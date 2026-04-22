@@ -1,0 +1,14 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-dialog = "2"

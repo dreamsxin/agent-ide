@@ -1,0 +1,19 @@
+[workspace]
+members = [
+  "apps/desktop",
+  "apps/runtime",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+runtime = { path = "apps/runtime" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+walkdir = "2.5"

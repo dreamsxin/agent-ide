@@ -1,0 +1,15 @@
+{
+  "name": "agent-ide",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/client"
+  ],
+  "scripts": {
+    "client:dev": "npm --workspace apps/client run dev",
+    "client:build": "npm --workspace apps/client run build",
+    "client:lint": "npm --workspace apps/client run lint",
+    "tauri:dev": "npm --prefix apps/desktop run dev",
+    "tauri:info": "npm --prefix apps/desktop run info"
+  }
+}
