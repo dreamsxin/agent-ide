@@ -1,8 +1,9 @@
 import Editor, { type OnMount } from '@monaco-editor/react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open } from '@tauri-apps/plugin-dialog'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type * as Monaco from 'monaco-editor'
 import './App.css'
 
@@ -160,6 +161,17 @@ type TreeNode = {
   children: TreeNode[]
 }
 
+type ExplorerSelection = {
+  path: string
+  name: string
+  kind: 'file' | 'directory'
+}
+
+type ContextMenuState = ExplorerSelection & {
+  x: number
+  y: number
+}
+
 type ActivityView = 'explorer' | 'editor' | 'review' | 'logs'
 
 type ActivityItem = {
@@ -179,6 +191,8 @@ function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState | null>(null)
   const [gitState, setGitState] = useState<GitState | null>(null)
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const [selectedEntry, setSelectedEntry] = useState<ExplorerSelection | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [openDocuments, setOpenDocuments] = useState<Record<string, OpenDocument>>({})
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({})
   const [activeView, setActiveView] = useState<ActivityView>('explorer')
@@ -200,12 +214,16 @@ function App() {
     mode: 'offline',
   })
   const [providerSecretDraft, setProviderSecretDraft] = useState('')
+  const [providerPanelOpen, setProviderPanelOpen] = useState(false)
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [planningAgentTask, setPlanningAgentTask] = useState(false)
   const [message, setMessage] = useState('Pick a folder to start the IDE loop.')
   const [error, setError] = useState<string | null>(null)
   const [cursor, setCursor] = useState<CursorState>({ line: 1, column: 1 })
   const logIdRef = useRef(1)
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
+  const commandInputRef = useRef<HTMLInputElement | null>(null)
+  const agentInputRef = useRef<HTMLInputElement | null>(null)
   const pendingStepCommandRef = useRef<Record<string, string>>({})
   const executionStepRef = useRef<Record<string, string>>({})
   const [logs, setLogs] = useState<LogEntry[]>([
@@ -359,6 +377,28 @@ function App() {
     return () => unsubscribe?.()
   }, [updateAgentStepStatus])
 
+  const refreshWorkspaceState = useCallback(async () => {
+    if (!workspace) return
+
+    const nextWorkspace = await invoke<WorkspaceState>('open_workspace', {
+      path: workspace.root,
+    })
+    const nextGitState = await invoke<GitState>('git_state', {
+      root: nextWorkspace.root,
+    })
+    const nextTasks = await invoke<WorkspaceTask[]>('workspace_tasks', {
+      root: nextWorkspace.root,
+    })
+
+    setWorkspace(nextWorkspace)
+    setGitState(nextGitState)
+    setWorkspaceTasks(nextTasks)
+    setExpandedDirs((current) => ({
+      ...buildExpandedMap(nextWorkspace.entries),
+      ...current,
+    }))
+  }, [workspace])
+
   const chooseWorkspace = useCallback(async () => {
     try {
       setError(null)
@@ -386,12 +426,18 @@ function App() {
       const nextTasks = await invoke<WorkspaceTask[]>('workspace_tasks', {
         root: nextWorkspace.root,
       })
-      const latestPlan = await invoke<AgentPlan | null>('latest_agent_plan', {
-        root: nextWorkspace.root,
-      })
-      const planHistory = await invoke<AgentPlanSummary[]>('agent_plan_history', {
-        root: nextWorkspace.root,
-      })
+      let latestPlan: AgentPlan | null = null
+      let planHistory: AgentPlanSummary[] = []
+      try {
+        latestPlan = await invoke<AgentPlan | null>('latest_agent_plan', {
+          root: nextWorkspace.root,
+        })
+        planHistory = await invoke<AgentPlanSummary[]>('agent_plan_history', {
+          root: nextWorkspace.root,
+        })
+      } catch (err) {
+        appendLog('error', `Agent plan history skipped: ${String(err)}`)
+      }
       const providerStatus = await invoke<AgentProviderStatus>('agent_provider_status', {
         root: nextWorkspace.root,
       })
@@ -411,6 +457,8 @@ function App() {
         setCommandInput(nextTasks[0].command)
       }
       setSelectedPath(null)
+      setSelectedEntry(null)
+      setContextMenu(null)
       setOpenDocuments({})
       setExpandedDirs(buildExpandedMap(nextWorkspace.entries))
       setActiveView('explorer')
@@ -465,6 +513,154 @@ function App() {
       setSaving(false)
     }
   }, [appendLog, openDocuments, selectedPath, workspace])
+
+  const deleteWorkspaceEntry = useCallback(async (entry: ExplorerSelection) => {
+    if (!workspace) return
+
+    const label = entry.kind === 'directory' ? `${entry.name} and everything inside it` : entry.name
+    const confirmed = window.confirm(`Delete ${label}? This cannot be undone from Agent IDE.`)
+    if (!confirmed) {
+      setContextMenu(null)
+      return
+    }
+
+    setError(null)
+    setContextMenu(null)
+    appendLog('info', `Deleting ${entry.path}`)
+    try {
+      await invoke('delete_path', {
+        root: workspace.root,
+        payload: {
+          path: entry.path,
+        },
+      })
+
+      const isDeletedPath = (path: string) => path === entry.path || path.startsWith(`${entry.path}/`)
+      const remainingDocuments = Object.fromEntries(
+        Object.entries(openDocuments).filter(([path]) => !isDeletedPath(path)),
+      )
+      setOpenDocuments(remainingDocuments)
+      if (selectedPath && isDeletedPath(selectedPath)) {
+        setSelectedPath(Object.keys(remainingDocuments)[0] ?? null)
+      }
+      if (selectedEntry && isDeletedPath(selectedEntry.path)) {
+        setSelectedEntry(null)
+      }
+
+      await refreshWorkspaceState()
+      setMessage(`Deleted ${entry.path}`)
+      appendLog('success', `Deleted ${entry.path}`)
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, openDocuments, refreshWorkspaceState, selectedEntry, selectedPath, workspace])
+
+  const createWorkspaceEntry = useCallback(async (kind: 'file' | 'directory', target: ExplorerSelection | null) => {
+    if (!workspace) return
+
+    const parent = target?.kind === 'directory' ? target.path : target ? parentOf(target.path) ?? '' : ''
+    const name = window.prompt(`New ${kind} name`)
+    if (!name) {
+      setContextMenu(null)
+      return
+    }
+
+    setError(null)
+    setContextMenu(null)
+    appendLog('info', `Creating ${kind}: ${name}`)
+    try {
+      const entry = await invoke<WorkspaceEntry>('create_path', {
+        root: workspace.root,
+        payload: {
+          parent,
+          name,
+          kind,
+        },
+      })
+
+      if (parent) {
+        setExpandedDirs((current) => ({
+          ...current,
+          [parent]: true,
+        }))
+      }
+      await refreshWorkspaceState()
+      setSelectedEntry(entry)
+      if (entry.kind === 'file') {
+        setOpenDocuments((current) => ({
+          ...current,
+          [entry.path]: {
+            path: entry.path,
+            contents: '',
+            dirty: false,
+          },
+        }))
+        setSelectedPath(entry.path)
+        setActiveView('editor')
+      }
+      setMessage(`Created ${entry.path}`)
+      appendLog('success', `Created ${entry.path}`)
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, refreshWorkspaceState, workspace])
+
+  const renameWorkspaceEntry = useCallback(async (entry: ExplorerSelection) => {
+    if (!workspace) return
+
+    const nextName = window.prompt(`Rename ${entry.name}`, entry.name)
+    if (!nextName || nextName === entry.name) {
+      setContextMenu(null)
+      return
+    }
+
+    setError(null)
+    setContextMenu(null)
+    appendLog('info', `Renaming ${entry.path} to ${nextName}`)
+    try {
+      const renamed = await invoke<WorkspaceEntry>('rename_path', {
+        root: workspace.root,
+        payload: {
+          path: entry.path,
+          newName: nextName,
+        },
+      })
+
+      const mapRenamedPath = (path: string) =>
+        path === entry.path
+          ? renamed.path
+          : path.startsWith(`${entry.path}/`)
+            ? `${renamed.path}/${path.slice(entry.path.length + 1)}`
+            : path
+
+      setOpenDocuments((current) => {
+        const next: Record<string, OpenDocument> = {}
+        for (const document of Object.values(current)) {
+          const nextPath = mapRenamedPath(document.path)
+          next[nextPath] = {
+            ...document,
+            path: nextPath,
+          }
+        }
+        return next
+      })
+      if (selectedPath) {
+        setSelectedPath(mapRenamedPath(selectedPath))
+      }
+      setSelectedEntry(renamed)
+      await refreshWorkspaceState()
+      setMessage(`Renamed ${entry.path} to ${renamed.path}`)
+      appendLog('success', `Renamed ${entry.path} to ${renamed.path}`)
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, refreshWorkspaceState, selectedPath, workspace])
 
   const runWorkspaceCommand = useCallback(async (command: string) => {
     if (!workspace || !command.trim()) return
@@ -644,12 +840,39 @@ function App() {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
         void saveDocument()
+        return
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') {
+        event.preventDefault()
+        commandInputRef.current?.focus()
+        commandInputRef.current?.select()
+        return
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'a') {
+        event.preventDefault()
+        setActiveView('review')
+        agentInputRef.current?.focus()
+        agentInputRef.current?.select()
+        return
+      }
+
+      if ((event.ctrlKey || event.metaKey) && ['1', '2', '3', '4'].includes(event.key)) {
+        event.preventDefault()
+        setActiveView(ACTIVITY_ITEMS[Number(event.key) - 1].id)
+        return
+      }
+
+      if (activeView === 'explorer' && event.key === 'Delete' && selectedEntry) {
+        event.preventDefault()
+        void deleteWorkspaceEntry(selectedEntry)
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [saveDocument])
+  }, [activeView, deleteWorkspaceEntry, saveDocument, selectedEntry])
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined
@@ -698,6 +921,11 @@ function App() {
   async function openDocument(path: string) {
     if (!workspace) return
 
+    setSelectedEntry({
+      path,
+      name: labelForPath(path),
+      kind: 'file',
+    })
     expandParents(path)
 
     if (openDocuments[path]) {
@@ -813,44 +1041,152 @@ function App() {
   )
   const activeLanguage = activeDocument ? languageForPath(activeDocument.path) : 'plaintext'
   const activeEol = activeDocument?.contents.includes('\r\n') ? 'CRLF' : 'LF'
+  const executionLabel = execution
+    ? `${execution.status}${execution.exitCode !== null ? `:${execution.exitCode}` : ''}`
+    : 'idle'
+
+  function startWindowDrag(event: MouseEvent) {
+    if (event.button === 0) {
+      void getCurrentWindow()
+        .startDragging()
+        .catch((err) => appendLog('error', `Window drag failed: ${String(err)}`))
+    }
+  }
+
+  function minimizeWindow() {
+    void getCurrentWindow().minimize().catch((err) => appendLog('error', `Window minimize failed: ${String(err)}`))
+  }
+
+  function toggleMaximizeWindow() {
+    void getCurrentWindow()
+      .toggleMaximize()
+      .catch((err) => appendLog('error', `Window maximize failed: ${String(err)}`))
+  }
+
+  function closeWindow() {
+    void getCurrentWindow().close().catch((err) => appendLog('error', `Window close failed: ${String(err)}`))
+  }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Desktop-first Agent IDE</p>
-          <h1>Workbench with native menus and clearer layout</h1>
-        </div>
-        <div className="agent-composer compact">
-          <div className="agent-composer-heading">
-            <span>Agent</span>
-            <strong>Task decomposition</strong>
+    <main className="app-shell" onClick={() => setContextMenu(null)}>
+      <div className="window-titlebar">
+        <div className="titlebar-brand" data-tauri-drag-region onMouseDown={startWindowDrag}>
+          <span className="titlebar-mark">AI</span>
+          <div>
+            <strong>Agent IDE</strong>
+            <span>{workspaceName}</span>
           </div>
-          <div className="agent-composer-row">
-            <input
-              className="agent-chat-input"
-              value={agentGoal}
-              onChange={(event) => setAgentGoal(event.target.value)}
-              placeholder="Ask the Agent to plan work in this workspace"
-              disabled={!workspace || planningAgentTask}
-              onFocus={() => setActiveView('review')}
-            />
-            <button
-              className="action-button"
-              onClick={() => void decomposeAgentTask()}
-              disabled={!workspace || !agentGoal.trim() || planningAgentTask}
-            >
-              {planningAgentTask ? 'Planning...' : 'Plan'}
+        </div>
+
+        <nav className="titlebar-menu" aria-label="Application menu">
+          <div className="titlebar-menu-group">
+            <span>File</span>
+            <button type="button" onClick={() => void chooseWorkspace()} disabled={loading}>
+              {loading ? 'Opening...' : 'Open Folder'}
+            </button>
+            <button type="button" onClick={() => void saveDocument()} disabled={!selectedPath || saving}>
+              {saving ? 'Saving...' : 'Save'}
             </button>
           </div>
+          <div className="titlebar-menu-group">
+            <span>View</span>
+            {ACTIVITY_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={activeView === item.id ? 'active' : ''}
+                onClick={() => setActiveView(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="titlebar-menu-group">
+            <span>Run</span>
+            <button
+              type="button"
+              onClick={() => void runCommand()}
+              disabled={!workspace || !commandInput.trim() || runningCommand}
+            >
+              {runningCommand ? 'Running...' : 'Run Command'}
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void cancelActiveExecution()}
+              disabled={!execution || execution.status !== 'running'}
+            >
+              Stop
+            </button>
+          </div>
+        </nav>
+
+        <div className="titlebar-drag-fill" data-tauri-drag-region onMouseDown={startWindowDrag} />
+
+        <div className="window-controls" aria-label="Window controls">
+          <button type="button" className="window-control" onClick={minimizeWindow} aria-label="Minimize">
+            <WindowMinimizeIcon />
+          </button>
+          <button type="button" className="window-control" onClick={toggleMaximizeWindow} aria-label="Maximize">
+            <WindowMaximizeIcon />
+          </button>
+          <button type="button" className="window-control close" onClick={closeWindow} aria-label="Close">
+            <WindowCloseIcon />
+          </button>
         </div>
+      </div>
+
+      {contextMenu ? (
+        <div
+          className="context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="context-menu-header">
+            <span>{contextMenu.kind}</span>
+            <strong>{contextMenu.name}</strong>
+          </div>
+          <button type="button" onClick={() => void createWorkspaceEntry('file', contextMenu)}>
+            New File
+          </button>
+          <button type="button" onClick={() => void createWorkspaceEntry('directory', contextMenu)}>
+            New Folder
+          </button>
+          <button type="button" onClick={() => void renameWorkspaceEntry(contextMenu)}>
+            Rename
+          </button>
+          <button type="button" className="danger" onClick={() => void deleteWorkspaceEntry(contextMenu)}>
+            Delete
+          </button>
+        </div>
+      ) : null}
+
+      <header className="topbar">
+        <div className="topbar-identity">
+          <p className="eyebrow">Workspace</p>
+          <h1>{workspaceName}</h1>
+          <div className="topbar-facts">
+            <span>{fileCount} files</span>
+            <span>{gitState?.branch ?? 'no-git'}</span>
+            <span>{executionLabel}</span>
+          </div>
+        </div>
+
         <div className="toolbar">
-          <div className="command-bar">
+          <div className="command-bar" aria-label="Command center">
+            <span className="command-label">Command</span>
             <input
+              ref={commandInputRef}
               className="command-input"
               value={commandInput}
               onChange={(event) => setCommandInput(event.target.value)}
-              placeholder="Run a workspace command"
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  void runCommand()
+                }
+              }}
+              placeholder="Run task or shell command"
               disabled={!workspace || runningCommand}
             />
             <button
@@ -865,11 +1201,12 @@ function App() {
               onClick={() => void cancelActiveExecution()}
               disabled={!execution || execution.status !== 'running'}
             >
-              Cancel
+              Stop
             </button>
           </div>
           {workspaceTasks.length > 0 ? (
             <div className="task-strip" aria-label="Workspace tasks">
+              <span className="task-strip-label">Tasks</span>
               {workspaceTasks.map((task) => (
                 <button
                   key={task.id}
@@ -883,17 +1220,37 @@ function App() {
               ))}
             </div>
           ) : null}
-          <button className="action-button" onClick={() => void chooseWorkspace()} disabled={loading}>
-            {loading ? 'Opening...' : 'Open Folder'}
-          </button>
-          <button
-            className="action-button secondary"
-            onClick={() => void saveDocument()}
-            disabled={!selectedPath || saving}
-            title="Ctrl+S"
-          >
-            {saving ? 'Saving...' : 'Save'}
-          </button>
+        </div>
+
+        <div className="agent-composer compact">
+          <div className="agent-composer-heading">
+            <span>Agent</span>
+            <strong>Ask, plan, verify</strong>
+          </div>
+          <div className="agent-composer-row">
+            <input
+              ref={agentInputRef}
+              className="agent-chat-input"
+              value={agentGoal}
+              onChange={(event) => setAgentGoal(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  void decomposeAgentTask()
+                }
+              }}
+              placeholder="Describe the change for the Agent"
+              disabled={!workspace || planningAgentTask}
+              onFocus={() => setActiveView('review')}
+            />
+            <button
+              className="action-button"
+              onClick={() => void decomposeAgentTask()}
+              disabled={!workspace || !agentGoal.trim() || planningAgentTask}
+            >
+              {planningAgentTask ? 'Planning...' : 'Plan'}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -933,6 +1290,30 @@ function App() {
             <div className="explorer-toolbar">
               <span className="explorer-pill">{workspace ? 'Workspace loaded' : 'Waiting for folder'}</span>
               <span className="explorer-pill">{workspaceTree.length} root items</span>
+              <button
+                type="button"
+                className="explorer-action"
+                disabled={!workspace}
+                onClick={() => void createWorkspaceEntry('file', selectedEntry)}
+              >
+                New File
+              </button>
+              <button
+                type="button"
+                className="explorer-action"
+                disabled={!workspace}
+                onClick={() => void createWorkspaceEntry('directory', selectedEntry)}
+              >
+                New Folder
+              </button>
+              <button
+                type="button"
+                className="explorer-action"
+                disabled={!workspace}
+                onClick={() => void refreshWorkspaceState()}
+              >
+                Refresh
+              </button>
             </div>
           ) : null}
 
@@ -946,8 +1327,19 @@ function App() {
                     depth={0}
                     expandedDirs={expandedDirs}
                     selectedPath={selectedPath}
+                    selectedEntryPath={selectedEntry?.path ?? null}
                     onToggleDir={toggleDirectory}
                     onOpenFile={openDocument}
+                    onSelectEntry={setSelectedEntry}
+                    onContextMenu={(entry, event) => {
+                      event.preventDefault()
+                      setSelectedEntry(entry)
+                      setContextMenu({
+                        ...entry,
+                        x: event.clientX,
+                        y: event.clientY,
+                      })
+                    }}
                   />
                 ))}
               </div>
@@ -1094,25 +1486,28 @@ function App() {
           <div className="tab-strip">
             {openTabs.length > 0 ? (
               openTabs.map((tab) => (
-                <button
+                <div
                   key={tab.path}
                   className={`tab-item ${tab.path === selectedPath ? 'active' : ''}`}
-                  onClick={() => setSelectedPath(tab.path)}
                 >
-                  <span className="tab-title">
+                  <button type="button" className="tab-select" onClick={() => setSelectedPath(tab.path)}>
+                    <span className="tab-title">
                     {tab.dirty ? '* ' : ''}
                     {labelForPath(tab.path)}
-                  </span>
-                  <span
+                    </span>
+                  </button>
+                  <button
+                    type="button"
                     className="tab-close"
+                    aria-label={`Close ${labelForPath(tab.path)}`}
                     onClick={(event) => {
                       event.stopPropagation()
                       closeDocument(tab.path)
                     }}
                   >
                     x
-                  </span>
-                </button>
+                  </button>
+                </div>
               ))
             ) : (
               <div className="tab-empty">No files open</div>
@@ -1173,19 +1568,35 @@ function App() {
         </section>
 
         <aside className="panel inspector">
-          <p className="panel-label">Context</p>
-          <h2>{bootstrap?.app_name ?? 'Agent IDE'}</h2>
-          <AgentProviderCard
-            status={agentProvider}
-            draft={providerDraft}
-            onDraftChange={setProviderDraft}
-            disabled={!workspace}
-            onSave={(provider, model, mode) => void saveProviderConfig(provider, model, mode)}
-            secretDraft={providerSecretDraft}
-            onSecretDraftChange={setProviderSecretDraft}
-            onSaveSecret={() => void saveProviderSecret()}
-            onClearSecret={() => void clearProviderSecret()}
-          />
+          <div className="inspector-header">
+            <div>
+              <p className="panel-label">Context</p>
+              <h2>{bootstrap?.app_name ?? 'Agent IDE'}</h2>
+            </div>
+            <button
+              type="button"
+              className={`provider-pill ${agentProvider?.configured ? 'configured' : 'fallback'}`}
+              onClick={() => setProviderPanelOpen((current) => !current)}
+              disabled={!workspace}
+              title={agentProvider?.message ?? 'Open a workspace to configure provider'}
+            >
+              <span>{agentProvider?.provider ?? 'local'}</span>
+              <strong>{agentProvider?.mode ?? 'offline'}</strong>
+            </button>
+          </div>
+          {providerPanelOpen ? (
+            <AgentProviderCard
+              status={agentProvider}
+              draft={providerDraft}
+              onDraftChange={setProviderDraft}
+              disabled={!workspace}
+              onSave={(provider, model, mode) => void saveProviderConfig(provider, model, mode)}
+              secretDraft={providerSecretDraft}
+              onSecretDraftChange={setProviderSecretDraft}
+              onSaveSecret={() => void saveProviderSecret()}
+              onClearSecret={() => void clearProviderSecret()}
+            />
+          ) : null}
           {agentPlan ? (
             <div className="agent-plan-detail">
               <p className="panel-label">Agent Plan</p>
@@ -1209,14 +1620,6 @@ function App() {
               </div>
             </div>
           ) : null}
-          <ul className="capabilities">
-            {(bootstrap?.capabilities ?? []).map((capability) => (
-              <li key={capability.id}>
-                <code>{capability.id}</code>
-                <span>{capability.label}</span>
-              </li>
-            ))}
-          </ul>
           <div className={`git-card ${gitState?.dirty ? 'dirty' : ''}`}>
             <strong>{gitState?.branch ?? 'no-git'}</strong>
             <p>{gitState?.summary ?? 'Git state appears here after opening a workspace.'}</p>
@@ -1235,6 +1638,22 @@ function App() {
             ) : (
               <p>No file-level Git changes to display.</p>
             )}
+          </div>
+          <div className="capabilities-compact">
+            <button type="button" onClick={() => setCapabilitiesOpen((current) => !current)}>
+              <span>Runtime capabilities</span>
+              <strong>{bootstrap?.capabilities.length ?? 0}</strong>
+            </button>
+            {capabilitiesOpen ? (
+              <ul className="capabilities">
+                {(bootstrap?.capabilities ?? []).map((capability) => (
+                  <li key={capability.id}>
+                    <code>{capability.id}</code>
+                    <span>{capability.label}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         </aside>
       </section>
@@ -1346,8 +1765,11 @@ type TreeItemProps = {
   depth: number
   expandedDirs: Record<string, boolean>
   selectedPath: string | null
+  selectedEntryPath: string | null
   onToggleDir: (path: string) => void
   onOpenFile: (path: string) => void
+  onSelectEntry: (entry: ExplorerSelection) => void
+  onContextMenu: (entry: ExplorerSelection, event: MouseEvent<HTMLButtonElement>) => void
 }
 
 type AgentPlanWorkbenchProps = {
@@ -1533,18 +1955,35 @@ function TreeItem({
   depth,
   expandedDirs,
   selectedPath,
+  selectedEntryPath,
   onToggleDir,
   onOpenFile,
+  onSelectEntry,
+  onContextMenu,
 }: TreeItemProps) {
   const isDirectory = node.kind === 'directory'
   const isExpanded = expandedDirs[node.path] ?? false
+  const entry = {
+    path: node.path,
+    name: node.name,
+    kind: node.kind,
+  }
+  const isSelected = selectedEntryPath === node.path || selectedPath === node.path
 
   return (
     <div className="tree-node">
       <button
-        className={`tree-item ${selectedPath === node.path ? 'active' : ''}`}
+        className={`tree-item ${isSelected ? 'active' : ''}`}
         style={{ paddingLeft: `${12 + depth * 14}px` }}
-        onClick={() => (isDirectory ? onToggleDir(node.path) : onOpenFile(node.path))}
+        onClick={() => {
+          onSelectEntry(entry)
+          if (isDirectory) {
+            onToggleDir(node.path)
+          } else {
+            void onOpenFile(node.path)
+          }
+        }}
+        onContextMenu={(event) => onContextMenu(entry, event)}
       >
         <span className="tree-prefix" aria-hidden="true">
           {isDirectory ? (
@@ -1569,8 +2008,11 @@ function TreeItem({
               depth={depth + 1}
               expandedDirs={expandedDirs}
               selectedPath={selectedPath}
+              selectedEntryPath={selectedEntryPath}
               onToggleDir={onToggleDir}
               onOpenFile={onOpenFile}
+              onSelectEntry={onSelectEntry}
+              onContextMenu={onContextMenu}
             />
           ))}
         </div>
@@ -1610,6 +2052,30 @@ function ActivityIcon({ view }: { view: ActivityView }) {
         </svg>
       )
   }
+}
+
+function WindowMinimizeIcon() {
+  return (
+    <svg viewBox="0 0 12 12" aria-hidden="true">
+      <path d="M2.5 6.5h7" />
+    </svg>
+  )
+}
+
+function WindowMaximizeIcon() {
+  return (
+    <svg viewBox="0 0 12 12" aria-hidden="true">
+      <rect x="3" y="3" width="6" height="6" rx="0.8" />
+    </svg>
+  )
+}
+
+function WindowCloseIcon() {
+  return (
+    <svg viewBox="0 0 12 12" aria-hidden="true">
+      <path d="M3.2 3.2l5.6 5.6M8.8 3.2 3.2 8.8" />
+    </svg>
+  )
 }
 
 function FolderIcon({ open }: { open: boolean }) {

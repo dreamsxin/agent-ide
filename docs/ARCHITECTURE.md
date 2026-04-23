@@ -14,9 +14,12 @@ docs/
   AI_WORKFLOW.md
   DESKTOP_IDE.md
   NEXT_STEPS.md
+AI_AGENT_IDE_PLAN.md
 ```
 
 This is now the canonical architecture for the project.
+
+`AI_AGENT_IDE_PLAN.md` is the product-level roadmap. Architecture documents should stay aligned with it, while this file remains focused on system boundaries and ownership.
 
 ## Module Responsibilities
 

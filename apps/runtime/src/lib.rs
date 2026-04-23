@@ -48,6 +48,24 @@ pub struct SaveFileRequest {
     pub contents: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeletePathRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePathRequest {
+    pub parent: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenamePathRequest {
+    pub path: String,
+    pub new_name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GitState {
     pub branch: String,
@@ -194,6 +212,18 @@ pub fn bootstrap() -> RuntimeBootstrap {
                 label: "Write files",
             },
             RuntimeCapability {
+                id: "workspace.delete",
+                label: "Delete files",
+            },
+            RuntimeCapability {
+                id: "workspace.create",
+                label: "Create files and folders",
+            },
+            RuntimeCapability {
+                id: "workspace.rename",
+                label: "Rename files and folders",
+            },
+            RuntimeCapability {
                 id: "git.status",
                 label: "Inspect Git status",
             },
@@ -263,6 +293,72 @@ pub fn read_file(root: &str, relative_path: &str) -> Result<FileDocument, String
 pub fn save_file(root: &str, request: SaveFileRequest) -> Result<(), String> {
     let full_path = resolve_workspace_path(root, &request.path)?;
     fs::write(full_path, request.contents).map_err(|err| err.to_string())
+}
+
+pub fn delete_path(root: &str, request: DeletePathRequest) -> Result<(), String> {
+    let full_path = resolve_workspace_path(root, &request.path)?;
+    let canonical_root = PathBuf::from(root)
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+
+    if full_path == canonical_root {
+        return Err("cannot delete the workspace root".into());
+    }
+
+    if full_path.is_dir() {
+        fs::remove_dir_all(full_path).map_err(|err| err.to_string())
+    } else {
+        fs::remove_file(full_path).map_err(|err| err.to_string())
+    }
+}
+
+pub fn create_path(root: &str, request: CreatePathRequest) -> Result<WorkspaceEntry, String> {
+    let name = validate_entry_name(&request.name)?;
+    let parent = resolve_workspace_path(root, parent_request_path(&request.parent))?;
+    if !parent.is_dir() {
+        return Err("target parent is not a directory".into());
+    }
+
+    let target = parent.join(&name);
+    ensure_path_stays_in_workspace(root, &target)?;
+    if target.exists() {
+        return Err("target path already exists".into());
+    }
+
+    match request.kind.as_str() {
+        "file" => {
+            fs::write(&target, "").map_err(|err| err.to_string())?;
+        }
+        "directory" => {
+            fs::create_dir(&target).map_err(|err| err.to_string())?;
+        }
+        _ => return Err("create kind must be file or directory".into()),
+    }
+
+    workspace_entry_for(root, &target)
+}
+
+pub fn rename_path(root: &str, request: RenamePathRequest) -> Result<WorkspaceEntry, String> {
+    let new_name = validate_entry_name(&request.new_name)?;
+    let source = resolve_workspace_path(root, &request.path)?;
+    let canonical_root = PathBuf::from(root)
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+    if source == canonical_root {
+        return Err("cannot rename the workspace root".into());
+    }
+
+    let parent = source
+        .parent()
+        .ok_or_else(|| "path has no parent".to_string())?;
+    let target = parent.join(&new_name);
+    ensure_path_stays_in_workspace(root, &target)?;
+    if target.exists() {
+        return Err("target path already exists".into());
+    }
+
+    fs::rename(&source, &target).map_err(|err| err.to_string())?;
+    workspace_entry_for(root, &target)
 }
 
 pub fn git_state(root: &str) -> GitState {
@@ -817,6 +913,66 @@ fn resolve_workspace_path(root: &str, relative_path: &str) -> Result<PathBuf, St
     Ok(canonical_candidate)
 }
 
+fn ensure_path_stays_in_workspace(root: &str, path: &Path) -> Result<(), String> {
+    let canonical_root = PathBuf::from(root)
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+    let absolute_candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        canonical_root.join(path)
+    };
+
+    if !absolute_candidate.starts_with(&canonical_root) {
+        return Err("path escapes workspace root".into());
+    }
+
+    Ok(())
+}
+
+fn workspace_entry_for(root: &str, path: &Path) -> Result<WorkspaceEntry, String> {
+    let canonical_root = PathBuf::from(root)
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+    let relative = path
+        .strip_prefix(&canonical_root)
+        .map_err(|err| err.to_string())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "path has no file name".to_string())?
+        .to_string_lossy()
+        .into_owned();
+
+    Ok(WorkspaceEntry {
+        path: normalize_separators(relative),
+        name,
+        kind: if path.is_dir() { "directory" } else { "file" },
+    })
+}
+
+fn parent_request_path(parent: &str) -> &str {
+    let parent = parent.trim();
+    if parent.is_empty() { "." } else { parent }
+}
+
+fn validate_entry_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("name is empty".into());
+    }
+    if matches!(name, "." | "..") {
+        return Err("name cannot be . or ..".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("name cannot contain path separators".into());
+    }
+    if name.contains('\0') {
+        return Err("name cannot contain null bytes".into());
+    }
+
+    Ok(name.into())
+}
+
 fn agent_plans_dir(root: &str) -> Result<PathBuf, String> {
     let root = PathBuf::from(root);
     let canonical_root = root.canonicalize().map_err(|err| err.to_string())?;
@@ -891,4 +1047,103 @@ fn create_execution_id() -> String {
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     format!("exec-{millis:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("agent-ide-{name}-{}", create_execution_id()));
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
+    #[test]
+    fn delete_path_removes_file_inside_workspace() {
+        let root = test_root("delete-file");
+        let file_path = root.join("old-plan.md");
+        fs::write(&file_path, "old plan").expect("write test file");
+
+        delete_path(
+            root.to_str().expect("utf-8 temp path"),
+            DeletePathRequest {
+                path: "old-plan.md".into(),
+            },
+        )
+        .expect("delete file");
+
+        assert!(!file_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_path_rejects_workspace_root() {
+        let root = test_root("delete-root");
+
+        let result = delete_path(
+            root.to_str().expect("utf-8 temp path"),
+            DeletePathRequest { path: ".".into() },
+        );
+
+        assert!(result.is_err());
+        assert!(root.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_path_creates_file_inside_workspace() {
+        let root = test_root("create-file");
+
+        let entry = create_path(
+            root.to_str().expect("utf-8 temp path"),
+            CreatePathRequest {
+                parent: "".into(),
+                name: "notes.md".into(),
+                kind: "file".into(),
+            },
+        )
+        .expect("create file");
+
+        assert_eq!(entry.path, "notes.md");
+        assert!(root.join("notes.md").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rename_path_renames_file_inside_workspace() {
+        let root = test_root("rename-file");
+        fs::write(root.join("old.md"), "content").expect("write file");
+
+        let entry = rename_path(
+            root.to_str().expect("utf-8 temp path"),
+            RenamePathRequest {
+                path: "old.md".into(),
+                new_name: "new.md".into(),
+            },
+        )
+        .expect("rename file");
+
+        assert_eq!(entry.path, "new.md");
+        assert!(!root.join("old.md").exists());
+        assert!(root.join("new.md").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_path_rejects_nested_name() {
+        let root = test_root("reject-nested-name");
+
+        let result = create_path(
+            root.to_str().expect("utf-8 temp path"),
+            CreatePathRequest {
+                parent: "".into(),
+                name: "../escape.md".into(),
+                kind: "file".into(),
+            },
+        );
+
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(root);
+    }
 }

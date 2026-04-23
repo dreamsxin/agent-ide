@@ -1,5 +1,7 @@
 # Desktop IDE V3
 
+The product-level roadmap is maintained in `AI_AGENT_IDE_PLAN.md`.
+
 ## Role In Architecture V3
 
 `apps/desktop` is the primary product shell.
@@ -51,6 +53,7 @@ The shell should support:
 
 - title or command area
 - native menu bar with core workspace actions
+- custom frameless title bar with integrated workspace, menu, and window controls
 - activity rail
 - explorer or contextual side panels
 - editor center
@@ -97,12 +100,19 @@ For text and icon rendering:
 Current workbench direction also includes:
 
 - SVG-based activity and explorer icons instead of fragile text glyphs
+- explorer context actions for creating files and folders, renaming entries, deleting entries, and refreshing workspace state through the Rust runtime
 - breadcrumb context above the editor for workspace-to-file navigation clarity
 - a bottom status bar that surfaces branch, encoding, language, EOL, runtime, and cursor status
 - a top command input for workspace-scoped commands with results shown in the logs surface
 - live command output streaming into the logs surface while workspace commands run
 - workspace task buttons for common verification commands such as Rust check and tests
 - a visible Agent chat composer and review workbench for task decomposition
+- production IDE chrome with compact panels, clearer contrast, and Agent-first composition
+- frameless Tauri window chrome where the React workbench owns the visible title bar, common menu actions, and Windows controls while native menu events remain available for shortcuts and platform integration
+- a compact command center rather than a large dashboard-style command form, keeping workspace identity, command execution, task shortcuts, and Agent planning visually balanced like an IDE workbench
+- a compact inspector where provider configuration is opened from a small status affordance and runtime capabilities collapse to a summary, leaving the right rail focused on Agent review, Git state, and changed files
+- fixed viewport workbench sizing where the application shell does not show a browser-style page scrollbar; sidebars, inspector, editor lists, and bottom panels own their own IDE-style scrollbars
+- non-wrapping title/menu actions so desktop commands such as `Open Folder` and `Run Command` remain single-line menu affordances
 
 ## Native Boundary
 

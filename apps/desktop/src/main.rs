@@ -2,7 +2,8 @@
 
 use runtime::{
     AgentPlan, AgentPlanSummary, AgentProviderConfig, AgentProviderStatus, AgentTaskRequest,
-    CommandEvent, CommandRequest, CommandResult, CommandStarted, FileDocument, GitState,
+    CommandEvent, CommandRequest, CommandResult, CommandStarted, CreatePathRequest,
+    DeletePathRequest, FileDocument, GitState, RenamePathRequest,
     RuntimeBootstrap, SaveFileRequest, WorkspaceState, WorkspaceTask,
 };
 use std::{collections::HashMap, sync::Mutex};
@@ -106,6 +107,63 @@ fn save_file(
         match &result {
             Ok(_) => format!("File saved: {}", path),
             Err(err) => format!("File save failed: {}", err),
+        },
+    );
+    result
+}
+
+#[tauri::command]
+fn delete_path(
+    app: tauri::AppHandle,
+    root: String,
+    payload: DeletePathRequest,
+) -> Result<(), String> {
+    let path = payload.path.clone();
+    let result = runtime::delete_path(&root, payload);
+    emit_runtime_log(
+        &app,
+        if result.is_ok() { "success" } else { "error" },
+        match &result {
+            Ok(_) => format!("Deleted: {}", path),
+            Err(err) => format!("Delete failed for {}: {}", path, err),
+        },
+    );
+    result
+}
+
+#[tauri::command]
+fn create_path(
+    app: tauri::AppHandle,
+    root: String,
+    payload: CreatePathRequest,
+) -> Result<runtime::WorkspaceEntry, String> {
+    let name = payload.name.clone();
+    let result = runtime::create_path(&root, payload);
+    emit_runtime_log(
+        &app,
+        if result.is_ok() { "success" } else { "error" },
+        match &result {
+            Ok(entry) => format!("Created {}: {}", entry.kind, entry.path),
+            Err(err) => format!("Create failed for {}: {}", name, err),
+        },
+    );
+    result
+}
+
+#[tauri::command]
+fn rename_path(
+    app: tauri::AppHandle,
+    root: String,
+    payload: RenamePathRequest,
+) -> Result<runtime::WorkspaceEntry, String> {
+    let path = payload.path.clone();
+    let result = runtime::rename_path(&root, payload);
+    emit_runtime_log(
+        &app,
+        if result.is_ok() { "success" } else { "error" },
+        match &result {
+            Ok(entry) => format!("Renamed {} to {}", path, entry.path),
+            Err(err) => format!("Rename failed for {}: {}", path, err),
         },
     );
     result
@@ -496,6 +554,9 @@ fn main() {
             open_workspace,
             read_file,
             save_file,
+            delete_path,
+            create_path,
+            rename_path,
             git_state,
             workspace_tasks,
             decompose_agent_task,

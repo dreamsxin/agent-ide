@@ -6,7 +6,7 @@ This file defines how future implementation runs should work after the Rust-firs
 
 Every new implementation run should read:
 
-1. `PLAN.md`
+1. `AI_AGENT_IDE_PLAN.md`
 2. `docs/ARCHITECTURE.md`
 3. `docs/DESKTOP_IDE.md`
 4. `docs/NEXT_STEPS.md`
@@ -51,7 +51,7 @@ Always prioritize in this order:
 
 After any architectural task, update:
 
-- `PLAN.md`
+- `AI_AGENT_IDE_PLAN.md`
 - `docs/ARCHITECTURE.md`
 - `docs/NEXT_STEPS.md`
 

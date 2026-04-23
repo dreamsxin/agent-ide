@@ -2,7 +2,9 @@
 
 ## Current Target
 
-Build the V3 foundation as a Rust-first desktop Agent IDE using Tauri for the shell and a thin client workbench.
+Build the V3 foundation into an industrial-grade desktop AI Agent IDE using Tauri for the shell, Rust for the trusted runtime, and a thin client workbench.
+
+The product-level roadmap now lives in `AI_AGENT_IDE_PLAN.md`.
 
 ## Phase 1: Repository Skeleton
 
@@ -116,8 +118,10 @@ Definition of done:
 
 Current focus after the workspace loop:
 
-1. continue refining explorer density, file-type affordances, and keyboard-friendly behavior
-2. deepen editor workbench polish with command entry, status details, and keyboard navigation
-3. improve execution registry semantics with history and clearer cancel/finalize states
-4. implement the real provider adapter inside the Rust runtime only
-5. add provider request/response logging that redacts prompt-sensitive and secret material
+1. complete explorer move operation and polish file-operation prompts beyond the current prompt-based create, rename, delete, and refresh flow
+2. handle malformed persisted Agent data as a non-blocking workspace warning while keeping the new schema strict
+3. extract protocol contracts from duplicated Rust and TypeScript shapes
+4. improve execution registry semantics with history and clearer cancel/finalize states
+5. implement the real provider adapter inside the Rust runtime only
+6. add provider request/response logging that redacts prompt-sensitive and secret material
+7. add diff and patch review surfaces for Agent-applied changes
