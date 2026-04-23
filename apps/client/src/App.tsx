@@ -60,6 +60,41 @@ type WorkspaceTask = {
   command: string
 }
 
+type AgentPlanStep = {
+  id: string
+  title: string
+  detail: string
+  status: AgentStepStatus
+  command: string | null
+}
+
+type AgentPlan = {
+  id: string
+  goal: string
+  summary: string
+  source: string
+  steps: AgentPlanStep[]
+  verification: string[]
+}
+
+type AgentStepStatus = 'pending' | 'active' | 'done'
+
+type AgentPlanSummary = {
+  id: string
+  goal: string
+  step_count: number
+  done_count: number
+}
+
+type AgentProviderStatus = {
+  provider: string
+  model: string
+  configured: boolean
+  secret_configured: boolean
+  mode: string
+  message: string
+}
+
 type LogEntry = {
   id: number
   level: 'info' | 'success' | 'error'
@@ -90,8 +125,12 @@ type ExecutionEvent =
       success: boolean
       exit_code: number | null
     }
+  | {
+      kind: 'cancelled'
+      id: string
+    }
 
-type ExecutionStatus = 'starting' | 'running' | 'succeeded' | 'failed'
+type ExecutionStatus = 'starting' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
 type ExecutionState = {
   id: string
@@ -151,11 +190,24 @@ function App() {
   const [commandStream, setCommandStream] = useState<CommandStreamEvent[]>([])
   const [workspaceTasks, setWorkspaceTasks] = useState<WorkspaceTask[]>([])
   const [execution, setExecution] = useState<ExecutionState | null>(null)
+  const [agentGoal, setAgentGoal] = useState('Improve the current workspace safely.')
+  const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null)
+  const [agentPlanHistory, setAgentPlanHistory] = useState<AgentPlanSummary[]>([])
+  const [agentProvider, setAgentProvider] = useState<AgentProviderStatus | null>(null)
+  const [providerDraft, setProviderDraft] = useState({
+    provider: 'local',
+    model: 'local-decomposition',
+    mode: 'offline',
+  })
+  const [providerSecretDraft, setProviderSecretDraft] = useState('')
+  const [planningAgentTask, setPlanningAgentTask] = useState(false)
   const [message, setMessage] = useState('Pick a folder to start the IDE loop.')
   const [error, setError] = useState<string | null>(null)
   const [cursor, setCursor] = useState<CursorState>({ line: 1, column: 1 })
   const logIdRef = useRef(1)
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
+  const pendingStepCommandRef = useRef<Record<string, string>>({})
+  const executionStepRef = useRef<Record<string, string>>({})
   const [logs, setLogs] = useState<LogEntry[]>([
     {
       id: 0,
@@ -177,6 +229,26 @@ function App() {
       ...current,
     ].slice(0, 40))
   }, [])
+
+  const updateAgentStepStatus = useCallback(async (stepId: string, status: AgentStepStatus) => {
+    if (!agentPlan || !workspace) return
+
+    try {
+      const nextPlan = await invoke<AgentPlan>('update_agent_step_status', {
+        payload: {
+          root: workspace.root,
+          planId: agentPlan.id,
+          stepId,
+          status,
+        },
+      })
+      setAgentPlan(nextPlan)
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [agentPlan, appendLog, workspace])
 
   useEffect(() => {
     invoke<RuntimeBootstrap>('bootstrap_runtime')
@@ -229,6 +301,11 @@ function App() {
     void listen<ExecutionEvent>('execution-event', (event) => {
       const payload = event.payload
       if (payload.kind === 'started') {
+        const stepId = pendingStepCommandRef.current[payload.command]
+        if (stepId) {
+          executionStepRef.current[payload.id] = stepId
+          delete pendingStepCommandRef.current[payload.command]
+        }
         setExecution({
           id: payload.id,
           command: payload.command,
@@ -241,14 +318,37 @@ function App() {
         return
       }
 
+      if (payload.kind === 'finished') {
+        const stepId = executionStepRef.current[payload.id]
+        if (stepId) {
+          void updateAgentStepStatus(stepId, payload.success ? 'done' : 'active')
+          delete executionStepRef.current[payload.id]
+        }
+        setExecution((current) =>
+          current?.id === payload.id
+            ? {
+                ...current,
+                command: payload.command,
+                status: current.status === 'cancelled' ? 'cancelled' : payload.success ? 'succeeded' : 'failed',
+                finishedAt: current.finishedAt ?? new Date().toLocaleTimeString(),
+                exitCode: payload.exit_code,
+              }
+            : current,
+        )
+        return
+      }
+
+      const stepId = executionStepRef.current[payload.id]
+      if (stepId) {
+        void updateAgentStepStatus(stepId, 'active')
+        delete executionStepRef.current[payload.id]
+      }
       setExecution((current) =>
         current?.id === payload.id
           ? {
               ...current,
-              command: payload.command,
-              status: payload.success ? 'succeeded' : 'failed',
+              status: 'cancelled',
               finishedAt: new Date().toLocaleTimeString(),
-              exitCode: payload.exit_code,
             }
           : current,
       )
@@ -257,7 +357,7 @@ function App() {
     })
 
     return () => unsubscribe?.()
-  }, [])
+  }, [updateAgentStepStatus])
 
   const chooseWorkspace = useCallback(async () => {
     try {
@@ -286,10 +386,27 @@ function App() {
       const nextTasks = await invoke<WorkspaceTask[]>('workspace_tasks', {
         root: nextWorkspace.root,
       })
+      const latestPlan = await invoke<AgentPlan | null>('latest_agent_plan', {
+        root: nextWorkspace.root,
+      })
+      const planHistory = await invoke<AgentPlanSummary[]>('agent_plan_history', {
+        root: nextWorkspace.root,
+      })
+      const providerStatus = await invoke<AgentProviderStatus>('agent_provider_status', {
+        root: nextWorkspace.root,
+      })
 
       setWorkspace(nextWorkspace)
       setGitState(nextGitState)
       setWorkspaceTasks(nextTasks)
+      setAgentPlan(latestPlan)
+      setAgentPlanHistory(planHistory)
+      setAgentProvider(providerStatus)
+      setProviderDraft({
+        provider: providerStatus.provider,
+        model: providerStatus.model,
+        mode: providerStatus.mode,
+      })
       if (nextTasks[0]) {
         setCommandInput(nextTasks[0].command)
       }
@@ -401,6 +518,126 @@ function App() {
   const runCommand = useCallback(async () => {
     await runWorkspaceCommand(commandInput)
   }, [commandInput, runWorkspaceCommand])
+
+  const cancelActiveExecution = useCallback(async () => {
+    if (!execution || execution.status !== 'running') return
+
+    try {
+      await invoke('cancel_execution', {
+        executionId: execution.id,
+      })
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, execution])
+
+  const decomposeAgentTask = useCallback(async () => {
+    if (!workspace || !agentGoal.trim()) return
+
+    setPlanningAgentTask(true)
+    setError(null)
+    setActiveView('review')
+    try {
+      const plan = await invoke<AgentPlan>('decompose_agent_task', {
+        root: workspace.root,
+        payload: {
+          goal: agentGoal.trim(),
+        },
+      })
+      setAgentPlan(plan)
+      const planHistory = await invoke<AgentPlanSummary[]>('agent_plan_history', {
+        root: workspace.root,
+      })
+      setAgentPlanHistory(planHistory)
+      setMessage(`Agent plan ready: ${plan.id}`)
+      appendLog('success', `Agent task decomposed into ${plan.steps.length} steps.`)
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    } finally {
+      setPlanningAgentTask(false)
+    }
+  }, [agentGoal, appendLog, workspace])
+
+  const selectAgentPlan = useCallback(async (planId: string) => {
+    if (!workspace) return
+
+    try {
+      const plan = await invoke<AgentPlan>('read_agent_plan', {
+        root: workspace.root,
+        planId,
+      })
+      setAgentPlan(plan)
+      setActiveView('review')
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, workspace])
+
+  const saveProviderConfig = useCallback(async (provider: string, model: string, mode: string) => {
+    if (!workspace) return
+
+    try {
+      const status = await invoke<AgentProviderStatus>('save_agent_provider_config', {
+        root: workspace.root,
+        payload: {
+          provider,
+          model,
+          mode,
+        },
+      })
+      setAgentProvider(status)
+      setProviderDraft({
+        provider: status.provider,
+        model: status.model,
+        mode: status.mode,
+      })
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, workspace])
+
+  const saveProviderSecret = useCallback(async () => {
+    if (!workspace || !providerSecretDraft.trim()) return
+
+    try {
+      const status = await invoke<AgentProviderStatus>('save_agent_provider_secret', {
+        root: workspace.root,
+        payload: {
+          secret: providerSecretDraft,
+        },
+      })
+      setAgentProvider(status)
+      setProviderSecretDraft('')
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, providerSecretDraft, workspace])
+
+  const clearProviderSecret = useCallback(async () => {
+    if (!workspace) return
+
+    try {
+      const status = await invoke<AgentProviderStatus>('clear_agent_provider_secret', {
+        root: workspace.root,
+      })
+      setAgentProvider(status)
+      setProviderSecretDraft('')
+    } catch (err) {
+      const nextError = String(err)
+      setError(nextError)
+      appendLog('error', nextError)
+    }
+  }, [appendLog, workspace])
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -584,6 +821,29 @@ function App() {
           <p className="eyebrow">Desktop-first Agent IDE</p>
           <h1>Workbench with native menus and clearer layout</h1>
         </div>
+        <div className="agent-composer compact">
+          <div className="agent-composer-heading">
+            <span>Agent</span>
+            <strong>Task decomposition</strong>
+          </div>
+          <div className="agent-composer-row">
+            <input
+              className="agent-chat-input"
+              value={agentGoal}
+              onChange={(event) => setAgentGoal(event.target.value)}
+              placeholder="Ask the Agent to plan work in this workspace"
+              disabled={!workspace || planningAgentTask}
+              onFocus={() => setActiveView('review')}
+            />
+            <button
+              className="action-button"
+              onClick={() => void decomposeAgentTask()}
+              disabled={!workspace || !agentGoal.trim() || planningAgentTask}
+            >
+              {planningAgentTask ? 'Planning...' : 'Plan'}
+            </button>
+          </div>
+        </div>
         <div className="toolbar">
           <div className="command-bar">
             <input
@@ -599,6 +859,13 @@ function App() {
               disabled={!workspace || !commandInput.trim() || runningCommand}
             >
               {runningCommand ? 'Running...' : 'Run'}
+            </button>
+            <button
+              className="action-button danger"
+              onClick={() => void cancelActiveExecution()}
+              disabled={!execution || execution.status !== 'running'}
+            >
+              Cancel
             </button>
           </div>
           {workspaceTasks.length > 0 ? (
@@ -711,6 +978,49 @@ function App() {
 
           {activeView === 'review' ? (
             <div className="sidebar-section">
+              <p className="section-title">Agent task</p>
+              <div className="agent-chat-card">
+                <div className="agent-avatar">AI</div>
+                <div>
+                  <strong>Planning assistant</strong>
+                  <p>Describe a task and the runtime will decompose it into reviewable implementation steps.</p>
+                </div>
+              </div>
+              <button
+                className="action-button secondary"
+                onClick={() => void decomposeAgentTask()}
+                disabled={!workspace || !agentGoal.trim() || planningAgentTask}
+              >
+                {planningAgentTask ? 'Planning...' : 'Decompose Task'}
+              </button>
+              {agentPlan ? (
+                <div className="agent-plan-card">
+                  <strong>{agentPlan.id}</strong>
+                  <span>
+                    {agentPlan.steps.length} steps | {agentPlan.source}
+                  </span>
+                </div>
+              ) : null}
+              {agentPlanHistory.length > 0 ? (
+                <>
+                  <p className="section-title">Plan history</p>
+                  <div className="agent-history-list">
+                    {agentPlanHistory.map((plan) => (
+                      <button
+                        key={plan.id}
+                        className={`agent-history-item ${agentPlan?.id === plan.id ? 'active' : ''}`}
+                        onClick={() => void selectAgentPlan(plan.id)}
+                      >
+                        <strong>{plan.goal}</strong>
+                        <span>
+                          {plan.done_count}/{plan.step_count} done
+                        </span>
+                        <code>{plan.id}</code>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
               <p className="section-title">Changed files</p>
               {gitState?.changes.length ? (
                 gitState.changes.map((change) => (
@@ -833,9 +1143,31 @@ function App() {
               }}
             />
           ) : (
-            <div className="placeholder">
-              <p>{message}</p>
-              {error ? <p className="error-text">{error}</p> : null}
+            <div className={`placeholder ${activeView === 'review' ? 'agent-workspace' : ''}`}>
+              {activeView === 'review' ? (
+                <AgentPlanWorkbench
+                  plan={agentPlan}
+                  goal={agentGoal}
+                  planning={planningAgentTask}
+                  onGoalChange={setAgentGoal}
+                  onPlan={() => void decomposeAgentTask()}
+                  onStepStatusChange={(stepId, status) => void updateAgentStepStatus(stepId, status)}
+                  onRunStep={(step) => {
+                    void updateAgentStepStatus(step.id, 'active')
+                    if (step.command) {
+                      pendingStepCommandRef.current[step.command] = step.id
+                      void runWorkspaceCommand(step.command)
+                    }
+                  }}
+                  onRunVerification={(command) => void runWorkspaceCommand(command)}
+                  disabled={!workspace}
+                />
+              ) : (
+                <>
+                  <p>{message}</p>
+                  {error ? <p className="error-text">{error}</p> : null}
+                </>
+              )}
             </div>
           )}
         </section>
@@ -843,6 +1175,40 @@ function App() {
         <aside className="panel inspector">
           <p className="panel-label">Context</p>
           <h2>{bootstrap?.app_name ?? 'Agent IDE'}</h2>
+          <AgentProviderCard
+            status={agentProvider}
+            draft={providerDraft}
+            onDraftChange={setProviderDraft}
+            disabled={!workspace}
+            onSave={(provider, model, mode) => void saveProviderConfig(provider, model, mode)}
+            secretDraft={providerSecretDraft}
+            onSecretDraftChange={setProviderSecretDraft}
+            onSaveSecret={() => void saveProviderSecret()}
+            onClearSecret={() => void clearProviderSecret()}
+          />
+          {agentPlan ? (
+            <div className="agent-plan-detail">
+              <p className="panel-label">Agent Plan</p>
+              <h2>{agentPlan.goal}</h2>
+              <span className="agent-source-badge">{agentPlan.source}</span>
+              <p>{agentPlan.summary}</p>
+              <div className="agent-step-list">
+                {agentPlan.steps.map((step) => (
+                  <div key={step.id} className="agent-step">
+                    <span>{step.status}</span>
+                    <strong>{step.title}</strong>
+                    <p>{step.detail}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="agent-verification">
+                <strong>Verification</strong>
+                {agentPlan.verification.map((item) => (
+                  <code key={item}>{item}</code>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <ul className="capabilities">
             {(bootstrap?.capabilities ?? []).map((capability) => (
               <li key={capability.id}>
@@ -889,7 +1255,7 @@ function App() {
               <strong>{lastCommandResult.command}</strong>
               <span>
                 {lastCommandResult.success ? 'Success' : 'Failed'}
-                {lastCommandResult.exit_code !== null ? ` · exit ${lastCommandResult.exit_code}` : ''}
+                {lastCommandResult.exit_code !== null ? ` | exit ${lastCommandResult.exit_code}` : ''}
               </span>
             </div>
             {lastCommandResult.stdout ? (
@@ -982,6 +1348,184 @@ type TreeItemProps = {
   selectedPath: string | null
   onToggleDir: (path: string) => void
   onOpenFile: (path: string) => void
+}
+
+type AgentPlanWorkbenchProps = {
+  plan: AgentPlan | null
+  goal: string
+  planning: boolean
+  disabled: boolean
+  onGoalChange: (goal: string) => void
+  onPlan: () => void
+  onStepStatusChange: (stepId: string, status: AgentStepStatus) => void
+  onRunStep: (step: AgentPlanStep) => void
+  onRunVerification: (command: string) => void
+}
+
+type AgentProviderCardProps = {
+  status: AgentProviderStatus | null
+  draft: {
+    provider: string
+    model: string
+    mode: string
+  }
+  onDraftChange: (draft: { provider: string; model: string; mode: string }) => void
+  disabled: boolean
+  onSave: (provider: string, model: string, mode: string) => void
+  secretDraft: string
+  onSecretDraftChange: (secret: string) => void
+  onSaveSecret: () => void
+  onClearSecret: () => void
+}
+
+function AgentProviderCard({
+  status,
+  draft,
+  onDraftChange,
+  disabled,
+  onSave,
+  secretDraft,
+  onSecretDraftChange,
+  onSaveSecret,
+  onClearSecret,
+}: AgentProviderCardProps) {
+  return (
+    <div className={`provider-card ${status?.configured ? 'configured' : 'fallback'}`}>
+      <p className="panel-label">Agent Provider</p>
+      <div className="provider-grid">
+        <label>
+          Provider
+          <select
+            value={draft.provider}
+            onChange={(event) => onDraftChange({ ...draft, provider: event.target.value })}
+            disabled={disabled}
+          >
+            <option value="local">local</option>
+            <option value="openai">openai</option>
+          </select>
+        </label>
+        <label>
+          Model
+          <input
+            value={draft.model}
+            onChange={(event) => onDraftChange({ ...draft, model: event.target.value })}
+            disabled={disabled}
+          />
+        </label>
+        <label>
+          Mode
+          <select
+            value={draft.mode}
+            onChange={(event) => onDraftChange({ ...draft, mode: event.target.value })}
+            disabled={disabled}
+          >
+            <option value="offline">offline</option>
+            <option value="provider-backed">provider-backed</option>
+          </select>
+        </label>
+      </div>
+      <p>{status?.message ?? 'Open a workspace to load provider configuration.'}</p>
+      <div className="provider-secret-row">
+        <span>{status?.secret_configured ? 'Secret configured' : 'No runtime secret'}</span>
+        <input
+          type="password"
+          value={secretDraft}
+          onChange={(event) => onSecretDraftChange(event.target.value)}
+          placeholder="Runtime-owned provider secret"
+          disabled={disabled}
+        />
+      </div>
+      <div className="provider-actions">
+        <button className="task-button" onClick={onSaveSecret} disabled={disabled || !secretDraft.trim()}>
+          Save Secret
+        </button>
+        <button className="task-button" onClick={onClearSecret} disabled={disabled || !status?.secret_configured}>
+          Clear Secret
+        </button>
+      </div>
+      <button className="task-button" onClick={() => onSave(draft.provider, draft.model, draft.mode)} disabled={disabled}>
+        Save Provider
+      </button>
+    </div>
+  )
+}
+
+function AgentPlanWorkbench({
+  plan,
+  goal,
+  planning,
+  disabled,
+  onGoalChange,
+  onPlan,
+  onStepStatusChange,
+  onRunStep,
+  onRunVerification,
+}: AgentPlanWorkbenchProps) {
+  return (
+    <div className="agent-workbench">
+      <div className="agent-thread">
+        <div className="agent-message user">
+          <span>You</span>
+          <p>{goal || 'Describe what you want the Agent to plan.'}</p>
+        </div>
+        <div className="agent-message assistant">
+          <span>Agent</span>
+          <p>
+            {plan
+              ? plan.summary
+              : 'I can break the task into safe implementation steps, verification commands, and review checkpoints.'}
+          </p>
+        </div>
+      </div>
+
+      <div className="agent-chat-box">
+        <textarea
+          value={goal}
+          onChange={(event) => onGoalChange(event.target.value)}
+          placeholder="Tell the Agent what to plan, for example: add project search with Rust runtime support"
+          disabled={disabled || planning}
+        />
+        <button className="action-button" onClick={onPlan} disabled={disabled || !goal.trim() || planning}>
+          {planning ? 'Planning...' : 'Decompose Task'}
+        </button>
+      </div>
+
+      {plan ? (
+        <div className="agent-plan-board">
+          <div>
+            <p className="panel-label">Plan</p>
+            <h2>{plan.goal}</h2>
+            <span className="agent-source-badge">{plan.source}</span>
+          </div>
+          <div className="agent-step-list">
+            {plan.steps.map((step) => (
+              <div key={step.id} className="agent-step">
+                <span>{step.status}</span>
+                <strong>{step.title}</strong>
+                <p>{step.detail}</p>
+                <div className="agent-step-actions">
+                  <button onClick={() => onStepStatusChange(step.id, 'active')}>Start</button>
+                  <button onClick={() => onStepStatusChange(step.id, 'done')}>Done</button>
+                  <button onClick={() => onStepStatusChange(step.id, 'pending')}>Reset</button>
+                  {step.command ? <button onClick={() => onRunStep(step)}>Run Step</button> : null}
+                </div>
+                {step.command ? <code className="agent-step-command">{step.command}</code> : null}
+              </div>
+            ))}
+          </div>
+          <div className="agent-verification">
+            <strong>Verification</strong>
+            {plan.verification.map((item) => (
+              <button key={item} className="verification-command" onClick={() => onRunVerification(extractCommand(item))}>
+                <code>{item}</code>
+                <span>Run</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function TreeItem({
@@ -1185,6 +1729,11 @@ function fileIconVariant(path: string): string {
 function buildBreadcrumbs(workspaceName: string, path: string | null): string[] {
   if (!path) return [workspaceName, 'workspace']
   return [workspaceName, ...path.split('/')]
+}
+
+function extractCommand(labelledCommand: string): string {
+  const separator = labelledCommand.indexOf(': ')
+  return separator === -1 ? labelledCommand : labelledCommand.slice(separator + 2)
 }
 
 export default App

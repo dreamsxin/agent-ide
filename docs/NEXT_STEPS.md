@@ -118,5 +118,6 @@ Current focus after the workspace loop:
 
 1. continue refining explorer density, file-type affordances, and keyboard-friendly behavior
 2. deepen editor workbench polish with command entry, status details, and keyboard navigation
-3. store runtime process handles by execution id
-4. add cancellation before deeper Agent orchestration
+3. improve execution registry semantics with history and clearer cancel/finalize states
+4. implement the real provider adapter inside the Rust runtime only
+5. add provider request/response logging that redacts prompt-sensitive and secret material

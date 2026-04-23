@@ -43,6 +43,7 @@ Reference points:
 - VS Code for layout clarity
 - Codex-style review flow for Agent output
 - explicit workspace and safety state
+- Agent chat and task composition as first-class workbench surfaces
 
 ## Desktop Workbench Expectations
 
@@ -62,10 +63,11 @@ The shell should support:
 The intended workbench layout should stabilize around:
 
 - top title and command strip for current workspace identity and quick actions
+- top Agent composer for task planning and decomposition
 - native menu bar for `File`, `View`, `Debug`, and `Help`
 - left activity rail for major workbench modes
 - left side panel for explorer, editor list, review queue, or recent logs
-- center editor region with tabs, breadcrumbs, and Monaco
+- center editor region with tabs, breadcrumbs, Monaco, or Agent plan workbench
 - right context panel for Git, runtime capabilities, and review context
 - bottom logs surface for runtime and command output
 - status bar for branch, encoding, runtime state, and task status
@@ -100,6 +102,7 @@ Current workbench direction also includes:
 - a top command input for workspace-scoped commands with results shown in the logs surface
 - live command output streaming into the logs surface while workspace commands run
 - workspace task buttons for common verification commands such as Rust check and tests
+- a visible Agent chat composer and review workbench for task decomposition
 
 ## Native Boundary
 
