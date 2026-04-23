@@ -118,5 +118,5 @@ Current focus after the workspace loop:
 
 1. continue refining explorer density, file-type affordances, and keyboard-friendly behavior
 2. deepen editor workbench polish with command entry, status details, and keyboard navigation
-3. upgrade command execution from one-shot results to runtime event streaming from Rust
-4. start protocol shaping for command, test, and runtime event surfaces
+3. store runtime process handles by execution id
+4. add cancellation before deeper Agent orchestration

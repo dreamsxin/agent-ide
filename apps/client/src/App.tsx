@@ -46,11 +46,18 @@ type GitState = {
 }
 
 type CommandResult = {
+  execution_id: string
   command: string
   success: boolean
   exit_code: number | null
   stdout: string
   stderr: string
+}
+
+type WorkspaceTask = {
+  id: string
+  label: string
+  command: string
 }
 
 type LogEntry = {
@@ -62,6 +69,38 @@ type LogEntry = {
 type RuntimeLogEvent = {
   level: LogEntry['level']
   message: string
+}
+
+type CommandStreamEvent = {
+  execution_id: string
+  stream: 'stdout' | 'stderr'
+  line: string
+}
+
+type ExecutionEvent =
+  | {
+      kind: 'started'
+      id: string
+      command: string
+    }
+  | {
+      kind: 'finished'
+      id: string
+      command: string
+      success: boolean
+      exit_code: number | null
+    }
+
+type ExecutionStatus = 'starting' | 'running' | 'succeeded' | 'failed'
+
+type ExecutionState = {
+  id: string
+  command: string
+  status: ExecutionStatus
+  startedAt: string
+  finishedAt: string | null
+  exitCode: number | null
+  outputCount: number
 }
 
 type OpenDocument = {
@@ -109,6 +148,9 @@ function App() {
   const [runningCommand, setRunningCommand] = useState(false)
   const [commandInput, setCommandInput] = useState('cargo check')
   const [lastCommandResult, setLastCommandResult] = useState<CommandResult | null>(null)
+  const [commandStream, setCommandStream] = useState<CommandStreamEvent[]>([])
+  const [workspaceTasks, setWorkspaceTasks] = useState<WorkspaceTask[]>([])
+  const [execution, setExecution] = useState<ExecutionState | null>(null)
   const [message, setMessage] = useState('Pick a folder to start the IDE loop.')
   const [error, setError] = useState<string | null>(null)
   const [cursor, setCursor] = useState<CursorState>({ line: 1, column: 1 })
@@ -161,6 +203,62 @@ function App() {
     return () => unsubscribe?.()
   }, [appendLog])
 
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined
+
+    void listen<CommandStreamEvent>('command-stream', (event) => {
+      setCommandStream((current) => [event.payload, ...current].slice(0, 120))
+      setExecution((current) =>
+        current?.id === event.payload.execution_id
+          ? {
+              ...current,
+              outputCount: current.outputCount + 1,
+            }
+          : current,
+      )
+    }).then((fn) => {
+      unsubscribe = fn
+    })
+
+    return () => unsubscribe?.()
+  }, [])
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined
+
+    void listen<ExecutionEvent>('execution-event', (event) => {
+      const payload = event.payload
+      if (payload.kind === 'started') {
+        setExecution({
+          id: payload.id,
+          command: payload.command,
+          status: 'running',
+          startedAt: new Date().toLocaleTimeString(),
+          finishedAt: null,
+          exitCode: null,
+          outputCount: 0,
+        })
+        return
+      }
+
+      setExecution((current) =>
+        current?.id === payload.id
+          ? {
+              ...current,
+              command: payload.command,
+              status: payload.success ? 'succeeded' : 'failed',
+              finishedAt: new Date().toLocaleTimeString(),
+              exitCode: payload.exit_code,
+            }
+          : current,
+      )
+    }).then((fn) => {
+      unsubscribe = fn
+    })
+
+    return () => unsubscribe?.()
+  }, [])
+
   const chooseWorkspace = useCallback(async () => {
     try {
       setError(null)
@@ -185,9 +283,16 @@ function App() {
       const nextGitState = await invoke<GitState>('git_state', {
         root: nextWorkspace.root,
       })
+      const nextTasks = await invoke<WorkspaceTask[]>('workspace_tasks', {
+        root: nextWorkspace.root,
+      })
 
       setWorkspace(nextWorkspace)
       setGitState(nextGitState)
+      setWorkspaceTasks(nextTasks)
+      if (nextTasks[0]) {
+        setCommandInput(nextTasks[0].command)
+      }
       setSelectedPath(null)
       setOpenDocuments({})
       setExpandedDirs(buildExpandedMap(nextWorkspace.entries))
@@ -244,17 +349,28 @@ function App() {
     }
   }, [appendLog, openDocuments, selectedPath, workspace])
 
-  const runCommand = useCallback(async () => {
-    if (!workspace || !commandInput.trim()) return
+  const runWorkspaceCommand = useCallback(async (command: string) => {
+    if (!workspace || !command.trim()) return
 
     setRunningCommand(true)
     setError(null)
     setActiveView('logs')
+    setCommandStream([])
+    setCommandInput(command)
+    setExecution({
+      id: 'pending',
+      command: command.trim(),
+      status: 'starting',
+      startedAt: new Date().toLocaleTimeString(),
+      finishedAt: null,
+      exitCode: null,
+      outputCount: 0,
+    })
     try {
       const result = await invoke<CommandResult>('run_workspace_command', {
         root: workspace.root,
         payload: {
-          command: commandInput.trim(),
+          command: command.trim(),
         },
       })
 
@@ -268,10 +384,23 @@ function App() {
       const nextError = String(err)
       setError(nextError)
       appendLog('error', nextError)
+      setExecution((current) =>
+        current?.id === 'pending'
+          ? {
+              ...current,
+              status: 'failed',
+              finishedAt: new Date().toLocaleTimeString(),
+            }
+          : current,
+      )
     } finally {
       setRunningCommand(false)
     }
-  }, [appendLog, commandInput, workspace])
+  }, [appendLog, workspace])
+
+  const runCommand = useCallback(async () => {
+    await runWorkspaceCommand(commandInput)
+  }, [commandInput, runWorkspaceCommand])
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -472,6 +601,21 @@ function App() {
               {runningCommand ? 'Running...' : 'Run'}
             </button>
           </div>
+          {workspaceTasks.length > 0 ? (
+            <div className="task-strip" aria-label="Workspace tasks">
+              {workspaceTasks.map((task) => (
+                <button
+                  key={task.id}
+                  className="task-button"
+                  onClick={() => void runWorkspaceCommand(task.command)}
+                  disabled={runningCommand}
+                  title={task.command}
+                >
+                  {task.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <button className="action-button" onClick={() => void chooseWorkspace()} disabled={loading}>
             {loading ? 'Opening...' : 'Open Folder'}
           </button>
@@ -583,10 +727,23 @@ function App() {
 
           {activeView === 'logs' ? (
             <div className="sidebar-section">
+              {execution ? (
+                <div className={`execution-card ${execution.status}`}>
+                  <span className="execution-status">{execution.status}</span>
+                  <strong>{execution.command}</strong>
+                  <code>{execution.id}</code>
+                </div>
+              ) : null}
               {lastCommandResult ? (
                 <div className={`command-summary ${lastCommandResult.success ? 'success' : 'error'}`}>
                   <strong>{lastCommandResult.success ? 'Last command succeeded' : 'Last command failed'}</strong>
                   <code>{lastCommandResult.command}</code>
+                </div>
+              ) : null}
+              {runningCommand ? (
+                <div className="command-summary">
+                  <strong>Command is running</strong>
+                  <code>{commandInput}</code>
                 </div>
               ) : null}
               <p className="section-title">Recent runtime events</p>
@@ -747,6 +904,48 @@ function App() {
                 <pre>{lastCommandResult.stderr}</pre>
               </div>
             ) : null}
+          </div>
+        ) : null}
+        {runningCommand || commandStream.length > 0 ? (
+          <div className="command-stream-panel">
+            <div className="command-result-header">
+              <strong>Live command output</strong>
+              <span>{runningCommand ? 'Streaming...' : 'Completed stream'}</span>
+            </div>
+            <div className="command-stream-list">
+              {commandStream.length > 0 ? (
+                commandStream.map((entry, index) => (
+                  <div key={`${entry.stream}-${index}-${entry.line}`} className={`stream-line ${entry.stream}`}>
+                    <code>{entry.stream}</code>
+                    <span>{entry.line}</span>
+                  </div>
+                ))
+              ) : (
+                <p className="empty-copy">Waiting for command output...</p>
+              )}
+            </div>
+          </div>
+        ) : null}
+        {execution ? (
+          <div className={`execution-detail ${execution.status}`}>
+            <div>
+              <p className="panel-label">Execution</p>
+              <h2>{execution.status}</h2>
+            </div>
+            <div className="execution-grid">
+              <span>ID</span>
+              <code>{execution.id}</code>
+              <span>Command</span>
+              <code>{execution.command}</code>
+              <span>Started</span>
+              <code>{execution.startedAt}</code>
+              <span>Finished</span>
+              <code>{execution.finishedAt ?? 'running'}</code>
+              <span>Exit</span>
+              <code>{execution.exitCode ?? 'pending'}</code>
+              <span>Output</span>
+              <code>{execution.outputCount} lines</code>
+            </div>
           </div>
         ) : null}
         <div className="log-list">

@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use runtime::{
-    CommandRequest, CommandResult, FileDocument, GitState, RuntimeBootstrap, SaveFileRequest,
-    WorkspaceState,
+    CommandEvent, CommandRequest, CommandResult, FileDocument, GitState, RuntimeBootstrap,
+    SaveFileRequest, WorkspaceState, WorkspaceTask,
 };
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
@@ -23,6 +23,25 @@ const CLOSE_DEVTOOLS_ID: &str = "debug.close_devtools";
 struct RuntimeLogEvent {
     level: &'static str,
     message: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct CommandStreamEvent {
+    execution_id: String,
+    stream: &'static str,
+    line: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum ExecutionEvent {
+    Started { id: String, command: String },
+    Finished {
+        id: String,
+        command: String,
+        success: bool,
+        exit_code: Option<i32>,
+    },
 }
 
 #[tauri::command]
@@ -83,6 +102,11 @@ fn git_state(root: String) -> GitState {
 }
 
 #[tauri::command]
+fn workspace_tasks(root: String) -> Vec<WorkspaceTask> {
+    runtime::workspace_tasks(&root)
+}
+
+#[tauri::command]
 fn run_workspace_command(
     app: tauri::AppHandle,
     root: String,
@@ -91,10 +115,53 @@ fn run_workspace_command(
     let command_label = payload.command.clone();
     emit_runtime_log(&app, "info", format!("Running command: {}", command_label));
 
-    let result = runtime::run_command(&root, payload);
+    let mut started = false;
+    let result = runtime::run_command_streaming(&root, payload, |event: CommandEvent| {
+        if !started {
+            emit_execution_event(
+                &app,
+                ExecutionEvent::Started {
+                    id: event.execution_id.clone(),
+                    command: command_label.clone(),
+                },
+            );
+            started = true;
+        }
+        let _ = app.emit(
+            "command-stream",
+            CommandStreamEvent {
+                execution_id: event.execution_id.clone(),
+                stream: event.stream,
+                line: event.line.clone(),
+            },
+        );
+        emit_runtime_log(
+            &app,
+            if event.stream == "stderr" { "error" } else { "info" },
+            format!("[{}] {}", event.stream, event.line),
+        );
+    });
 
     match &result {
         Ok(output) => {
+            if !started {
+                emit_execution_event(
+                    &app,
+                    ExecutionEvent::Started {
+                        id: output.execution_id.clone(),
+                        command: output.command.clone(),
+                    },
+                );
+            }
+            emit_execution_event(
+                &app,
+                ExecutionEvent::Finished {
+                    id: output.execution_id.clone(),
+                    command: output.command.clone(),
+                    success: output.success,
+                    exit_code: output.exit_code,
+                },
+            );
             let exit_code = output
                 .exit_code
                 .map(|value| value.to_string())
@@ -104,14 +171,6 @@ fn run_workspace_command(
                 if output.success { "success" } else { "error" },
                 format!("Command finished ({}) with exit code {}", output.command, exit_code),
             );
-
-            for line in output.stdout.lines().take(20) {
-                emit_runtime_log(&app, "info", format!("[stdout] {}", line));
-            }
-
-            for line in output.stderr.lines().take(20) {
-                emit_runtime_log(&app, "error", format!("[stderr] {}", line));
-            }
         }
         Err(err) => {
             emit_runtime_log(&app, "error", format!("Command failed to start: {}", err));
@@ -133,6 +192,10 @@ fn emit_runtime_log(app: &tauri::AppHandle, level: &'static str, message: String
 
 fn emit_menu_action(app: &tauri::AppHandle, action: &str) {
     let _ = app.emit("menu-action", action);
+}
+
+fn emit_execution_event(app: &tauri::AppHandle, event: ExecutionEvent) {
+    let _ = app.emit("execution-event", event);
 }
 
 fn main() {
@@ -230,6 +293,7 @@ fn main() {
             read_file,
             save_file,
             git_state,
+            workspace_tasks,
             run_workspace_command
         ])
         .run(tauri::generate_context!())

@@ -98,6 +98,8 @@ Current workbench direction also includes:
 - breadcrumb context above the editor for workspace-to-file navigation clarity
 - a bottom status bar that surfaces branch, encoding, language, EOL, runtime, and cursor status
 - a top command input for workspace-scoped commands with results shown in the logs surface
+- live command output streaming into the logs surface while workspace commands run
+- workspace task buttons for common verification commands such as Rust check and tests
 
 ## Native Boundary
 

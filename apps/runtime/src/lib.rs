@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use walkdir::WalkDir;
 
@@ -65,11 +69,41 @@ pub struct CommandRequest {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandResult {
+    pub execution_id: String,
     pub command: String,
     pub success: bool,
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandEvent {
+    pub execution_id: String,
+    pub stream: &'static str,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionStarted {
+    pub id: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionFinished {
+    pub id: String,
+    pub command: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+}
+
+// Protocol-facing descriptor for commands the runtime can recommend for a workspace.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceTask {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub command: String,
 }
 
 pub fn bootstrap() -> RuntimeBootstrap {
@@ -96,6 +130,10 @@ pub fn bootstrap() -> RuntimeBootstrap {
             RuntimeCapability {
                 id: "command.run",
                 label: "Run workspace command",
+            },
+            RuntimeCapability {
+                id: "test.run",
+                label: "Run workspace tests",
             },
             RuntimeCapability {
                 id: "agent.run",
@@ -179,6 +217,38 @@ pub fn git_state(root: &str) -> GitState {
     }
 }
 
+pub fn workspace_tasks(root: &str) -> Vec<WorkspaceTask> {
+    let root_path = PathBuf::from(root);
+    if !root_path.is_dir() {
+        return Vec::new();
+    }
+
+    let mut tasks = Vec::new();
+
+    if root_path.join("Cargo.toml").is_file() {
+        tasks.push(WorkspaceTask {
+            id: "rust.check",
+            label: "Run Check",
+            command: "cargo check".into(),
+        });
+        tasks.push(WorkspaceTask {
+            id: "rust.test",
+            label: "Run Tests",
+            command: "cargo test".into(),
+        });
+    }
+
+    if root_path.join("package.json").is_file() {
+        tasks.push(WorkspaceTask {
+            id: "node.test",
+            label: "Run npm test",
+            command: "npm test".into(),
+        });
+    }
+
+    tasks
+}
+
 pub fn run_command(root: &str, request: CommandRequest) -> Result<CommandResult, String> {
     let workspace_root = PathBuf::from(root);
     if !workspace_root.is_dir() {
@@ -199,11 +269,121 @@ pub fn run_command(root: &str, request: CommandRequest) -> Result<CommandResult,
     .map_err(|err| err.to_string())?;
 
     Ok(CommandResult {
+        execution_id: create_execution_id(),
         command: request.command,
         success: output.status.success(),
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+pub fn run_command_streaming<F>(
+    root: &str,
+    request: CommandRequest,
+    mut on_event: F,
+) -> Result<CommandResult, String>
+where
+    F: FnMut(CommandEvent),
+{
+    let execution_id = create_execution_id();
+    let workspace_root = PathBuf::from(root);
+    if !workspace_root.is_dir() {
+        return Err("workspace root is not a directory".into());
+    }
+
+    let mut command = if cfg!(target_os = "windows") {
+        let mut inner = Command::new("cmd");
+        inner.args(["/C", request.command.as_str()]);
+        inner
+    } else {
+        let mut inner = Command::new("sh");
+        inner.args(["-lc", request.command.as_str()]);
+        inner
+    };
+
+    let mut child = command
+        .current_dir(&workspace_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to capture stderr".to_string())?;
+
+    let (sender, receiver) = mpsc::channel::<CommandEvent>();
+
+    let stdout_execution_id = execution_id.clone();
+    let stdout_sender = sender.clone();
+    let stdout_thread = thread::spawn(move || -> Result<(), String> {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = line.map_err(|err| err.to_string())?;
+            stdout_sender
+                .send(CommandEvent {
+                    execution_id: stdout_execution_id.clone(),
+                    stream: "stdout",
+                    line,
+                })
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    });
+
+    let stderr_execution_id = execution_id.clone();
+    let stderr_sender = sender.clone();
+    let stderr_thread = thread::spawn(move || -> Result<(), String> {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            let line = line.map_err(|err| err.to_string())?;
+            stderr_sender
+                .send(CommandEvent {
+                    execution_id: stderr_execution_id.clone(),
+                    stream: "stderr",
+                    line,
+                })
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    });
+
+    drop(sender);
+
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+
+    for event in receiver {
+        if event.stream == "stdout" {
+            stdout_lines.push(event.line.clone());
+        } else {
+            stderr_lines.push(event.line.clone());
+        }
+        on_event(event);
+    }
+
+    stdout_thread
+        .join()
+        .map_err(|_| "stdout worker panicked".to_string())??;
+    stderr_thread
+        .join()
+        .map_err(|_| "stderr worker panicked".to_string())??;
+
+    let status = child.wait().map_err(|err| err.to_string())?;
+
+    Ok(CommandResult {
+        execution_id,
+        command: request.command,
+        success: status.success(),
+        exit_code: status.code(),
+        stdout: stdout_lines.join("\n"),
+        stderr: stderr_lines.join("\n"),
     })
 }
 
@@ -271,4 +451,12 @@ fn should_skip(path: &Path) -> bool {
         let name = component.as_os_str().to_string_lossy();
         matches!(name.as_ref(), ".git" | "node_modules" | "target" | "dist")
     })
+}
+
+fn create_execution_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("exec-{millis:x}")
 }

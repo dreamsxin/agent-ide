@@ -111,6 +111,7 @@ Primary runtime capabilities:
 - workspace read
 - workspace write
 - workspace command run
+- workspace task discovery
 - workspace save
 - workspace search
 - test execution

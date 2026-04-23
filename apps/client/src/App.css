@@ -86,6 +86,32 @@ textarea {
   color: #8298b0;
 }
 
+.task-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-button {
+  border: 1px solid rgba(129, 151, 179, 0.15);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  color: #dceaf7;
+  background: rgba(255, 255, 255, 0.045);
+  cursor: pointer;
+}
+
+.task-button:hover {
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.task-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .action-button {
   border: 0;
   border-radius: 10px;
@@ -436,6 +462,55 @@ textarea {
   font-size: 0.8rem;
 }
 
+.execution-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(129, 151, 179, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+}
+
+.execution-card.starting,
+.execution-card.running {
+  border-color: rgba(96, 165, 250, 0.32);
+}
+
+.execution-card.succeeded {
+  border-color: rgba(134, 239, 172, 0.3);
+}
+
+.execution-card.failed {
+  border-color: rgba(253, 164, 175, 0.28);
+}
+
+.execution-status {
+  align-self: flex-start;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.14);
+  color: #bfdbfe;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.68rem;
+}
+
+.execution-card.succeeded .execution-status {
+  background: rgba(134, 239, 172, 0.12);
+  color: #bbf7d0;
+}
+
+.execution-card.failed .execution-status {
+  background: rgba(253, 164, 175, 0.12);
+  color: #fecdd3;
+}
+
+.execution-card code {
+  color: #9cc5f0;
+  font-size: 0.76rem;
+}
+
 .editor-header {
   display: flex;
   justify-content: space-between;
@@ -709,6 +784,92 @@ textarea {
   white-space: pre-wrap;
   word-break: break-word;
   overflow: auto;
+}
+
+.command-stream-panel {
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(129, 151, 179, 0.1);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.command-stream-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.stream-line {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(5, 9, 14, 0.55);
+  color: #d9e5f1;
+  font-size: 0.8rem;
+}
+
+.stream-line code {
+  color: #8fa5bc;
+  font-size: 0.74rem;
+}
+
+.stream-line span {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.stream-line.stderr {
+  border: 1px solid rgba(253, 164, 175, 0.18);
+}
+
+.stream-line.stdout {
+  border: 1px solid rgba(147, 197, 253, 0.12);
+}
+
+.execution-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(129, 151, 179, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.execution-detail.starting,
+.execution-detail.running {
+  border-color: rgba(96, 165, 250, 0.24);
+}
+
+.execution-detail.succeeded {
+  border-color: rgba(134, 239, 172, 0.22);
+}
+
+.execution-detail.failed {
+  border-color: rgba(253, 164, 175, 0.22);
+}
+
+.execution-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 12px;
+  min-width: min(460px, 100%);
+  color: #91a7bf;
+  font-size: 0.8rem;
+}
+
+.execution-grid code {
+  color: #d8e5f2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 1260px) {
