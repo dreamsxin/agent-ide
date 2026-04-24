@@ -1,5 +1,6 @@
 use tauri::Manager;
 use commands::agent::AgentGlobalState;
+use commands::fs::FileWatcherState;
 use commands::terminal::TerminalManager;
 
 mod commands;
@@ -15,6 +16,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(AgentGlobalState::new())
         .manage(TerminalManager::new())
+        .manage(FileWatcherState::new())
         .setup(|app| {
             // 获取主窗口并设置标题
             if let Some(window) = app.get_webview_window("main") {
@@ -28,10 +30,22 @@ pub fn run() {
             commands::fs::write_file_content,
             commands::fs::list_directory,
             commands::fs::file_exists,
+            commands::fs::delete_path,
+            commands::fs::create_file,
+            commands::fs::create_directory,
+            commands::fs::rename_path,
+            commands::fs::watch_start,
+            commands::fs::watch_stop,
             // Agent 命令
             commands::agent::get_agent_state,
             commands::agent::send_agent_prompt,
             commands::agent::stop_agent,
+            commands::agent::set_agent_mode,
+            commands::agent::apply_diffs,
+            commands::agent::reject_diffs,
+            commands::agent::get_agent_steps,
+            commands::agent::get_agent_diffs,
+            commands::agent::update_llm_config,
             // Terminal 命令
             commands::terminal::spawn_terminal,
             commands::terminal::write_to_terminal,

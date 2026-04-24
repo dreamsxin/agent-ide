@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useMonacoContext } from "./MonacoContext";
+import type { editor } from "monaco-editor";
 
 /**
  * Diff 高亮装饰层 —— 用绿/红背景标注 AI 建议的代码差异
@@ -25,7 +26,7 @@ export default function DiffOverlay() {
     // 先清除旧 decorations
     decorationsRef.current = editor.deltaDecorations(decorationsRef.current, []);
 
-    const newDecorations: monaco.editor.IModelDeltaDecoration[] = [];
+    const newDecorations: editor.IModelDeltaDecoration[] = [];
 
     for (const overlay of diffOverlays) {
       const oldLines = overlay.oldText.split("\n").length;

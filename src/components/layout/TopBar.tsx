@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import StatusDot from "../shared/StatusDot";
@@ -6,12 +7,27 @@ import ModeSwitch from "../shared/ModeSwitch";
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
-  const setAgentMode = useAgentStore((s) => s.setMode);
+  const changeMode = useAgentStore((s) => s.changeMode);
+  const stopAgent = useAgentStore((s) => s.stopAgent);
   const focusMode = useLayoutStore((s) => s.focusMode);
   const toggleFocusMode = useLayoutStore((s) => s.toggleFocusMode);
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
+
+  const isRunning =
+    agentState !== "idle" && agentState !== "done" && agentState !== "error";
+
+  const handleModeChange = useCallback(
+    (mode: "suggest" | "edit" | "auto") => {
+      changeMode(mode);
+    },
+    [changeMode]
+  );
+
+  const handleStop = useCallback(() => {
+    stopAgent();
+  }, [stopAgent]);
 
   return (
     <div className="flex items-center justify-between px-4 border-b border-surface-border bg-surface-panel h-full no-select">
@@ -27,26 +43,29 @@ export default function TopBar() {
 
       {/* 中间：Agent 模式切换 */}
       <div className="flex items-center gap-3">
-        <ModeSwitch mode={agentMode} onChange={setAgentMode} />
+        <ModeSwitch mode={agentMode} onChange={handleModeChange} />
       </div>
 
       {/* 右侧：状态 + 控制按钮 */}
       <div className="flex items-center gap-3">
         <StatusDot state={agentState} />
 
-        <button
-          className="px-2.5 py-1 text-xs bg-accent-blue hover:bg-blue-700 text-white rounded transition-colors"
-          title="Run Task"
-        >
-          ▶ Run
-        </button>
-
-        <button
-          className="px-2.5 py-1 text-xs bg-red-600/70 hover:bg-red-600 text-white rounded transition-colors"
-          title="Stop Agent"
-        >
-          ■ Stop
-        </button>
+        {isRunning ? (
+          <button
+            onClick={handleStop}
+            className="px-2.5 py-1 text-xs bg-red-600/70 hover:bg-red-600 text-white rounded transition-colors"
+            title="Stop Agent"
+          >
+            ■ Stop
+          </button>
+        ) : (
+          <button
+            className="px-2.5 py-1 text-xs bg-accent-blue hover:bg-blue-700 text-white rounded transition-colors opacity-50 cursor-not-allowed"
+            title="Start a task in Chat"
+          >
+            ▶ Run
+          </button>
+        )}
 
         <div className="w-px h-4 bg-surface-border" />
 

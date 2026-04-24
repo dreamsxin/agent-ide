@@ -24,12 +24,6 @@ export default function QuickActions() {
     try {
       // 选区起始行的像素 Top
       const top = editor.getTopForLineNumber(selectedRange.startLine);
-
-      // 选区最后一行的像素 Bottom
-      const bottom =
-        editor.getTopForLineNumber(selectedRange.endLine) +
-        editor.getOption(monaco.editor.EditorOption.lineHeight);
-
       const editorLayout = editor.getLayoutInfo();
 
       return {

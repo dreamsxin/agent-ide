@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { editor, languages } from "monaco-editor";
+import type { editor } from "monaco-editor";
 
 /** Monaco editor instance + namespace shared across AI-layer components */
 export interface MonacoContextValue {

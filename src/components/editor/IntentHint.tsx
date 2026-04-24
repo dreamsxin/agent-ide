@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useMonacoContext } from "./MonacoContext";
+import type { editor, IDisposable } from "monaco-editor";
 
 /**
  * AI 意图提示层 —— 在特定行显示 AI 建议/警告/优化提示
@@ -13,8 +14,8 @@ import { useMonacoContext } from "./MonacoContext";
 export default function IntentHint() {
   const intentHints = useEditorStore((s) => s.intentHints);
   const { editor, monaco } = useMonacoContext();
-  const widgetsRef = useRef<monaco.editor.IContentWidget[]>([]);
-  const disposablesRef = useRef<monaco.IDisposable[]>([]);
+  const widgetsRef = useRef<editor.IContentWidget[]>([]);
+  const disposablesRef = useRef<IDisposable[]>([]);
 
   useEffect(() => {
     if (!editor || !monaco) return;
@@ -41,7 +42,7 @@ export default function IntentHint() {
         <span class="intent-hint-text">${escapeHtml(hint.message)}</span>
       `;
 
-      const widget: monaco.editor.IContentWidget = {
+      const widget: editor.IContentWidget = {
         getId: () => `intent-hint-${hint.line}`,
         getDomNode: () => domNode,
         getPosition: () => ({

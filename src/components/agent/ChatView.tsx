@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useEditorStore } from "../../stores/useEditorStore";
 import type { ChatMessage } from "../../types/agent";
 
 export default function ChatView() {
@@ -14,42 +15,104 @@ export default function ChatView() {
   ]);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
-  const isActing = agentState !== "idle" && agentState !== "done" && agentState !== "error";
+  const streamContent = useAgentStore((s) => s.streamContent);
+  const isStreaming = useAgentStore((s) => s.isStreaming);
+  const sendPrompt = useAgentStore((s) => s.sendPrompt);
+  const stopAgent = useAgentStore((s) => s.stopAgent);
+
+  const activeFile = useEditorStore((s) => s.activeFile);
+  const fileContents = useEditorStore((s) => s.fileContents);
+  const selectedText = useEditorStore((s) => s.selectedText);
+
+  const isActing =
+    agentState !== "idle" && agentState !== "done" && agentState !== "error";
+
+  // 当前流式消息 ID：用于实时显示
+  const streamingMsgId = useRef<string | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamContent]);
 
-  const handleSend = () => {
+  // 流式内容变化时更新消息列表
+  useEffect(() => {
+    if (!isStreaming) {
+      streamingMsgId.current = null;
+      return;
+    }
+    const msgId = streamingMsgId.current;
+    if (msgId) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msgId ? { ...m, content: streamContent } : m
+        )
+      );
+    } else if (streamContent) {
+      // 新的流式消息
+      const newId = `stream-${Date.now()}`;
+      streamingMsgId.current = newId;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: newId,
+          role: "agent",
+          content: streamContent,
+          timestamp: Date.now(),
+        },
+      ]);
+    }
+  }, [streamContent, isStreaming]);
+
+  // 流结束时固化消息
+  useEffect(() => {
+    if (!isStreaming && streamingMsgId.current) {
+      streamingMsgId.current = null;
+    }
+  }, [isStreaming]);
+
+  const buildContext = useCallback(() => {
+    return {
+      activeFile: activeFile ?? undefined,
+      activeFileContent: activeFile ? fileContents[activeFile] : undefined,
+      selection: selectedText ?? undefined,
+    };
+  }, [activeFile, fileContents, selectedText]);
+
+  const handleSend = useCallback(async () => {
     if (!input.trim() || isActing) return;
+
+    const content = input.trim();
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
       role: "user",
-      content: input.trim(),
+      content,
       timestamp: Date.now(),
     };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
 
-    // TODO: 对接 Tauri Agent IPC
-    setTimeout(() => {
-      const reply: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: "agent",
-        content: `Received: "${userMsg.content}". Mode: ${agentMode}. I'll analyze this...`,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, reply]);
-    }, 500);
-  };
+    // 调用 Agent
+    const ctx = buildContext();
+    await sendPrompt({
+      prompt: content,
+      ...ctx,
+    });
+
+    // Agent 完成后不添加额外消息（流式消息已存在）
+  }, [input, isActing, sendPrompt, buildContext]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
+  };
+
+  const handleStop = () => {
+    stopAgent();
   };
 
   return (
@@ -64,7 +127,7 @@ export default function ChatView() {
             }`}
           >
             <div
-              className={`max-w-[90%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+              className={`max-w-[90%] rounded-lg px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap ${
                 msg.role === "user"
                   ? "bg-accent-blue text-white"
                   : msg.role === "system"
@@ -73,6 +136,9 @@ export default function ChatView() {
               }`}
             >
               {msg.content}
+              {msg.role === "agent" && isStreaming && msg.id === streamingMsgId.current && (
+                <span className="inline-block w-1.5 h-3 bg-accent-purple ml-0.5 animate-pulse align-middle" />
+              )}
             </div>
           </div>
         ))}
@@ -86,18 +152,31 @@ export default function ChatView() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isActing ? "Agent is working..." : "Ask Agent... (Shift+Enter for newline)"}
+            placeholder={
+              isActing
+                ? "Agent is working..."
+                : `Ask Agent... (Mode: ${agentMode}, Shift+Enter for newline)`
+            }
             disabled={isActing}
             rows={2}
             className="flex-1 bg-surface-base text-surface-text text-xs p-2 rounded border border-surface-border focus:border-accent-blue focus:outline-none resize-none placeholder-surface-muted disabled:opacity-50"
           />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isActing}
-            className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end"
-          >
-            Send
-          </button>
+          {isActing ? (
+            <button
+              onClick={handleStop}
+              className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs transition-colors self-end"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end"
+            >
+              Send
+            </button>
+          )}
         </div>
       </div>
     </div>

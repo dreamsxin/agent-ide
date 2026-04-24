@@ -6,6 +6,7 @@ import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import { useLayoutStore } from "./stores/useLayoutStore";
+import { useAgentBridge } from "./hooks/useAgentBridge";
 
 export default function App() {
   const leftWidth = useLayoutStore((s) => s.leftWidth);
@@ -17,6 +18,9 @@ export default function App() {
   const setLeftWidth = useLayoutStore((s) => s.setLeftWidth);
   const setRightWidth = useLayoutStore((s) => s.setRightWidth);
   const setBottomHeight = useLayoutStore((s) => s.setBottomHeight);
+
+  // 挂载 Agent Bridge: 监听 Tauri 事件 → 同步 store
+  useAgentBridge();
 
   const onLeftResize = useCallback(
     (delta: number) => setLeftWidth(leftWidth + delta),
