@@ -2,13 +2,16 @@ import { useState } from "react";
 import ChatView from "../agent/ChatView";
 import TaskView from "../agent/TaskView";
 import DiffView from "../agent/DiffView";
+import AgentSelector from "../agent/AgentSelector";
+import TaskPipeline from "../agent/TaskPipeline";
 
-type TabId = "chat" | "tasks" | "diff";
+type TabId = "chat" | "tasks" | "diff" | "pipeline";
 
 const tabs: { id: TabId; label: string; icon: string }[] = [
   { id: "chat", label: "Chat", icon: "💬" },
   { id: "tasks", label: "Tasks", icon: "📋" },
   { id: "diff", label: "Diff", icon: "🔄" },
+  { id: "pipeline", label: "Pipeline", icon: "⚙" },
 ];
 
 export default function AgentPanel() {
@@ -22,7 +25,7 @@ export default function AgentPanel() {
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-1.5 px-4 py-2 text-xs transition-colors ${
+            className={`flex items-center gap-1.5 px-3 py-2 text-xs transition-colors ${
               activeTab === tab.id
                 ? "text-surface-text border-b-2 border-accent-blue bg-surface-base/50"
                 : "text-surface-muted hover:text-surface-text hover:bg-surface-border/20"
@@ -39,6 +42,13 @@ export default function AgentPanel() {
         {activeTab === "chat" && <ChatView />}
         {activeTab === "tasks" && <TaskView />}
         {activeTab === "diff" && <DiffView />}
+        {activeTab === "pipeline" && (
+          <div className="flex flex-col h-full overflow-auto">
+            <AgentSelector />
+            <div className="border-t border-surface-border" />
+            <TaskPipeline />
+          </div>
+        )}
       </div>
     </div>
   );

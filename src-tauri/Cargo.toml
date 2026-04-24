@@ -29,3 +29,4 @@ similar = "2"
 chrono = { version = "0.4", features = ["serde"] }
 notify = "6"
 walkdir = "2"
+git2 = "0.19"

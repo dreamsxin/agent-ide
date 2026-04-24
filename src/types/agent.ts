@@ -15,6 +15,16 @@ export type AgentMode = "suggest" | "edit" | "auto";
 /** Agent 角色 */
 export type AgentRole = "architect" | "coder" | "tester" | "reviewer";
 
+/** Pipeline 阶段状态 */
+export type PipelineStageStatus = "pending" | "active" | "completed" | "failed";
+
+/** Pipeline 阶段 */
+export interface PipelineStage {
+  role: AgentRole;
+  name: string;
+  status: PipelineStageStatus;
+}
+
 /** 单个步骤 */
 export interface Step {
   id: string;

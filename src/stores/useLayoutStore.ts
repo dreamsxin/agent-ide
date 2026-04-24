@@ -14,6 +14,9 @@ interface LayoutStore {
   // 专注模式
   focusMode: boolean;
 
+  // 左侧面板标签
+  leftTab: "explorer" | "git";
+
   // 当前底部面板标签
   bottomTab: "terminal" | "logs" | "tests" | "actions";
 
@@ -25,6 +28,7 @@ interface LayoutStore {
   toggleRightPanel: () => void;
   toggleBottomPanel: () => void;
   toggleFocusMode: () => void;
+  setLeftTab: (tab: LayoutStore["leftTab"]) => void;
   setBottomTab: (tab: LayoutStore["bottomTab"]) => void;
 }
 
@@ -36,6 +40,7 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
   rightVisible: true,
   bottomVisible: true,
   focusMode: false,
+  leftTab: "explorer",
   bottomTab: "terminal",
 
   setLeftWidth: (w) => set({ leftWidth: Math.max(180, Math.min(500, w)) }),
@@ -51,5 +56,6 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
       }
       return { focusMode: true, leftVisible: false, rightVisible: false, bottomVisible: false };
     }),
+  setLeftTab: (leftTab) => set({ leftTab }),
   setBottomTab: (bottomTab) => set({ bottomTab }),
 }));

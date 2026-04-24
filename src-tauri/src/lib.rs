@@ -46,6 +46,10 @@ pub fn run() {
             commands::agent::get_agent_steps,
             commands::agent::get_agent_diffs,
             commands::agent::update_llm_config,
+            // Git 命令
+            commands::git::git_status,
+            commands::git::git_diff,
+            commands::git::git_commit,
             // Terminal 命令
             commands::terminal::spawn_terminal,
             commands::terminal::write_to_terminal,

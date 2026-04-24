@@ -1,5 +1,6 @@
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import Terminal from "../panels/Terminal";
+import LogView from "../panels/LogView";
 
 type BottomTab = "terminal" | "logs" | "tests" | "actions";
 
@@ -9,35 +10,6 @@ const tabs: { id: BottomTab; label: string; icon: string }[] = [
   { id: "tests", label: "Tests", icon: "🧪" },
   { id: "actions", label: "Actions", icon: "⚡" },
 ];
-
-function LogsTab() {
-  const logs = [
-    { time: "15:10:32", level: "info", msg: "Agent IDE started" },
-    { time: "15:10:33", level: "info", msg: "Project loaded: my-project" },
-    { time: "15:11:05", level: "warn", msg: "File watcher: src/types.ts changed" },
-    { time: "15:12:18", level: "info", msg: "Agent: idle → thinking" },
-  ];
-
-  const levelColor: Record<string, string> = {
-    info: "text-accent-blue",
-    warn: "text-diff-modify",
-    error: "text-diff-remove",
-  };
-
-  return (
-    <div className="h-full bg-black p-2 overflow-auto font-mono text-xs">
-      {logs.map((log, i) => (
-        <div key={i} className="flex gap-3 py-0.5">
-          <span className="text-surface-muted flex-shrink-0">{log.time}</span>
-          <span className={`flex-shrink-0 w-10 ${levelColor[log.level] || ""}`}>
-            {log.level.toUpperCase()}
-          </span>
-          <span className="text-surface-text">{log.msg}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function TestsTab() {
   return (
@@ -103,7 +75,7 @@ export default function BottomPanel() {
       {/* Tab 内容 */}
       <div className="flex-1 overflow-hidden">
         {activeTab === "terminal" && <Terminal />}
-        {activeTab === "logs" && <LogsTab />}
+        {activeTab === "logs" && <LogView />}
         {activeTab === "tests" && <TestsTab />}
         {activeTab === "actions" && <ActionsTab />}
       </div>
