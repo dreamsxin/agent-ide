@@ -123,16 +123,19 @@ export default function SettingsPanel() {
   // 测试连接
   const [testing, setTesting] = useState(false);
   const handleTestConnection = useCallback(async () => {
-    if (!endpoint.trim() || !apiKey.trim() || !model.trim()) {
-      setMessage({ type: "err", text: "Fill all fields first, then Save before testing" });
-      return;
-    }
     setTesting(true);
     setMessage(null);
     try {
-      // 先保存当前配置
-      await updateLlmConfig(endpoint.trim(), apiKey.trim(), model.trim());
-      // 再测试连通性
+      // 如果表单里还有新 key（用户修改后未点 Save），先保存
+      if (apiKey.trim()) {
+        await updateLlmConfig(endpoint.trim(), apiKey.trim(), model.trim());
+        setApiKey(""); // 保存后清空输入框
+      }
+      // 后端已有配置，直接测试
+      if (!llmConfigured) {
+        setMessage({ type: "err", text: "No config saved. Fill fields and click Save first." });
+        return;
+      }
       const result = await testLlmConnection();
       setMessage({ type: "ok", text: result });
     } catch (e) {
@@ -140,7 +143,7 @@ export default function SettingsPanel() {
     } finally {
       setTesting(false);
     }
-  }, [endpoint, apiKey, model, updateLlmConfig, testLlmConnection]);
+  }, [endpoint, apiKey, model, llmConfigured, updateLlmConfig, testLlmConnection]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
 

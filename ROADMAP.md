@@ -278,6 +278,8 @@ cargo check         # Rust: 0 errors (15 warnings, benign)
 | 2026-04-24 | Custom titlebar (`decorations: false`) | Native-like IDE experience |
 | 2026-04-24 | `copy_path` + `search_files` + `get_file_metadata` | Complete file mgmt for AI agent |
 | 2026-04-24 | Structured config status card | Replaced cryptic "Connected: url · model(key)" display |
+| 2026-04-24 | SettingsPanel Test Connect fix | Save no longer loses key before testing |
+| 2026-04-24 | agent_cli --apply + --workspace | Files written to target dir; preview mode default |
 
 ---
 
@@ -290,8 +292,16 @@ npm run tauri dev          # Start Tauri + Vite dev server
 npm run dev                # Vite only (web)
 npx tsc --noEmit          # TypeScript check
 cargo check               # Rust check (from src-tauri/)
+
+# Agent CLI
+cargo build --bin agent_cli --release   # Build CLI
+target\release\agent_cli --help          # Show usage
+
+# Terminal
+# Terminal spawns cmd.exe (Windows) / $SHELL (Linux/macOS) via PTY.
+# No sandbox mode — full user permissions in spawned shell.
 ```
 
 ---
 
-*Last updated: 2026-04-24 — All phases complete. Custom titlebar, workspace, agent roles/LLM config, file tools, UI polish done.*
+*Last updated: 2026-04-24 — All phases complete. Custom titlebar, workspace, agent roles/LLM config, file tools, UI polish done. CLI --apply + workspace, SettingsPanel save fix, terminal docs.*
