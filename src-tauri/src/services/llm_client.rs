@@ -96,10 +96,18 @@ impl LlmClient {
             // 字节追加到缓冲区，防止 SSE 行被 TCP 分片截断
             sse_buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            // 逐完整行解析
-            while let Some(nl) = sse_buf.find('\n') {
-                let line = sse_buf[..nl].trim().to_string();
-                sse_buf.drain(..=nl);
+            // 逐完整行解析（兼容 \r\n / \r / \n 各种行尾）
+            while let Some(nl) = sse_buf.find(|c| c == '\n' || c == '\r') {
+                let is_cr = sse_buf.as_bytes()[nl] == b'\r';
+                // 提取行内容并 trim \r 和空白
+                let line = sse_buf[..nl].trim().trim_end_matches('\r').to_string();
+                // drain: \n case drain through \n; \r case drain through \r
+                let drain_end = if is_cr { nl } else { nl };
+                sse_buf.drain(..=drain_end);
+                // 跳过剩余的 \n（处理 \r\n 情况）
+                if is_cr && sse_buf.starts_with('\n') {
+                    sse_buf.drain(..1);
+                }
 
                 if line.is_empty() || line == "data: [DONE]" {
                     continue;

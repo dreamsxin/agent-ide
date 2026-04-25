@@ -21,50 +21,52 @@ export function useAgentBridge() {
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
 
   useEffect(() => {
+    let stopped = false;
     const unlisteners: Array<() => void> = [];
 
-    // 监听 Agent 状态变化
-    listen<StateChangedPayload>("agent-state-changed", (e) => {
-      const { state, mode } = e.payload;
-      setState(state as AgentState);
-      if (mode) {
-        useAgentStore.getState().setMode(mode as "suggest" | "edit" | "auto");
+    // 用 async IIFE 收集所有异步 listen，确保 StrictMode 下正确清理
+    (async () => {
+      try {
+        const fns = await Promise.all([
+          listen<StateChangedPayload>("agent-state-changed", (e) => {
+            const { state, mode } = e.payload;
+            setState(state as AgentState);
+            if (mode) {
+              useAgentStore.getState().setMode(mode as "suggest" | "edit" | "auto");
+            }
+          }),
+
+          listen<Step[]>("agent-plan-ready", (e) => {
+            setSteps(e.payload);
+            clearStreamContent();
+          }),
+
+          listen<Step>("agent-step-update", (e) => {
+            const step = e.payload;
+            updateStep(step.id, { status: step.status, logs: step.logs });
+          }),
+
+          listen<DiffEntry[]>("agent-diff-ready", (e) => {
+            setDiffs(e.payload);
+          }),
+
+          listen<string>("agent-stream-token", (e) => {
+            appendStreamContent(e.payload);
+          }),
+        ]);
+        if (!stopped) {
+          unlisteners.push(...fns);
+        } else {
+          // 已被清理 → 立即取消刚注册的 listener
+          fns.forEach((fn) => fn());
+        }
+      } catch (e) {
+        console.warn("[useAgentBridge] listen failed:", e);
       }
-    })
-      .then((fn) => unlisteners.push(fn))
-      .catch(console.warn);
-
-    // 监听 Plan 就绪
-    listen<Step[]>("agent-plan-ready", (e) => {
-      setSteps(e.payload);
-      clearStreamContent();
-    })
-      .then((fn) => unlisteners.push(fn))
-      .catch(console.warn);
-
-    // 监听单步更新
-    listen<Step>("agent-step-update", (e) => {
-      const step = e.payload;
-      updateStep(step.id, { status: step.status, logs: step.logs });
-    })
-      .then((fn) => unlisteners.push(fn))
-      .catch(console.warn);
-
-    // 监听 Diff 就绪
-    listen<DiffEntry[]>("agent-diff-ready", (e) => {
-      setDiffs(e.payload);
-    })
-      .then((fn) => unlisteners.push(fn))
-      .catch(console.warn);
-
-    // 监听流式 token
-    listen<string>("agent-stream-token", (e) => {
-      appendStreamContent(e.payload);
-    })
-      .then((fn) => unlisteners.push(fn))
-      .catch(console.warn);
+    })();
 
     return () => {
+      stopped = true;
       unlisteners.forEach((fn) => fn());
     };
   }, []);
