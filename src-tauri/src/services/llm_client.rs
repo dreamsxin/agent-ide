@@ -71,6 +71,7 @@ impl LlmClient {
 
         let mut full_response = String::new();
         let mut stream = response.bytes_stream();
+        let mut sse_buf = String::new();
 
         #[derive(Deserialize)]
         struct StreamChunk {
@@ -83,28 +84,36 @@ impl LlmClient {
         }
 
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct StreamDelta {
             content: Option<String>,
+            #[serde(rename = "reasoning_content")]
+            reasoning_content: Option<String>,
         }
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
-            // SSE data line: "data: {...}\n\n"
-            let text = String::from_utf8_lossy(&chunk);
-            for line in text.lines() {
-                let line = line.trim();
+            // 字节追加到缓冲区，防止 SSE 行被 TCP 分片截断
+            sse_buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            // 逐完整行解析
+            while let Some(nl) = sse_buf.find('\n') {
+                let line = sse_buf[..nl].trim().to_string();
+                sse_buf.drain(..=nl);
+
                 if line.is_empty() || line == "data: [DONE]" {
                     continue;
                 }
                 if let Some(json_str) = line.strip_prefix("data: ") {
                     if let Ok(parsed) = serde_json::from_str::<StreamChunk>(json_str) {
-                        if let Some(content) = parsed
-                            .choices
-                            .first()
-                            .and_then(|c| c.delta.content.as_ref())
-                        {
-                            full_response.push_str(content);
-                            let _ = tx.send(content.clone()).await;
+                        for choice in &parsed.choices {
+                            // 仅取 content，跳过 reasoning_content（推理内容）
+                            if let Some(ref text) = choice.delta.content {
+                                if !text.is_empty() {
+                                    full_response.push_str(text);
+                                    let _ = tx.send(text.clone()).await;
+                                }
+                            }
                         }
                     }
                 }

@@ -446,15 +446,9 @@ export default function Explorer() {
             openByDefault={false}
             onToggle={handleToggle}
             onActivate={(node) => {
-              const { data } = node;
-              if (!data.isDir) {
-                const lang = detectLanguage(data.path);
-                useEditorStore.getState().openFile({
-                  path: data.path,
-                  name: data.name,
-                  isDirty: false,
-                  language: lang,
-                });
+              // 只处理目录切换（键盘 Enter），文件打开由 TreeNode onClick 处理
+              if (node.data.isDir) {
+                node.toggle();
               }
             }}
             // @ts-expect-error react-arborist typing
