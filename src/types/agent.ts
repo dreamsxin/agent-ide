@@ -48,6 +48,8 @@ export interface DiffHunk {
   newStart: number;
   newLines: number;
   content: string;
+  original: string;
+  updated: string;
 }
 
 /** Task 任务 */

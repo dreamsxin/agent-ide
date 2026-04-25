@@ -167,14 +167,86 @@ pub async fn set_agent_mode(
     Ok(())
 }
 
-/// 应用所有 pending diffs
+/// 应用所有 pending diffs —— 实际写入文件系统
 #[tauri::command]
 pub async fn apply_diffs(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<Vec<FileDiff>, String> {
+    use std::fs;
+    use std::path::PathBuf;
+
     let mut orch = agent_state.orchestrator.lock().await;
-    orch.apply_diffs();
+    let diffs = orch.diffs.clone();
+
+    let mut applied: Vec<FileDiff> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for diff in &diffs {
+        if diff.status != "pending" {
+            continue;
+        }
+
+        // 拼接项目路径 + 文件路径
+        let file_path = if std::path::Path::new(&diff.file).is_absolute() {
+            PathBuf::from(&diff.file)
+        } else {
+            // 相对路径：相对于项目根目录
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            cwd.join(&diff.file)
+        };
+
+        // 确保父目录存在
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Create dir failed: {}", e))?;
+        }
+
+        let mut written = false;
+        for hunk in &diff.hunks {
+            if hunk.original.is_empty() && !hunk.updated.is_empty() {
+                // 新文件：直接写入 updated 内容
+                fs::write(&file_path, &hunk.updated)
+                    .map_err(|e| format!("Write new file {}: {}", file_path.display(), e))?;
+                written = true;
+            } else if !hunk.original.is_empty() {
+                // 编辑已有文件：读取 → 替换 → 写回
+                let existing = match fs::read_to_string(&file_path) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        errors.push(format!("File not found: {}", file_path.display()));
+                        continue;
+                    }
+                };
+
+                // 在文件内容中查找并替换 original → updated
+                if let Some(replaced) = replace_first(&existing, &hunk.original, &hunk.updated) {
+                    fs::write(&file_path, &replaced)
+                        .map_err(|e| format!("Write {}: {}", file_path.display(), e))?;
+                    written = true;
+                } else {
+                    errors.push(format!(
+                        "Could not find original content in {}:\n---\n{}\n---",
+                        file_path.display(),
+                        &hunk.original[..hunk.original.len().min(200)]
+                    ));
+                }
+            }
+        }
+
+        if written {
+            applied.push(diff.clone());
+        }
+    }
+
+    // 标记 applied diffs
+    orch.diffs.retain(|d| d.status != "pending");
+    for d in &applied {
+        orch.diffs.push({
+            let mut d2 = d.clone();
+            d2.status = "applied".to_string();
+            d2
+        });
+    }
 
     orch.state_mgr
         .transition(&crate::agent::state_machine::AgentEvent::UserApply);
@@ -183,14 +255,35 @@ pub async fn apply_diffs(
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
     );
 
-    let applied: Vec<FileDiff> = orch
-        .diffs
-        .iter()
-        .filter(|d| d.status == "applied")
-        .cloned()
-        .collect();
+    if !errors.is_empty() {
+        eprintln!("[apply_diffs] Warnings: {:?}", errors);
+    }
 
     Ok(applied)
+}
+
+/// 在文本中查找并替换首次出现的 original → updated
+fn replace_first(text: &str, original: &str, updated: &str) -> Option<String> {
+    // 精确匹配
+    if let Some(pos) = text.find(original) {
+        let mut result = String::with_capacity(text.len() + updated.len());
+        result.push_str(&text[..pos]);
+        result.push_str(updated);
+        result.push_str(&text[pos + original.len()..]);
+        return Some(result);
+    }
+    // 模糊匹配：trim 后比较
+    let orig_trim = original.trim();
+    if orig_trim != original {
+        if let Some(pos) = text.find(orig_trim) {
+            let mut result = String::with_capacity(text.len() + updated.len());
+            result.push_str(&text[..pos]);
+            result.push_str(updated.trim());
+            result.push_str(&text[pos + orig_trim.len()..]);
+            return Some(result);
+        }
+    }
+    None
 }
 
 /// 拒绝所有 pending diffs

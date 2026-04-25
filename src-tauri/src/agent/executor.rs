@@ -157,6 +157,8 @@ fn make_diff(file: &str, content: &str, original: &[String], updated: &[String])
             new_start: 0,
             new_lines: new_count,
             content: content.to_string(),
+            original: original.join("\n"),
+            updated: updated.join("\n"),
         }],
         status: "pending".to_string(),
     }
@@ -173,6 +175,8 @@ fn make_new_file_diff(file: &str, content: &str) -> crate::agent::state_machine:
             new_start: 0,
             new_lines: count,
             content: content.to_string(),
+            original: String::new(),
+            updated: content.to_string(),
         }],
         status: "pending".to_string(),
     }

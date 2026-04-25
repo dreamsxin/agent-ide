@@ -138,7 +138,7 @@ impl AgentOrchestrator {
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
 
-        // 5. Reviewing → WaitingUser
+        // 5. Auto 模式：自动应用 diff；非 Auto：等待用户确认
         if !self.diffs.is_empty() {
             let _ = app.emit(
                 "agent-diff-ready",
@@ -146,9 +146,84 @@ impl AgentOrchestrator {
             );
         }
         let _ = self.state_mgr.transition(&AgentEvent::DiffReady(self.diffs.clone()));
-        self.state_mgr.set(crate::agent::state_machine::AgentState::WaitingUser);
+
+        if self.mode == AgentMode::Auto {
+            // Auto 模式：自动 apply diffs
+            self.apply_diffs_to_fs()?;
+            self.state_mgr.set(crate::agent::state_machine::AgentState::Done);
+        } else {
+            self.state_mgr.set(crate::agent::state_machine::AgentState::WaitingUser);
+        }
         self.emit_state(&app);
 
+        Ok(())
+    }
+
+    /// 将 pending diffs 实际写入文件系统
+    pub fn apply_diffs_to_fs(&mut self) -> Result<(), String> {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let diffs: Vec<_> = self.diffs.iter().filter(|d| d.status == "pending").cloned().collect();
+        let mut errors = Vec::new();
+
+        for diff in &diffs {
+            let file_path = if std::path::Path::new(&diff.file).is_absolute() {
+                PathBuf::from(&diff.file)
+            } else {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&diff.file)
+            };
+
+            if let Some(parent) = file_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            for hunk in &diff.hunks {
+                if hunk.original.is_empty() && !hunk.updated.is_empty() {
+                    // 新文件
+                    if let Err(e) = fs::write(&file_path, &hunk.updated) {
+                        errors.push(format!("{}: {}", file_path.display(), e));
+                    }
+                } else if !hunk.original.is_empty() {
+                    // 编辑已有文件
+                    match fs::read_to_string(&file_path) {
+                        Ok(existing) => {
+                            let replaced = if let Some(pos) = existing.find(&hunk.original) {
+                                let mut r = String::with_capacity(existing.len() + hunk.updated.len());
+                                r.push_str(&existing[..pos]);
+                                r.push_str(&hunk.updated);
+                                r.push_str(&existing[pos + hunk.original.len()..]);
+                                r
+                            } else if let Some(pos) = existing.find(hunk.original.trim()) {
+                                let mut r = String::with_capacity(existing.len() + hunk.updated.len());
+                                r.push_str(&existing[..pos]);
+                                r.push_str(hunk.updated.trim());
+                                r.push_str(&existing[pos + hunk.original.trim().len()..]);
+                                r
+                            } else {
+                                errors.push(format!("Could not find original in {}", file_path.display()));
+                                continue;
+                            };
+                            if let Err(e) = fs::write(&file_path, &replaced) {
+                                errors.push(format!("{}: {}", file_path.display(), e));
+                            }
+                        }
+                        Err(e) => { errors.push(format!("{}: {}", file_path.display(), e)); }
+                    }
+                }
+            }
+        }
+
+        // 标记为 applied
+        for diff in &mut self.diffs {
+            if diff.status == "pending" {
+                diff.status = "applied".to_string();
+            }
+        }
+
+        if !errors.is_empty() {
+            eprintln!("[apply_diffs_to_fs] Warnings: {:?}", errors);
+        }
         Ok(())
     }
 

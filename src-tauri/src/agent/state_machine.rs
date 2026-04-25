@@ -91,6 +91,10 @@ pub struct DiffHunk {
     #[serde(rename = "newLines")]
     pub new_lines: u32,
     pub content: String,
+    /// 原始代码块（用于应用 diff 时替换定位）
+    pub original: String,
+    /// 更新后的代码块
+    pub updated: String,
 }
 
 /// Agent 状态管理器 —— 封装状态转换逻辑

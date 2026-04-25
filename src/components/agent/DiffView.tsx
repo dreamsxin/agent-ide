@@ -3,8 +3,65 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import type { DiffEntry } from "../../types/agent";
 
 function HunkBlock({ hunk }: { hunk: DiffEntry["hunks"][0] }) {
-  const lines = hunk.content.split("\n");
+  const hasOriginal = hunk.original && hunk.original.trim().length > 0;
+  const hasUpdated = hunk.updated && hunk.updated.trim().length > 0;
 
+  // 如果是新建文件，直接展示内容
+  if (!hasOriginal && hasUpdated) {
+    const lines = hunk.updated.split("\n");
+    return (
+      <div className="text-xs font-mono leading-relaxed">
+        <div className="px-2 py-0.5 bg-diff-add/10 text-diff-add text-[10px] font-semibold border-b border-diff-add/20">
+          + New file
+        </div>
+        {lines.map((line, i) => (
+          <div key={i} className="px-2 bg-diff-add/5">
+            <span className="whitespace-pre text-diff-add">+ {line}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // 有 original + updated ：分左右展示
+  if (hasOriginal && hasUpdated) {
+    const origLines = hunk.original.split("\n");
+    const updLines = hunk.updated.split("\n");
+
+    return (
+      <div className="text-xs font-mono leading-relaxed">
+        <div className="grid grid-cols-2 border-b border-surface-border">
+          <div className="px-2 py-0.5 bg-diff-remove/10 text-diff-remove text-[10px] font-semibold">
+            - Original
+          </div>
+          <div className="px-2 py-0.5 bg-diff-add/10 text-diff-add text-[10px] font-semibold border-l border-surface-border">
+            + Updated
+          </div>
+        </div>
+        <div className="grid grid-cols-2">
+          {/* 左列：原始 */}
+          <div className="bg-diff-remove/5">
+            {origLines.map((line, i) => (
+              <div key={i} className="px-2 border-r border-surface-border/50">
+                <span className="whitespace-pre text-diff-remove">{line || " "}</span>
+              </div>
+            ))}
+          </div>
+          {/* 右列：更新 */}
+          <div className="bg-diff-add/5">
+            {updLines.map((line, i) => (
+              <div key={i} className="px-2">
+                <span className="whitespace-pre text-diff-add">{line || " "}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 兜底：raw content
+  const lines = hunk.content.split("\n");
   return (
     <div className="text-xs font-mono leading-relaxed">
       {lines.map((line, i) => {
