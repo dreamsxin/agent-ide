@@ -33,9 +33,9 @@ After any interruption, restore context in this order:
 
 ---
 
-## Current State: Phase 4 — COMPLETE
+## Current State: Phase 5 — COMPLETE
 
-Phase 1 + Phase 2 + Phase 3 + Phase 4 done as of 2026-04-24.
+All 5 phases done as of 2026-04-24.
 
 ### What's Built
 
@@ -47,24 +47,28 @@ d:\work\agent-ide\
 │   └── agent_ide_ui_design.md          <-- UI design specification (English)
 │
 ├── src/                                # React Frontend
-│   ├── App.tsx                         # CSS Grid layout, resizable panels, useAgentBridge mount
+│   ├── App.tsx                         # Layout, animated panels, shortcuts, theme support
 │   ├── main.tsx                        # Entry point
-│   ├── styles/index.css                # Tailwind + scrollbar + terminal styles
+│   ├── styles/index.css                # Tailwind + Light/Dark theme + animations
 │   │
 │   ├── stores/
-│   │   ├── useLayoutStore.ts           # Panel sizes, visibility, focus mode
+│   │   ├── useLayoutStore.ts           # Panel sizes, visibility, focus mode, tabs
 │   │   ├── useEditorStore.ts           # Files, contents, dirty state, save
-│   │   └── useAgentStore.ts            # Agent state + IPC actions + streaming support
+│   │   ├── useAgentStore.ts            # Agent state + IPC actions + streaming support
+│   │   ├── useGitStore.ts              # Git status, diff, commit actions
+│   │   ├── useLogStore.ts              # Log entries with source/level tracking
+│   │   └── useThemeStore.ts            # Dark/Light theme with localStorage persistence
 │   │
 │   ├── hooks/
 │   │   ├── useAgentBridge.ts           # Tauri event -> Zustand store sync
-│   │   └── useTauriEvent.ts            # Generic Tauri event listener hook
+│   │   ├── useTauriEvent.ts            # Generic Tauri event listener hook
+│   │   └── useShortcuts.ts             # Centralized keyboard shortcut system
 │   │
 │   ├── components/
 │   │   ├── layout/
-│   │   │   ├── TopBar.tsx              # Mode switch + Run/Stop + panel toggles
-│   │   │   ├── LeftPanel.tsx           # Wraps Explorer
-│   │   │   ├── AgentPanel.tsx          # Chat/Tasks/Diff tabs
+│   │   │   ├── TopBar.tsx              # Mode switch, Run/Stop, panel toggles, theme, help
+│   │   │   ├── LeftPanel.tsx           # Explorer/Git tab switching
+│   │   │   ├── AgentPanel.tsx          # Chat/Tasks/Diff/Pipeline tabs
 │   │   │   ├── BottomPanel.tsx         # Terminal/Logs/Tests/Actions tabs
 │   │   │   └── ResizeHandle.tsx        # Drag-to-resize panels
 │   │   │
@@ -79,26 +83,32 @@ d:\work\agent-ide\
 │   │   │
 │   │   ├── panels/
 │   │   │   ├── Explorer.tsx            # react-arborist + Tauri FS lazy load
-│   │   │   └── Terminal.tsx            # xterm.js + FitAddon + WebLinksAddon
+│   │   │   ├── Terminal.tsx            # xterm.js + FitAddon + WebLinksAddon
+│   │   │   ├── GitPanel.tsx            # Source control: status, diff viewer, commit
+│   │   │   └── LogView.tsx             # Log timeline with source icons, auto-scroll
 │   │   │
 │   │   ├── agent/
 │   │   │   ├── ChatView.tsx            # Multi-turn chat + streaming display + IPC send
 │   │   │   ├── TaskView.tsx            # Step visualization from agent store
-│   │   │   └── DiffView.tsx            # Diff list + Apply All / Reject All bulk actions
+│   │   │   ├── DiffView.tsx            # Diff list + Apply All / Reject All bulk actions
+│   │   │   ├── TaskPipeline.tsx        # Pipeline timeline with status indicators
+│   │   │   └── AgentSelector.tsx       # Agent role selector with descriptions
 │   │   │
 │   │   └── shared/
 │   │       ├── StatusDot.tsx
 │   │       ├── ModeSwitch.tsx
+│   │       ├── ShortcutsHelp.tsx       # F1 shortcut reference modal
 │   │       ├── Button.tsx
 │   │       ├── Badge.tsx
 │   │       └── Spinner.tsx
 │   │
 │   └── types/
-│       ├── agent.ts                    # AgentState, Step, DiffEntry, Task, ChatMessage
-│       └── editor.ts                   # FileTab, FileNode, DiffOverlay types
+│       ├── agent.ts                    # AgentState, Step, DiffEntry, Task, ChatMessage, PipelineStage
+│       ├── editor.ts                   # FileTab, FileNode, DiffOverlay types
+│       └── project.ts                  # ProjectInfo, GitStatus, GitStatusEntry, LogEntry
 │
 ├── src-tauri/                          # Rust Backend
-│   ├── Cargo.toml                      # deps: portable-pty, tokio, serde, reqwest, etc.
+│   ├── Cargo.toml                      # deps: portable-pty, tokio, serde, reqwest, git2, etc.
 │   └── src/
 │       ├── main.rs
 │       ├── lib.rs                      # Plugin reg + command handler reg
@@ -106,6 +116,7 @@ d:\work\agent-ide\
 │       │   ├── mod.rs
 │       │   ├── fs.rs                   # read_file, write_file, list_dir, file_exists
 │       │   ├── terminal.rs             # spawn/write/resize/kill PTY + TerminalManager
+│       │   ├── git.rs                  # git_status, git_diff, git_commit (discover)
 │       │   └── agent.rs                # Agent IPC: prompt/stop/mode/apply/reject + LLM config
 │       ├── agent/
 │       │   ├── mod.rs
@@ -113,7 +124,8 @@ d:\work\agent-ide\
 │       │   ├── orchestrator.rs         # Main flow: prompt -> plan -> execute -> review
 │       │   ├── planner.rs              # LLM task decomposition + plan parsing
 │       │   ├── executor.rs             # Step execution + diff parsing from LLM output
-│       │   └── diff_gen.rs             # Text diff utilities (similar crate)
+│       │   ├── diff_gen.rs             # Text diff utilities (similar crate)
+│       │   └── multi_agent.rs          # AgentRole, PipelineStage, default_pipeline
 │       └── services/
 │           ├── mod.rs
 │           ├── llm_client.rs           # OpenAI-compatible HTTP streaming client
@@ -182,12 +194,12 @@ User applies/rejects diffs:
 
 ```
 npx tsc --noEmit    # TypeScript: 0 errors
-cargo check         # Rust: 0 errors (10 warnings, benign)
+cargo check         # Rust: 0 errors (15 warnings, benign)
 ```
 
 ---
 
-## Future Phases Summary
+## All Phases Summary
 
 | Phase | Name | Key Deliverables |
 |-------|------|------------------|
@@ -202,22 +214,22 @@ cargo check         # Rust: 0 errors (10 warnings, benign)
 ## Architecture at a Glance
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Tauri v2 Shell                        │
-├──────────────────────────────────────────────────────────┤
-│  WebView (React 18)            │  Rust Backend           │
-│                                │                         │
-│  ┌──────┬──────┬──────────┐   │  Agent State Machine    │
-│  │Left  │Editor│Agent     │   │  Agent Orchestrator     │
-│  │(FS)  │Monaco│Chat/Task │<--+-- File System            │
-│  └──────┴──────┴──────────┘   │  LLM Client (reqwest)   │
-│  ┌──────────────────────────┐ │  PTY Terminal           │
-│  │  Terminal | Logs         │<--+-- Planner / Executor     │
-│  └──────────────────────────┘ │  Diff Generator         │
-│                                │                         │
-│  Zustand Stores --invoke----->│                         │
-│  <-- Tauri Event (listen) ----│                         │
-└──────────────────────────────────────────────────────────┘
++----------------------------------------------------------+
+|                    Tauri v2 Shell                        |
++----------------------------------------------------------+
+|  WebView (React 18)            |  Rust Backend           |
+|                                |                         |
+|  +------+------+----------+   |  Agent State Machine    |
+|  |Left  |Editor|Agent     |   |  Agent Orchestrator     |
+|  |(FS)  |Monaco|Chat/Task |<--+-- File System            |
+|  +------+------+----------+   |  LLM Client (reqwest)   |
+|  +--------------------------+ |  PTY Terminal           |
+|  |  Terminal | Logs         |<--+-- Planner / Executor     |
+|  +--------------------------+ |  Diff Generator         |
+|                                |  Git (git2)            |
+|  Zustand Stores --invoke----->|                         |
+|  <-- Tauri Event (listen) ----|                         |
++----------------------------------------------------------+
 ```
 
 **IPC Commands registered:**
@@ -226,6 +238,7 @@ cargo check         # Rust: 0 errors (10 warnings, benign)
 - `get_agent_state`, `send_agent_prompt`, `stop_agent`
 - `set_agent_mode`, `apply_diffs`, `reject_diffs`
 - `get_agent_steps`, `get_agent_diffs`, `update_llm_config`
+- `git_status`, `git_diff`, `git_commit`
 
 **Tauri Events emitted:**
 - `terminal-output` — PTY output to frontend
@@ -254,6 +267,9 @@ cargo check         # Rust: 0 errors (10 warnings, benign)
 | 2026-04-24 | reqwest SSE streaming for LLM | Standard OpenAI-compatible API |
 | 2026-04-24 | `useAgentBridge` hook pattern | Single mount for event->store sync |
 | 2026-04-24 | `similar` crate for diff | Fast text diff utilities |
+| 2026-04-24 | `git2::Repository::discover` | Walk up to find .git in Tauri |
+| 2026-04-24 | Theme via `data-theme` + CSS vars | Runtime switching, no rebuild |
+| 2026-04-24 | `useShortcuts` hook | Centralized, group-aware shortcut registry |
 
 ---
 
@@ -270,4 +286,4 @@ cargo check               # Rust check (from src-tauri/)
 
 ---
 
-*Last updated: 2026-04-24 — Phase 4 complete, Phase 5 pending.*
+*Last updated: 2026-04-24 — All 5 phases complete. Project ready for release.*

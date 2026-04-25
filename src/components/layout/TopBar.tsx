@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import { useThemeStore } from "../../stores/useThemeStore";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
 
@@ -14,6 +15,8 @@ export default function TopBar() {
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
+  const theme = useThemeStore((s) => s.theme);
+  const toggleTheme = useThemeStore((s) => s.toggleTheme);
 
   const isRunning =
     agentState !== "idle" && agentState !== "done" && agentState !== "error";
@@ -28,6 +31,10 @@ export default function TopBar() {
   const handleStop = useCallback(() => {
     stopAgent();
   }, [stopAgent]);
+
+  const handleHelp = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("toggle-shortcuts-help"));
+  }, []);
 
   return (
     <div className="flex items-center justify-between px-4 border-b border-surface-border bg-surface-panel h-full no-select">
@@ -73,21 +80,21 @@ export default function TopBar() {
         <button
           onClick={toggleLeftPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors"
-          title="Toggle Explorer"
+          title="Toggle Explorer (Ctrl+Shift+E)"
         >
           📁
         </button>
         <button
           onClick={toggleRightPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors"
-          title="Toggle Agent Panel"
+          title="Toggle Agent Panel (Ctrl+Shift+X)"
         >
           🤖
         </button>
         <button
           onClick={toggleBottomPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors"
-          title="Toggle Terminal"
+          title="Toggle Terminal (Ctrl+`)"
         >
           ⬜
         </button>
@@ -96,9 +103,29 @@ export default function TopBar() {
           className={`text-xs transition-colors ${
             focusMode ? "text-accent-purple" : "text-surface-muted hover:text-surface-text"
           }`}
-          title="Focus Mode"
+          title="Focus Mode (Ctrl+Shift+F)"
         >
           ⊡
+        </button>
+
+        <div className="w-px h-4 bg-surface-border" />
+
+        {/* 主题切换 */}
+        <button
+          onClick={toggleTheme}
+          className="text-xs text-surface-muted hover:text-surface-text transition-colors"
+          title={`Switch to ${theme === "dark" ? "Light" : "Dark"} Theme`}
+        >
+          {theme === "dark" ? "☀" : "🌙"}
+        </button>
+
+        {/* 快捷键帮助 */}
+        <button
+          onClick={handleHelp}
+          className="text-xs text-surface-muted hover:text-surface-text transition-colors"
+          title="Keyboard Shortcuts (F1)"
+        >
+          ?
         </button>
       </div>
     </div>

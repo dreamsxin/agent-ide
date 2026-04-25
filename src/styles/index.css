@@ -2,6 +2,35 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ===== Light Theme ===== */
+:root[data-theme="light"] {
+  --bg-base: #FFFFFF;
+  --bg-panel: #F6F8FA;
+  --bg-border: #D0D7DE;
+  --text-primary: #1F2328;
+  --text-muted: #656D76;
+  --accent-blue: #0969DA;
+  --accent-purple: #8250DF;
+  --diff-add: #1A7F37;
+  --diff-remove: #CF222E;
+  --diff-modify: #9A6700;
+}
+
+/* ===== Dark Theme (default) ===== */
+:root,
+:root[data-theme="dark"] {
+  --bg-base: #0D1117;
+  --bg-panel: #161B22;
+  --bg-border: #30363D;
+  --text-primary: #E6EDF3;
+  --text-muted: #8B949E;
+  --accent-blue: #3B82F6;
+  --accent-purple: #8B5CF6;
+  --diff-add: #238636;
+  --diff-remove: #DA3633;
+  --diff-modify: #D29922;
+}
+
 /* ---- 全局滚动条 ---- */
 ::-webkit-scrollbar {
   width: 6px;
@@ -151,4 +180,13 @@
 .resize-handle-h:hover,
 .resize-handle-h.active {
   background: #3B82F6;
+}
+
+/* ---- Panel Transition Animations ---- */
+.panel-enter {
+  animation: panel-slide-in 0.2s ease-out;
+}
+@keyframes panel-slide-in {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
 }

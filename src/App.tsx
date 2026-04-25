@@ -1,12 +1,34 @@
-import { useCallback } from "react";
+import { useCallback, useState, useEffect } from "react";
 import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
 import EditorContainer from "./components/editor/EditorContainer";
 import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
+import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import { useLayoutStore } from "./stores/useLayoutStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
+import useShortcuts from "./hooks/useShortcuts";
+
+function AnimatedPanel({ visible, children }: { visible: boolean; children: React.ReactNode }) {
+  const [shouldRender, setShouldRender] = useState(visible);
+  const [animClass, setAnimClass] = useState("");
+
+  useEffect(() => {
+    if (visible) {
+      setShouldRender(true);
+      requestAnimationFrame(() => setAnimClass("panel-enter"));
+    } else {
+      setAnimClass("");
+      const timer = setTimeout(() => setShouldRender(false), 200);
+      return () => clearTimeout(timer);
+    }
+  }, [visible]);
+
+  if (!shouldRender) return null;
+
+  return <div className={animClass}>{children}</div>;
+}
 
 export default function App() {
   const leftWidth = useLayoutStore((s) => s.leftWidth);
@@ -19,8 +41,34 @@ export default function App() {
   const setRightWidth = useLayoutStore((s) => s.setRightWidth);
   const setBottomHeight = useLayoutStore((s) => s.setBottomHeight);
 
-  // 挂载 Agent Bridge: 监听 Tauri 事件 → 同步 store
   useAgentBridge();
+
+  const { shortcuts } = useShortcuts();
+  const [helpVisible, setHelpVisible] = useState(false);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "F1") {
+        e.preventDefault();
+        setHelpVisible((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setHelpVisible((v) => !v);
+    window.addEventListener("toggle-shortcuts-help", handler);
+    return () => window.removeEventListener("toggle-shortcuts-help", handler);
+  }, []);
+
+  const allShortcuts = [
+    ...shortcuts,
+    { id: "help", keys: "F1", label: "Shortcuts Help",
+      group: "General", scope: "global" as const,
+      handler: () => setHelpVisible((v) => !v) },
+  ];
 
   const onLeftResize = useCallback(
     (delta: number) => setLeftWidth(leftWidth + delta),
@@ -37,48 +85,48 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-surface-base text-surface-text overflow-hidden">
-      {/* ======== 顶部控制栏 ======== */}
+      <ShortcutsHelp
+        shortcuts={allShortcuts}
+        visible={helpVisible}
+        onClose={() => setHelpVisible(false)}
+      />
+
       <div className="h-12 flex-shrink-0">
         <TopBar />
       </div>
 
-      {/* ======== 中间三栏区域 ======== */}
       <div className="flex-1 flex min-h-0">
-        {/* 左侧面板 */}
-        {leftVisible && (
-          <>
+        <AnimatedPanel visible={leftVisible}>
+          <div className="flex gap-0">
             <div style={{ width: `${leftWidth}px` }} className="flex-shrink-0">
               <LeftPanel />
             </div>
             <ResizeHandle direction="horizontal" onResize={onLeftResize} />
-          </>
-        )}
+          </div>
+        </AnimatedPanel>
 
-        {/* 编辑器核心区 */}
         <div className="flex-1 min-w-0">
           <EditorContainer />
         </div>
 
-        {/* 右侧 Agent 面板 */}
-        {rightVisible && (
-          <>
+        <AnimatedPanel visible={rightVisible}>
+          <div className="flex gap-0">
             <ResizeHandle direction="horizontal" onResize={onRightResize} />
             <div style={{ width: `${rightWidth}px` }} className="flex-shrink-0">
               <AgentPanel />
             </div>
-          </>
-        )}
+          </div>
+        </AnimatedPanel>
       </div>
 
-      {/* 垂直分隔 + 底部面板 */}
-      {bottomVisible && (
-        <>
+      <AnimatedPanel visible={bottomVisible}>
+        <div>
           <ResizeHandle direction="vertical" onResize={onBottomResize} />
           <div style={{ height: `${bottomHeight}px` }} className="flex-shrink-0">
             <BottomPanel />
           </div>
-        </>
-      )}
+        </div>
+      </AnimatedPanel>
     </div>
   );
 }
