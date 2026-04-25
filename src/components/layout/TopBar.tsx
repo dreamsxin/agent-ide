@@ -4,6 +4,7 @@ import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
@@ -70,6 +71,8 @@ export default function TopBar() {
       if (selected && typeof selected === "string") {
         setWorkspacePath(selected);
         useEditorStore.getState().setWorkspacePath(selected);
+        // 持久化到磁盘
+        invoke("save_workspace_path", { path: selected }).catch(console.warn);
       }
     } catch (e) {
       console.warn("Open folder failed:", e);

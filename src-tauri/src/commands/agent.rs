@@ -298,6 +298,34 @@ pub async fn get_llm_config(
     }
 }
 
+/// 保存工作目录路径到磁盘
+#[tauri::command]
+pub fn save_workspace_path(path: String) -> Result<(), String> {
+    let dir = config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("workspace.json");
+    let json = serde_json::json!({ "path": path });
+    let content = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("Serialize error: {}", e))?;
+    std::fs::write(&file_path, content)
+        .map_err(|e| format!("Write error: {}", e))?;
+    Ok(())
+}
+
+/// 从磁盘加载上次保存的工作目录
+#[tauri::command]
+pub fn get_workspace_path() -> Result<Option<String>, String> {
+    let path = config_dir().join("workspace.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Parse error: {}", e))?;
+    let wsp = parsed.get("path").and_then(|v| v.as_str().map(|s| s.to_string()));
+    Ok(wsp)
+}
+
 /// 测试 LLM 连通性：发送简单请求验证 API 可用
 #[tauri::command]
 pub async fn test_llm_connection(

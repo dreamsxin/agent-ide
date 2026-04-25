@@ -1,4 +1,5 @@
 import { useCallback, useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
 import EditorContainer from "./components/editor/EditorContainer";
@@ -7,6 +8,7 @@ import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import { useLayoutStore } from "./stores/useLayoutStore";
+import { useEditorStore } from "./stores/useEditorStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import useShortcuts from "./hooks/useShortcuts";
 
@@ -61,6 +63,18 @@ export default function App() {
     const handler = () => setHelpVisible((v) => !v);
     window.addEventListener("toggle-shortcuts-help", handler);
     return () => window.removeEventListener("toggle-shortcuts-help", handler);
+  }, []);
+
+  // 启动时恢复上次的工作目录
+  useEffect(() => {
+    invoke<string | null>("get_workspace_path").then((saved) => {
+      if (saved && typeof saved === "string" && saved.length > 0) {
+        useLayoutStore.getState().setWorkspacePath(saved);
+        useEditorStore.getState().setWorkspacePath(saved);
+      }
+    }).catch(() => {
+      // 无历史记录或读取失败，保持空状态
+    });
   }, []);
 
   const allShortcuts = [

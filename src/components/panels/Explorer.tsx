@@ -156,7 +156,11 @@ export default function Explorer() {
     setLoading(true);
     setError(null);
     try {
-      const entries: FileEntry[] = await invoke("list_directory", { path: workspacePath || "." });
+      if (!workspacePath) {
+        setRootData([]);
+        return;
+      }
+      const entries: FileEntry[] = await invoke("list_directory", { path: workspacePath });
       const nodes = entries
         .filter((e) => !EXCLUDE_DIRS.has(e.name))
         .map(fileEntryToNode);
