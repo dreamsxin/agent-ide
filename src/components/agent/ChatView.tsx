@@ -10,10 +10,37 @@ marked.setOptions({
   gfm: true,      // GitHub Flavored Markdown
 });
 
+/** 自动闭合未关闭的代码块，防止整个后缀被渲染为代码 */
+function sanitizeMarkdown(raw: string): string {
+  const lines = raw.split('\n');
+  let inBlock = false;
+  const result: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
+      if (!inBlock) {
+        inBlock = true;
+      } else {
+        inBlock = false;
+      }
+    }
+    result.push(line);
+  }
+
+  // 未闭合的代码块自动补上 ```
+  if (inBlock) {
+    result.push('```');
+  }
+
+  return result.join('\n');
+}
+
 /** 将 markdown 渲染为 HTML，支持流式不完整代码块 */
 function renderMarkdown(raw: string): string {
   try {
-    return marked.parse(raw) as string;
+    const sanitized = sanitizeMarkdown(raw);
+    return marked.parse(sanitized) as string;
   } catch {
     return escapeHtml(raw);
   }
