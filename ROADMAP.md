@@ -33,9 +33,9 @@ After any interruption, restore context in this order:
 
 ---
 
-## Current State: Phase 5 — COMPLETE
+## Current State: Phase 5 — COMPLETE + UI Polish
 
-All 5 phases done as of 2026-04-24.
+All 5 phases done as of 2026-04-24. Recent additions: custom titlebar, workspace open, enhanced file tools, Agent roles & LLM config, UI clarity improvements.
 
 ### What's Built
 
@@ -233,12 +233,17 @@ cargo check         # Rust: 0 errors (15 warnings, benign)
 ```
 
 **IPC Commands registered:**
-- `read_file_content`, `write_file_content`, `list_directory`, `file_exists`
-- `spawn_terminal`, `write_to_terminal`, `resize_terminal`, `kill_terminal`
-- `get_agent_state`, `send_agent_prompt`, `stop_agent`
-- `set_agent_mode`, `apply_diffs`, `reject_diffs`
-- `get_agent_steps`, `get_agent_diffs`, `update_llm_config`
-- `git_status`, `git_diff`, `git_commit`
+- FS: `read_file_content`, `write_file_content`, `list_directory`, `file_exists`
+- FS: `delete_path`, `create_file`, `create_directory`, `rename_path`
+- FS: `copy_path`, `get_file_metadata`, `search_files` (new)
+- FS: `watch_start`, `watch_stop`
+- Terminal: `spawn_terminal`, `write_to_terminal`, `resize_terminal`, `kill_terminal`
+- Agent: `get_agent_state`, `send_agent_prompt`, `stop_agent`, `set_agent_mode`
+- Agent: `apply_diffs`, `reject_diffs`, `get_agent_steps`, `get_agent_diffs`
+- Agent: `update_llm_config`, `get_llm_config` (new)
+- Agent: `set_active_role`, `get_active_role` (new)
+- Agent: `get_pipeline`, `update_pipeline`, `reset_pipeline` (new)
+- Git: `git_status`, `git_diff`, `git_commit`
 
 **Tauri Events emitted:**
 - `terminal-output` — PTY output to frontend
@@ -270,6 +275,9 @@ cargo check         # Rust: 0 errors (15 warnings, benign)
 | 2026-04-24 | `git2::Repository::discover` | Walk up to find .git in Tauri |
 | 2026-04-24 | Theme via `data-theme` + CSS vars | Runtime switching, no rebuild |
 | 2026-04-24 | `useShortcuts` hook | Centralized, group-aware shortcut registry |
+| 2026-04-24 | Custom titlebar (`decorations: false`) | Native-like IDE experience |
+| 2026-04-24 | `copy_path` + `search_files` + `get_file_metadata` | Complete file mgmt for AI agent |
+| 2026-04-24 | Structured config status card | Replaced cryptic "Connected: url · model(key)" display |
 
 ---
 
@@ -286,4 +294,4 @@ cargo check               # Rust check (from src-tauri/)
 
 ---
 
-*Last updated: 2026-04-24 — All 5 phases complete. Project ready for release.*
+*Last updated: 2026-04-24 — All phases complete. Custom titlebar, workspace, agent roles/LLM config, file tools, UI polish done.*

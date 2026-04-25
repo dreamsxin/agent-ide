@@ -2,9 +2,9 @@ import Explorer from "../panels/Explorer";
 import GitPanel from "../panels/GitPanel";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 
-const tabs: { id: "explorer" | "git"; label: string; icon: string }[] = [
-  { id: "explorer", label: "Files", icon: "📁" },
-  { id: "git", label: "Git", icon: "⬢" },
+const tabs: { id: "explorer" | "git"; label: string; icon: string; tooltip: string }[] = [
+  { id: "explorer", label: "Explorer", icon: "📁", tooltip: "Browse & manage project files" },
+  { id: "git", label: "Git", icon: "⬢", tooltip: "Version control & changes" },
 ];
 
 export default function LeftPanel() {
@@ -19,6 +19,7 @@ export default function LeftPanel() {
           <button
             key={tab.id}
             onClick={() => setLeftTab(tab.id)}
+            title={tab.tooltip}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] transition-colors ${
               leftTab === tab.id
                 ? "text-surface-text border-b-2 border-b-accent-blue bg-surface-base/50"

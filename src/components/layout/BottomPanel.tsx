@@ -4,11 +4,11 @@ import LogView from "../panels/LogView";
 
 type BottomTab = "terminal" | "logs" | "tests" | "actions";
 
-const tabs: { id: BottomTab; label: string; icon: string }[] = [
-  { id: "terminal", label: "Terminal", icon: ">" },
-  { id: "logs", label: "Logs", icon: "📋" },
-  { id: "tests", label: "Tests", icon: "🧪" },
-  { id: "actions", label: "Actions", icon: "⚡" },
+const tabs: { id: BottomTab; label: string; icon: string; tooltip: string }[] = [
+  { id: "terminal", label: "Terminal", icon: ">", tooltip: "Integrated system terminal" },
+  { id: "logs", label: "Logs", icon: "📋", tooltip: "Agent & system operation logs" },
+  { id: "tests", label: "Tests", icon: "🧪", tooltip: "Test execution results" },
+  { id: "actions", label: "Actions", icon: "⚡", tooltip: "Agent action history" },
 ];
 
 function TestsTab() {
@@ -59,6 +59,7 @@ export default function BottomPanel() {
           <button
             key={tab.id}
             onClick={() => setBottomTab(tab.id)}
+            title={tab.tooltip}
             className={`flex items-center gap-1 px-3 py-1.5 text-[11px] transition-colors ${
               activeTab === tab.id
                 ? "text-surface-text border-t-2 border-t-accent-blue bg-surface-base"

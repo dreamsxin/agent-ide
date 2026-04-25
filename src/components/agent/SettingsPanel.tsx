@@ -3,6 +3,13 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import type { ModelProvider, ProviderPreset } from "../../types/agent";
 
 // ====== 提供商预设 ======
+const providerLabels: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  azure: "Azure OpenAI",
+  custom: "Custom",
+};
+
 const PROVIDERS: ProviderPreset[] = [
   {
     id: "openai",
@@ -112,16 +119,39 @@ export default function SettingsPanel() {
         Model Configuration
       </div>
 
-      {/* 状态条 */}
-      {llmConfigured && (
-        <div className="mb-3 px-2 py-1.5 rounded bg-accent-green/10 border border-accent-green/30 text-accent-green text-[11px]">
-          Connected: {llmEndpoint} · {llmModel}
-          {apiKeyMasked && <span className="text-surface-muted ml-1">({apiKeyMasked})</span>}
+      {/* 当前配置状态卡 */}
+      {llmConfigured ? (
+        <div className="mb-4 rounded border border-accent-green/30 bg-accent-green/5 overflow-hidden">
+          <div className="px-3 py-1.5 bg-accent-green/10 border-b border-accent-green/20 text-accent-green text-[11px] font-medium flex items-center gap-1.5">
+            <span>●</span> LLM Service Configured
+          </div>
+          <div className="px-3 py-2 space-y-1 text-[11px]">
+            <div className="flex justify-between">
+              <span className="text-surface-muted">Provider</span>
+              <span className="text-surface-text font-medium">{providerLabels[provider] ?? provider}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-muted">Model</span>
+              <span className="text-surface-text font-mono">{llmModel}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-muted">Endpoint</span>
+              <span className="text-surface-text font-mono text-[10px] truncate max-w-[160px]" title={llmEndpoint}>{new URL(llmEndpoint).hostname}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-muted">API Key</span>
+              <span className="text-surface-text font-mono">{apiKeyMasked || '****'}</span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mb-4 px-3 py-2 rounded border border-surface-border bg-surface-border/10 text-surface-muted text-[11px]">
+          No LLM service configured. Fill in the form below to connect an AI model.
         </div>
       )}
 
       {/* Provider 下拉 */}
-      <label className="block text-surface-muted mb-1">Provider</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">AI Provider</label>
       <select
         value={provider}
         onChange={(e) => handleProviderChange(e.target.value as ModelProvider)}
@@ -135,7 +165,7 @@ export default function SettingsPanel() {
       </select>
 
       {/* Endpoint */}
-      <label className="block text-surface-muted mb-1">API Endpoint (Base URL)</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">API Base URL</label>
       <input
         type="text"
         value={endpoint}
@@ -145,8 +175,8 @@ export default function SettingsPanel() {
       />
 
       {/* API Key */}
-      <label className="block text-surface-muted mb-1">
-        API Key {apiKeyMasked && <span className="text-[10px]">(saved: {apiKeyMasked})</span>}
+      <label className="block text-surface-muted mb-1 text-[11px]">
+        Secret Key {apiKeyMasked && <span className="text-[10px] text-accent-green">(saved)</span>}
       </label>
       <input
         type="password"
@@ -157,7 +187,7 @@ export default function SettingsPanel() {
       />
 
       {/* Model */}
-      <label className="block text-surface-muted mb-1">Model</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">Model Name</label>
       {preset && preset.models.length > 0 ? (
         <>
           <select
@@ -209,10 +239,9 @@ export default function SettingsPanel() {
 
       <div className="mt-4 pt-3 border-t border-surface-border">
         <div className="text-surface-muted text-[10px] leading-relaxed">
-          Configuration is stored in the backend session. Set environment variables{" "}
-          <code className="bg-surface-border/50 px-1 rounded">LLM_ENDPOINT</code>,{" "}
+          Tip: Set <code className="bg-surface-border/50 px-1 rounded">LLM_ENDPOINT</code>,{" "}
           <code className="bg-surface-border/50 px-1 rounded">LLM_API_KEY</code>,{" "}
-          <code className="bg-surface-border/50 px-1 rounded">LLM_MODEL</code> for defaults.
+          <code className="bg-surface-border/50 px-1 rounded">LLM_MODEL</code> env vars for default values.
         </div>
       </div>
     </div>

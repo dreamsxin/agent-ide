@@ -8,12 +8,12 @@ import SettingsPanel from "../agent/SettingsPanel";
 
 type TabId = "chat" | "tasks" | "diff" | "pipeline" | "settings";
 
-const tabs: { id: TabId; label: string; icon: string }[] = [
-  { id: "chat", label: "Chat", icon: "💬" },
-  { id: "tasks", label: "Tasks", icon: "📋" },
-  { id: "diff", label: "Diff", icon: "🔄" },
-  { id: "pipeline", label: "Pipe", icon: "⚙" },
-  { id: "settings", label: "Set", icon: "🔧" },
+const tabs: { id: TabId; label: string; icon: string; tooltip: string }[] = [
+  { id: "chat", label: "Chat", icon: "💬", tooltip: "Conversation with AI Agent" },
+  { id: "tasks", label: "Tasks", icon: "📋", tooltip: "Task plan & execution steps" },
+  { id: "diff", label: "Diff", icon: "🔄", tooltip: "Code changes to review" },
+  { id: "pipeline", label: "Pipeline", icon: "⚙", tooltip: "Agent roles & workflow" },
+  { id: "settings", label: "Settings", icon: "🔧", tooltip: "AI model & API configuration" },
 ];
 
 export default function AgentPanel() {
@@ -27,7 +27,8 @@ export default function AgentPanel() {
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-1 px-2 py-1.5 text-[11px] transition-colors whitespace-nowrap ${
+            title={tab.tooltip}
+            className={`flex items-center gap-1 px-1.5 py-1.5 text-[11px] transition-colors whitespace-nowrap ${
               activeTab === tab.id
                 ? "text-surface-text border-b-2 border-accent-blue bg-surface-base/50"
                 : "text-surface-muted hover:text-surface-text hover:bg-surface-border/20"
