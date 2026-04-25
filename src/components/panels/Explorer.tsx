@@ -91,6 +91,20 @@ function TreeNode({
     <div
       style={style}
       className="flex items-center gap-1 py-0.5 px-1 hover:bg-surface-border/30 cursor-pointer text-xs text-surface-text group"
+      onClick={(e) => {
+        if (!data.isDir) {
+          const lang = detectLanguage(data.path);
+          useEditorStore.getState().openFile({
+            path: data.path,
+            name: data.name,
+            isDirty: false,
+            language: lang,
+          });
+        } else {
+          e.stopPropagation();
+          node.toggle();
+        }
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -414,9 +428,7 @@ export default function Explorer() {
             onToggle={handleToggle}
             onActivate={(node) => {
               const { data } = node;
-              if (data.isDir) {
-                node.toggle();
-              } else {
+              if (!data.isDir) {
                 const lang = detectLanguage(data.path);
                 useEditorStore.getState().openFile({
                   path: data.path,
