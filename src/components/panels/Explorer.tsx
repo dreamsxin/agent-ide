@@ -425,6 +425,7 @@ export default function Explorer() {
             indent={14}
             rowHeight={26}
             overscanCount={20}
+            openByDefault={false}
             onToggle={handleToggle}
             onActivate={(node) => {
               const { data } = node;
