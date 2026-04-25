@@ -9,6 +9,7 @@ import type {
   Task,
   Step,
   DiffEntry,
+  ChatMessage,
 } from "../types/agent";
 
 interface AgentStore {
@@ -22,6 +23,9 @@ interface AgentStore {
   error: string | null;
   streamContent: string;
   isStreaming: boolean;
+
+  // ====== Chat 消息 ======
+  messages: ChatMessage[];
 
   // ====== 角色与流水线 ======
   activeRole: AgentRole;
@@ -47,6 +51,9 @@ interface AgentStore {
   setError: (error: string | null) => void;
   appendStreamContent: (token: string) => void;
   clearStreamContent: () => void;
+  addMessage: (msg: ChatMessage) => void;
+  updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
+  clearMessages: () => void;
   reset: () => void;
 
   // ====== 异步 Actions (IPC) ======
@@ -90,6 +97,14 @@ export const useAgentStore = create<AgentStore>((set) => ({
   error: null,
   streamContent: "",
   isStreaming: false,
+  messages: [
+    {
+      id: "welcome",
+      role: "system" as const,
+      content: "Welcome to Agent IDE. I'm your AI coding assistant. Try selecting code for quick actions, or ask me to build something.",
+      timestamp: Date.now(),
+    },
+  ],
   activeRole: "coder",
   pipeline: [
     { role: "architect", name: "Design", status: "pending" },
@@ -136,6 +151,24 @@ export const useAgentStore = create<AgentStore>((set) => ({
       isStreaming: true,
     })),
   clearStreamContent: () => set({ streamContent: "", isStreaming: false }),
+  addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
+  updateMessage: (id, updates) =>
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id ? { ...m, ...updates } : m
+      ),
+    })),
+  clearMessages: () =>
+    set({
+      messages: [
+        {
+          id: "welcome",
+          role: "system",
+          content: "Welcome to Agent IDE. I'm your AI coding assistant.",
+          timestamp: Date.now(),
+        },
+      ],
+    }),
   reset: () =>
     set({
       state: "idle",

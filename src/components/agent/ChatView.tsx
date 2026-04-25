@@ -1,18 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
-import type { ChatMessage } from "../../types/agent";
 
 export default function ChatView() {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "system",
-      content:
-        "Welcome to Agent IDE. I'm your AI coding assistant. Try selecting code for quick actions, or ask me to build something.",
-      timestamp: Date.now(),
-    },
-  ]);
+  const messages = useAgentStore((s) => s.messages);
+  const addMessage = useAgentStore((s) => s.addMessage);
+  const updateMessage = useAgentStore((s) => s.updateMessage);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -45,24 +38,17 @@ export default function ChatView() {
     }
     const msgId = streamingMsgId.current;
     if (msgId) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === msgId ? { ...m, content: streamContent } : m
-        )
-      );
+      updateMessage(msgId, { content: streamContent });
     } else if (streamContent) {
       // 新的流式消息
       const newId = `stream-${Date.now()}`;
       streamingMsgId.current = newId;
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: newId,
-          role: "agent",
-          content: streamContent,
-          timestamp: Date.now(),
-        },
-      ]);
+      addMessage({
+        id: newId,
+        role: "agent",
+        content: streamContent,
+        timestamp: Date.now(),
+      });
     }
   }, [streamContent, isStreaming]);
 
@@ -85,13 +71,12 @@ export default function ChatView() {
     if (!input.trim() || isActing) return;
 
     const content = input.trim();
-    const userMsg: ChatMessage = {
+    addMessage({
       id: Date.now().toString(),
       role: "user",
       content,
       timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
+    });
     setInput("");
 
     // 调用 Agent
