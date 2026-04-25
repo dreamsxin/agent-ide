@@ -10,6 +10,39 @@ use tauri::{AppHandle, State};
 use tauri::Emitter;
 
 /// Agent 全局状态（使用 tokio::sync::Mutex 以支持 async 上下文中持有锁）
+
+/// 获取 Agent IDE 配置目录（~/.agent-ide）
+fn config_dir() -> std::path::PathBuf {
+    let home = dirs_next::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".agent-ide")
+}
+
+/// 保存 LLM 配置到磁盘
+fn save_llm_config_to_disk(config: &LlmConfig) {
+    let dir = config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("config.json");
+    if let Ok(json) = serde_json::to_string_pretty(&serde_json::json!({
+        "endpoint": config.endpoint,
+        "api_key": config.api_key,
+        "model": config.model,
+    })) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+/// 从磁盘加载 LLM 配置
+fn load_llm_config_from_disk() -> Option<LlmConfig> {
+    let path = config_dir().join("config.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    Some(LlmConfig {
+        endpoint: parsed.get("endpoint")?.as_str()?.to_string(),
+        api_key: parsed.get("api_key")?.as_str()?.to_string(),
+        model: parsed.get("model")?.as_str()?.to_string(),
+    })
+}
+
 pub struct AgentGlobalState {
     pub orchestrator: Arc<Mutex<AgentOrchestrator>>,
     pub llm_config: Arc<std::sync::Mutex<Option<LlmConfig>>>,
@@ -20,16 +53,14 @@ pub struct AgentGlobalState {
 
 impl AgentGlobalState {
     pub fn new() -> Self {
-        let endpoint = std::env::var("LLM_ENDPOINT")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
-        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4".to_string());
-
-        let config = LlmConfig {
-            endpoint,
-            api_key,
-            model,
-        };
+        // 优先从磁盘加载上次配置，否则用环境变量 / 默认值
+        let config = load_llm_config_from_disk().unwrap_or_else(|| {
+            let endpoint = std::env::var("LLM_ENDPOINT")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
+            let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4".to_string());
+            LlmConfig { endpoint, api_key, model }
+        });
 
         let client = LlmClient::new(config.clone());
 
@@ -224,12 +255,15 @@ pub async fn update_llm_config(
 
     {
         let mut cfg = agent_state.llm_config.lock().map_err(|e| e.to_string())?;
-        *cfg = Some(config);
+        *cfg = Some(config.clone());
     }
     {
         let mut cli = agent_state.llm_client.lock().map_err(|e| e.to_string())?;
         *cli = Some(client);
     }
+
+    // 持久化到 ~/.agent-ide/config.json
+    save_llm_config_to_disk(&config);
 
     Ok(())
 }

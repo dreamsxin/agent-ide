@@ -1,6 +1,7 @@
 import { useCallback, useState, useEffect } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import { useEditorStore } from "../../stores/useEditorStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -68,6 +69,7 @@ export default function TopBar() {
       });
       if (selected && typeof selected === "string") {
         setWorkspacePath(selected);
+        useEditorStore.getState().setWorkspacePath(selected);
       }
     } catch (e) {
       console.warn("Open folder failed:", e);

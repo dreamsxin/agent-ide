@@ -13,6 +13,7 @@ interface EditorStore {
 
   // Explorer 刷新触发器
   explorerKey: number;
+  workspacePath: string;
 
   // AI 增强层
   inlineSuggestion: InlineSuggestion | null;
@@ -49,6 +50,9 @@ interface EditorStore {
   startWatching: () => Promise<void>;
   stopWatching: () => Promise<void>;
 
+  // ====== 工作目录 ======
+  setWorkspacePath: (path: string) => void;
+
   // ====== AI 增强层 ======
   setInlineSuggestion: (suggestion: InlineSuggestion | null) => void;
   addDiffOverlay: (overlay: DiffOverlay) => void;
@@ -65,6 +69,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   activeFile: null,
   fileContents: {},
   explorerKey: 0,
+  workspacePath: "",
   inlineSuggestion: null,
   diffOverlays: [],
   intentHints: [],
@@ -239,6 +244,13 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       console.warn("Failed to stop file watching:", e);
     }
   },
+
+  // ====== 工作目录 ======
+
+  setWorkspacePath: (path) => set((prev) => ({
+    workspacePath: path,
+    explorerKey: prev.explorerKey + 1,  // 触发 Explorer 刷新
+  })),
 
   // ====== AI 增强层 ======
 
