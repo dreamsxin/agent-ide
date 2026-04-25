@@ -1,6 +1,99 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { marked } from "marked";
+
+// 配置 marked
+marked.setOptions({
+  breaks: true,   // 换行 → <br>
+  gfm: true,      // GitHub Flavored Markdown
+});
+
+/** 将 markdown 渲染为 HTML，支持流式不完整代码块 */
+function renderMarkdown(raw: string): string {
+  try {
+    return marked.parse(raw) as string;
+  } catch {
+    return escapeHtml(raw);
+  }
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** 单条消息组件 */
+function MessageBubble({
+  msg,
+  isStreamingBubble,
+}: {
+  msg: { id: string; role: string; content: string };
+  isStreamingBubble: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // fallback
+    }
+  }, [msg.content]);
+
+  const isUser = msg.role === "user";
+  const isSystem = msg.role === "system";
+  const isAgent = msg.role === "agent";
+
+  return (
+    <div
+      className={`animate-fade-in ${
+        isUser ? "flex justify-end" : "flex justify-start"
+      }`}
+    >
+      <div
+        className={`relative group max-w-[90%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+          isUser
+            ? "bg-accent-blue text-white"
+            : isSystem
+            ? "bg-surface-border/30 text-surface-muted text-center w-full"
+            : "bg-surface-border/50 text-surface-text"
+        }`}
+      >
+        {/* 内容 */}
+        {isAgent ? (
+          <div
+            className="markdown-body"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+          />
+        ) : (
+          <div className="whitespace-pre-wrap">{msg.content}</div>
+        )}
+
+        {/* 流式光标 */}
+        {isAgent && isStreamingBubble && (
+          <span className="inline-block w-1.5 h-3 bg-accent-purple ml-0.5 animate-pulse align-middle" />
+        )}
+
+        {/* 复制按钮（agent 消息 hover 时显示） */}
+        {isAgent && msg.content && (
+          <button
+            onClick={handleCopy}
+            title="Copy raw content"
+            className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-surface-border/50 text-surface-muted hover:text-surface-text text-[10px]"
+          >
+            {copied ? "✓" : "📋"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function ChatView() {
   const messages = useAgentStore((s) => s.messages);
@@ -87,7 +180,7 @@ export default function ChatView() {
     });
 
     // Agent 完成后不添加额外消息（流式消息已存在）
-  }, [input, isActing, sendPrompt, buildContext]);
+  }, [input, isActing, sendPrompt, buildContext, addMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -105,27 +198,13 @@ export default function ChatView() {
       {/* 消息列表 */}
       <div className="flex-1 overflow-auto p-3 space-y-3">
         {messages.map((msg) => (
-          <div
+          <MessageBubble
             key={msg.id}
-            className={`animate-fade-in ${
-              msg.role === "user" ? "flex justify-end" : "flex justify-start"
-            }`}
-          >
-            <div
-              className={`max-w-[90%] rounded-lg px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap ${
-                msg.role === "user"
-                  ? "bg-accent-blue text-white"
-                  : msg.role === "system"
-                  ? "bg-surface-border/30 text-surface-muted text-center w-full"
-                  : "bg-surface-border/50 text-surface-text"
-              }`}
-            >
-              {msg.content}
-              {msg.role === "agent" && isStreaming && msg.id === streamingMsgId.current && (
-                <span className="inline-block w-1.5 h-3 bg-accent-purple ml-0.5 animate-pulse align-middle" />
-              )}
-            </div>
-          </div>
+            msg={msg}
+            isStreamingBubble={
+              msg.role === "agent" && isStreaming && msg.id === streamingMsgId.current
+            }
+          />
         ))}
         <div ref={bottomRef} />
       </div>
