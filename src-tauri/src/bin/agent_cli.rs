@@ -155,25 +155,64 @@ async fn main() {
 
                     // Apply to filesystem if --apply
                     if apply {
-                        // Extract the UPDATED content for this diff
-                        let new_content = extract_updated(&h.content);
-
                         // Create parent dirs
                         if let Some(parent) = target_path.parent() {
-                            if !parent.exists() {
-                                let _ = fs::create_dir_all(parent);
-                            }
+                            let _ = fs::create_dir_all(parent);
                         }
 
-                        // For new files or diffs, write the updated content
-                        match fs::write(&target_path, &new_content) {
-                            Ok(()) => {
-                                println!("  >> Written: {}", target_path.display());
-                                files_written += 1;
+                        let mut written = false;
+
+                        if h.original.is_empty() && !h.updated.is_empty() {
+                            // New file
+                            match fs::write(&target_path, &h.updated) {
+                                Ok(()) => {
+                                    println!("  >> Created: {}", target_path.display());
+                                    files_written += 1;
+                                    written = true;
+                                }
+                                Err(e) => {
+                                    eprintln!("  !! Write failed: {}", e);
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("  !! Write failed for {}: {}", target_path.display(), e);
+                        } else if !h.original.is_empty() {
+                            // Edit existing file: read → find/replace → write back
+                            match std::fs::read_to_string(&target_path) {
+                                Ok(existing) => {
+                                    // Try exact match first, then trim match
+                                    let replaced = if let Some(pos) = existing.find(&h.original) {
+                                        let mut r = String::with_capacity(existing.len() + h.updated.len());
+                                        r.push_str(&existing[..pos]);
+                                        r.push_str(&h.updated);
+                                        r.push_str(&existing[pos + h.original.len()..]);
+                                        r
+                                    } else if let Some(pos) = existing.find(h.original.trim()) {
+                                        let mut r = String::with_capacity(existing.len() + h.updated.len());
+                                        r.push_str(&existing[..pos]);
+                                        r.push_str(h.updated.trim());
+                                        r.push_str(&existing[pos + h.original.trim().len()..]);
+                                        r
+                                    } else {
+                                        eprintln!("  !! Could not find ORIGINAL in {}. Falling back to writing UPDATED only.", target_path.display());
+                                        h.updated.clone()
+                                    };
+                                    match fs::write(&target_path, &replaced) {
+                                        Ok(()) => {
+                                            println!("  >> Modified: {}", target_path.display());
+                                            files_written += 1;
+                                            written = true;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("  !! Write failed: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("  !! Could not read {}: {}", target_path.display(), e);
+                                }
                             }
+                        }
+                        if !written {
+                            eprintln!("  !! No changes applied to {}", target_path.display());
                         }
                     } else {
                         println!("  >> Preview: would write to {}", target_path.display());
@@ -192,37 +231,6 @@ async fn main() {
     }
 }
 
-/// Extract the UPDATED content from a diff block.
-/// For format: <<<<<<< ORIGINAL\n...\n=======\n...\n>>>>>>> UPDATED
-/// Returns the updated part, or the full content if no markers found.
-fn extract_updated(content: &str) -> String {
-    let mut in_updated = false;
-    let mut updated_lines: Vec<&str> = Vec::new();
-
-    for line in content.lines() {
-        if line.trim().starts_with(">>>>>>>") {
-            in_updated = false;
-            continue;
-        }
-        if line.trim().starts_with("=======") {
-            in_updated = true;
-            continue;
-        }
-        if line.trim().starts_with("<<<<<<<") {
-            continue;
-        }
-        if in_updated {
-            updated_lines.push(line);
-        }
-    }
-
-    if updated_lines.is_empty() {
-        // No diff markers found — treat entire content as the new code
-        content.to_string()
-    } else {
-        updated_lines.join("\n")
-    }
-}
 
 fn print_help() {
     println!(r#"Agent IDE CLI - AI Coding Agent
