@@ -10,6 +10,7 @@ import ModeSwitch from "../shared/ModeSwitch";
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
+  const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const changeMode = useAgentStore((s) => s.changeMode);
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const focusMode = useLayoutStore((s) => s.focusMode);
@@ -110,6 +111,12 @@ export default function TopBar() {
 
       {/* 右侧：状态 + 控制按钮 + 窗口控件 */}
       <div className="flex items-center gap-2">
+        {/* LLM 连接状态 */}
+        <span
+          className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${llmConfigured ? "bg-green-500 animate-pulse-dot" : "bg-red-500"}`}
+          title={llmConfigured ? "LLM Connected" : "LLM Not Configured — open Settings panel to set API credentials"}
+        />
+
         <StatusDot state={agentState} />
 
         {isRunning ? (

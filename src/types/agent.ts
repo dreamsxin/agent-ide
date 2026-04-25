@@ -71,7 +71,7 @@ export interface ChatMessage {
 // ====== LLM 配置相关 ======
 
 /** LLM 模型提供商 */
-export type ModelProvider = "openai" | "anthropic" | "azure" | "custom";
+export type ModelProvider = "openai" | "anthropic" | "azure" | "deepseek" | "custom";
 
 /** LLM 配置 */
 export interface LlmConfig {

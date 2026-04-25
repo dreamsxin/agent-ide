@@ -7,6 +7,7 @@ const providerLabels: Record<string, string> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   azure: "Azure OpenAI",
+  deepseek: "DeepSeek",
   custom: "Custom",
 };
 
@@ -38,6 +39,13 @@ const PROVIDERS: ProviderPreset[] = [
     models: ["gpt-4", "gpt-4o", "gpt-35-turbo"],
   },
   {
+    id: "deepseek",
+    label: "DeepSeek",
+    defaultEndpoint: "https://api.deepseek.com",
+    defaultModel: "deepseek-chat",
+    models: ["deepseek-chat", "deepseek-v4-flash"],
+  },
+  {
     id: "custom",
     label: "Custom Provider",
     defaultEndpoint: "",
@@ -54,6 +62,7 @@ export default function SettingsPanel() {
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
   const updateLlmConfig = useAgentStore((s) => s.updateLlmConfig);
+  const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
 
   const [provider, setProvider] = useState<ModelProvider>("openai");
   const [endpoint, setEndpoint] = useState("");
@@ -110,6 +119,28 @@ export default function SettingsPanel() {
       setSaving(false);
     }
   }, [endpoint, apiKey, model, updateLlmConfig]);
+
+  // 测试连接
+  const [testing, setTesting] = useState(false);
+  const handleTestConnection = useCallback(async () => {
+    if (!endpoint.trim() || !apiKey.trim() || !model.trim()) {
+      setMessage({ type: "err", text: "Fill all fields first, then Save before testing" });
+      return;
+    }
+    setTesting(true);
+    setMessage(null);
+    try {
+      // 先保存当前配置
+      await updateLlmConfig(endpoint.trim(), apiKey.trim(), model.trim());
+      // 再测试连通性
+      const result = await testLlmConnection();
+      setMessage({ type: "ok", text: result });
+    } catch (e) {
+      setMessage({ type: "err", text: `Test failed: ${e}` });
+    } finally {
+      setTesting(false);
+    }
+  }, [endpoint, apiKey, model, updateLlmConfig, testLlmConnection]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
 
@@ -222,6 +253,15 @@ export default function SettingsPanel() {
         className="w-full py-1.5 rounded bg-accent-blue hover:bg-accent-blue/80 text-white text-xs font-medium disabled:opacity-50 transition-colors"
       >
         {saving ? "Saving..." : "Save Configuration"}
+      </button>
+
+      {/* Test Connection */}
+      <button
+        onClick={handleTestConnection}
+        disabled={testing}
+        className="w-full mt-2 py-1.5 rounded border border-accent-purple/50 text-accent-purple text-xs font-medium hover:bg-accent-purple/10 disabled:opacity-50 transition-colors"
+      >
+        {testing ? "Testing..." : "⚡ Test Connection"}
       </button>
 
       {/* Message */}

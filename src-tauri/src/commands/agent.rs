@@ -264,6 +264,40 @@ pub async fn get_llm_config(
     }
 }
 
+/// 测试 LLM 连通性：发送简单请求验证 API 可用
+#[tauri::command]
+pub async fn test_llm_connection(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
+    let llm = agent_state.get_llm_client()?;
+
+    let messages = vec![
+        crate::services::llm_client::ChatMessage {
+            role: "user".to_string(),
+            content: "Hi".to_string(),
+        },
+    ];
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+    let handle = tokio::spawn(async move {
+        let mut full = String::new();
+        while let Some(tok) = rx.recv().await {
+            full.push_str(&tok);
+        }
+        full
+    });
+
+    match llm.stream_chat(messages, tx).await {
+        Ok(response) => {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let full = handle.await.unwrap_or(response);
+            Ok(format!("OK — {}", &full[..full.len().min(120)]))
+        }
+        Err(e) => Err(format!("Connection failed: {}", e)),
+    }
+}
+
+
 /// 设置当前 Agent 角色
 #[tauri::command]
 pub async fn set_active_role(

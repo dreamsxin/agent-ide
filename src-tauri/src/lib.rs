@@ -55,6 +55,7 @@ pub fn run() {
             commands::agent::get_pipeline,
             commands::agent::update_pipeline,
             commands::agent::reset_pipeline,
+            commands::agent::test_llm_connection,
             // Git 命令
             commands::git::git_status,
             commands::git::git_diff,

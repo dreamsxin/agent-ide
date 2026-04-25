@@ -74,6 +74,9 @@ interface AgentStore {
   fetchPipeline: () => Promise<void>;
   updatePipeline: (stages: PipelineStage[]) => Promise<void>;
   resetPipeline: () => Promise<void>;
+
+  // ====== 连通性测试 ======
+  testLlmConnection: () => Promise<string>;
 }
 
 export const useAgentStore = create<AgentStore>((set) => ({
@@ -282,5 +285,11 @@ export const useAgentStore = create<AgentStore>((set) => ({
   resetPipeline: async () => {
     const stages = await invoke<PipelineStage[]>("reset_pipeline");
     set({ pipeline: stages });
+  },
+
+  // ========== 连通性测试 ==========
+  testLlmConnection: async () => {
+    const result = await invoke<string>("test_llm_connection");
+    return result;
   },
 }));
