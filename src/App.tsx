@@ -69,11 +69,14 @@ export default function App() {
   useEffect(() => {
     invoke<string | null>("get_workspace_path").then((saved) => {
       if (saved && typeof saved === "string" && saved.length > 0) {
+        console.log("[App] Restoring workspace:", saved);
         useLayoutStore.getState().setWorkspacePath(saved);
         useEditorStore.getState().setWorkspacePath(saved);
+      } else {
+        console.log("[App] No saved workspace found, starting empty");
       }
-    }).catch(() => {
-      // 无历史记录或读取失败，保持空状态
+    }).catch((err) => {
+      console.warn("[App] Failed to load workspace:", err);
     });
   }, []);
 

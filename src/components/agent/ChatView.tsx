@@ -114,7 +114,7 @@ export default function ChatView() {
   const selectedText = useEditorStore((s) => s.selectedText);
 
   const isActing =
-    agentState !== "idle" && agentState !== "done" && agentState !== "error";
+    agentState !== "idle" && agentState !== "done" && agentState !== "error" && agentState !== "waiting_user";
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
