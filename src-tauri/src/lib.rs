@@ -4,8 +4,8 @@ use commands::fs::FileWatcherState;
 use commands::terminal::TerminalManager;
 
 mod commands;
-mod agent;
-mod services;
+pub mod agent;
+pub mod services;
 
 /// 应用运行入口
 pub fn run() {
