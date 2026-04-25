@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Agent IDE - AI-powered code editor"
 authors = ["Agent IDE Team"]
 edition = "2021"
+default-run = "agent-ide"
 
 [lib]
 name = "agent_ide_lib"
