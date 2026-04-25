@@ -1,7 +1,9 @@
 {
   "identifier": "default",
   "description": "Default capabilities for Agent IDE",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "shell:allow-open",
@@ -16,6 +18,13 @@
     "shell:allow-spawn",
     "shell:allow-execute",
     "process:allow-exit",
-    "process:allow-restart"
+    "process:allow-restart",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-start-dragging"
   ]
 }

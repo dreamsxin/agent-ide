@@ -16,7 +16,7 @@ export default function TaskView() {
   const title = currentTask?.title ?? "Agent Task";
 
   return (
-    <div className="p-3 space-y-2 animate-fade-in">
+    <div className="p-3 space-y-2 animate-fade-in h-full overflow-auto">
       {/* 任务标题 + 状态 */}
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-semibold text-surface-text">{title}</span>

@@ -1,18 +1,13 @@
+import { useAgentStore } from "../../stores/useAgentStore";
 import type { PipelineStage } from "../../types/agent";
-
-const PIPELINE: Omit<PipelineStage, "status">[] = [
-  { role: "architect", name: "Design" },
-  { role: "coder", name: "Implement" },
-  { role: "tester", name: "Test" },
-  { role: "reviewer", name: "Review" },
-];
 
 interface TaskPipelineProps {
   stages?: PipelineStage[];
 }
 
 export default function TaskPipeline({ stages }: TaskPipelineProps) {
-  const displayStages = stages ?? PIPELINE.map((s) => ({ ...s, status: "pending" as const }));
+  const storePipeline = useAgentStore((s) => s.pipeline);
+  const displayStages = stages ?? storePipeline;
 
   return (
     <div className="p-3 text-xs">
@@ -39,7 +34,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
           };
 
           return (
-            <div key={stage.role} className="flex items-start gap-2">
+            <div key={`${stage.role}-${i}`} className="flex items-start gap-2">
               {/* Timeline indicator */}
               <div className="flex flex-col items-center flex-shrink-0 pt-0.5">
                 <div

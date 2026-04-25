@@ -144,6 +144,7 @@ export default function Explorer() {
   const createFile = useEditorStore((s) => s.createFile);
   const createDirectory = useEditorStore((s) => s.createDirectory);
   const renamePath = useEditorStore((s) => s.renamePath);
+  const copyPath = useEditorStore((s) => s.copyPath);
   const startWatching = useEditorStore((s) => s.startWatching);
   const reloadFile = useEditorStore((s) => s.reloadFile);
 
@@ -345,6 +346,22 @@ export default function Explorer() {
     [renamePath, closeContextMenu]
   );
 
+  // 复制
+  const handleCopy = useCallback(
+    async (node: TreeNodeData) => {
+      const destName = prompt("Copy to (path):", node.path + ".copy");
+      if (!destName) return;
+      try {
+        await copyPath(node.path, destName);
+        showToast(`Copied: ${node.name}`);
+      } catch (e) {
+        alert(`Failed to copy: ${e}`);
+      }
+      closeContextMenu();
+    },
+    [copyPath, closeContextMenu]
+  );
+
   // 删除
   const handleDelete = useCallback(
     async (node: TreeNodeData) => {
@@ -478,6 +495,12 @@ export default function Explorer() {
               <div className="border-t border-surface-border my-0.5" />
             </>
           )}
+          <button
+            onClick={() => handleCopy(contextMenu.node)}
+            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+          >
+            <span>📋</span> Copy
+          </button>
           <button
             onClick={() => handleRename(contextMenu.node)}
             className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"

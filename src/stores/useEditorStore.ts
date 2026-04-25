@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { FileTab, InlineSuggestion, DiffOverlay, IntentHint } from "../types/editor";
+import type { FileMetadata, SearchResult } from "../types/project";
 
 interface EditorStore {
   // 文件标签
@@ -32,6 +33,11 @@ interface EditorStore {
   updateFileContent: (path: string, content: string) => void;
   saveCurrentFile: () => Promise<void>;
   reloadFile: (path: string) => Promise<void>;
+
+  // Enhanced file tools
+  copyPath: (src: string, dest: string) => Promise<void>;
+  getFileMetadata: (path: string) => Promise<FileMetadata>;
+  searchFiles: (root: string, pattern: string, maxDepth?: number) => Promise<SearchResult[]>;
 
   // ====== CRUD 操作 ======
   deletePath: (path: string) => Promise<void>;
@@ -154,6 +160,21 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     } catch (e) {
       console.error(`Failed to reload ${path}:`, e);
     }
+  },
+
+  // ====== Enhanced file tools ======
+
+  copyPath: async (src, dest) => {
+    await invoke("copy_path", { src, dest });
+    set((prev) => ({ explorerKey: prev.explorerKey + 1 }));
+  },
+
+  getFileMetadata: async (path) => {
+    return await invoke<FileMetadata>("get_file_metadata", { path });
+  },
+
+  searchFiles: async (root, pattern, maxDepth) => {
+    return await invoke<SearchResult[]>("search_files", { root, pattern, maxDepth: maxDepth ?? null });
   },
 
   // ====== CRUD ======

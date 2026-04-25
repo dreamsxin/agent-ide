@@ -20,6 +20,9 @@ interface LayoutStore {
   // 当前底部面板标签
   bottomTab: "terminal" | "logs" | "tests" | "actions";
 
+  // workspacePath
+  workspacePath: string;
+
   // Actions
   setLeftWidth: (w: number) => void;
   setRightWidth: (w: number) => void;
@@ -30,6 +33,7 @@ interface LayoutStore {
   toggleFocusMode: () => void;
   setLeftTab: (tab: LayoutStore["leftTab"]) => void;
   setBottomTab: (tab: LayoutStore["bottomTab"]) => void;
+  setWorkspacePath: (path: string) => void;
 }
 
 export const useLayoutStore = create<LayoutStore>((set) => ({
@@ -42,6 +46,7 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
   focusMode: false,
   leftTab: "explorer",
   bottomTab: "terminal",
+  workspacePath: "",
 
   setLeftWidth: (w) => set({ leftWidth: Math.max(180, Math.min(500, w)) }),
   setRightWidth: (w) => set({ rightWidth: Math.max(280, Math.min(600, w)) }),
@@ -58,4 +63,5 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
     }),
   setLeftTab: (leftTab) => set({ leftTab }),
   setBottomTab: (bottomTab) => set({ bottomTab }),
+  setWorkspacePath: (workspacePath) => set({ workspacePath }),
 }));

@@ -67,3 +67,32 @@ export interface ChatMessage {
   timestamp: number;
   files?: string[];
 }
+
+// ====== LLM 配置相关 ======
+
+/** LLM 模型提供商 */
+export type ModelProvider = "openai" | "anthropic" | "azure" | "custom";
+
+/** LLM 配置 */
+export interface LlmConfig {
+  provider: ModelProvider;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+}
+
+/** LLM 配置响应（apiKey 脱敏） */
+export interface LlmConfigResponse {
+  endpoint: string;
+  api_key_masked: string;
+  model: string;
+}
+
+/** 模型提供商预设 */
+export interface ProviderPreset {
+  id: ModelProvider;
+  label: string;
+  defaultEndpoint: string;
+  defaultModel: string;
+  models: string[];
+}

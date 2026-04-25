@@ -1,5 +1,6 @@
 use crate::agent::state_machine::{AgentState, AgentMode, TaskStep, FileDiff};
 use crate::agent::orchestrator::AgentOrchestrator;
+use crate::agent::multi_agent::{AgentRole, PipelineStage, default_pipeline};
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::context::AgentContext;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,8 @@ pub struct AgentGlobalState {
     pub orchestrator: Arc<Mutex<AgentOrchestrator>>,
     pub llm_config: Arc<std::sync::Mutex<Option<LlmConfig>>>,
     pub llm_client: Arc<std::sync::Mutex<Option<LlmClient>>>,
+    pub active_role: Arc<std::sync::Mutex<AgentRole>>,
+    pub pipeline_stages: Arc<std::sync::Mutex<Vec<PipelineStage>>>,
 }
 
 impl AgentGlobalState {
@@ -34,6 +37,8 @@ impl AgentGlobalState {
             orchestrator: Arc::new(Mutex::new(AgentOrchestrator::new())),
             llm_config: Arc::new(std::sync::Mutex::new(Some(config))),
             llm_client: Arc::new(std::sync::Mutex::new(Some(client))),
+            active_role: Arc::new(std::sync::Mutex::new(AgentRole::Coder)),
+            pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
         }
     }
 
@@ -227,4 +232,91 @@ pub async fn update_llm_config(
     }
 
     Ok(())
+}
+
+/// 获取 LLM 配置（api_key 脱敏）
+#[derive(Debug, Serialize)]
+pub struct LlmConfigResponse {
+    pub endpoint: String,
+    pub api_key_masked: String,
+    pub model: String,
+}
+
+#[tauri::command]
+pub async fn get_llm_config(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<LlmConfigResponse, String> {
+    let cfg = agent_state.llm_config.lock().map_err(|e| e.to_string())?;
+    match &*cfg {
+        Some(c) => {
+            let masked = if c.api_key.len() > 8 {
+                format!("{}****{}", &c.api_key[..4], &c.api_key[c.api_key.len()-4..])
+            } else {
+                "****".to_string()
+            };
+            Ok(LlmConfigResponse {
+                endpoint: c.endpoint.clone(),
+                api_key_masked: masked,
+                model: c.model.clone(),
+            })
+        }
+        None => Err("LLM config not set".to_string()),
+    }
+}
+
+/// 设置当前 Agent 角色
+#[tauri::command]
+pub async fn set_active_role(
+    role: String,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
+    let parsed = match role.as_str() {
+        "architect" => AgentRole::Architect,
+        "coder" => AgentRole::Coder,
+        "tester" => AgentRole::Tester,
+        "reviewer" => AgentRole::Reviewer,
+        _ => return Err(format!("Invalid role: {}", role)),
+    };
+    let mut active = agent_state.active_role.lock().map_err(|e| e.to_string())?;
+    *active = parsed;
+    Ok(parsed.to_string().to_string())
+}
+
+/// 获取当前 Agent 角色
+#[tauri::command]
+pub async fn get_active_role(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
+    let active = agent_state.active_role.lock().map_err(|e| e.to_string())?;
+    Ok(active.to_string().to_string())
+}
+
+/// 获取当前流水线
+#[tauri::command]
+pub async fn get_pipeline(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Vec<PipelineStage>, String> {
+    let stages = agent_state.pipeline_stages.lock().map_err(|e| e.to_string())?;
+    Ok(stages.clone())
+}
+
+/// 更新流水线
+#[tauri::command]
+pub async fn update_pipeline(
+    stages: Vec<PipelineStage>,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<(), String> {
+    let mut pipe = agent_state.pipeline_stages.lock().map_err(|e| e.to_string())?;
+    *pipe = stages;
+    Ok(())
+}
+
+/// 重置流水线为默认
+#[tauri::command]
+pub async fn reset_pipeline(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Vec<PipelineStage>, String> {
+    let mut pipe = agent_state.pipeline_stages.lock().map_err(|e| e.to_string())?;
+    *pipe = default_pipeline();
+    Ok(pipe.clone())
 }

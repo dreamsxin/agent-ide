@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 use tauri::AppHandle;
 use tauri::Emitter;
 
@@ -129,6 +130,172 @@ pub fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     }
     fs::rename(&old_path, &new_path)
         .map_err(|e| format!("Failed to rename: {}", e))
+}
+
+// ====== 增强文件操作 ======
+
+/// 文件/目录元数据
+#[derive(Debug, Serialize)]
+pub struct FileMetadata {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: u64,  // UNIX timestamp (seconds)
+    pub readonly: bool,
+}
+
+/// 获取文件/目录元数据
+#[tauri::command]
+pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    let metadata = fs::metadata(&path).map_err(|e| format!("Failed to read metadata: {}", e))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let readonly = metadata.permissions().readonly();
+    Ok(FileMetadata {
+        name: p.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone()),
+        path,
+        is_dir: metadata.is_dir(),
+        size: metadata.len(),
+        modified,
+        readonly,
+    })
+}
+
+/// 复制文件或递归复制目录
+#[tauri::command]
+pub fn copy_path(src: String, dest: String) -> Result<(), String> {
+    let src_path = Path::new(&src);
+    if !src_path.exists() {
+        return Err(format!("Source does not exist: {}", src));
+    }
+    let dest_path = Path::new(&dest);
+    if dest_path.exists() {
+        return Err(format!("Destination already exists: {}", dest));
+    }
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
+    }
+    if src_path.is_dir() {
+        copy_dir_recursive(src_path, dest_path)?;
+    } else {
+        fs::copy(src_path, dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
+    }
+    Ok(())
+}
+
+/// 递归复制目录
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("Failed to create dest dir: {}", e))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read src dir: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let src_entry = entry.path();
+        let dest_entry = dest.join(entry.file_name());
+        if src_entry.is_dir() {
+            copy_dir_recursive(&src_entry, &dest_entry)?;
+        } else {
+            fs::copy(&src_entry, &dest_entry)
+                .map_err(|e| format!("Failed to copy {}: {}", src_entry.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// 按 glob 模式搜索文件
+#[derive(Debug, Serialize)]
+pub struct SearchResult {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub fn search_files(root: String, pattern: String, max_depth: Option<u32>) -> Result<Vec<SearchResult>, String> {
+    let root_path = Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(format!("Not a directory: {}", root));
+    }
+    let max_depth = max_depth.unwrap_or(20);
+    let mut results = Vec::new();
+    search_recursive(root_path, &pattern, 0, max_depth, &mut results)?;
+    results.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(results)
+}
+
+fn search_recursive(
+    dir: &Path,
+    pattern: &str,
+    depth: u32,
+    max_depth: u32,
+    results: &mut Vec<SearchResult>,
+) -> Result<(), String> {
+    if depth > max_depth {
+        return Ok(());
+    }
+    let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read dir: {}", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let metadata = entry.metadata().map_err(|e| format!("Failed to get metadata: {}", e))?;
+
+        // Simple glob match
+        if glob_match(&name, pattern) {
+            results.push(SearchResult {
+                name: name.clone(),
+                path: path.to_string_lossy().to_string(),
+                is_dir: metadata.is_dir(),
+                size: metadata.len(),
+            });
+        }
+        if metadata.is_dir() {
+            search_recursive(&path, pattern, depth + 1, max_depth, results)?;
+        }
+    }
+    Ok(())
+}
+
+/// Simple glob matching supporting * and ?
+fn glob_match(name: &str, pattern: &str) -> bool {
+    let name = name.to_lowercase();
+    let pattern = pattern.to_lowercase();
+    let name_bytes = name.as_bytes();
+    let pat_bytes = pattern.as_bytes();
+    let n = name_bytes.len();
+    let m = pat_bytes.len();
+
+    // DP table
+    let mut dp = vec![vec![false; m + 1]; n + 1];
+    dp[0][0] = true;
+    for j in 1..=m {
+        if pat_bytes[j - 1] == b'*' {
+            dp[0][j] = dp[0][j - 1];
+        }
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            if pat_bytes[j - 1] == b'*' {
+                dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
+            } else if pat_bytes[j - 1] == b'?' || pat_bytes[j - 1] == name_bytes[i - 1] {
+                dp[i][j] = dp[i - 1][j - 1];
+            }
+        }
+    }
+    dp[n][m]
 }
 
 // ====== 文件监听 ======

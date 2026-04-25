@@ -10,7 +10,7 @@ import { useLayoutStore } from "./stores/useLayoutStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import useShortcuts from "./hooks/useShortcuts";
 
-function AnimatedPanel({ visible, children }: { visible: boolean; children: React.ReactNode }) {
+function AnimatedPanel({ visible, className = "", children }: { visible: boolean; className?: string; children: React.ReactNode }) {
   const [shouldRender, setShouldRender] = useState(visible);
   const [animClass, setAnimClass] = useState("");
 
@@ -27,7 +27,7 @@ function AnimatedPanel({ visible, children }: { visible: boolean; children: Reac
 
   if (!shouldRender) return null;
 
-  return <div className={animClass}>{children}</div>;
+  return <div className={`${animClass} ${className}`}>{children}</div>;
 }
 
 export default function App() {
@@ -91,14 +91,13 @@ export default function App() {
         onClose={() => setHelpVisible(false)}
       />
 
-      <div className="h-12 flex-shrink-0">
-        <TopBar />
-      </div>
+      {/* 自定义标题栏 */}
+      <TopBar />
 
       <div className="flex-1 flex min-h-0">
-        <AnimatedPanel visible={leftVisible}>
-          <div className="flex gap-0">
-            <div style={{ width: `${leftWidth}px` }} className="flex-shrink-0">
+        <AnimatedPanel visible={leftVisible} className="h-full">
+          <div className="flex h-full gap-0">
+            <div style={{ width: `${leftWidth}px` }} className="flex-shrink-0 h-full">
               <LeftPanel />
             </div>
             <ResizeHandle direction="horizontal" onResize={onLeftResize} />
@@ -109,17 +108,17 @@ export default function App() {
           <EditorContainer />
         </div>
 
-        <AnimatedPanel visible={rightVisible}>
-          <div className="flex gap-0">
+        <AnimatedPanel visible={rightVisible} className="h-full">
+          <div className="flex h-full gap-0">
             <ResizeHandle direction="horizontal" onResize={onRightResize} />
-            <div style={{ width: `${rightWidth}px` }} className="flex-shrink-0">
+            <div style={{ width: `${rightWidth}px` }} className="flex-shrink-0 h-full">
               <AgentPanel />
             </div>
           </div>
         </AnimatedPanel>
       </div>
 
-      <AnimatedPanel visible={bottomVisible}>
+      <AnimatedPanel visible={bottomVisible} className="flex-shrink-0">
         <div>
           <ResizeHandle direction="vertical" onResize={onBottomResize} />
           <div style={{ height: `${bottomHeight}px` }} className="flex-shrink-0">

@@ -1,9 +1,18 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { AgentState, AgentMode, Task, Step, DiffEntry } from "../types/agent";
+import type {
+  AgentState,
+  AgentMode,
+  AgentRole,
+  PipelineStage,
+  LlmConfigResponse,
+  Task,
+  Step,
+  DiffEntry,
+} from "../types/agent";
 
 interface AgentStore {
-  // 状态
+  // ====== Agent 状态 ======
   state: AgentState;
   mode: AgentMode;
   currentTask: Task | null;
@@ -14,7 +23,17 @@ interface AgentStore {
   streamContent: string;
   isStreaming: boolean;
 
-  // 同步 Actions
+  // ====== 角色与流水线 ======
+  activeRole: AgentRole;
+  pipeline: PipelineStage[];
+
+  // ====== LLM 配置 ======
+  llmConfigured: boolean;
+  llmEndpoint: string;
+  llmModel: string;
+  apiKeyMasked: string;
+
+  // ====== 同步 Actions ======
   setState: (state: AgentState) => void;
   setMode: (mode: AgentMode) => void;
   setCurrentTask: (task: Task | null) => void;
@@ -30,7 +49,7 @@ interface AgentStore {
   clearStreamContent: () => void;
   reset: () => void;
 
-  // 异步 Actions (IPC)
+  // ====== 异步 Actions (IPC) ======
   sendPrompt: (params: {
     prompt: string;
     contextFiles?: string[];
@@ -42,9 +61,23 @@ interface AgentStore {
   changeMode: (mode: AgentMode) => Promise<void>;
   applyAllDiffs: () => Promise<DiffEntry[]>;
   rejectAllDiffs: () => Promise<DiffEntry[]>;
+
+  // ====== 模型配置 ======
+  fetchLlmConfig: () => Promise<void>;
+  updateLlmConfig: (endpoint: string, apiKey: string, model: string) => Promise<void>;
+
+  // ====== 角色管理 ======
+  setActiveRole: (role: AgentRole) => Promise<void>;
+  fetchActiveRole: () => Promise<void>;
+
+  // ====== 流水线管理 ======
+  fetchPipeline: () => Promise<void>;
+  updatePipeline: (stages: PipelineStage[]) => Promise<void>;
+  resetPipeline: () => Promise<void>;
 }
 
 export const useAgentStore = create<AgentStore>((set) => ({
+  // ========== 初始值 ==========
   state: "idle",
   mode: "suggest",
   currentTask: null,
@@ -54,6 +87,17 @@ export const useAgentStore = create<AgentStore>((set) => ({
   error: null,
   streamContent: "",
   isStreaming: false,
+  activeRole: "coder",
+  pipeline: [
+    { role: "architect", name: "Design", status: "pending" },
+    { role: "coder", name: "Implement", status: "pending" },
+    { role: "tester", name: "Test", status: "pending" },
+    { role: "reviewer", name: "Review", status: "pending" },
+  ],
+  llmConfigured: false,
+  llmEndpoint: "",
+  llmModel: "",
+  apiKeyMasked: "",
 
   // ========== 同步 Actions ==========
   setState: (state) => set({ state }),
@@ -136,7 +180,6 @@ export const useAgentStore = create<AgentStore>((set) => ({
       set({ mode });
     } catch (err: unknown) {
       console.warn("[AgentStore] set_agent_mode failed:", err);
-      // 仍然本地更新
       set({ mode });
     }
   },
@@ -173,5 +216,71 @@ export const useAgentStore = create<AgentStore>((set) => ({
       console.warn("[AgentStore] reject_diffs failed:", err);
       return [];
     }
+  },
+
+  // ========== 模型配置 ==========
+  fetchLlmConfig: async () => {
+    try {
+      const cfg = await invoke<LlmConfigResponse>("get_llm_config");
+      set({
+        llmConfigured: true,
+        llmEndpoint: cfg.endpoint,
+        llmModel: cfg.model,
+        apiKeyMasked: cfg.api_key_masked,
+      });
+    } catch {
+      set({ llmConfigured: false });
+    }
+  },
+
+  updateLlmConfig: async (endpoint, apiKey, model) => {
+    await invoke("update_llm_config", {
+      endpoint,
+      apiKey,
+      model,
+    });
+    set({
+      llmConfigured: true,
+      llmEndpoint: endpoint,
+      llmModel: model,
+      apiKeyMasked: apiKey.length > 8
+        ? apiKey.slice(0, 4) + "****" + apiKey.slice(-4)
+        : "****",
+    });
+  },
+
+  // ========== 角色管理 ==========
+  setActiveRole: async (role) => {
+    await invoke("set_active_role", { role });
+    set({ activeRole: role });
+  },
+
+  fetchActiveRole: async () => {
+    try {
+      const role = await invoke<string>("get_active_role");
+      set({ activeRole: role as AgentRole });
+    } catch {
+      // keep default
+    }
+  },
+
+  // ========== 流水线管理 ==========
+  fetchPipeline: async () => {
+    try {
+      const stages = await invoke<PipelineStage[]>("get_pipeline");
+      set({ pipeline: stages });
+    } catch {
+      // keep default
+    }
+  },
+
+  updatePipeline: async (stages) => {
+    await invoke("update_pipeline", { stages });
+    set({ pipeline: stages });
+  },
+
+  resetPipeline: async () => {
+    const stages = await invoke<PipelineStage[]>("reset_pipeline");
+    set({ pipeline: stages });
   },
 }));

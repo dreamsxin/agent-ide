@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useLayoutStore } from "../stores/useLayoutStore";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export interface Shortcut {
   id: string;
@@ -77,6 +78,17 @@ export default function useShortcuts() {
       handler: () => { setBottomTab("terminal"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
     { id: "logs-bottom", keys: "Ctrl+Shift+L", label: "Switch to Logs", group: "Navigation", scope: "global",
       handler: () => { setBottomTab("logs"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
+
+    // File
+    { id: "open-folder", keys: "Ctrl+O", label: "Open Folder", group: "General", scope: "global",
+      handler: async () => {
+        try {
+          const selected = await open({ directory: true, multiple: false, title: "Open Workspace Folder" });
+          if (selected && typeof selected === "string") {
+            useLayoutStore.getState().setWorkspacePath(selected);
+          }
+        } catch { /* ignore */ }
+      } },
   ];
 
   const shortcutsRef = useRef(shortcuts);

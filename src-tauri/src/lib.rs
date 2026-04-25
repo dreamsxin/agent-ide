@@ -34,6 +34,9 @@ pub fn run() {
             commands::fs::create_file,
             commands::fs::create_directory,
             commands::fs::rename_path,
+            commands::fs::copy_path,
+            commands::fs::get_file_metadata,
+            commands::fs::search_files,
             commands::fs::watch_start,
             commands::fs::watch_stop,
             // Agent 命令
@@ -46,6 +49,12 @@ pub fn run() {
             commands::agent::get_agent_steps,
             commands::agent::get_agent_diffs,
             commands::agent::update_llm_config,
+            commands::agent::get_llm_config,
+            commands::agent::set_active_role,
+            commands::agent::get_active_role,
+            commands::agent::get_pipeline,
+            commands::agent::update_pipeline,
+            commands::agent::reset_pipeline,
             // Git 命令
             commands::git::git_status,
             commands::git::git_diff,

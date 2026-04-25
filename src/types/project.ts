@@ -38,3 +38,21 @@ export interface LogEntry {
   message: string;
   details?: string;
 }
+
+/** 文件元数据 */
+export interface FileMetadata {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: number;
+  readonly: boolean;
+}
+
+/** 搜索匹配结果 */
+export interface SearchResult {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
