@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { marked } from "marked";
+import type { AgentState } from "../../types/agent";
 
 // 配置 marked
 marked.setOptions({
@@ -24,6 +25,18 @@ function escapeHtml(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+
+/** 各状态对应的 UI 信息 */
+const STATE_INFO: Record<AgentState, { label: string; spinner: boolean }> = {
+  idle:         { label: "Ready",         spinner: false },
+  thinking:     { label: "Thinking…",     spinner: true },
+  planning:     { label: "Planning…",     spinner: true },
+  acting:       { label: "Executing…",    spinner: true },
+  reviewing:    { label: "Reviewing…",    spinner: true },
+  waiting_user: { label: "Awaiting input", spinner: false },
+  done:         { label: "Done",           spinner: false },
+  error:        { label: "Error",          spinner: false },
+};
 
 /** 单条消息组件 */
 function MessageBubble({
@@ -114,7 +127,13 @@ export default function ChatView() {
   const selectedText = useEditorStore((s) => s.selectedText);
 
   const isActing =
-    agentState !== "idle" && agentState !== "done" && agentState !== "error" && agentState !== "waiting_user";
+    agentState !== "idle" &&
+    agentState !== "done" &&
+    agentState !== "error" &&
+    agentState !== "waiting_user";
+
+  const info = STATE_INFO[agentState] ?? STATE_INFO.idle;
+  const isSending = isActing;
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
@@ -133,7 +152,6 @@ export default function ChatView() {
     if (msgId) {
       updateMessage(msgId, { content: streamContent });
     } else if (streamContent) {
-      // 新的流式消息
       const newId = `stream-${Date.now()}`;
       streamingMsgId.current = newId;
       addMessage({
@@ -143,7 +161,7 @@ export default function ChatView() {
         timestamp: Date.now(),
       });
     }
-  }, [streamContent, isStreaming]);
+  }, [streamContent, isStreaming, addMessage, updateMessage]);
 
   // 流结束时固化消息
   useEffect(() => {
@@ -172,14 +190,11 @@ export default function ChatView() {
     });
     setInput("");
 
-    // 调用 Agent
     const ctx = buildContext();
     await sendPrompt({
       prompt: content,
       ...ctx,
     });
-
-    // Agent 完成后不添加额外消息（流式消息已存在）
   }, [input, isActing, sendPrompt, buildContext, addMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -211,34 +226,85 @@ export default function ChatView() {
 
       {/* 输入区 */}
       <div className="p-2 border-t border-surface-border">
+        {/* 状态指示条 */}
+        <div className="flex items-center gap-2 mb-1.5 px-0.5">
+          {info.spinner && (
+            <span className="inline-block w-2.5 h-2.5 border-2 border-surface-muted border-t-accent-blue rounded-full animate-spin flex-shrink-0" />
+          )}
+          <span className={`text-[11px] font-medium ${info.spinner ? "text-accent-blue" : "text-surface-muted"}`}>
+            {info.label}
+          </span>
+          {agentState !== "idle" && agentState !== "error" && (
+            <span className="text-[10px] text-surface-muted ml-auto">
+              {agentMode}
+            </span>
+          )}
+        </div>
+
+        {/* 输入 + 按钮 */}
         <div className="flex gap-2">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
+            onKeyDown={isSending ? undefined : handleKeyDown}
             placeholder={
-              isActing
-                ? "Agent is working..."
-                : `Ask Agent... (Mode: ${agentMode}, Shift+Enter for newline)`
+              isSending
+                ? "Agent is working…"
+                : agentState === "waiting_user"
+                ? "Review diffs or continue… (Shift+Enter for newline)"
+                : agentState === "error"
+                ? "An error occurred. Try again…"
+                : `Ask Agent… (Mode: ${agentMode}, Shift+Enter for newline)`
             }
-            disabled={isActing}
+            disabled={isSending}
             rows={2}
             className="flex-1 bg-surface-base text-surface-text text-xs p-2 rounded border border-surface-border focus:border-accent-blue focus:outline-none resize-none placeholder-surface-muted disabled:opacity-50"
           />
-          {isActing ? (
+
+          {/* 按钮区 — 根据状态显示不同按钮 */}
+          {isSending ? (
+            /* 工作中 → 停止按钮 */
             <button
               onClick={handleStop}
-              className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs transition-colors self-end"
+              className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs font-medium transition-colors self-end flex-shrink-0"
             >
-              Stop
+              ■&nbsp;Stop
             </button>
-          ) : (
+          ) : agentState === "waiting_user" ? (
+            /* 等待用户 → 蓝色继续按钮 */
             <button
               onClick={handleSend}
               disabled={!input.trim()}
-              className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end"
+              className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
             >
-              Send
+              ↩&nbsp;Send
+            </button>
+          ) : agentState === "done" ? (
+            /* 完成 → 绿色继续按钮 */
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className="px-3 bg-green-600/70 hover:bg-green-600 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+            >
+              ✓&nbsp;Continue
+            </button>
+          ) : agentState === "error" ? (
+            /* 出错 → 重试按钮 */
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+            >
+              ↻&nbsp;Retry
+            </button>
+          ) : (
+            /* 空闲 → 发送按钮 */
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+            >
+              ↑&nbsp;Send
             </button>
           )}
         </div>
