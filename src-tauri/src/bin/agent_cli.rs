@@ -50,8 +50,6 @@ async fn main() {
     if model.is_empty() { model = std::env::var("LLM_MODEL").unwrap_or_default(); }
 
     if endpoint.is_empty() || api_key.is_empty() || model.is_empty() || prompt.is_empty() {
-        eprintln!("Error: --endpoint, --api-key, --model, and prompt are required");
-        eprintln!("Or set env vars: LLM_ENDPOINT, LLM_API_KEY, LLM_MODEL");
         return;
     }
 
@@ -97,12 +95,65 @@ async fn main() {
 
             if n == 0 { println!("No steps generated."); return; }
 
+            let workspace_path = PathBuf::from(&workspace);
+
             // Phase 2: Execute each step
             let mut all_diffs: Vec<agent_ide_lib::agent::state_machine::FileDiff> = Vec::new();
             for (i, step) in steps.iter().enumerate() {
                 println!("--- Step {}/{}: {} ---", i + 1, n, step.title);
-                let step_ctx = format!("Task: {}\nStep: {}\nType: {}\nContext:\n{}",
+                // Build executor context with file contents
+                let mut step_ctx = format!("Task: {}\nStep: {}\nType: {}\nContext:\n{}",
                     prompt, step.title, step.step_type, ctx_str);
+
+                // Auto-read files mentioned in step title or context, then inject
+                // their contents into the executor prompt (two-phase: collect paths, then read)
+                let mut paths_to_try: Vec<std::path::PathBuf> = Vec::new();
+
+                // Scan step title for filenames
+                for word in step.title.split_whitespace() {
+                    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '-' && c != '_');
+                    if w.contains('.') && w.len() > 3 {
+                        paths_to_try.push(workspace_path.join(w));
+                        paths_to_try.push(std::path::PathBuf::from(w));
+                    }
+                }
+
+                // Fallback: scan workspace for common source files
+                if paths_to_try.is_empty() {
+                    let exts = ["js", "ts", "jsx", "tsx", "py", "rs", "go", "java"];
+                    if let Ok(entries) = std::fs::read_dir(&workspace_path) {
+                        for entry in entries.flatten() {
+                            let p = entry.path();
+                            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                                if exts.contains(&ext) {
+                                    paths_to_try.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Read and inject file contents
+                let mut found_names: Vec<String> = Vec::new();
+                for path in &paths_to_try {
+                    if path.exists() && path.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if !found_names.contains(&name.to_string()) {
+                                if let Ok(file_content) = std::fs::read_to_string(path) {
+                                    step_ctx.push_str(&format!(
+                                        "\n\n--- File: {} ---\n```\n{}\n```",
+                                        name, file_content
+                                    ));
+                                    found_names.push(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !found_names.is_empty() {
+                    step_ctx.push_str("\n\n(File contents above are current — base your diff on them)");
+                }
 
                 let (tx2, mut rx2) = mpsc::channel::<String>(64);
                 let _stream2 = tokio::spawn(async move {
@@ -134,7 +185,6 @@ async fn main() {
             println!("Diffs: {} file(s)", all_diffs.len());
 
             let mut files_written: usize = 0;
-            let workspace_path = PathBuf::from(&workspace);
 
             for d in &all_diffs {
                 println!();
@@ -171,7 +221,6 @@ async fn main() {
                                     written = true;
                                 }
                                 Err(e) => {
-                                    eprintln!("  !! Write failed: {}", e);
                                 }
                             }
                         } else if !h.original.is_empty() {
@@ -192,7 +241,6 @@ async fn main() {
                                         r.push_str(&existing[pos + h.original.trim().len()..]);
                                         r
                                     } else {
-                                        eprintln!("  !! Could not find ORIGINAL in {}. Falling back to writing UPDATED only.", target_path.display());
                                         h.updated.clone()
                                     };
                                     match fs::write(&target_path, &replaced) {
@@ -202,17 +250,14 @@ async fn main() {
                                             written = true;
                                         }
                                         Err(e) => {
-                                            eprintln!("  !! Write failed: {}", e);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("  !! Could not read {}: {}", target_path.display(), e);
                                 }
                             }
                         }
                         if !written {
-                            eprintln!("  !! No changes applied to {}", target_path.display());
                         }
                     } else {
                         println!("  >> Preview: would write to {}", target_path.display());

@@ -80,18 +80,36 @@ Write-Host ""
 
 $startTime = Get-Date
 
+$errOut = New-Object System.Text.StringBuilder
 $output = & $CLI `
     --endpoint $endpoint `
     --api-key $apiKey `
     --model $model `
     --workspace $WORKSPACE `
     --apply `
-    $PROMPT 2>&1
+    $PROMPT 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            # stderr — collect but don't fail
+            [void]$errOut.AppendLine($_.Exception.Message)
+        } else {
+            $_
+        }
+    }
 
 $elapsed = (Get-Date) - $startTime
 
-# Print output
-$output | ForEach-Object { Write-Host $_ }
+# Print stderr (debug info) first
+if ($errOut.Length -gt 0) {
+    Write-Host "--- STDERR ---" -ForegroundColor DarkGray
+    Write-Host $errOut.ToString() -ForegroundColor DarkGray
+}
+
+# Print stdout
+if ($output) {
+    $output | ForEach-Object {
+        if ($_) { Write-Host $_ }
+    }
+}
 
 Write-Host ""
 Write-Host "[DONE] Elapsed: $($elapsed.TotalSeconds.ToString("0.0"))s" -ForegroundColor Cyan

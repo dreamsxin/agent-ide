@@ -12,4 +12,11 @@ function add(a, b) {
   return a + b;
 }
 
-module.exports = { greet, add };
+/**
+ * Say goodbye to someone asynchronously
+ */
+async function farewell(name) {
+  return 'Goodbye ' + name;
+}
+
+module.exports = { greet, add, farewell };
