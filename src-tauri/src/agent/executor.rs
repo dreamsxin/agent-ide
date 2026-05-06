@@ -1,4 +1,5 @@
 use crate::services::llm_client::{ChatMessage, LlmClient};
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::mpsc;
 
 /// 执行步骤的系统提示词
@@ -34,6 +35,7 @@ pub async fn execute_step(
     llm: &LlmClient,
     step: &str,
     context: &str,
+    cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
 ) -> Result<String, String> {
     let messages = vec![
@@ -50,7 +52,7 @@ pub async fn execute_step(
         },
     ];
 
-    llm.stream_chat(messages, tx).await
+    llm.stream_chat(messages, cancel_flag, tx).await
 }
 
 /// 从 LLM 响应中解析 diff 块

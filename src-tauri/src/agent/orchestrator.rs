@@ -4,6 +4,7 @@ use crate::agent::executor;
 use crate::services::llm_client::LlmClient;
 use crate::services::context::{AgentContext, ContextCompressionMode};
 use crate::services::workspace;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tauri::AppHandle;
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -33,6 +34,7 @@ impl AgentOrchestrator {
         prompt: String,
         context: AgentContext,
         context_compression: ContextCompressionMode,
+        cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
         app: AppHandle,
     ) -> Result<(), String> {
@@ -57,9 +59,10 @@ impl AgentOrchestrator {
         });
 
         let (steps, _full_response) =
-            planner::plan_task(llm, &prompt, &ctx_str, tx).await?;
+            planner::plan_task(llm, &prompt, &ctx_str, cancel_flag.clone(), tx).await?;
 
         self.steps = steps;
+        self.ensure_not_cancelled(&cancel_flag, &app)?;
 
         // 3. Transition to Planning
         let _ = self.state_mgr.transition(&AgentEvent::PlanReady(self.steps.clone()));
@@ -95,7 +98,7 @@ impl AgentOrchestrator {
                 prompt, step_title, step_type, ctx_str
             );
 
-            match executor::execute_step(llm, &step_title, &step_context, tx2).await {
+            match executor::execute_step(llm, &step_title, &step_context, cancel_flag.clone(), tx2).await {
                 Ok(response) => {
                     self.steps[i].status = "done".to_string();
                     self.steps[i]
@@ -111,6 +114,8 @@ impl AgentOrchestrator {
                     self.steps[i].logs.push(format!("Error: {}", e));
                 }
             }
+
+            self.ensure_not_cancelled(&cancel_flag, &app)?;
 
             let _ = app.emit(
                 "agent-step-update",
@@ -237,6 +242,19 @@ impl AgentOrchestrator {
             "mode": self.mode.to_string(),
         });
         let _ = app.emit("agent-state-changed", payload);
+    }
+
+    fn ensure_not_cancelled(
+        &mut self,
+        cancel_flag: &Arc<AtomicBool>,
+        app: &AppHandle,
+    ) -> Result<(), String> {
+        if cancel_flag.load(Ordering::SeqCst) {
+            self.state_mgr.set(crate::agent::state_machine::AgentState::Idle);
+            self.emit_state(app);
+            return Err("Agent task cancelled".to_string());
+        }
+        Ok(())
     }
 
     /// 应用所有 pending diff

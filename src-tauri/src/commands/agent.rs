@@ -4,7 +4,7 @@ use crate::agent::multi_agent::{AgentRole, PipelineStage, default_pipeline};
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::context::{AgentContext, ContextCompressionMode};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::Mutex;
 use tauri::{AppHandle, State};
 use tauri::Emitter;
@@ -52,6 +52,7 @@ pub struct AgentGlobalState {
     pub active_role: Arc<std::sync::Mutex<AgentRole>>,
     pub pipeline_stages: Arc<std::sync::Mutex<Vec<PipelineStage>>>,
     pub context_compression: Arc<std::sync::Mutex<ContextCompressionMode>>,
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 impl AgentGlobalState {
@@ -78,6 +79,7 @@ impl AgentGlobalState {
             active_role: Arc::new(std::sync::Mutex::new(AgentRole::Coder)),
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -146,8 +148,14 @@ pub async fn send_agent_prompt(
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
+    agent_state.cancel_flag.store(false, Ordering::SeqCst);
+    let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
-    orch.run(request.prompt, context, compression, &llm, app_handle).await?;
+    match orch.run(request.prompt, context, compression, cancel_flag, &llm, app_handle).await {
+        Ok(()) => {}
+        Err(err) if is_cancelled_error(&err) => return Ok("Agent task cancelled".to_string()),
+        Err(err) => return Err(err),
+    }
 
     Ok("Agent task completed".to_string())
 }
@@ -155,6 +163,7 @@ pub async fn send_agent_prompt(
 /// 停止 Agent 当前任务
 #[tauri::command]
 pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<String, String> {
+    agent_state.cancel_flag.store(true, Ordering::SeqCst);
     let mut orch = agent_state.orchestrator.lock().await;
     orch.state_mgr.set(AgentState::Idle);
     orch.steps.clear();
@@ -434,6 +443,10 @@ fn replace_first(text: &str, original: &str, updated: &str) -> Option<String> {
     None
 }
 
+fn is_cancelled_error(err: &str) -> bool {
+    err == "Agent task cancelled"
+}
+
 /// 拒绝所有 pending diffs
 #[tauri::command]
 pub async fn reject_diffs(
@@ -615,7 +628,7 @@ pub async fn test_llm_connection(
         full
     });
 
-    match llm.stream_chat(messages, tx).await {
+    match llm.stream_chat(messages, agent_state.cancel_flag.clone(), tx).await {
         Ok(response) => {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let full = handle.await.unwrap_or(response);

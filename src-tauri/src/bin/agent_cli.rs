@@ -10,6 +10,7 @@ use agent_ide_lib::agent::planner;
 use agent_ide_lib::agent::executor;
 use agent_ide_lib::services::llm_client::{LlmClient, LlmConfig};
 use agent_ide_lib::services::context::AgentContext;
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::mpsc;
 use std::path::PathBuf;
 use std::fs;
@@ -64,6 +65,7 @@ async fn main() {
 
     let config = LlmConfig { endpoint, api_key, model };
     let llm = LlmClient::new(config);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
 
     let workspace_clone = workspace.clone();
     let context = AgentContext {
@@ -80,7 +82,7 @@ async fn main() {
         while let Some(tok) = rx.recv().await { print!("{}", tok); }
     });
 
-    match planner::plan_task(&llm, &prompt, &ctx_str, tx).await {
+    match planner::plan_task(&llm, &prompt, &ctx_str, cancel_flag.clone(), tx).await {
         Ok((steps, _full)) => {
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             stream_task.abort();
@@ -160,7 +162,7 @@ async fn main() {
                     while let Some(tok) = rx2.recv().await { print!("{}", tok); }
                 });
 
-                match executor::execute_step(&llm, &step.title, &step_ctx, tx2).await {
+                match executor::execute_step(&llm, &step.title, &step_ctx, cancel_flag.clone(), tx2).await {
                     Ok(response) => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                         println!();

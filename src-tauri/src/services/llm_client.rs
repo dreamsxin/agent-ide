@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::mpsc;
 
 /// LLM 配置
@@ -37,6 +38,7 @@ impl LlmClient {
     pub async fn stream_chat(
         &self,
         messages: Vec<ChatMessage>,
+        cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
     ) -> Result<String, String> {
         #[derive(Serialize)]
@@ -52,6 +54,10 @@ impl LlmClient {
             messages,
             stream: true,
         };
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err("Agent task cancelled".to_string());
+        }
 
         let response = self
             .client
@@ -92,6 +98,9 @@ impl LlmClient {
         }
 
         while let Some(chunk_result) = stream.next().await {
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Err("Agent task cancelled".to_string());
+            }
             let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
             // 字节追加到缓冲区，防止 SSE 行被 TCP 分片截断
             sse_buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -118,6 +127,9 @@ impl LlmClient {
                             // 仅取 content，跳过 reasoning_content（推理内容）
                             if let Some(ref text) = choice.delta.content {
                                 if !text.is_empty() {
+                                    if cancel_flag.load(Ordering::SeqCst) {
+                                        return Err("Agent task cancelled".to_string());
+                                    }
                                     full_response.push_str(text);
                                     let _ = tx.send(text.clone()).await;
                                 }

@@ -1,4 +1,5 @@
 use crate::services::llm_client::{ChatMessage, LlmClient};
+use std::sync::{Arc, atomic::AtomicBool};
 use crate::agent::state_machine::TaskStep;
 use tokio::sync::mpsc;
 
@@ -144,6 +145,7 @@ pub async fn plan_task(
     llm: &LlmClient,
     user_prompt: &str,
     context: &str,
+    cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
 ) -> Result<(Vec<TaskStep>, String), String> {
     let messages = vec![
@@ -161,7 +163,7 @@ pub async fn plan_task(
         },
     ];
 
-    let full_response = llm.stream_chat(messages, tx).await?;
+    let full_response = llm.stream_chat(messages, cancel_flag, tx).await?;
     let steps = parse_plan(&full_response);
 
     Ok((steps, full_response))

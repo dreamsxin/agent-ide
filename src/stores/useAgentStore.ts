@@ -209,7 +209,11 @@ export const useAgentStore = create<AgentStore>((set) => ({
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      set({ error: msg, state: "error" });
+      if (msg === "Agent task cancelled") {
+        set({ error: null, state: "idle" });
+      } else {
+        set({ error: msg, state: "error" });
+      }
     } finally {
       set({ isStreaming: false });
     }
