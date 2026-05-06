@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { isTauriRuntime } from "../utils/tauri";
 
 /**
  * 监听 Tauri 后端事件
@@ -13,6 +14,7 @@ export function useTauriEvent<T>(
   handlerRef.current = handler;
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     let unlisten: UnlistenFn | undefined;
 
     const setup = async () => {
@@ -46,6 +48,7 @@ export function useTauriEvents<T extends Record<string, unknown>>(
   const keys = Object.keys(handlers) as (keyof T)[];
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     const unlisteners: UnlistenFn[] = [];
 
     keys.forEach((event) => {

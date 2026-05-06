@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { FileTab, InlineSuggestion, DiffOverlay, IntentHint } from "../types/editor";
 import type { FileMetadata, SearchResult } from "../types/project";
+import { isTauriRuntime } from "../utils/tauri";
 
 interface EditorStore {
   // 文件标签
@@ -86,7 +87,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
     let content = "";
     try {
-      content = await invoke<string>("read_file_content", { path: tab.path });
+      content = isTauriRuntime()
+        ? await invoke<string>("read_file_content", { path: tab.path })
+        : `// File loading is available in the Tauri app runtime.\n// ${tab.path}`;
     } catch {
       content = `// Failed to load: ${tab.path}`;
     }
@@ -140,6 +143,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     if (!activeFile) return;
     const content = fileContents[activeFile];
     if (content === undefined) return;
+    if (!isTauriRuntime()) return;
 
     try {
       await invoke("write_file_content", { path: activeFile, content });
@@ -154,6 +158,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   reloadFile: async (path) => {
+    if (!isTauriRuntime()) return;
     try {
       const content = await invoke<string>("read_file_content", { path });
       set((s) => ({
@@ -170,21 +175,27 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   // ====== Enhanced file tools ======
 
   copyPath: async (src, dest) => {
+    if (!isTauriRuntime()) return;
     await invoke("copy_path", { src, dest });
     set((prev) => ({ explorerKey: prev.explorerKey + 1 }));
   },
 
   getFileMetadata: async (path) => {
+    if (!isTauriRuntime()) {
+      throw new Error("File metadata is available in the Tauri app runtime.");
+    }
     return await invoke<FileMetadata>("get_file_metadata", { path });
   },
 
   searchFiles: async (root, pattern, maxDepth) => {
+    if (!isTauriRuntime()) return [];
     return await invoke<SearchResult[]>("search_files", { root, pattern, maxDepth: maxDepth ?? null });
   },
 
   // ====== CRUD ======
 
   deletePath: async (path) => {
+    if (!isTauriRuntime()) return;
     await invoke("delete_path", { path });
     // 关闭该文件（如果是打开的文件）
     const s = get();
@@ -196,16 +207,19 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   createFile: async (path, content = "") => {
+    if (!isTauriRuntime()) return;
     await invoke("create_file", { path, content });
     set((prev) => ({ explorerKey: prev.explorerKey + 1 }));
   },
 
   createDirectory: async (path) => {
+    if (!isTauriRuntime()) return;
     await invoke("create_directory", { path });
     set((prev) => ({ explorerKey: prev.explorerKey + 1 }));
   },
 
   renamePath: async (oldPath, newPath) => {
+    if (!isTauriRuntime()) return;
     await invoke("rename_path", { oldPath, newPath });
     // 更新已打开的文件引用
     set((s) => ({
@@ -230,6 +244,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   // ====== 文件监听 ======
 
   startWatching: async () => {
+    if (!isTauriRuntime()) return;
     try {
       await invoke("watch_start");
     } catch (e) {
@@ -238,6 +253,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   stopWatching: async () => {
+    if (!isTauriRuntime()) return;
     try {
       await invoke("watch_stop");
     } catch (e) {

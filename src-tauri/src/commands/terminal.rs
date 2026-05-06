@@ -191,7 +191,8 @@ pub async fn kill_terminal(
         .terminals
         .lock()
         .map_err(|e| e.to_string())?;
-    if terminals.remove(&id).is_some() {
+    if let Some(instance) = terminals.remove(&id) {
+        let _ = instance.cancel_tx.try_send(());
         // 实例被移除时 pty_master 会被 drop，关闭 PTY 连接
     }
     Ok(())

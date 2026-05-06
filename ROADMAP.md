@@ -1,6 +1,6 @@
-# Agent IDE — Implementation Roadmap
+# Agent IDE - Implementation Roadmap
 
-> **This file is the canonical source of truth for project state.**
+> This file is the canonical source of truth for project state.
 > If you resume work after an interruption, start here.
 
 ---
@@ -9,11 +9,18 @@
 
 After any interruption, restore context in this order:
 
-1. **Read this file** — understand what's done and what's next
-2. **Read `docs/agent_ide_plan.md`** — full technical plan
-3. **Read `docs/agent_ide_ui_design.md`** — UI design specs
-4. **Check `.workbuddy/memory/`** — recent work logs
-5. **Run `cargo check && npx tsc --noEmit`** — verify code compiles
+1. Read this file to understand current state and next work.
+2. Read `docs/agent_ide_plan.md` for the broader technical plan.
+3. Read `docs/agent_ide_ui_design.md` for UI design intent.
+4. Check `git status --short` before editing. There may be user changes.
+5. Run verification:
+
+```powershell
+npm run build
+cd src-tauri
+cargo check
+cargo test
+```
 
 ---
 
@@ -21,237 +28,276 @@ After any interruption, restore context in this order:
 
 | Field | Value |
 |-------|-------|
-| **Project** | Agent IDE |
-| **Description** | Code-centric controllable AI Agent IDE |
-| **Stack** | Tauri v2 (Rust) + React 18 + TypeScript + Tailwind CSS |
-| **Editor** | Monaco Editor (`@monaco-editor/react`) |
-| **Terminal** | xterm.js + Tauri PTY (`portable-pty`) |
-| **File Tree** | react-arborist + Tauri FS |
-| **State** | Zustand |
-| **Build** | Vite |
-| **Root** | `d:\work\agent-ide` |
+| Project | Agent IDE |
+| Description | Code-centric controllable AI Agent IDE |
+| Stack | Tauri v2 + Rust backend + React 18 + TypeScript + Tailwind CSS |
+| Editor | Monaco Editor |
+| Terminal | xterm.js + Tauri PTY (`portable-pty`) |
+| File Tree | react-arborist + Tauri commands |
+| State | Zustand |
+| Build | Vite |
+| Root | `d:\work\agent-ide` |
 
 ---
 
-## Current State: Phase 5 — COMPLETE + UI Polish
+## Current State
 
-All 5 phases done as of 2026-04-24. Recent additions: custom titlebar, workspace open, enhanced file tools, Agent roles & LLM config, UI clarity improvements.
+Status as of 2026-04-30: **Phase 6 in progress - stabilization and Agent hardening**.
 
-### What's Built
+The app is no longer just a static UI prototype. It has a working Tauri/Rust backend, file commands, Git commands, LLM streaming, Agent planning/execution scaffolding, diff review UI, and settings for model configuration. Recent work focused on correcting safety and runtime assumptions:
 
-```
-d:\work\agent-ide\
-├── ROADMAP.md                          <-- You are here
-├── docs/
-│   ├── agent_ide_plan.md               <-- Full technical plan (English)
-│   └── agent_ide_ui_design.md          <-- UI design specification (English)
-│
-├── src/                                # React Frontend
-│   ├── App.tsx                         # Layout, animated panels, shortcuts, theme support
-│   ├── main.tsx                        # Entry point
-│   ├── styles/index.css                # Tailwind + Light/Dark theme + animations
-│   │
-│   ├── stores/
-│   │   ├── useLayoutStore.ts           # Panel sizes, visibility, focus mode, tabs
-│   │   ├── useEditorStore.ts           # Files, contents, dirty state, save
-│   │   ├── useAgentStore.ts            # Agent state + IPC actions + streaming support
-│   │   ├── useGitStore.ts              # Git status, diff, commit actions
-│   │   ├── useLogStore.ts              # Log entries with source/level tracking
-│   │   └── useThemeStore.ts            # Dark/Light theme with localStorage persistence
-│   │
-│   ├── hooks/
-│   │   ├── useAgentBridge.ts           # Tauri event -> Zustand store sync
-│   │   ├── useTauriEvent.ts            # Generic Tauri event listener hook
-│   │   └── useShortcuts.ts             # Centralized keyboard shortcut system
-│   │
-│   ├── components/
-│   │   ├── layout/
-│   │   │   ├── TopBar.tsx              # Mode switch, Run/Stop, panel toggles, theme, help
-│   │   │   ├── LeftPanel.tsx           # Explorer/Git tab switching
-│   │   │   ├── AgentPanel.tsx          # Chat/Tasks/Diff/Pipeline tabs
-│   │   │   ├── BottomPanel.tsx         # Terminal/Logs/Tests/Actions tabs
-│   │   │   └── ResizeHandle.tsx        # Drag-to-resize panels
-│   │   │
-│   │   ├── editor/
-│   │   │   ├── EditorContainer.tsx     # Monaco + Ctrl+S + onMount context
-│   │   │   ├── EditorTabs.tsx          # File tab bar
-│   │   │   ├── MonacoContext.tsx       # Shared editor instance + monaco ns
-│   │   │   ├── InlineSuggestion.tsx    # Ghost text decoration
-│   │   │   ├── DiffOverlay.tsx         # Diff line highlight (green/red)
-│   │   │   ├── IntentHint.tsx          # AI hint content widgets
-│   │   │   └── QuickActions.tsx        # Selection floating toolbar
-│   │   │
-│   │   ├── panels/
-│   │   │   ├── Explorer.tsx            # react-arborist + Tauri FS lazy load
-│   │   │   ├── Terminal.tsx            # xterm.js + FitAddon + WebLinksAddon
-│   │   │   ├── GitPanel.tsx            # Source control: status, diff viewer, commit
-│   │   │   └── LogView.tsx             # Log timeline with source icons, auto-scroll
-│   │   │
-│   │   ├── agent/
-│   │   │   ├── ChatView.tsx            # Multi-turn chat + streaming display + IPC send
-│   │   │   ├── TaskView.tsx            # Step visualization from agent store
-│   │   │   ├── DiffView.tsx            # Diff list + Apply All / Reject All bulk actions
-│   │   │   ├── TaskPipeline.tsx        # Pipeline timeline with status indicators
-│   │   │   └── AgentSelector.tsx       # Agent role selector with descriptions
-│   │   │
-│   │   └── shared/
-│   │       ├── StatusDot.tsx
-│   │       ├── ModeSwitch.tsx
-│   │       ├── ShortcutsHelp.tsx       # F1 shortcut reference modal
-│   │       ├── Button.tsx
-│   │       ├── Badge.tsx
-│   │       └── Spinner.tsx
-│   │
-│   └── types/
-│       ├── agent.ts                    # AgentState, Step, DiffEntry, Task, ChatMessage, PipelineStage
-│       ├── editor.ts                   # FileTab, FileNode, DiffOverlay types
-│       └── project.ts                  # ProjectInfo, GitStatus, GitStatusEntry, LogEntry
-│
-├── src-tauri/                          # Rust Backend
-│   ├── Cargo.toml                      # deps: portable-pty, tokio, serde, reqwest, git2, etc.
-│   └── src/
-│       ├── main.rs
-│       ├── lib.rs                      # Plugin reg + command handler reg
-│       ├── commands/
-│       │   ├── mod.rs
-│       │   ├── fs.rs                   # read_file, write_file, list_dir, file_exists
-│       │   ├── terminal.rs             # spawn/write/resize/kill PTY + TerminalManager
-│       │   ├── git.rs                  # git_status, git_diff, git_commit (discover)
-│       │   └── agent.rs                # Agent IPC: prompt/stop/mode/apply/reject + LLM config
-│       ├── agent/
-│       │   ├── mod.rs
-│       │   ├── state_machine.rs        # AgentState enum + AgentStateManager transitions
-│       │   ├── orchestrator.rs         # Main flow: prompt -> plan -> execute -> review
-│       │   ├── planner.rs              # LLM task decomposition + plan parsing
-│       │   ├── executor.rs             # Step execution + diff parsing from LLM output
-│       │   ├── diff_gen.rs             # Text diff utilities (similar crate)
-│       │   └── multi_agent.rs          # AgentRole, PipelineStage, default_pipeline
-│       └── services/
-│           ├── mod.rs
-│           ├── llm_client.rs           # OpenAI-compatible HTTP streaming client
-│           └── context.rs              # AgentContext builder (file/selection/project)
-│
-├── .workbuddy/memory/                  # Cross-session memory
-│   ├── 2026-04-24.md                   # Daily log
-│   └── MEMORY.md                       # Long-term facts
-│
-├── package.json                        # All npm deps installed
-├── tsconfig.json
-├── vite.config.ts
-├── tailwind.config.js
-└── postcss.config.js
+- Added workspace path resolution and path-bound file operations.
+- Added Agent context compression modes: `focused`, `compact`, `full`.
+- Replaced unsafe Agent Markdown HTML injection with `ReactMarkdown skipHtml`.
+- Restored a Tauri CSP instead of `csp: null`.
+- Added browser/Tauri runtime guards so `npm run dev` can preview UI without crashing.
+- Fixed Git untracked status classification.
+- Fixed terminal kill path to signal the reader loop.
+- Added tests for context compression behavior.
+
+Important distinction:
+
+- `npm run dev`: Vite web preview only. Tauri IPC, filesystem, terminal, Git, and Agent backend are disabled or stubbed.
+- `npm run tauri -- dev`: real IDE runtime with Rust backend and Tauri APIs.
+
+---
+
+## Current Verification
+
+Last verified locally:
+
+```powershell
+npm run build     # passes; Vite still warns about a large Monaco/Markdown chunk
+cargo check       # passes
+cargo test        # passes; includes context compression tests
 ```
 
-### Key Data Flows
+Known local worktree note:
 
-**Open a File:**
-```
-Explorer click file
-  -> useEditorStore.openFile({ path, name, language })
-    -> invoke("read_file_content", { path })
-      -> store fileContents[path] = content
-        -> EditorContainer reads fileContents[activeFile]
-          -> Monaco renders with key={activeFile}
+- `demo/hello.js` may contain unrelated user/demo changes. Do not revert it unless explicitly requested.
+
+---
+
+## Implemented Architecture
+
+### Frontend
+
+- `src/App.tsx`: layout, panel visibility, shortcut help, workspace restore.
+- `src/components/layout/`: titlebar, left/right/bottom panels, resize handles.
+- `src/components/editor/`: Monaco editor, tabs, inline suggestions, diff overlays, quick actions.
+- `src/components/panels/`: Explorer, Git panel, terminal, logs.
+- `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
+- `src/stores/`: Zustand state for layout, editor, Agent, Git, logs, theme.
+- `src/hooks/`: Tauri event bridge, shortcuts, event helpers.
+- `src/utils/tauri.ts`: runtime detection for Tauri-only APIs.
+
+### Backend
+
+- `src-tauri/src/lib.rs`: Tauri plugin setup and command registration.
+- `src-tauri/src/commands/fs.rs`: workspace-scoped file operations and watcher.
+- `src-tauri/src/commands/git.rs`: Git status, diff, commit.
+- `src-tauri/src/commands/terminal.rs`: PTY lifecycle.
+- `src-tauri/src/commands/agent.rs`: Agent commands, LLM config, context compression config.
+- `src-tauri/src/agent/`: state machine, planner, executor, orchestrator, diff helpers, roles/pipeline models.
+- `src-tauri/src/services/llm_client.rs`: OpenAI-compatible streaming client.
+- `src-tauri/src/services/context.rs`: AgentContext and context compression.
+- `src-tauri/src/services/workspace.rs`: config dir, workspace persistence, path resolution and workspace boundary checks.
+
+---
+
+## Key Data Flows
+
+### Open File
+
+```text
+Explorer click
+  -> useEditorStore.openFile()
+    -> invoke("read_file_content")
+      -> Rust fs command resolves path inside workspace
+        -> editor store caches content
+          -> Monaco renders active file
 ```
 
-**Save a File:**
-```
-Ctrl+S -> EditorContainer handler -> saveCurrentFile()
-  -> invoke("write_file_content", { path, content })
-    -> markDirty(path, false)
-```
+### Agent Prompt
 
-**Agent System:**
-```
+```text
 ChatView.handleSend()
-  -> useAgentStore.sendPrompt({ prompt, activeFile, selection ... })
-    -> invoke("send_agent_prompt", { request })
-      -> Rust AgentOrchestrator.run()
-        -> State: Thinking -> emit "agent-state-changed"
-        -> LLM plan_task() via streaming -> emit "agent-stream-token"
-        -> State: Planning -> emit "agent-plan-ready" (steps[])
-        -> For each step:
-            -> State: Acting -> emit "agent-step-update"
-            -> LLM execute_step() via streaming
-            -> Parse diffs from LLM output
-        -> State: Reviewing -> emit "agent-diff-ready" (diffs[])
-        -> State: WaitingUser -> emit "agent-state-changed"
-
-Frontend Bridge (useAgentBridge):
-  -> agent-state-changed  -> setState() / setMode()
-  -> agent-plan-ready     -> setSteps()
-  -> agent-step-update    -> updateStep()
-  -> agent-diff-ready     -> setDiffs()
-  -> agent-stream-token   -> appendStreamContent() -> ChatView real-time render
-
-User applies/rejects diffs:
-  DiffView -> applyAllDiffs() / rejectAllDiffs()
-    -> invoke("apply_diffs") / invoke("reject_diffs")
-      -> State: Done -> emit "agent-state-changed"
+  -> useAgentStore.sendPrompt()
+    -> invoke("send_agent_prompt")
+      -> AgentContext built from active file, selection, open files
+      -> context compressed by selected mode
+      -> AgentOrchestrator.run()
+        -> planner LLM streaming
+        -> executor LLM streaming
+        -> parse model diff blocks
+        -> emit plan, step, token, diff, state events
 ```
 
-### Verification
+### Apply Diff
 
+```text
+DiffView.applyAllDiffs()
+  -> invoke("apply_diffs")
+    -> resolve each diff file inside workspace
+    -> string-match original hunk
+    -> write updated content
+    -> mark applied and emit state
 ```
-npx tsc --noEmit    # TypeScript: 0 errors
-cargo check         # Rust: 0 errors (15 warnings, benign)
-```
+
+Current limitation: diff application still uses textual `find` replacement. It needs stronger conflict detection.
 
 ---
 
-## All Phases Summary
+## Known Issues
 
-| Phase | Name | Key Deliverables |
-|-------|------|------------------|
-| **1** | Skeleton | Layout, Monaco, Terminal, File Tree |
-| **2** | Editor Enhancements | InlineSuggestion, DiffOverlay, IntentHint, QuickActions |
-| **3** | Agent System | Rust state machine, LLM streaming, ChatView, TaskView, DiffView |
-| **4** | Multi-Agent | Agent roles, TaskPipeline, Git panel, LogView |
-| **5** | Polish & Release | Shortcuts, themes, animations, cross-platform packaging |
+### High Priority
+
+1. **Diff application is fragile**
+   - Current behavior depends on exact or trimmed string match.
+   - Missing file hash/version checks.
+   - Partial apply errors are collected but not fully surfaced to UI.
+   - No per-hunk apply/reject.
+
+2. **Agent cancellation is not real cancellation**
+   - `stop_agent` changes state and clears data.
+   - In-flight LLM requests are not cancelled with a cancellation token.
+
+3. **Pipeline is mostly UI/state, not execution orchestration**
+   - Roles exist.
+   - Pipeline stages can be configured.
+   - Orchestrator does not yet execute architect/coder/tester/reviewer as distinct passes.
+
+4. **Secret storage is weak**
+   - LLM API key is persisted in `~/.agent-ide/config.json`.
+   - Should move to OS keychain or a permission-hardened credential store.
+
+### Medium Priority
+
+5. **Terminal frontend is not fully wired to PTY commands**
+   - Backend PTY commands exist.
+   - Frontend terminal currently behaves mostly as local xterm UI.
+   - Needs spawn/write/resize/output event integration.
+
+6. **Workspace boundary should cover every backend surface**
+   - FS and Agent diff paths are guarded.
+   - Git and terminal working directory policy still needs a focused review.
+   - Agent CLI should align with the same policy.
+
+7. **Runtime modes need clearer UI messaging**
+   - Browser preview now avoids crashes.
+   - Some panels still need explicit disabled states for web preview mode.
+
+8. **Encoding cleanup is incomplete**
+   - Many files had historical mojibake comments/text.
+   - User-visible text should be cleaned progressively.
+
+### Lower Priority
+
+9. **Large frontend bundle**
+   - Monaco, Markdown, xterm and syntax tooling create a large chunk.
+   - Add dynamic imports/manual chunks later.
+
+10. **Test coverage is thin**
+   - Rust context compression has tests.
+   - Need tests for workspace guard, diff apply, Git status, Agent state transitions, and frontend store behavior.
 
 ---
 
-## Architecture at a Glance
+## Roadmap
 
+### Phase 6 - Stabilization and Safety
+
+Goal: make the IDE safe enough for regular local development.
+
+Deliverables:
+
+- Workspace boundary applied consistently across FS, Agent, Git, terminal cwd, and CLI.
+- LLM key storage moved out of plain JSON or protected with strict permissions as an interim step.
+- Diff application returns structured errors to UI.
+- Agent cancellation token wired through orchestrator and LLM client.
+- Browser preview mode has clear disabled states.
+- Roadmap and docs reflect actual project state.
+
+Acceptance checks:
+
+```powershell
+npm run build
+cd src-tauri
+cargo check
+cargo test
 ```
-+----------------------------------------------------------+
-|                    Tauri v2 Shell                        |
-+----------------------------------------------------------+
-|  WebView (React 18)            |  Rust Backend           |
-|                                |                         |
-|  +------+------+----------+   |  Agent State Machine    |
-|  |Left  |Editor|Agent     |   |  Agent Orchestrator     |
-|  |(FS)  |Monaco|Chat/Task |<--+-- File System            |
-|  +------+------+----------+   |  LLM Client (reqwest)   |
-|  +--------------------------+ |  PTY Terminal           |
-|  |  Terminal | Logs         |<--+-- Planner / Executor     |
-|  +--------------------------+ |  Diff Generator         |
-|                                |  Git (git2)            |
-|  Zustand Stores --invoke----->|                         |
-|  <-- Tauri Event (listen) ----|                         |
-+----------------------------------------------------------+
-```
 
-**IPC Commands registered:**
-- FS: `read_file_content`, `write_file_content`, `list_directory`, `file_exists`
-- FS: `delete_path`, `create_file`, `create_directory`, `rename_path`
-- FS: `copy_path`, `get_file_metadata`, `search_files` (new)
-- FS: `watch_start`, `watch_stop`
-- Terminal: `spawn_terminal`, `write_to_terminal`, `resize_terminal`, `kill_terminal`
-- Agent: `get_agent_state`, `send_agent_prompt`, `stop_agent`, `set_agent_mode`
-- Agent: `apply_diffs`, `reject_diffs`, `get_agent_steps`, `get_agent_diffs`
-- Agent: `update_llm_config`, `get_llm_config` (new)
-- Agent: `set_active_role`, `get_active_role` (new)
-- Agent: `get_pipeline`, `update_pipeline`, `reset_pipeline` (new)
-- Git: `git_status`, `git_diff`, `git_commit`
+Add focused tests:
 
-**Tauri Events emitted:**
-- `terminal-output` — PTY output to frontend
-- `agent-state-changed` — Agent state transitions
-- `agent-plan-ready` — Task steps after LLM planning
-- `agent-step-update` — Step status changes
-- `agent-diff-ready` — Diff entries after code generation
-- `agent-stream-token` — Real-time LLM streaming tokens
+- `workspace::resolve_existing` rejects outside paths.
+- `workspace::resolve_for_write` rejects outside parents.
+- `apply_diffs` reports unmatched hunks.
+- `git_status` distinguishes added vs untracked.
+
+### Phase 7 - Agent Execution Quality
+
+Goal: turn Agent scaffolding into a reliable controllable coding loop.
+
+Deliverables:
+
+- Role-aware orchestration: architect -> coder -> tester -> reviewer.
+- Pipeline stages influence prompts and state transitions.
+- Context sources: selected files, open files, git diff, project tree summary, terminal/log excerpts.
+- Context compression strategy interface:
+  - `full`: complete active context.
+  - `focused`: selected code and active-file excerpt.
+  - `compact`: outline and metadata.
+  - `budgeted`: token-budget-aware file packing.
+- Structured model protocol instead of free-form markdown-only diff parsing.
+- Agent action log with prompt/context/diff provenance.
+
+Acceptance checks:
+
+- A prompt produces visible plan stages.
+- Each stage emits state and logs.
+- Diff suggestions include source context metadata.
+- Stop cancels active LLM streaming.
+
+### Phase 8 - IDE Workflow Completion
+
+Goal: make core IDE workflows practical.
+
+Deliverables:
+
+- Terminal fully wired to backend PTY:
+  - spawn terminal
+  - write input
+  - resize
+  - receive `terminal-output`
+  - kill terminal
+- QuickActions sends real Agent prompts.
+- DiffView supports per-file and per-hunk apply/reject.
+- Git panel supports stage, unstage, discard with confirmation.
+- Tests tab reflects real test commands instead of static sample data.
+- Logs panel consumes backend and Agent event streams.
+
+Acceptance checks:
+
+- Open workspace, edit file, save, view Git diff.
+- Ask Agent for a small change, review diff, apply one hunk.
+- Run terminal command and see output.
+
+### Phase 9 - Release Readiness
+
+Goal: make the app packageable and maintainable.
+
+Deliverables:
+
+- CI for TypeScript, Rust, tests, formatting.
+- Tauri smoke tests for app boot, workspace open, file read/write, settings load.
+- Packaging validation for Windows first.
+- Security model documentation:
+  - workspace policy
+  - terminal permissions
+  - Agent auto-edit policy
+  - LLM data exposure
+  - secret storage
+- Troubleshooting guide for Vite vs Tauri dev modes.
 
 ---
 
@@ -259,49 +305,54 @@ cargo check         # Rust: 0 errors (15 warnings, benign)
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
-| 2026-04-24 | `fileContents` as Record<string, string> | Simple cache, sufficient for Phase 1 |
-| 2026-04-24 | Monaco `key={activeFile}` for file switching | Forces remount, reliable |
-| 2026-04-24 | `portable-pty` over `termion` | Cross-platform |
-| 2026-04-24 | react-arborist over custom tree | Virtual scrolling |
-| 2026-04-24 | `try_clone_reader()` for PTY read | MasterPty doesn't implement Read |
-| 2026-04-24 | English docs | Avoid encoding issues |
-| 2026-04-24 | React Context for Monaco sharing | Shared across AI-layer components |
-| 2026-04-24 | `deltaDecorations` for AI layers | Performant batch decoration |
-| 2026-04-24 | Content widget for IntentHint | Inline rendering below lines |
-| 2026-04-24 | `tokio::sync::Mutex` for orchestrator | Safe lock across .await |
-| 2026-04-24 | reqwest SSE streaming for LLM | Standard OpenAI-compatible API |
-| 2026-04-24 | `useAgentBridge` hook pattern | Single mount for event->store sync |
-| 2026-04-24 | `similar` crate for diff | Fast text diff utilities |
-| 2026-04-24 | `git2::Repository::discover` | Walk up to find .git in Tauri |
-| 2026-04-24 | Theme via `data-theme` + CSS vars | Runtime switching, no rebuild |
-| 2026-04-24 | `useShortcuts` hook | Centralized, group-aware shortcut registry |
-| 2026-04-24 | Custom titlebar (`decorations: false`) | Native-like IDE experience |
-| 2026-04-24 | `copy_path` + `search_files` + `get_file_metadata` | Complete file mgmt for AI agent |
-| 2026-04-24 | Structured config status card | Replaced cryptic "Connected: url · model(key)" display |
-| 2026-04-24 | SettingsPanel Test Connect fix | Save no longer loses key before testing |
-| 2026-04-24 | agent_cli --apply + --workspace | Files written to target dir; preview mode default |
+| 2026-04-24 | Monaco `key={activeFile}` for file switching | Simple and reliable remount behavior |
+| 2026-04-24 | `portable-pty` for terminal | Cross-platform PTY support |
+| 2026-04-24 | react-arborist for explorer | Virtualized file tree |
+| 2026-04-24 | Zustand stores | Lightweight local state model |
+| 2026-04-24 | `tokio::sync::Mutex` for Agent orchestrator | Allows async lock usage |
+| 2026-04-24 | reqwest SSE streaming | OpenAI-compatible LLM API support |
+| 2026-04-24 | `similar` crate for diff utilities | Existing text diff support |
+| 2026-04-24 | `git2::Repository::discover` | Locate Git repo from workspace paths |
+| 2026-04-30 | Tauri runtime guard in frontend | Vite web preview should not crash without Tauri APIs |
+| 2026-04-30 | Workspace path service | Centralized path resolution and workspace boundary checks |
+| 2026-04-30 | `ReactMarkdown skipHtml` for Agent output | Avoid rendering arbitrary LLM HTML |
+| 2026-04-30 | Context compression modes | Let users choose prompt context size/detail |
 
 ---
 
-## Commands Cheat Sheet
+## Command Cheat Sheet
 
-```bash
-# Development
-cd d:\work\agent-ide
-npm run tauri dev          # Start Tauri + Vite dev server
-npm run dev                # Vite only (web)
-npx tsc --noEmit          # TypeScript check
-cargo check               # Rust check (from src-tauri/)
+```powershell
+# Web UI preview only. Backend features are disabled/stubbed.
+npm run dev
 
-# Agent CLI
-cargo build --bin agent_cli --release   # Build CLI
-target\release\agent_cli --help          # Show usage
+# Real IDE runtime with Rust backend.
+npm run tauri -- dev
 
-# Terminal
-# Terminal spawns cmd.exe (Windows) / $SHELL (Linux/macOS) via PTY.
-# No sandbox mode — full user permissions in spawned shell.
+# Frontend build/type check.
+npm run build
+
+# Rust verification.
+cd src-tauri
+cargo check
+cargo test
+
+# Agent CLI.
+cd src-tauri
+cargo build --bin agent_cli --release
+target\release\agent_cli --help
 ```
 
 ---
 
-*Last updated: 2026-04-24 — All phases complete. Custom titlebar, workspace, agent roles/LLM config, file tools, UI polish done. CLI --apply + workspace, SettingsPanel save fix, terminal docs.*
+## Next Immediate Tasks
+
+1. Add workspace guard tests and fix any uncovered path edge cases.
+2. Wire frontend terminal to backend PTY commands.
+3. Replace current diff apply with structured conflict-aware apply results.
+4. Add real cancellation token through Agent orchestrator and LLM client.
+5. Move LLM API key storage to a safer credential path.
+
+---
+
+*Last updated: 2026-04-30 - Phase 6 in progress.*

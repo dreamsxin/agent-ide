@@ -3,6 +3,7 @@ import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
+import { isTauriRuntime } from "../../utils/tauri";
 
 interface TerminalProps {
   /** 终端 ID（用于后续多终端支持） */
@@ -16,6 +17,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
 
   // 初始化 xterm 实例
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     if (!containerRef.current) return;
 
     const term = new XtermTerminal({
@@ -56,8 +58,19 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
 
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
-    term.open(containerRef.current);
-    fitAddon.fit();
+    try {
+      term.open(containerRef.current);
+      requestAnimationFrame(() => {
+        try {
+          fitAddon.fit();
+        } catch {
+          // The panel may still be measuring during startup.
+        }
+      });
+    } catch {
+      term.dispose();
+      return;
+    }
 
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
@@ -100,6 +113,12 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       ref={containerRef}
       className="h-full w-full"
       style={{ padding: "4px 8px" }}
-    />
+    >
+      {!isTauriRuntime() && (
+        <div className="h-full flex items-center justify-center text-xs text-surface-muted">
+          Terminal is available in the Tauri app runtime.
+        </div>
+      )}
+    </div>
   );
 }

@@ -1,14 +1,17 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "../utils/tauri";
 import type {
   AgentState,
   AgentMode,
   AgentRole,
+  ContextCompressionMode,
   PipelineStage,
   LlmConfigResponse,
   Task,
   Step,
   DiffEntry,
+  ApplyDiffsResult,
   ChatMessage,
 } from "../types/agent";
 
@@ -21,6 +24,7 @@ interface AgentStore {
   diffs: DiffEntry[];
   steps: Step[];
   error: string | null;
+  lastApplyResult: ApplyDiffsResult | null;
   streamContent: string;
   isStreaming: boolean;
 
@@ -36,6 +40,7 @@ interface AgentStore {
   llmEndpoint: string;
   llmModel: string;
   apiKeyMasked: string;
+  contextCompression: ContextCompressionMode;
 
   // ====== 同步 Actions ======
   setState: (state: AgentState) => void;
@@ -67,11 +72,13 @@ interface AgentStore {
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
   applyAllDiffs: () => Promise<DiffEntry[]>;
+  clearApplyResult: () => void;
   rejectAllDiffs: () => Promise<DiffEntry[]>;
 
   // ====== 模型配置 ======
   fetchLlmConfig: () => Promise<void>;
   updateLlmConfig: (endpoint: string, apiKey: string, model: string) => Promise<void>;
+  updateContextCompression: (mode: ContextCompressionMode) => Promise<void>;
 
   // ====== 角色管理 ======
   setActiveRole: (role: AgentRole) => Promise<void>;
@@ -95,6 +102,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   diffs: [],
   steps: [],
   error: null,
+  lastApplyResult: null,
   streamContent: "",
   isStreaming: false,
   messages: [
@@ -116,6 +124,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   llmEndpoint: "",
   llmModel: "",
   apiKeyMasked: "",
+  contextCompression: "focused",
 
   // ========== 同步 Actions ==========
   setState: (state) => set({ state }),
@@ -130,7 +139,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
         st.id === stepId ? { ...st, ...updates } : st
       ),
     })),
-  setDiffs: (diffs) => set({ diffs }),
+  setDiffs: (diffs) => set({ diffs, lastApplyResult: null }),
   addDiff: (diff) => set((s) => ({ diffs: [...s.diffs, diff] })),
   markDiffApplied: (diffId) =>
     set((s) => ({
@@ -145,6 +154,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
       ),
     })),
   setError: (error) => set({ error, state: error ? "error" : "idle" }),
+  clearApplyResult: () => set({ lastApplyResult: null }),
   appendStreamContent: (token) =>
     set((s) => ({
       streamContent: s.streamContent + token,
@@ -176,14 +186,18 @@ export const useAgentStore = create<AgentStore>((set) => ({
       steps: [],
       diffs: [],
       error: null,
+      lastApplyResult: null,
       streamContent: "",
       isStreaming: false,
     }),
 
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {
-    set({ error: null, streamContent: "", isStreaming: true });
+    set({ error: null, lastApplyResult: null, streamContent: "", isStreaming: true });
     try {
+      if (!isTauriRuntime()) {
+        throw new Error("Agent backend is available in the Tauri app runtime.");
+      }
       await invoke("send_agent_prompt", {
         request: {
           prompt: params.prompt,
@@ -203,6 +217,10 @@ export const useAgentStore = create<AgentStore>((set) => ({
 
   stopAgent: async () => {
     try {
+      if (!isTauriRuntime()) {
+        set({ state: "idle", steps: [], diffs: [] });
+        return;
+      }
       await invoke("stop_agent");
       set({ state: "idle", steps: [], diffs: [] });
     } catch (err: unknown) {
@@ -212,6 +230,10 @@ export const useAgentStore = create<AgentStore>((set) => ({
 
   changeMode: async (mode) => {
     try {
+      if (!isTauriRuntime()) {
+        set({ mode });
+        return;
+      }
       await invoke("set_agent_mode", { mode });
       set({ mode });
     } catch (err: unknown) {
@@ -222,15 +244,22 @@ export const useAgentStore = create<AgentStore>((set) => ({
 
   applyAllDiffs: async () => {
     try {
-      const applied = await invoke<DiffEntry[]>("apply_diffs");
+      if (!isTauriRuntime()) return [];
+      const result = await invoke<ApplyDiffsResult>("apply_diffs");
       set((s) => ({
+        lastApplyResult: result,
+        error: result.failed.length > 0
+          ? `Failed to apply ${result.failed.length} diff${result.failed.length === 1 ? "" : "s"}.`
+          : null,
         diffs: s.diffs.map((d) =>
-          applied.some((a) => a.id === d.id)
+          result.applied.some((a) => a.id === d.id)
             ? { ...d, status: "applied" as const }
+            : result.failed.some((f) => f.diffId === d.id)
+            ? { ...d, status: "failed" as const }
             : d
         ),
       }));
-      return applied;
+      return result.applied;
     } catch (err: unknown) {
       console.warn("[AgentStore] apply_diffs failed:", err);
       return [];
@@ -239,8 +268,10 @@ export const useAgentStore = create<AgentStore>((set) => ({
 
   rejectAllDiffs: async () => {
     try {
+      if (!isTauriRuntime()) return [];
       const rejected = await invoke<DiffEntry[]>("reject_diffs");
       set((s) => ({
+        lastApplyResult: null,
         diffs: s.diffs.map((d) =>
           rejected.some((r) => r.id === d.id)
             ? { ...d, status: "rejected" as const }
@@ -257,12 +288,17 @@ export const useAgentStore = create<AgentStore>((set) => ({
   // ========== 模型配置 ==========
   fetchLlmConfig: async () => {
     try {
+      if (!isTauriRuntime()) {
+        set({ llmConfigured: false });
+        return;
+      }
       const cfg = await invoke<LlmConfigResponse>("get_llm_config");
       set({
         llmConfigured: true,
         llmEndpoint: cfg.endpoint,
         llmModel: cfg.model,
         apiKeyMasked: cfg.api_key_masked,
+        contextCompression: cfg.context_compression,
       });
     } catch {
       set({ llmConfigured: false });
@@ -270,6 +306,9 @@ export const useAgentStore = create<AgentStore>((set) => ({
   },
 
   updateLlmConfig: async (endpoint, apiKey, model) => {
+    if (!isTauriRuntime()) {
+      throw new Error("LLM configuration is available in the Tauri app runtime.");
+    }
     await invoke("update_llm_config", {
       endpoint,
       apiKey,
@@ -285,14 +324,28 @@ export const useAgentStore = create<AgentStore>((set) => ({
     });
   },
 
+  updateContextCompression: async (mode) => {
+    if (!isTauriRuntime()) {
+      set({ contextCompression: mode });
+      return;
+    }
+    const saved = await invoke<ContextCompressionMode>("set_context_compression", { mode });
+    set({ contextCompression: saved });
+  },
+
   // ========== 角色管理 ==========
   setActiveRole: async (role) => {
+    if (!isTauriRuntime()) {
+      set({ activeRole: role });
+      return;
+    }
     await invoke("set_active_role", { role });
     set({ activeRole: role });
   },
 
   fetchActiveRole: async () => {
     try {
+      if (!isTauriRuntime()) return;
       const role = await invoke<string>("get_active_role");
       set({ activeRole: role as AgentRole });
     } catch {
@@ -303,6 +356,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   // ========== 流水线管理 ==========
   fetchPipeline: async () => {
     try {
+      if (!isTauriRuntime()) return;
       const stages = await invoke<PipelineStage[]>("get_pipeline");
       set({ pipeline: stages });
     } catch {
@@ -311,17 +365,27 @@ export const useAgentStore = create<AgentStore>((set) => ({
   },
 
   updatePipeline: async (stages) => {
+    if (!isTauriRuntime()) {
+      set({ pipeline: stages });
+      return;
+    }
     await invoke("update_pipeline", { stages });
     set({ pipeline: stages });
   },
 
   resetPipeline: async () => {
+    if (!isTauriRuntime()) {
+      return;
+    }
     const stages = await invoke<PipelineStage[]>("reset_pipeline");
     set({ pipeline: stages });
   },
 
   // ========== 连通性测试 ==========
   testLlmConnection: async () => {
+    if (!isTauriRuntime()) {
+      throw new Error("LLM connection test is available in the Tauri app runtime.");
+    }
     const result = await invoke<string>("test_llm_connection");
     return result;
   },

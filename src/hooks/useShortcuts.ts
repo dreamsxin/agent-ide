@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useLayoutStore } from "../stores/useLayoutStore";
 import { open } from "@tauri-apps/plugin-dialog";
+import { isTauriRuntime } from "../utils/tauri";
 
 export interface Shortcut {
   id: string;
@@ -83,6 +84,7 @@ export default function useShortcuts() {
     { id: "open-folder", keys: "Ctrl+O", label: "Open Folder", group: "General", scope: "global",
       handler: async () => {
         try {
+          if (!isTauriRuntime()) return;
           const selected = await open({ directory: true, multiple: false, title: "Open Workspace Folder" });
           if (selected && typeof selected === "string") {
             useLayoutStore.getState().setWorkspacePath(selected);

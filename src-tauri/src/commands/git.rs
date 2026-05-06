@@ -54,7 +54,9 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
         let status = entry.status();
         let path = entry.path().unwrap_or("").to_string();
 
-        let status_str = if status.is_index_new() || status.is_wt_new() {
+        let status_str = if status.is_wt_new() {
+            "untracked"
+        } else if status.is_index_new() {
             "added"
         } else if status.is_index_deleted() || status.is_wt_deleted() {
             "deleted"
@@ -62,8 +64,6 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
             "modified"
         } else if status.is_index_renamed() || status.is_wt_renamed() {
             "renamed"
-        } else if status.is_wt_new() {
-            "untracked"
         } else {
             continue; // skip clean files
         };

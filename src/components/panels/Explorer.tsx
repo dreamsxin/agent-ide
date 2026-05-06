@@ -4,6 +4,7 @@ import type { NodeApi } from "react-arborist";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { isTauriRuntime } from "../../utils/tauri";
 
 // ====== 类型 ======
 interface FileEntry {
@@ -160,6 +161,11 @@ export default function Explorer() {
         setRootData([]);
         return;
       }
+      if (!isTauriRuntime()) {
+        setRootData([]);
+        setError("File explorer is available in the Tauri app runtime.");
+        return;
+      }
       const entries: FileEntry[] = await invoke("list_directory", { path: workspacePath });
       const nodes = entries
         .filter((e) => !EXCLUDE_DIRS.has(e.name))
@@ -185,6 +191,7 @@ export default function Explorer() {
 
   // 启动文件监听
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     startWatching().catch(console.warn);
 
     // 监听后端文件变更事件
@@ -246,6 +253,7 @@ export default function Explorer() {
       if (!changed) return;
 
       try {
+        if (!isTauriRuntime()) return;
         const entries: FileEntry[] = await invoke("list_directory", { path: id });
         const children = entries
           .filter((e) => !EXCLUDE_DIRS.has(e.name))

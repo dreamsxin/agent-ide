@@ -2,7 +2,8 @@ use crate::agent::state_machine::{AgentMode, AgentStateManager, TaskStep};
 use crate::agent::planner;
 use crate::agent::executor;
 use crate::services::llm_client::LlmClient;
-use crate::services::context::AgentContext;
+use crate::services::context::{AgentContext, ContextCompressionMode};
+use crate::services::workspace;
 use tauri::AppHandle;
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -31,6 +32,7 @@ impl AgentOrchestrator {
         &mut self,
         prompt: String,
         context: AgentContext,
+        context_compression: ContextCompressionMode,
         llm: &LlmClient,
         app: AppHandle,
     ) -> Result<(), String> {
@@ -43,7 +45,7 @@ impl AgentOrchestrator {
         self.emit_state(&app);
 
         // 2. Call LLM Streaming for planning
-        let ctx_str = context.to_prompt_context();
+        let ctx_str = context.to_prompt_context_with_mode(&context_compression);
         let (tx, mut rx) = mpsc::channel::<String>(32);
 
         // 发射流式 token 到前端
@@ -171,8 +173,9 @@ impl AgentOrchestrator {
             let file_path = if std::path::Path::new(&diff.file).is_absolute() {
                 PathBuf::from(&diff.file)
             } else {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&diff.file)
+                workspace::workspace_root()?.join(&diff.file)
             };
+            let file_path = workspace::resolve_for_write(&file_path.to_string_lossy())?;
 
             if let Some(parent) = file_path.parent() {
                 let _ = fs::create_dir_all(parent);

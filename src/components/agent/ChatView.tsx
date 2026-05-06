@@ -1,14 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
-import { marked } from "marked";
+import ReactMarkdown from "react-markdown";
 import type { AgentState } from "../../types/agent";
-
-// 配置 marked
-marked.setOptions({
-  breaks: true,   // 换行 → <br>
-  gfm: true,      // GitHub Flavored Markdown
-});
 
 /** 自动闭合未关闭的代码块，防止整个后缀被渲染为代码 */
 function sanitizeMarkdown(raw: string): string {
@@ -37,22 +31,6 @@ function sanitizeMarkdown(raw: string): string {
 }
 
 /** 将 markdown 渲染为 HTML，支持流式不完整代码块 */
-function renderMarkdown(raw: string): string {
-  try {
-    const sanitized = sanitizeMarkdown(raw);
-    return marked.parse(sanitized) as string;
-  } catch {
-    return escapeHtml(raw);
-  }
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 /** 各状态对应的 UI 信息 */
 const STATE_INFO: Record<AgentState, { label: string; spinner: boolean }> = {
   idle:         { label: "Ready",         spinner: false },
@@ -107,10 +85,9 @@ function MessageBubble({
       >
         {/* 内容 */}
         {isAgent ? (
-          <div
-            className="markdown-body"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
-          />
+          <div className="markdown-body">
+            <ReactMarkdown skipHtml>{sanitizeMarkdown(msg.content)}</ReactMarkdown>
+          </div>
         ) : (
           <div className="whitespace-pre-wrap">{msg.content}</div>
         )}

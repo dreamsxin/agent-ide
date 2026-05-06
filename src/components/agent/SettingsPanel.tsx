@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
-import type { ModelProvider, ProviderPreset } from "../../types/agent";
+import type { ContextCompressionMode, ModelProvider, ProviderPreset } from "../../types/agent";
 
 // ====== 提供商预设 ======
 const providerLabels: Record<string, string> = {
@@ -60,14 +60,17 @@ export default function SettingsPanel() {
   const llmModel = useAgentStore((s) => s.llmModel);
   const apiKeyMasked = useAgentStore((s) => s.apiKeyMasked);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
+  const contextCompression = useAgentStore((s) => s.contextCompression);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
   const updateLlmConfig = useAgentStore((s) => s.updateLlmConfig);
+  const updateContextCompression = useAgentStore((s) => s.updateContextCompression);
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
 
   const [provider, setProvider] = useState<ModelProvider>("openai");
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
+  const [compression, setCompression] = useState<ContextCompressionMode>("focused");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
@@ -81,11 +84,12 @@ export default function SettingsPanel() {
     if (llmConfigured) {
       setEndpoint(llmEndpoint);
       setModel(llmModel);
+      setCompression(contextCompression);
       // 尝试匹配 provider
       const matched = PROVIDERS.find((p) => p.defaultEndpoint && llmEndpoint.startsWith(p.defaultEndpoint));
       setProvider(matched?.id ?? "custom");
     }
-  }, [llmConfigured, llmEndpoint, llmModel]);
+  }, [contextCompression, llmConfigured, llmEndpoint, llmModel]);
 
   // 切换 provider 时自动填默认值
   const handleProviderChange = useCallback(
@@ -146,11 +150,33 @@ export default function SettingsPanel() {
   }, [endpoint, apiKey, model, llmConfigured, updateLlmConfig, testLlmConnection]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
+  const handleCompressionChange = useCallback(async (mode: ContextCompressionMode) => {
+    setCompression(mode);
+    try {
+      await updateContextCompression(mode);
+    } catch (e) {
+      setCompression(contextCompression);
+      setMessage({ type: "err", text: `Context mode update failed: ${e}` });
+    }
+  }, [contextCompression, updateContextCompression]);
 
   return (
     <div className="p-3 text-xs overflow-auto h-full">
       <div className="text-surface-muted mb-3 font-semibold tracking-wide">
         Model Configuration
+      </div>
+
+      <div className="mb-4">
+        <label className="block text-surface-muted mb-1 text-[11px]">Context Compression</label>
+        <select
+          value={compression}
+          onChange={(e) => handleCompressionChange(e.target.value as ContextCompressionMode)}
+          className="w-full px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
+        >
+          <option value="focused">Focused - active file excerpt</option>
+          <option value="compact">Compact - outline and metadata</option>
+          <option value="full">Full - complete active file</option>
+        </select>
       </div>
 
       {/* 当前配置状态卡 */}

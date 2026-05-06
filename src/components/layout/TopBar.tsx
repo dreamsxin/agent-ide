@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
+import { isTauriRuntime } from "../../utils/tauri";
 
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
@@ -32,6 +33,7 @@ export default function TopBar() {
 
   // 监听窗口最大化状态
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     const win = getCurrentWindow();
     win.isMaximized().then(setIsMaximized);
     const unlisten = win.onResized(() => {
@@ -56,13 +58,20 @@ export default function TopBar() {
   }, []);
 
   // 窗口控制
-  const handleMinimize = () => getCurrentWindow().minimize();
-  const handleMaximize = () => getCurrentWindow().toggleMaximize();
-  const handleClose = () => getCurrentWindow().close();
+  const handleMinimize = () => {
+    if (isTauriRuntime()) getCurrentWindow().minimize();
+  };
+  const handleMaximize = () => {
+    if (isTauriRuntime()) getCurrentWindow().toggleMaximize();
+  };
+  const handleClose = () => {
+    if (isTauriRuntime()) getCurrentWindow().close();
+  };
 
   // 打开工作目录
   const handleOpenFolder = useCallback(async () => {
     try {
+      if (!isTauriRuntime()) return;
       const selected = await open({
         directory: true,
         multiple: false,

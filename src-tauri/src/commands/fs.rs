@@ -1,4 +1,5 @@
 use serde::Serialize;
+use crate::services::workspace;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -34,13 +35,15 @@ impl FileWatcherState {
 /// 读取文件内容
 #[tauri::command]
 pub fn read_file_content(path: String) -> Result<String, String> {
+    let path = workspace::resolve_existing(&path)?;
     fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))
 }
 
 /// 写入文件内容（自动创建父目录）
 #[tauri::command]
 pub fn write_file_content(path: String, content: String) -> Result<(), String> {
-    if let Some(parent) = Path::new(&path).parent() {
+    let path = workspace::resolve_for_write(&path)?;
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {}", e))?;
     }
     fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e))
@@ -49,6 +52,7 @@ pub fn write_file_content(path: String, content: String) -> Result<(), String> {
 /// 列出目录内容
 #[tauri::command]
 pub fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
+    let path = workspace::resolve_existing(&path)?;
     let dir = fs::read_dir(&path).map_err(|e| format!("Failed to read dir: {}", e))?;
 
     let mut entries = Vec::new();
@@ -77,7 +81,7 @@ pub fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
 /// 检查文件是否存在
 #[tauri::command]
 pub fn file_exists(path: String) -> Result<bool, String> {
-    Ok(Path::new(&path).exists())
+    Ok(workspace::resolve_existing(&path).is_ok())
 }
 
 // ====== CRUD 操作 ======
@@ -85,50 +89,55 @@ pub fn file_exists(path: String) -> Result<bool, String> {
 /// 删除文件或递归删除目录
 #[tauri::command]
 pub fn delete_path(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
+    let resolved = workspace::resolve_existing(&path)?;
+    let p = resolved.as_path();
     if !p.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
     if p.is_dir() {
-        fs::remove_dir_all(&path).map_err(|e| format!("Failed to delete directory: {}", e))
+        fs::remove_dir_all(&resolved).map_err(|e| format!("Failed to delete directory: {}", e))
     } else {
-        fs::remove_file(&path).map_err(|e| format!("Failed to delete file: {}", e))
+        fs::remove_file(&resolved).map_err(|e| format!("Failed to delete file: {}", e))
     }
 }
 
 /// 创建文件（可选初始内容）
 #[tauri::command]
 pub fn create_file(path: String, content: Option<String>) -> Result<(), String> {
-    if Path::new(&path).exists() {
+    let resolved = workspace::resolve_for_write(&path)?;
+    if resolved.exists() {
         return Err(format!("File already exists: {}", path));
     }
-    if let Some(parent) = Path::new(&path).parent() {
+    if let Some(parent) = resolved.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
     }
-    fs::write(&path, content.unwrap_or_default())
+    fs::write(&resolved, content.unwrap_or_default())
         .map_err(|e| format!("Failed to create file: {}", e))
 }
 
 /// 创建目录（递归）
 #[tauri::command]
 pub fn create_directory(path: String) -> Result<(), String> {
-    fs::create_dir_all(&path).map_err(|e| format!("Failed to create directory: {}", e))
+    let resolved = workspace::resolve_for_write(&path)?;
+    fs::create_dir_all(&resolved).map_err(|e| format!("Failed to create directory: {}", e))
 }
 
 /// 重命名/移动文件或目录
 #[tauri::command]
 pub fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
-    if !Path::new(&old_path).exists() {
+    let old_resolved = workspace::resolve_existing(&old_path)?;
+    let new_resolved = workspace::resolve_for_write(&new_path)?;
+    if !old_resolved.exists() {
         return Err(format!("Source path does not exist: {}", old_path));
     }
-    if Path::new(&new_path).exists() {
+    if new_resolved.exists() {
         return Err(format!("Target path already exists: {}", new_path));
     }
     // 确保目标父目录存在
-    if let Some(parent) = Path::new(&new_path).parent() {
+    if let Some(parent) = new_resolved.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
     }
-    fs::rename(&old_path, &new_path)
+    fs::rename(&old_resolved, &new_resolved)
         .map_err(|e| format!("Failed to rename: {}", e))
 }
 
@@ -148,11 +157,12 @@ pub struct FileMetadata {
 /// 获取文件/目录元数据
 #[tauri::command]
 pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
-    let p = Path::new(&path);
+    let resolved = workspace::resolve_existing(&path)?;
+    let p = resolved.as_path();
     if !p.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
-    let metadata = fs::metadata(&path).map_err(|e| format!("Failed to read metadata: {}", e))?;
+    let metadata = fs::metadata(&resolved).map_err(|e| format!("Failed to read metadata: {}", e))?;
     let modified = metadata
         .modified()
         .ok()
@@ -164,7 +174,7 @@ pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
         name: p.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.clone()),
-        path,
+        path: resolved.to_string_lossy().to_string(),
         is_dir: metadata.is_dir(),
         size: metadata.len(),
         modified,
@@ -175,11 +185,13 @@ pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
 /// 复制文件或递归复制目录
 #[tauri::command]
 pub fn copy_path(src: String, dest: String) -> Result<(), String> {
-    let src_path = Path::new(&src);
+    let src_resolved = workspace::resolve_existing(&src)?;
+    let src_path = src_resolved.as_path();
     if !src_path.exists() {
         return Err(format!("Source does not exist: {}", src));
     }
-    let dest_path = Path::new(&dest);
+    let dest_resolved = workspace::resolve_for_write(&dest)?;
+    let dest_path = dest_resolved.as_path();
     if dest_path.exists() {
         return Err(format!("Destination already exists: {}", dest));
     }
@@ -222,7 +234,8 @@ pub struct SearchResult {
 
 #[tauri::command]
 pub fn search_files(root: String, pattern: String, max_depth: Option<u32>) -> Result<Vec<SearchResult>, String> {
-    let root_path = Path::new(&root);
+    let root_resolved = workspace::resolve_existing(&root)?;
+    let root_path = root_resolved.as_path();
     if !root_path.is_dir() {
         return Err(format!("Not a directory: {}", root));
     }
@@ -332,7 +345,7 @@ pub fn watch_start(
         )
         .map_err(|e| format!("Failed to configure watcher: {}", e))?;
 
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {}", e))?;
+    let cwd = workspace::workspace_root()?;
     watcher
         .watch(&cwd, RecursiveMode::Recursive)
         .map_err(|e| format!("Failed to start watching: {}", e))?;

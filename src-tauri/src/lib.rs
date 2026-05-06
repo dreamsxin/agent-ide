@@ -50,6 +50,7 @@ pub fn run() {
             commands::agent::get_agent_diffs,
             commands::agent::update_llm_config,
             commands::agent::get_llm_config,
+            commands::agent::set_context_compression,
             commands::agent::set_active_role,
             commands::agent::get_active_role,
             commands::agent::get_pipeline,

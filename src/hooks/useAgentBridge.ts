@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAgentStore } from "../stores/useAgentStore";
 import type { AgentState, Step, DiffEntry } from "../types/agent";
+import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
   state: string;
@@ -21,6 +22,7 @@ export function useAgentBridge() {
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     let stopped = false;
     const unlisteners: Array<() => void> = [];
 

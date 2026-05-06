@@ -12,6 +12,8 @@ export type AgentState =
 /** Agent 控制模式 */
 export type AgentMode = "suggest" | "edit" | "auto";
 
+export type ContextCompressionMode = "full" | "focused" | "compact";
+
 /** Agent 角色 */
 export type AgentRole = "architect" | "coder" | "tester" | "reviewer";
 
@@ -39,7 +41,7 @@ export interface DiffEntry {
   id: string;
   file: string;
   hunks: DiffHunk[];
-  status: "pending" | "applied" | "rejected";
+  status: "pending" | "applied" | "rejected" | "failed";
 }
 
 export interface DiffHunk {
@@ -50,6 +52,17 @@ export interface DiffHunk {
   content: string;
   original: string;
   updated: string;
+}
+
+export interface ApplyDiffError {
+  diffId: string;
+  file: string;
+  message: string;
+}
+
+export interface ApplyDiffsResult {
+  applied: DiffEntry[];
+  failed: ApplyDiffError[];
 }
 
 /** Task 任务 */
@@ -88,6 +101,7 @@ export interface LlmConfigResponse {
   endpoint: string;
   api_key_masked: string;
   model: string;
+  context_compression: ContextCompressionMode;
 }
 
 /** 模型提供商预设 */

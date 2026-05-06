@@ -220,7 +220,7 @@ async fn main() {
                                     files_written += 1;
                                     written = true;
                                 }
-                                Err(e) => {
+                                Err(_e) => {
                                 }
                             }
                         } else if !h.original.is_empty() {
@@ -249,11 +249,11 @@ async fn main() {
                                             files_written += 1;
                                             written = true;
                                         }
-                                        Err(e) => {
+                                        Err(_e) => {
                                         }
                                     }
                                 }
-                                Err(e) => {
+                                Err(_e) => {
                                 }
                             }
                         }

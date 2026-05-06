@@ -79,6 +79,20 @@ pub struct FileDiff {
     pub status: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApplyDiffError {
+    #[serde(rename = "diffId")]
+    pub diff_id: String,
+    pub file: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApplyDiffsResult {
+    pub applied: Vec<FileDiff>,
+    pub failed: Vec<ApplyDiffError>,
+}
+
 /// Diff Hunk
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiffHunk {

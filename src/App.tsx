@@ -11,6 +11,7 @@ import { useLayoutStore } from "./stores/useLayoutStore";
 import { useEditorStore } from "./stores/useEditorStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import useShortcuts from "./hooks/useShortcuts";
+import { isTauriRuntime } from "./utils/tauri";
 
 function AnimatedPanel({ visible, className = "", children }: { visible: boolean; className?: string; children: React.ReactNode }) {
   const [shouldRender, setShouldRender] = useState(visible);
@@ -67,6 +68,7 @@ export default function App() {
 
   // 启动时恢复上次的工作目录
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     invoke<string | null>("get_workspace_path").then((saved) => {
       if (saved && typeof saved === "string" && saved.length > 0) {
         console.log("[App] Restoring workspace:", saved);

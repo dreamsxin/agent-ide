@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { GitStatus } from "../types/project";
+import { isTauriRuntime } from "../utils/tauri";
 
 interface GitStore {
   status: GitStatus | null;
@@ -23,6 +24,10 @@ export const useGitStore = create<GitStore>((set) => ({
   fetchStatus: async (path: string) => {
     set({ loading: true, error: null });
     try {
+      if (!isTauriRuntime()) {
+        set({ status: null, loading: false, error: "Git is available in the Tauri app runtime." });
+        return;
+      }
       const status = await invoke<GitStatus>("git_status", { path });
       set({ status, loading: false });
     } catch (err: unknown) {
@@ -33,6 +38,10 @@ export const useGitStore = create<GitStore>((set) => ({
   fetchDiff: async (path: string, file?: string) => {
     set({ loading: true, error: null });
     try {
+      if (!isTauriRuntime()) {
+        set({ diff: null, loading: false, error: "Git diff is available in the Tauri app runtime." });
+        return;
+      }
       const diff = await invoke<string>("git_diff", { path, file: file ?? null });
       set({ diff, loading: false });
     } catch (err: unknown) {
@@ -43,6 +52,10 @@ export const useGitStore = create<GitStore>((set) => ({
   commit: async (path: string, message: string, files?: string[]) => {
     set({ loading: true, error: null });
     try {
+      if (!isTauriRuntime()) {
+        set({ loading: false, error: "Git commit is available in the Tauri app runtime." });
+        return null;
+      }
       const oid = await invoke<string>("git_commit", {
         path,
         message,
