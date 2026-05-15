@@ -21,6 +21,12 @@ export interface QueuedTerminalCommand {
 interface TaskStore {
   lastTask: QueuedTerminalCommand | null;
   pendingTerminalCommands: QueuedTerminalCommand[];
+  discoveredTasks: ProjectTaskDefinition[];
+  taskDiscoveryLoading: boolean;
+  taskDiscoveryLoaded: boolean;
+  taskDiscoveryError: string | null;
+  setDiscoveredTasks: (tasks: ProjectTaskDefinition[]) => void;
+  setTaskDiscoveryState: (loading: boolean, error?: string | null, loaded?: boolean) => void;
   queueTerminalCommand: (taskId: string, command: string, terminalId?: string) => QueuedTerminalCommand;
   consumeTerminalCommands: (terminalId: string) => QueuedTerminalCommand[];
 }
@@ -66,6 +72,18 @@ export const PROJECT_TASKS: ProjectTaskDefinition[] = [
 export const useTaskStore = create<TaskStore>((set, get) => ({
   lastTask: null,
   pendingTerminalCommands: [],
+  discoveredTasks: [],
+  taskDiscoveryLoading: false,
+  taskDiscoveryLoaded: false,
+  taskDiscoveryError: null,
+
+  setDiscoveredTasks: (discoveredTasks) => set({ discoveredTasks }),
+  setTaskDiscoveryState: (taskDiscoveryLoading, taskDiscoveryError = null, taskDiscoveryLoaded) =>
+    set((state) => ({
+      taskDiscoveryLoading,
+      taskDiscoveryError,
+      taskDiscoveryLoaded: taskDiscoveryLoaded ?? state.taskDiscoveryLoaded,
+    })),
 
   queueTerminalCommand: (taskId, command, terminalId = "main") => {
     const queued: QueuedTerminalCommand = {

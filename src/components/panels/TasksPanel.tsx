@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { PROJECT_TASKS, useTaskStore, type ProjectTaskDefinition } from "../../stores/useTaskStore";
+import { useTaskStore } from "../../stores/useTaskStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { useProjectTasks } from "../../hooks/useProjectTasks";
 
 export default function TasksPanel() {
   const queueTerminalCommand = useTaskStore((s) => s.queueTerminalCommand);
@@ -14,37 +13,7 @@ export default function TasksPanel() {
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const addLog = useLogStore((s) => s.addLog);
   const clearProblems = useProblemStore((s) => s.clearProblems);
-  const [discoveredTasks, setDiscoveredTasks] = useState<ProjectTaskDefinition[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(null);
-    invoke<ProjectTaskDefinition[]>("discover_project_tasks")
-      .then((tasks) => {
-        if (!cancelled) setDiscoveredTasks(tasks);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setLoadError(String(err));
-          setDiscoveredTasks([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const tasks = discoveredTasks.length > 0 ? discoveredTasks : PROJECT_TASKS;
-  const usingFallback = discoveredTasks.length === 0;
+  const { tasks, usingFallback, loading, error } = useProjectTasks();
 
   const runTask = (taskId: string, command: string, label: string) => {
     if (!bottomVisible) {
@@ -65,7 +34,7 @@ export default function TasksPanel() {
   return (
     <div className="flex h-full flex-col bg-black text-xs">
       <div className="border-b border-surface-border px-3 py-2">
-        <div className="font-semibold text-surface-text">Project Tasks</div>
+        <div className="font-semibold text-surface-text">Project Commands</div>
         <div className="mt-0.5 text-[11px] text-surface-muted">
           {usingFallback
             ? "No workspace tasks discovered yet. Showing fallback commands."
@@ -79,9 +48,9 @@ export default function TasksPanel() {
         </div>
       )}
 
-      {loadError && (
+      {error && (
         <div className="border-b border-surface-border px-3 py-2 text-[11px] text-diff-remove">
-          Failed to discover workspace tasks: {loadError}
+          Failed to discover workspace tasks: {error}
         </div>
       )}
 

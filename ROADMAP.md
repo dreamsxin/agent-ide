@@ -83,6 +83,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Parsed terminal TypeScript/lint/test-style file-position errors into the Problems panel for click-through navigation.
 - Added a Project Tasks panel for build, test, lint, run, and debug commands that queue into the integrated terminal.
 - Added workspace task discovery from `package.json` scripts and Cargo manifests, with fallback default tasks when no project tasks are found.
+- Moved common project Run/Debug/Build/Test commands into the TopBar and renamed the bottom task list to Commands to keep Agent Tasks distinct.
 
 Important distinction:
 
@@ -118,7 +119,8 @@ Known local worktree note:
 - `src/utils/codeCompletion.ts`: local completion candidate extraction for Monaco suggestions.
 - `src/components/panels/`: Explorer, Git panel, terminal, logs.
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
-- `src/components/panels/TasksPanel.tsx`: project build/test/lint/run/debug task launcher.
+- `src/components/panels/TasksPanel.tsx`: project command list for discovered build/test/lint/run/debug commands.
+- `src/hooks/useProjectTasks.ts`: shared frontend task discovery hook for TopBar and Commands.
 - `src/stores/useTaskStore.ts`: queued terminal command state for project tasks.
 - `src/utils/terminalProblemParser.ts`: parses terminal output into Problems entries for common file:line:column formats.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
@@ -197,7 +199,7 @@ Project Tasks
   -> discover_project_tasks()
     -> package.json scripts + Cargo manifests
     -> fallback defaults when no tasks are discovered
-  -> TasksPanel
+  -> TopBar common Run/Debug/Build/Test buttons or Commands panel
     -> useTaskStore.queueTerminalCommand()
     -> Terminal consumes queued command when ready
     -> terminalProblemParser feeds Problems
@@ -382,7 +384,7 @@ Deliverables:
   - resize
   - receive `terminal-output`
   - kill terminal
-- Project Tasks panel discovers workspace scripts/manifests and launches build, test, lint, run, and debug commands through the integrated terminal.
+- TopBar exposes common Run/Debug/Build/Test commands, while the bottom Commands panel lists all discovered workspace commands.
 - QuickActions sends real Agent prompts.
 - DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.

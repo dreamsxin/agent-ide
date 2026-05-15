@@ -3,12 +3,15 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useThemeStore } from "../../stores/useThemeStore";
+import { useTaskStore, type ProjectTaskDefinition } from "../../stores/useTaskStore";
+import { useLogStore } from "../../stores/useLogStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
 import { isTauriRuntime } from "../../utils/tauri";
+import { useProjectTasks } from "../../hooks/useProjectTasks";
 
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
@@ -21,10 +24,15 @@ export default function TopBar() {
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
+  const bottomVisible = useLayoutStore((s) => s.bottomVisible);
+  const setBottomTab = useLayoutStore((s) => s.setBottomTab);
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const setWorkspacePath = useLayoutStore((s) => s.setWorkspacePath);
+  const queueTerminalCommand = useTaskStore((s) => s.queueTerminalCommand);
+  const addLog = useLogStore((s) => s.addLog);
+  const { tasks } = useProjectTasks();
 
   const [isMaximized, setIsMaximized] = useState(false);
 
@@ -52,6 +60,25 @@ export default function TopBar() {
   const handleStop = useCallback(() => {
     stopAgent();
   }, [stopAgent]);
+
+  const runProjectTask = useCallback(
+    (task: ProjectTaskDefinition | undefined) => {
+      if (!task || !isTauriRuntime()) return;
+      if (!bottomVisible) {
+        toggleBottomPanel();
+      }
+      setBottomTab("terminal");
+      queueTerminalCommand(task.id, task.command);
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        level: "info",
+        source: "system",
+        message: `Queued project task: ${task.label}`,
+        details: task.command,
+      });
+    },
+    [addLog, bottomVisible, queueTerminalCommand, setBottomTab, toggleBottomPanel]
+  );
 
   const handleHelp = useCallback(() => {
     window.dispatchEvent(new CustomEvent("toggle-shortcuts-help"));
@@ -92,6 +119,10 @@ export default function TopBar() {
   const projectName = workspacePath
     ? workspacePath.split(/[/\\]/).pop() || workspacePath
     : "No folder opened";
+  const runTask = pickTask(tasks, ["dev", "start", "run"]);
+  const debugTask = pickTask(tasks, ["debug", "preview"]);
+  const buildTask = pickTask(tasks, ["build"]);
+  const testTask = pickTask(tasks, ["test"]);
 
   return (
     <div
@@ -118,8 +149,42 @@ export default function TopBar() {
         </span>
       </div>
 
-      {/* 中间：Agent 模式切换 */}
-      <div className="flex items-center gap-3">
+      {/* 中间：项目命令 + Agent 模式切换 */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 rounded border border-surface-border bg-surface-base px-1 py-0.5">
+          <button
+            onClick={() => runProjectTask(runTask)}
+            disabled={!runTask || !isTauriRuntime()}
+            className="rounded px-2 py-0.5 text-[11px] text-surface-text hover:bg-surface-border/40 disabled:cursor-not-allowed disabled:opacity-40"
+            title={runTask ? runTask.command : "No run task discovered"}
+          >
+            Run
+          </button>
+          <button
+            onClick={() => runProjectTask(debugTask)}
+            disabled={!debugTask || !isTauriRuntime()}
+            className="rounded px-2 py-0.5 text-[11px] text-surface-text hover:bg-surface-border/40 disabled:cursor-not-allowed disabled:opacity-40"
+            title={debugTask ? debugTask.command : "No debug task discovered"}
+          >
+            Debug
+          </button>
+          <button
+            onClick={() => runProjectTask(buildTask)}
+            disabled={!buildTask || !isTauriRuntime()}
+            className="rounded px-2 py-0.5 text-[11px] text-surface-muted hover:bg-surface-border/40 hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
+            title={buildTask ? buildTask.command : "No build task discovered"}
+          >
+            Build
+          </button>
+          <button
+            onClick={() => runProjectTask(testTask)}
+            disabled={!testTask || !isTauriRuntime()}
+            className="rounded px-2 py-0.5 text-[11px] text-surface-muted hover:bg-surface-border/40 hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
+            title={testTask ? testTask.command : "No test task discovered"}
+          >
+            Test
+          </button>
+        </div>
         <ModeSwitch mode={agentMode} onChange={handleModeChange} />
       </div>
 
@@ -133,20 +198,13 @@ export default function TopBar() {
 
         <StatusDot state={agentState} />
 
-        {isRunning ? (
+        {isRunning && (
           <button
             onClick={handleStop}
             className="px-2.5 py-1 text-xs bg-red-600/70 hover:bg-red-600 text-white rounded transition-colors"
             title="Stop Agent"
           >
             ■ Stop
-          </button>
-        ) : (
-          <button
-            className="px-2.5 py-1 text-xs bg-accent-blue hover:bg-blue-700 text-white rounded transition-colors opacity-50 cursor-not-allowed"
-            title="Start a task in Chat"
-          >
-            ▶ Run
           </button>
         )}
 
@@ -230,5 +288,13 @@ export default function TopBar() {
         </div>
       </div>
     </div>
+  );
+}
+
+function pickTask(tasks: ProjectTaskDefinition[], names: string[]) {
+  const normalized = names.map((name) => name.toLowerCase());
+  return (
+    tasks.find((task) => normalized.includes(task.label.toLowerCase())) ??
+    tasks.find((task) => normalized.some((name) => task.id.toLowerCase().includes(name)))
   );
 }
