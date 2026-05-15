@@ -84,6 +84,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added a Project Tasks panel for build, test, lint, run, and debug commands that queue into the integrated terminal.
 - Added workspace task discovery from `package.json` scripts and Cargo manifests, with fallback default tasks when no project tasks are found.
 - Moved common project Run/Debug/Build/Test commands into the TopBar and renamed the bottom task list to Commands to keep Agent Tasks distinct.
+- Expanded terminal test-output parsing for Vitest/Jest-style failures, stack traces, and `FAIL` file summaries so `npm run test` failures can surface in Problems.
 
 Important distinction:
 
@@ -286,7 +287,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
 8. **Problems panel is only partially populated**
    - The UI/store foundation is now present.
    - Monaco diagnostics, Agent errors, and failed diff findings can be surfaced.
-   - Terminal TypeScript/lint/test-style file-position errors are parsed into Problems.
+   - Terminal TypeScript/lint/test-style file-position errors, Vitest/Jest-style stack traces, and failed test file summaries are parsed into Problems.
    - Rich test-runner protocol integration is still pending.
    - True cross-file LSP diagnostics still require LSP backend integration.
 
