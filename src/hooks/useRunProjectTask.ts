@@ -16,6 +16,7 @@ interface RunProjectTaskResult {
 }
 
 export function useRunProjectTask() {
+  const workspacePath = useLayoutStore((s) => s.workspacePath);
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
@@ -43,7 +44,7 @@ export function useRunProjectTask() {
 
         try {
           const result = await invoke<RunProjectTaskResult>("run_project_task", {
-            request: { command: task.command },
+            request: { command: task.command, cwd: workspacePath || null },
           });
           const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
           const status = result.exitCode === 0 ? "success" : "failed";
@@ -100,6 +101,7 @@ export function useRunProjectTask() {
       setBottomTab,
       startTaskRun,
       toggleBottomPanel,
+      workspacePath,
     ]
   );
 }

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useLayoutStore } from "../stores/useLayoutStore";
+import { useEditorStore } from "../stores/useEditorStore";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isTauriRuntime } from "../utils/tauri";
 
@@ -91,7 +93,9 @@ export default function useShortcuts() {
           if (!isTauriRuntime()) return;
           const selected = await open({ directory: true, multiple: false, title: "Open Workspace Folder" });
           if (selected && typeof selected === "string") {
+            await invoke("save_workspace_path", { path: selected });
             useLayoutStore.getState().setWorkspacePath(selected);
+            useEditorStore.getState().setWorkspacePath(selected);
           }
         } catch { /* ignore */ }
       } },

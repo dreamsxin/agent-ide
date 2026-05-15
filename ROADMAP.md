@@ -87,6 +87,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Expanded terminal test-output parsing for Vitest/Jest-style failures, stack traces, and `FAIL` file summaries so `npm run test` failures can surface in Problems.
 - Added non-interactive project task runner for build/test/lint/check commands with exit code, duration, Logs integration, and Problems parsing.
 - Unified TopBar and Commands panel project command execution through a shared runner/terminal routing hook, so build/test/lint/check feed Logs and Problems consistently while run/debug stay interactive in Terminal.
+- Fixed workspace switching for Commands and Terminal by passing the active frontend workspace path into task discovery, task execution, and terminal spawn instead of relying only on previously persisted backend workspace state.
 
 Important distinction:
 
@@ -200,7 +201,7 @@ Terminal command output
       -> ProblemsPanel
 
 Project Tasks
-  -> discover_project_tasks()
+  -> discover_project_tasks(active workspace path)
     -> package.json scripts + Cargo manifests
     -> fallback defaults when no tasks are discovered
   -> TopBar common Run/Debug/Build/Test buttons or Commands panel
@@ -280,6 +281,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Project tasks can queue run/debug commands into the terminal.
    - Build/test/lint/check tasks can run through a non-interactive command runner with exit code and duration.
    - TopBar and Commands panel now use the same project command execution path.
+   - Terminal spawn now receives the active frontend workspace path, so newly opened terminals start in the currently opened workspace.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Git workflow needs continued polish**

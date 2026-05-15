@@ -10,6 +10,7 @@ import { appendAndParseTerminalProblems } from "../../utils/terminalProblemParse
 import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
+import { useLayoutStore } from "../../stores/useLayoutStore";
 
 interface TerminalProps {
   terminalId?: string;
@@ -25,6 +26,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const lastTask = useTaskStore((s) => s.lastTask);
   const consumeTerminalCommands = useTaskStore((s) => s.consumeTerminalCommands);
   const addLog = useLogStore((s) => s.addLog);
+  const workspacePath = useLayoutStore((s) => s.workspacePath);
   const [startupError, setStartupError] = useState<string | null>(null);
 
   const runQueuedCommands = useCallback(() => {
@@ -145,7 +147,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       })
       .catch((err) => console.warn("[Terminal] listen failed:", err));
 
-    invoke("spawn_terminal", { id: terminalId })
+    invoke("spawn_terminal", { id: terminalId, cwd: workspacePath || null })
       .then(() => {
         readyRef.current = true;
         sendResize();
@@ -200,7 +202,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [replaceProblems, runQueuedCommands, terminalId]);
+  }, [replaceProblems, runQueuedCommands, terminalId, workspacePath]);
 
   useEffect(() => {
     runQueuedCommands();

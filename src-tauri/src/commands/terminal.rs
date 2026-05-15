@@ -33,6 +33,7 @@ pub async fn spawn_terminal(
     app: AppHandle,
     terminal_manager: tauri::State<'_, TerminalManager>,
     id: String,
+    cwd: Option<String>,
 ) -> Result<(), String> {
     // 检查是否已存在
     {
@@ -58,7 +59,12 @@ pub async fn spawn_terminal(
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
     // 构建 shell 命令
-    let workspace_root = workspace::workspace_root()?;
+    let workspace_root = match cwd.as_deref() {
+        Some(path) if !path.trim().is_empty() => std::path::PathBuf::from(path)
+            .canonicalize()
+            .map_err(|e| format!("Terminal cwd does not exist or is not accessible: {}", e))?,
+        _ => workspace::workspace_root()?,
+    };
 
     #[cfg(target_os = "windows")]
     let mut cmd = CommandBuilder::new("cmd.exe");

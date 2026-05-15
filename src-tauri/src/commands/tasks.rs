@@ -16,6 +16,7 @@ pub struct ProjectTask {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunProjectTaskRequest {
     pub command: String,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,8 +31,8 @@ pub struct RunProjectTaskResult {
 }
 
 #[tauri::command]
-pub fn discover_project_tasks() -> Result<Vec<ProjectTask>, String> {
-    let root = workspace::workspace_root()?;
+pub fn discover_project_tasks(path: Option<String>) -> Result<Vec<ProjectTask>, String> {
+    let root = task_workspace_root(path.as_deref())?;
     let mut tasks = Vec::new();
 
     tasks.extend(discover_package_scripts(&root)?);
@@ -42,7 +43,7 @@ pub fn discover_project_tasks() -> Result<Vec<ProjectTask>, String> {
 
 #[tauri::command]
 pub async fn run_project_task(request: RunProjectTaskRequest) -> Result<RunProjectTaskResult, String> {
-    let root = workspace::workspace_root()?;
+    let root = task_workspace_root(request.cwd.as_deref())?;
     let command = request.command.trim().to_string();
     if command.is_empty() {
         return Err("Task command is empty".to_string());
@@ -73,6 +74,15 @@ pub async fn run_project_task(request: RunProjectTaskRequest) -> Result<RunProje
     })
     .await
     .map_err(|e| format!("Join task command: {}", e))?
+}
+
+fn task_workspace_root(path: Option<&str>) -> Result<std::path::PathBuf, String> {
+    match path {
+        Some(path) if !path.trim().is_empty() => std::path::PathBuf::from(path)
+            .canonicalize()
+            .map_err(|e| format!("Workspace does not exist or is not accessible: {}", e)),
+        _ => workspace::workspace_root(),
+    }
 }
 
 fn discover_package_scripts(root: &Path) -> Result<Vec<ProjectTask>, String> {
@@ -217,11 +227,29 @@ mod tests {
             r#"{"scripts":{"test":"vitest","build":"vite build","dev":"vite"}}"#,
         );
 
-        let tasks = discover_project_tasks().unwrap();
+        let tasks = discover_project_tasks(None).unwrap();
 
         assert!(tasks.iter().any(|task| task.id == "npm:dev" && task.command == "npm run dev"));
         assert!(tasks.iter().any(|task| task.id == "npm:build"));
         assert!(tasks.iter().any(|task| task.id == "npm:test"));
+    }
+
+    #[test]
+    fn discover_project_tasks_uses_explicit_workspace_path() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        let explicit = env.root.join("nested-app");
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::write(
+            explicit.join("package.json"),
+            r#"{"scripts":{"test":"vitest","dev":"vite --host"}}"#,
+        )
+        .unwrap();
+
+        let tasks = discover_project_tasks(Some(explicit.to_string_lossy().to_string())).unwrap();
+
+        assert!(tasks.iter().any(|task| task.id == "npm:dev"));
+        assert!(tasks.iter().any(|task| task.command == "npm run test"));
     }
 
     #[test]
@@ -230,7 +258,7 @@ mod tests {
         let env = TestEnv::new();
         env.write("src-tauri/Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n");
 
-        let tasks = discover_project_tasks().unwrap();
+        let tasks = discover_project_tasks(None).unwrap();
 
         assert!(tasks
             .iter()

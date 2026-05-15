@@ -1,23 +1,29 @@
 import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useLayoutStore } from "../stores/useLayoutStore";
 import { PROJECT_TASKS, useTaskStore, type ProjectTaskDefinition } from "../stores/useTaskStore";
 import { isTauriRuntime } from "../utils/tauri";
 
 export function useProjectTasks() {
+  const workspacePath = useLayoutStore((s) => s.workspacePath);
   const discoveredTasks = useTaskStore((s) => s.discoveredTasks);
   const loading = useTaskStore((s) => s.taskDiscoveryLoading);
-  const loaded = useTaskStore((s) => s.taskDiscoveryLoaded);
   const error = useTaskStore((s) => s.taskDiscoveryError);
   const setDiscoveredTasks = useTaskStore((s) => s.setDiscoveredTasks);
   const setTaskDiscoveryState = useTaskStore((s) => s.setTaskDiscoveryState);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
-    if (loading || loaded) return;
+    if (!workspacePath) {
+      setDiscoveredTasks([]);
+      setTaskDiscoveryState(false, null, false);
+      return;
+    }
 
     let cancelled = false;
+    setDiscoveredTasks([]);
     setTaskDiscoveryState(true);
-    invoke<ProjectTaskDefinition[]>("discover_project_tasks")
+    invoke<ProjectTaskDefinition[]>("discover_project_tasks", { path: workspacePath })
       .then((tasks) => {
         if (!cancelled) {
           setDiscoveredTasks(tasks);
@@ -37,7 +43,7 @@ export function useProjectTasks() {
     return () => {
       cancelled = true;
     };
-  }, [loaded, loading, setDiscoveredTasks, setTaskDiscoveryState]);
+  }, [workspacePath, setDiscoveredTasks, setTaskDiscoveryState]);
 
   return {
     tasks: discoveredTasks.length > 0 ? discoveredTasks : PROJECT_TASKS,
