@@ -72,6 +72,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Improved terminal startup feedback and guarded resize fitting when the panel has no measurable size.
 - Added `README.md` with setup, runtime modes, verification, Agent workflow, protocol, and project status.
 - Added optional `baseHash` metadata to structured Agent diffs and reject stale edit diffs when the file content hash no longer matches.
+- Added `README.zh-CN.md` as the Chinese project README and linked it from the English README.
 
 Important distinction:
 
@@ -121,6 +122,7 @@ Known local worktree note:
 - `src-tauri/src/services/context.rs`: AgentContext and context compression.
 - `src-tauri/src/services/workspace.rs`: config dir, workspace persistence, path resolution and workspace boundary checks.
 - `README.md`: setup, runtime modes, verification, Agent workflow, and current limitations.
+- `README.zh-CN.md`: Chinese setup, workflow, protocol, and project status overview.
 
 ---
 

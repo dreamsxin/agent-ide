@@ -1,5 +1,7 @@
 # Agent IDE
 
+中文文档见 [README.zh-CN.md](README.zh-CN.md).
+
 Code-centric controllable AI Agent IDE built with Tauri v2, Rust, React, TypeScript, Tailwind CSS, Monaco Editor, and xterm.js.
 
 Agent IDE is not intended to be a chat-only coding tool. The product direction is an IDE where the Agent is visible, auditable, and user-controlled through task plans, role pipelines, diff review, logs, Git state, and terminal workflows.
