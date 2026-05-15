@@ -263,6 +263,53 @@ pub async fn apply_diffs(
     Ok(result)
 }
 
+/// Apply one pending diff to the filesystem.
+#[tauri::command]
+pub async fn apply_diff(
+    diff_id: String,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<ApplyDiffsResult, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(diff) = orch
+        .diffs
+        .iter()
+        .find(|item| item.id == diff_id)
+        .cloned()
+    else {
+        return Err(format!("Diff not found: {}", diff_id));
+    };
+
+    if diff.status != "pending" {
+        return Err(format!(
+            "Diff {} is not pending; current status is {}",
+            diff_id, diff.status
+        ));
+    }
+
+    let result = apply_pending_diffs(&[diff]);
+    let failed = result.failed.clone();
+
+    for item in &mut orch.diffs {
+        if item.id != diff_id {
+            continue;
+        }
+        if result.applied.iter().any(|applied| applied.id == item.id) {
+            item.status = "applied".to_string();
+        } else if failed.iter().any(|failure| failure.diff_id == item.id) {
+            item.status = "failed".to_string();
+        }
+    }
+
+    set_review_state_after_single_diff(&mut orch);
+    let _ = app_handle.emit(
+        "agent-state-changed",
+        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+
+    Ok(result)
+}
+
 fn is_cancelled_error(err: &str) -> bool {
     err == "Agent task cancelled"
 }
@@ -291,6 +338,49 @@ pub async fn reject_diffs(
         .collect();
 
     Ok(rejected)
+}
+
+/// Reject one pending diff.
+#[tauri::command]
+pub async fn reject_diff(
+    diff_id: String,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<FileDiff, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(diff) = orch.diffs.iter_mut().find(|item| item.id == diff_id) else {
+        return Err(format!("Diff not found: {}", diff_id));
+    };
+
+    if diff.status != "pending" {
+        return Err(format!(
+            "Diff {} is not pending; current status is {}",
+            diff_id, diff.status
+        ));
+    }
+
+    diff.status = "rejected".to_string();
+    let rejected = diff.clone();
+
+    set_review_state_after_single_diff(&mut orch);
+    let _ = app_handle.emit(
+        "agent-state-changed",
+        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+
+    Ok(rejected)
+}
+
+fn set_review_state_after_single_diff(orch: &mut AgentOrchestrator) {
+    if orch
+        .diffs
+        .iter()
+        .any(|diff| diff.status == "pending" || diff.status == "failed")
+    {
+        orch.state_mgr.set(AgentState::WaitingUser);
+    } else {
+        orch.state_mgr.set(AgentState::Done);
+    }
 }
 
 /// Get the current steps.

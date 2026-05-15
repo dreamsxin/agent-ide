@@ -73,8 +73,10 @@ interface AgentStore {
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
   applyAllDiffs: () => Promise<DiffEntry[]>;
+  applyDiff: (diffId: string) => Promise<DiffEntry[]>;
   clearApplyResult: () => void;
   rejectAllDiffs: () => Promise<DiffEntry[]>;
+  rejectDiff: (diffId: string) => Promise<DiffEntry | null>;
 
   // ====== 模型配置 ======
   fetchLlmConfig: () => Promise<void>;
@@ -275,6 +277,31 @@ export const useAgentStore = create<AgentStore>((set) => ({
     }
   },
 
+  applyDiff: async (diffId) => {
+    try {
+      if (!isTauriRuntime()) return [];
+      const result = await invoke<ApplyDiffsResult>("apply_diff", { diffId });
+      set((s) => ({
+        lastApplyResult: result,
+        error: result.failed.length > 0 ? "Failed to apply diff." : null,
+        diffs: s.diffs.map((d) => {
+          if (result.applied.some((a) => a.id === d.id)) {
+            return { ...d, status: "applied" as const, applyError: undefined };
+          }
+          const failure = result.failed.find((f) => f.diffId === d.id);
+          if (failure) {
+            return { ...d, status: "failed" as const, applyError: failure.message };
+          }
+          return d;
+        }),
+      }));
+      return result.applied;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] apply_diff failed:", err);
+      return [];
+    }
+  },
+
   rejectAllDiffs: async () => {
     try {
       if (!isTauriRuntime()) return [];
@@ -291,6 +318,25 @@ export const useAgentStore = create<AgentStore>((set) => ({
     } catch (err: unknown) {
       console.warn("[AgentStore] reject_diffs failed:", err);
       return [];
+    }
+  },
+
+  rejectDiff: async (diffId) => {
+    try {
+      if (!isTauriRuntime()) return null;
+      const rejected = await invoke<DiffEntry>("reject_diff", { diffId });
+      set((s) => ({
+        lastApplyResult: null,
+        diffs: s.diffs.map((d) =>
+          d.id === rejected.id
+            ? { ...d, status: "rejected" as const, applyError: undefined }
+            : d
+        ),
+      }));
+      return rejected;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] reject_diff failed:", err);
+      return null;
     }
   },
 

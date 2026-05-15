@@ -79,7 +79,9 @@ export default function DiffView() {
   const lastApplyResult = useAgentStore((s) => s.lastApplyResult);
   const clearApplyResult = useAgentStore((s) => s.clearApplyResult);
   const applyAllDiffs = useAgentStore((s) => s.applyAllDiffs);
+  const applyDiff = useAgentStore((s) => s.applyDiff);
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
+  const rejectDiff = useAgentStore((s) => s.rejectDiff);
 
   const pendingDiffs = diffs.filter((d) => d.status === "pending");
   const hasPending = pendingDiffs.length > 0;
@@ -94,6 +96,20 @@ export default function DiffView() {
   const handleRejectAll = useCallback(async () => {
     await rejectAllDiffs();
   }, [rejectAllDiffs]);
+
+  const handleApplyDiff = useCallback(
+    async (diffId: string) => {
+      await applyDiff(diffId);
+    },
+    [applyDiff]
+  );
+
+  const handleRejectDiff = useCallback(
+    async (diffId: string) => {
+      await rejectDiff(diffId);
+    },
+    [rejectDiff]
+  );
 
   return (
     <div className="flex h-full flex-col space-y-3 p-2 animate-fade-in">
@@ -163,6 +179,22 @@ export default function DiffView() {
                       baseHash
                     </span>
                     <span className="truncate font-mono">{diff.baseHash}</span>
+                  </div>
+                )}
+                {diff.status === "pending" && (
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => handleApplyDiff(diff.id)}
+                      className="rounded border border-diff-add/40 bg-diff-add/15 px-2 py-1 text-[11px] text-diff-add transition-colors hover:bg-diff-add/25"
+                    >
+                      Apply
+                    </button>
+                    <button
+                      onClick={() => handleRejectDiff(diff.id)}
+                      className="rounded border border-diff-remove/40 bg-diff-remove/15 px-2 py-1 text-[11px] text-diff-remove transition-colors hover:bg-diff-remove/25"
+                    >
+                      Reject
+                    </button>
                   </div>
                 )}
               </div>

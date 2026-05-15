@@ -75,6 +75,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added `README.zh-CN.md` as the Chinese project README and linked it from the English README.
 - Surfaced diff `baseHash` metadata in the Diff view and added stale-diff guidance when hash validation fails.
 - Added Git file management commands and UI actions for stage, unstage, and discard through a file context menu.
+- Added per-file diff apply/reject commands and Diff view controls so reviewers can accept or reject individual pending files instead of only applying or rejecting the full batch.
 
 Important distinction:
 
@@ -162,15 +163,16 @@ ChatView.handleSend()
 ### Apply Diff
 
 ```text
-DiffView.applyAllDiffs()
-  -> invoke("apply_diffs")
-    -> resolve each diff file inside workspace
-    -> string-match original hunk
+DiffView.applyAllDiffs() or per-file Apply
+  -> invoke("apply_diffs") or invoke("apply_diff", diffId)
+    -> resolve target diff files inside workspace
+    -> validate optional baseHash for stale edits
+    -> string-match original hunks
     -> write updated content
-    -> mark applied and emit state
+    -> mark applied/failed and emit state
 ```
 
-Current limitation: diff application still uses textual `find` replacement. It needs stronger conflict detection.
+Current limitation: diff application still uses textual `find` replacement. It needs stronger conflict detection and per-hunk controls.
 
 ---
 
@@ -183,6 +185,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Now rejects ambiguous matches and refuses to overwrite existing files for new-file hunks.
    - Missing file hash/version checks.
    - Partial apply errors are returned structurally and shown inline on failed diff cards.
+   - Per-file apply/reject is now wired in the backend and Diff view.
    - No per-hunk apply/reject.
 
 2. **Agent protocol is still markdown/diff-block based**
@@ -306,7 +309,7 @@ Deliverables:
   - receive `terminal-output`
   - kill terminal
 - QuickActions sends real Agent prompts.
-- DiffView supports per-file and per-hunk apply/reject.
+- DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.
 - Tests tab reflects real test commands instead of static sample data.
 - Logs panel consumes backend and Agent event streams.
@@ -383,9 +386,9 @@ target\release\agent_cli --help
 ## Next Immediate Tasks
 
 1. Add staged-vs-worktree diff views and multi-select to Git panel.
-2. Add terminal/log excerpts and selected-file packing to Agent context.
-3. Add stricter validation to the structured Agent protocol.
-4. Add per-hunk diff application and richer conflict recovery controls.
+2. Add per-hunk diff application and richer conflict recovery controls.
+3. Add terminal/log excerpts and selected-file packing to Agent context.
+4. Add stricter validation to the structured Agent protocol.
 5. Persist Agent action logs with prompt/context/diff provenance.
 6. Move LLM API key storage to a safer credential path.
 
