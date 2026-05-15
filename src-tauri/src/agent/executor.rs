@@ -297,6 +297,7 @@ fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff>
                             content: change.rationale.clone().unwrap_or_default(),
                             original: hunk.original,
                             updated: hunk.updated,
+                            status: None,
                         }
                     })
                     .collect();
@@ -353,6 +354,7 @@ fn make_diff(file: &str, content: &str, original: &[String], updated: &[String])
             content: content.to_string(),
             original: original.join("\n"),
             updated: updated.join("\n"),
+            status: None,
         }],
         status: "pending".to_string(),
     }
@@ -372,6 +374,7 @@ fn make_new_file_diff(file: &str, content: &str) -> crate::agent::state_machine:
             content: content.to_string(),
             original: String::new(),
             updated: content.to_string(),
+            status: None,
         }],
         status: "pending".to_string(),
     }

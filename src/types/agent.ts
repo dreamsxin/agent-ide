@@ -54,6 +54,8 @@ export interface DiffHunk {
   content: string;
   original: string;
   updated: string;
+  status?: "pending" | "applied" | "rejected" | "failed";
+  applyError?: string;
 }
 
 export interface ApplyDiffError {

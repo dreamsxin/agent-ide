@@ -74,9 +74,11 @@ interface AgentStore {
   changeMode: (mode: AgentMode) => Promise<void>;
   applyAllDiffs: () => Promise<DiffEntry[]>;
   applyDiff: (diffId: string) => Promise<DiffEntry[]>;
+  applyDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry[]>;
   clearApplyResult: () => void;
   rejectAllDiffs: () => Promise<DiffEntry[]>;
   rejectDiff: (diffId: string) => Promise<DiffEntry | null>;
+  rejectDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry | null>;
 
   // ====== 模型配置 ======
   fetchLlmConfig: () => Promise<void>;
@@ -302,6 +304,41 @@ export const useAgentStore = create<AgentStore>((set) => ({
     }
   },
 
+  applyDiffHunk: async (diffId, hunkIndex) => {
+    try {
+      if (!isTauriRuntime()) return [];
+      const result = await invoke<ApplyDiffsResult>("apply_diff_hunk", { diffId, hunkIndex });
+      set((s) => ({
+        lastApplyResult: result,
+        error: result.failed.length > 0 ? "Failed to apply hunk." : null,
+        diffs: s.diffs.map((d) => {
+          if (d.id !== diffId) return d;
+          const failed = result.failed.find((failure) => failure.diffId === d.id);
+          const applied = result.applied.some((item) => item.id === d.id);
+          const hunks = d.hunks.map((hunk, index) =>
+            index === hunkIndex
+              ? {
+                  ...hunk,
+                  status: applied ? "applied" as const : failed ? "failed" as const : hunk.status,
+                  applyError: failed?.message,
+                }
+              : hunk
+          );
+          return {
+            ...d,
+            hunks,
+            status: nextDiffStatus(hunks),
+            applyError: failed?.message,
+          };
+        }),
+      }));
+      return result.applied;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] apply_diff_hunk failed:", err);
+      return [];
+    }
+  },
+
   rejectAllDiffs: async () => {
     try {
       if (!isTauriRuntime()) return [];
@@ -336,6 +373,21 @@ export const useAgentStore = create<AgentStore>((set) => ({
       return rejected;
     } catch (err: unknown) {
       console.warn("[AgentStore] reject_diff failed:", err);
+      return null;
+    }
+  },
+
+  rejectDiffHunk: async (diffId, hunkIndex) => {
+    try {
+      if (!isTauriRuntime()) return null;
+      const rejected = await invoke<DiffEntry>("reject_diff_hunk", { diffId, hunkIndex });
+      set((s) => ({
+        lastApplyResult: null,
+        diffs: s.diffs.map((d) => (d.id === rejected.id ? rejected : d)),
+      }));
+      return rejected;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] reject_diff_hunk failed:", err);
       return null;
     }
   },
@@ -445,3 +497,13 @@ export const useAgentStore = create<AgentStore>((set) => ({
     return result;
   },
 }));
+
+function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
+  if (hunks.every((hunk) => hunk.status === "applied" || hunk.status === "rejected")) {
+    return "applied";
+  }
+  if (hunks.some((hunk) => hunk.status === "failed")) {
+    return "failed";
+  }
+  return "pending";
+}

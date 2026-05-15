@@ -111,6 +111,8 @@ pub struct DiffHunk {
     pub original: String,
     /// 更新后的代码块
     pub updated: String,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Agent 状态管理器 —— 封装状态转换逻辑

@@ -545,6 +545,7 @@ mod tests {
                 content: String::new(),
                 original: original.to_string(),
                 updated: updated.to_string(),
+                status: None,
             }],
             status: "pending".to_string(),
         }

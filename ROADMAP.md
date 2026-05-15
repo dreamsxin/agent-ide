@@ -98,6 +98,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Routed Run/Test/Debug-style project commands into dedicated Terminal sessions so long-running or interactive commands do not overwrite the main shell.
 - Added tracked Terminal task completion using per-session exit markers, so Test/Run-style commands opened in Terminal still update command status, run history, Problems, Logs, and Agent failure context.
 - Added TypeScript/JavaScript semantic editor defaults through the Monaco TS worker, including worker-backed diagnostics, hover/completion behavior, F12 definition action, and stable file-backed Monaco models for open files.
+- Added per-hunk diff review controls with backend `apply_diff_hunk` and `reject_diff_hunk` commands, hunk status tracking, and Diff view Apply/Reject hunk actions.
 
 Important distinction:
 
@@ -258,7 +259,7 @@ DiffView.applyAllDiffs() or per-file Apply
     -> mark applied/failed and emit state
 ```
 
-Current limitation: diff application still uses textual `find` replacement. It needs stronger conflict detection and per-hunk controls.
+Current limitation: diff application still uses textual `find` replacement. It needs stronger conflict recovery and clearer mixed hunk status semantics.
 
 ---
 
@@ -271,8 +272,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Now rejects ambiguous matches and refuses to overwrite existing files for new-file hunks.
    - Missing file hash/version checks.
    - Partial apply errors are returned structurally and shown inline on failed diff cards.
-   - Per-file apply/reject is now wired in the backend and Diff view.
-   - No per-hunk apply/reject.
+   - Per-file and per-hunk apply/reject are now wired in the backend and Diff view.
+   - Mixed applied/rejected hunk state currently closes the file diff; add clearer partial status next.
 
 2. **Agent protocol is still markdown/diff-block based**
    - Pipeline stages now drive backend execution.
@@ -418,7 +419,7 @@ Deliverables:
   - kill terminal
 - TopBar exposes common Run/Debug/Build/Test commands, while the bottom Commands panel lists all discovered workspace commands and task status.
 - QuickActions sends real Agent prompts.
-- DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
+- DiffView supports per-file and per-hunk apply/reject.
 - Git panel supports stage, unstage, discard with confirmation.
 - Editor has local code completion for common languages and current-file symbols.
 - Problems panel replaces static test/action samples and accepts Monaco diagnostics, Agent findings, and parsed terminal test/lint failures.

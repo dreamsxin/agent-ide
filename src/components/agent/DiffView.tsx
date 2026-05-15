@@ -1,15 +1,54 @@
 import { useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
-import type { DiffEntry } from "../../types/agent";
+import type { DiffEntry, DiffHunk } from "../../types/agent";
 
-function HunkBlock({ hunk }: { hunk: DiffEntry["hunks"][0] }) {
+function HunkBlock({
+  hunk,
+  index,
+  diffStatus,
+  onApply,
+  onReject,
+}: {
+  hunk: DiffHunk;
+  index: number;
+  diffStatus: DiffEntry["status"];
+  onApply: () => void;
+  onReject: () => void;
+}) {
   const hasOriginal = hunk.original && hunk.original.trim().length > 0;
   const hasUpdated = hunk.updated && hunk.updated.trim().length > 0;
+  const hunkStatus = hunk.status ?? "pending";
+  const canAct = (diffStatus === "pending" || diffStatus === "failed") && hunkStatus !== "applied" && hunkStatus !== "rejected";
+
+  const header = (
+    <div className="flex items-center justify-between gap-2 border-b border-surface-border bg-surface-panel/70 px-2 py-1">
+      <span className="text-[10px] font-semibold uppercase text-surface-muted">
+        Hunk {index + 1} · {hunkStatus}
+      </span>
+      {canAct && (
+        <span className="flex items-center gap-1">
+          <button
+            onClick={onApply}
+            className="rounded border border-diff-add/40 px-1.5 py-0.5 text-[10px] text-diff-add hover:bg-diff-add/10"
+          >
+            Apply hunk
+          </button>
+          <button
+            onClick={onReject}
+            className="rounded border border-diff-remove/40 px-1.5 py-0.5 text-[10px] text-diff-remove hover:bg-diff-remove/10"
+          >
+            Reject hunk
+          </button>
+        </span>
+      )}
+    </div>
+  );
 
   if (!hasOriginal && hasUpdated) {
     const lines = hunk.updated.split("\n");
     return (
-      <div className="text-xs font-mono leading-relaxed">
+      <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
+        {header}
         <div className="border-b border-diff-add/20 bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
           + New file
         </div>
@@ -27,7 +66,8 @@ function HunkBlock({ hunk }: { hunk: DiffEntry["hunks"][0] }) {
     const updLines = hunk.updated.split("\n");
 
     return (
-      <div className="text-xs font-mono leading-relaxed">
+      <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
+        {header}
         <div className="grid grid-cols-2 border-b border-surface-border">
           <div className="bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
             - Original
@@ -58,7 +98,8 @@ function HunkBlock({ hunk }: { hunk: DiffEntry["hunks"][0] }) {
 
   const lines = hunk.content.split("\n");
   return (
-    <div className="text-xs font-mono leading-relaxed">
+    <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
+      {header}
       {lines.map((line, i) => {
         let bg = "";
         if (line.startsWith("+")) bg = "bg-diff-add/15";
@@ -80,8 +121,10 @@ export default function DiffView() {
   const clearApplyResult = useAgentStore((s) => s.clearApplyResult);
   const applyAllDiffs = useAgentStore((s) => s.applyAllDiffs);
   const applyDiff = useAgentStore((s) => s.applyDiff);
+  const applyDiffHunk = useAgentStore((s) => s.applyDiffHunk);
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
+  const rejectDiffHunk = useAgentStore((s) => s.rejectDiffHunk);
 
   const pendingDiffs = diffs.filter((d) => d.status === "pending");
   const hasPending = pendingDiffs.length > 0;
@@ -201,7 +244,14 @@ export default function DiffView() {
 
               <div className="max-h-60 overflow-auto">
                 {diff.hunks.map((hunk, i) => (
-                  <HunkBlock key={i} hunk={hunk} />
+                  <HunkBlock
+                    key={i}
+                    hunk={hunk}
+                    index={i}
+                    diffStatus={diff.status}
+                    onApply={() => void applyDiffHunk(diff.id, i)}
+                    onReject={() => void rejectDiffHunk(diff.id, i)}
+                  />
                 ))}
               </div>
 

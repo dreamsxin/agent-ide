@@ -232,6 +232,7 @@ mod tests {
                 content: String::new(),
                 original: original.to_string(),
                 updated: updated.to_string(),
+                status: None,
             }],
             status: "pending".to_string(),
         }
@@ -353,6 +354,7 @@ mod tests {
             content: String::new(),
             original: "const missing = 1;".to_string(),
             updated: "const missing = 2;".to_string(),
+            status: None,
         });
 
         let err = apply_diff_to_path(&path, &diff).unwrap_err();

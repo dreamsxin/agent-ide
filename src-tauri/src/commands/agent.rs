@@ -310,6 +310,75 @@ pub async fn apply_diff(
     Ok(result)
 }
 
+/// Apply one hunk from a pending diff to the filesystem.
+#[tauri::command]
+pub async fn apply_diff_hunk(
+    diff_id: String,
+    hunk_index: usize,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<ApplyDiffsResult, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(diff) = orch
+        .diffs
+        .iter()
+        .find(|item| item.id == diff_id)
+        .cloned()
+    else {
+        return Err(format!("Diff not found: {}", diff_id));
+    };
+
+    if diff.status != "pending" && diff.status != "failed" {
+        return Err(format!(
+            "Diff {} cannot apply hunks while status is {}",
+            diff_id, diff.status
+        ));
+    }
+
+    let Some(hunk) = diff.hunks.get(hunk_index).cloned() else {
+        return Err(format!("Hunk {} not found in diff {}", hunk_index, diff_id));
+    };
+
+    if hunk.status.as_deref() == Some("applied") || hunk.status.as_deref() == Some("rejected") {
+        return Err(format!(
+            "Hunk {} in diff {} is already {}",
+            hunk_index,
+            diff_id,
+            hunk.status.unwrap_or_default()
+        ));
+    }
+
+    let single_hunk_diff = FileDiff {
+        hunks: vec![hunk],
+        ..diff.clone()
+    };
+    let result = apply_pending_diffs(&[single_hunk_diff]);
+    let failed = result.failed.clone();
+
+    if let Some(item) = orch.diffs.iter_mut().find(|item| item.id == diff_id) {
+        if result.applied.iter().any(|applied| applied.id == item.id) {
+            if let Some(hunk) = item.hunks.get_mut(hunk_index) {
+                hunk.status = Some("applied".to_string());
+            }
+            item.status = status_from_hunks(&item.hunks);
+        } else if let Some(failure) = failed.iter().find(|failure| failure.diff_id == item.id) {
+            if let Some(hunk) = item.hunks.get_mut(hunk_index) {
+                hunk.status = Some("failed".to_string());
+            }
+            item.status = "failed".to_string();
+            let _ = failure;
+        }
+    }
+
+    set_review_state_after_single_diff(&mut orch);
+    let _ = app_handle.emit(
+        "agent-state-changed",
+        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+
+    Ok(result)
+}
+
 fn is_cancelled_error(err: &str) -> bool {
     err == "Agent task cancelled"
 }
@@ -369,6 +438,58 @@ pub async fn reject_diff(
     );
 
     Ok(rejected)
+}
+
+/// Reject one hunk from a pending diff.
+#[tauri::command]
+pub async fn reject_diff_hunk(
+    diff_id: String,
+    hunk_index: usize,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<FileDiff, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(diff) = orch.diffs.iter_mut().find(|item| item.id == diff_id) else {
+        return Err(format!("Diff not found: {}", diff_id));
+    };
+
+    if diff.status != "pending" && diff.status != "failed" {
+        return Err(format!(
+            "Diff {} cannot reject hunks while status is {}",
+            diff_id, diff.status
+        ));
+    }
+
+    let Some(hunk) = diff.hunks.get_mut(hunk_index) else {
+        return Err(format!("Hunk {} not found in diff {}", hunk_index, diff_id));
+    };
+    hunk.status = Some("rejected".to_string());
+    diff.status = status_from_hunks(&diff.hunks);
+    let updated = diff.clone();
+
+    set_review_state_after_single_diff(&mut orch);
+    let _ = app_handle.emit(
+        "agent-state-changed",
+        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+
+    Ok(updated)
+}
+
+fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> String {
+    if hunks
+        .iter()
+        .all(|hunk| matches!(hunk.status.as_deref(), Some("applied") | Some("rejected")))
+    {
+        "applied".to_string()
+    } else if hunks
+        .iter()
+        .any(|hunk| matches!(hunk.status.as_deref(), Some("failed")))
+    {
+        "failed".to_string()
+    } else {
+        "pending".to_string()
+    }
 }
 
 fn set_review_state_after_single_diff(orch: &mut AgentOrchestrator) {
