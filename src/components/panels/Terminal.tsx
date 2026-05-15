@@ -519,7 +519,7 @@ function createTerminalSession(
 
 function buildTrackedCommand(command: string, marker: string) {
   if (navigator.userAgent.includes("Windows")) {
-    return `${command} & call echo ${marker}:%%ERRORLEVEL%%`;
+    return `${command} & echo ${marker}:%ERRORLEVEL%`;
   }
   return `${command}; printf '\\n${marker}:%s\\n' "$?"`;
 }

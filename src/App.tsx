@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
@@ -60,6 +60,7 @@ export default function App() {
   const setLeftWidth = useLayoutStore((s) => s.setLeftWidth);
   const setRightWidth = useLayoutStore((s) => s.setRightWidth);
   const setBottomHeight = useLayoutStore((s) => s.setBottomHeight);
+  const resizeStartRef = useRef({ left: leftWidth, right: rightWidth, bottom: bottomHeight });
 
   useAgentBridge();
 
@@ -107,16 +108,34 @@ export default function App() {
   ];
 
   const onLeftResize = useCallback(
-    (delta: number) => setLeftWidth(leftWidth + delta),
-    [leftWidth, setLeftWidth]
+    (delta: number, phase?: "start" | "move" | "end") => {
+      if (phase === "start") {
+        resizeStartRef.current.left = useLayoutStore.getState().leftWidth;
+        return;
+      }
+      if (phase === "move") setLeftWidth(resizeStartRef.current.left + delta);
+    },
+    [setLeftWidth]
   );
   const onRightResize = useCallback(
-    (delta: number) => setRightWidth(rightWidth - delta),
-    [rightWidth, setRightWidth]
+    (delta: number, phase?: "start" | "move" | "end") => {
+      if (phase === "start") {
+        resizeStartRef.current.right = useLayoutStore.getState().rightWidth;
+        return;
+      }
+      if (phase === "move") setRightWidth(resizeStartRef.current.right - delta);
+    },
+    [setRightWidth]
   );
   const onBottomResize = useCallback(
-    (delta: number) => setBottomHeight(bottomHeight - delta),
-    [bottomHeight, setBottomHeight]
+    (delta: number, phase?: "start" | "move" | "end") => {
+      if (phase === "start") {
+        resizeStartRef.current.bottom = useLayoutStore.getState().bottomHeight;
+        return;
+      }
+      if (phase === "move") setBottomHeight(resizeStartRef.current.bottom - delta);
+    },
+    [setBottomHeight]
   );
 
   return (
