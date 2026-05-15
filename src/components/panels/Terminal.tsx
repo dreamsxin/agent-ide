@@ -265,16 +265,16 @@ function TerminalSessionView({
       if (!taskId || !taskExitMarker || taskCompletedRef.current) return;
       taskOutputRef.current = `${taskOutputRef.current}${chunk}`;
       const plainOutput = stripAnsi(taskOutputRef.current).replace(/\r\n/g, "\n");
-      const markerIndex = plainOutput.indexOf(taskExitMarker);
-      if (markerIndex < 0) return;
-
-      const beforeMarker = plainOutput.slice(0, markerIndex);
-      const markerTail = plainOutput.slice(markerIndex);
-      const exitMatch = markerTail.match(new RegExp(`${escapeRegExp(taskExitMarker)}:(-?\\d+)`));
+      const exitPattern = new RegExp(`${escapeRegExp(taskExitMarker)}:(-?\\d+)`, "g");
+      let exitMatch: RegExpExecArray | null = null;
+      for (let match = exitPattern.exec(plainOutput); match; match = exitPattern.exec(plainOutput)) {
+        exitMatch = match;
+      }
       if (!exitMatch) return;
-      const exitCode = exitMatch ? Number(exitMatch[1]) : null;
+      const beforeMarker = plainOutput.slice(0, exitMatch.index);
+      const exitCode = Number(exitMatch[1]);
       const status = exitCode === 0 ? "success" : "failed";
-      const output = cleanupTrackedOutput(beforeMarker, initialCommand ?? "");
+      const output = cleanupTrackedOutput(beforeMarker, initialCommand ?? "", taskExitMarker);
       const problems = appendAndParseTerminalProblems("", output, terminalId).problems;
 
       taskCompletedRef.current = true;
@@ -526,18 +526,33 @@ function buildTrackedCommand(command: string, marker: string) {
 }
 
 function stripAnsi(value: string) {
-  return value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+  return value
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function cleanupTrackedOutput(output: string, command: string) {
+function cleanupTrackedOutput(output: string, command: string, marker?: string) {
+  const escapedCommand = escapeRegExp(command);
+  const promptCommandPattern = new RegExp(`^[A-Za-z]:[^\\n>]*>.*${escapedCommand}.*$`);
   return output
-    .replace(command, "")
     .split("\n")
-    .filter((line) => !line.includes("__AGENT_IDE_TASK_EXIT_"))
+    .map((line) => line.trimEnd())
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return false;
+      if (marker && trimmed.includes(marker)) return false;
+      if (trimmed.includes("__AGENT_IDE_TASK_EXIT_")) return false;
+      if (/^Microsoft Windows \[/.test(trimmed)) return false;
+      if (/^\(c\) Microsoft Corporation/.test(trimmed)) return false;
+      if (trimmed === command) return false;
+      if (promptCommandPattern.test(trimmed)) return false;
+      if (/^[A-Za-z]:[^>]*>\s*$/.test(trimmed)) return false;
+      return true;
+    })
     .join("\n")
     .trim();
 }
