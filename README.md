@@ -26,14 +26,17 @@ Implemented core capabilities:
 - Structured action log events shown in the Logs panel.
 - Diff review and apply flow with structured apply failures.
 - Compatible structured `agent-changes` JSON protocol plus legacy diff/new-file block parsing.
+- TypeScript/JavaScript semantic bridge with Monaco fallback plus `typescript-language-server` support for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
+- Problems integration for static diagnostics and terminal/test failures, including editor markers for runtime failures with file/line/column locations.
+- Explorer quality-of-life actions including reveal in file explorer, copy file, copy absolute file path, and copy relative file path.
 
 Important remaining gaps:
 
 - Git workflow still needs persistent credential storage, better SSH/passphrase UX, and richer merge editor controls.
-- Full workspace LSP-backed completion/diagnostics are still pending beyond Monaco open-file TypeScript/JavaScript semantics.
+- LSP support still needs workspace-wide indexing validation, install/configuration UX, and broader language coverage beyond TypeScript/JavaScript.
 - Agent change protocol still needs stricter schema validation and richer provenance.
 - API keys are still persisted in local JSON config.
-- Terminal still needs interactive runtime testing across panel hide/show and workspace switching.
+- Terminal still needs deeper interactive runtime testing across panel hide/show, workspace switching, and long-running processes.
 - Frontend test coverage and Tauri smoke tests are still thin.
 
 See [ROADMAP.md](ROADMAP.md) for the implementation source of truth and [docs/agent_ide_design.md](docs/agent_ide_design.md) for detailed design.

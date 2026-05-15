@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useProblemStore, type ProblemEntry, type ProblemSeverity } from "../../stores/useProblemStore";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { normalizeFilePath, pathKey } from "../../utils/paths";
 import { useMonacoContext } from "./MonacoContext";
 
 export default function DiagnosticsBridge() {
@@ -13,14 +14,16 @@ export default function DiagnosticsBridge() {
     if (!monaco) return;
 
     const syncMarkers = () => {
-      const knownPaths = new Set(openFiles.map((file) => normalizePath(file.path)));
+      const knownPaths = new Map(openFiles.map((file) => [pathKey(file.path), file.path]));
       const markerProblems = monaco.editor
         .getModelMarkers({})
-        .filter((marker) => knownPaths.has(normalizePath(marker.resource.fsPath || marker.resource.path)))
+        .filter((marker) => marker.owner !== "lsp")
+        .filter((marker) => marker.owner !== "runtime-problems")
+        .filter((marker) => knownPaths.has(pathKey(markerResourcePath(marker))))
         .map((marker): ProblemEntry => {
-          const file = marker.resource.fsPath || marker.resource.path;
+          const file = knownPaths.get(pathKey(markerResourcePath(marker))) ?? normalizeFilePath(markerResourcePath(marker));
           return {
-            id: `diagnostic-${normalizePath(file)}-${marker.startLineNumber}-${marker.startColumn}-${marker.code ?? marker.message}`,
+            id: `diagnostic-${pathKey(file)}-${marker.startLineNumber}-${marker.startColumn}-${marker.code ?? marker.message}`,
             file,
             line: marker.startLineNumber,
             column: marker.startColumn,
@@ -50,6 +53,6 @@ function toProblemSeverity(
   return "info";
 }
 
-function normalizePath(path: string) {
-  return path.replace(/\\/g, "/").toLowerCase();
+function markerResourcePath(marker: import("monaco-editor").editor.IMarker) {
+  return marker.resource.fsPath || marker.resource.path;
 }

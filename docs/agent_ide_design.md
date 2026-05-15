@@ -305,6 +305,41 @@ Terminal component mounts in Tauri runtime
 
 Terminal cwd is scoped to the saved workspace. Browser preview shows a disabled-state message instead of attempting PTY access.
 
+Terminal/test failures are parsed into structured Problems when output includes file, line, and column information. Those Problems are mirrored back into Monaco markers so runtime/test failures can be highlighted in the editor instead of only appearing in the Problems panel.
+
+### 4.6.1 Problems and Diagnostics
+
+Problems currently aggregate multiple sources:
+
+- `diagnostic`: Monaco built-in language diagnostics.
+- `lsp`: diagnostics published by the TypeScript language server.
+- `test`: terminal/task/test failures parsed from command output.
+- `agent` and `system`: Agent/runtime issues surfaced by the IDE.
+
+The editor has three marker bridges:
+
+- Monaco diagnostics are read into Problems through `DiagnosticsBridge`.
+- TypeScript LSP diagnostics are written to Problems and Monaco markers through `useLspDiagnostics`.
+- Runtime Problems from terminal/test/Agent/system sources are written back to Monaco markers through `ProblemsMarkerBridge`.
+
+Paths are normalized before tab matching, marker matching, and problem navigation. This avoids duplicate tabs and broken paths such as URL-encoded Windows drive paths.
+
+### 4.6.2 TypeScript/JavaScript Semantic Bridge
+
+Current TypeScript/JavaScript semantic support uses two layers:
+
+- Monaco TypeScript/JavaScript worker fallback for open-file syntax and semantic diagnostics.
+- Optional `typescript-language-server` backend for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
+
+The Rust backend searches for `typescript-language-server` in workspace `node_modules/.bin`, `%APPDATA%\npm` on Windows, and `PATH`. TopBar shows `TS checking`, `TS ready`, or `TS unavailable`; the unavailable tooltip includes the backend startup error.
+
+Remaining semantic work:
+
+- Validate workspace-wide indexing across larger TypeScript projects.
+- Add installation/configuration UX for missing language servers.
+- Add Rust/Python LSP adapters.
+- Feed code actions with actual diagnostics context for richer quick fixes.
+
 ### 4.7 Git
 
 Git commands resolve paths through the workspace service and then use `git2`:

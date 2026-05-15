@@ -1,5 +1,8 @@
 import { Suspense, lazy, useEffect, useCallback, useState, useRef } from "react";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { useLayoutStore } from "../../stores/useLayoutStore";
+import { useLspStore } from "../../stores/useLspStore";
+import { pathsEqual } from "../../utils/paths";
 import { MonacoContext } from "./MonacoContext";
 import EditorTabs from "./EditorTabs";
 import InlineSuggestion from "./InlineSuggestion";
@@ -7,11 +10,30 @@ import DiffOverlay from "./DiffOverlay";
 import IntentHint from "./IntentHint";
 import QuickActions from "./QuickActions";
 import DiagnosticsBridge from "./DiagnosticsBridge";
+import ProblemsMarkerBridge from "./ProblemsMarkerBridge";
 import { buildLocalCompletionCandidates, type CompletionCandidateKind } from "../../utils/codeCompletion";
 import {
   configureTypeScriptSemantic,
   ensureOpenFileModels,
 } from "../../utils/typescriptSemantic";
+import { useLspDiagnostics } from "../../hooks/useLspDiagnostics";
+import {
+  changeLspFile,
+  getLspCodeActions,
+  getLspCompletion,
+  getLspDefinition,
+  getLspDocumentSymbols,
+  getLspHover,
+  getLspRename,
+  initializeLsp,
+  isLspLanguage,
+  lspRangeToMonacoRange,
+  monacoRangeToLspRange,
+  openLspFile,
+  toMonacoSymbolKind,
+  type LspDocumentSymbol,
+  type LspWorkspaceEdit,
+} from "../../utils/lspClient";
 
 import type { editor } from "monaco-editor";
 
@@ -55,6 +77,8 @@ export default function EditorContainer() {
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
+  const workspacePath = useLayoutStore((s) => s.workspacePath);
+  const setLspStatus = useLspStore((s) => s.setStatus);
   const updateFileContent = useEditorStore((s) => s.updateFileContent);
   const saveCurrentFile = useEditorStore((s) => s.saveCurrentFile);
   const setSelectedText = useEditorStore((s) => s.setSelectedText);
@@ -64,9 +88,15 @@ export default function EditorContainer() {
 
   const [editorRef, setEditorRef] = useState<editor.IStandaloneCodeEditor | null>(null);
   const [monacoRef, setMonacoRef] = useState<typeof import("monaco-editor") | null>(null);
+  useLspDiagnostics(monacoRef);
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const disposablesRef = useRef<Set<{ dispose(): void }>>(new Set());
   const completionRegisteredRef = useRef(false);
+  const lspRegisteredRef = useRef(false);
+  const lspOpenedFilesRef = useRef<Set<string>>(new Set());
+  const lspFileVersionsRef = useRef<Map<string, number>>(new Map());
+  const lspChangeTimerRef = useRef<number | null>(null);
+  const [lspReady, setLspReady] = useState(false);
 
   const activeTab = openFiles.find((f) => f.path === activeFile);
   const currentContent = activeFile ? fileContents[activeFile] ?? "" : "";
@@ -180,6 +210,102 @@ export default function EditorContainer() {
         }
       }
 
+      if (!lspRegisteredRef.current) {
+        lspRegisteredRef.current = true;
+        for (const language of ["typescript", "javascript"]) {
+          const completionDisposable = monacoInst.languages.registerCompletionItemProvider(language, {
+            triggerCharacters: [".", "\"", "'", "/", "@", "<"],
+            provideCompletionItems: async (model, position) => {
+              const word = model.getWordUntilPosition(position);
+              const file = model.uri.fsPath || model.uri.path;
+              const items = await getLspCompletion(file, position.lineNumber - 1, position.column - 1);
+              return {
+                suggestions: items.map((item) => ({
+                  label: item.label,
+                  kind: toMonacoCompletionItemKind(monacoInst, item.kind),
+                  insertText: item.insertText || item.label,
+                  detail: item.detail,
+                  documentation: item.documentation ? { value: item.documentation } : undefined,
+                  sortText: item.sortText,
+                  filterText: item.filterText,
+                  range: {
+                    startLineNumber: position.lineNumber,
+                    endLineNumber: position.lineNumber,
+                    startColumn: word.startColumn,
+                    endColumn: word.endColumn,
+                  },
+                })),
+              };
+            },
+          });
+          disposablesRef.current.add(completionDisposable);
+
+          const hoverDisposable = monacoInst.languages.registerHoverProvider(language, {
+            provideHover: async (model, position) => {
+              const file = model.uri.fsPath || model.uri.path;
+              const hover = await getLspHover(file, position.lineNumber - 1, position.column - 1);
+              if (!hover?.contents) return null;
+              return {
+                contents: [{ value: hover.contents }],
+                range: hover.range ? lspRangeToMonacoRange(hover.range) : undefined,
+              };
+            },
+          });
+          disposablesRef.current.add(hoverDisposable);
+
+          const definitionProviderDisposable = monacoInst.languages.registerDefinitionProvider(language, {
+            provideDefinition: async (model, position) => {
+              const file = model.uri.fsPath || model.uri.path;
+              const locations = await getLspDefinition(file, position.lineNumber - 1, position.column - 1);
+              return locations.map((location) => ({
+                uri: monacoInst.Uri.file(location.file),
+                range: lspRangeToMonacoRange(location.range),
+              }));
+            },
+          });
+          disposablesRef.current.add(definitionProviderDisposable);
+
+          const documentSymbolDisposable = monacoInst.languages.registerDocumentSymbolProvider(language, {
+            provideDocumentSymbols: async (model) => {
+              const file = model.uri.fsPath || model.uri.path;
+              const symbols = await getLspDocumentSymbols(file);
+              return flattenDocumentSymbols(monacoInst, symbols);
+            },
+          });
+          disposablesRef.current.add(documentSymbolDisposable);
+
+          const renameDisposable = monacoInst.languages.registerRenameProvider(language, {
+            provideRenameEdits: async (model, position, newName) => {
+              const file = model.uri.fsPath || model.uri.path;
+              const edit = await getLspRename(file, position.lineNumber - 1, position.column - 1, newName);
+              if (!edit) {
+                return { edits: [] };
+              }
+              return workspaceEditToMonaco(monacoInst, edit);
+            },
+          });
+          disposablesRef.current.add(renameDisposable);
+
+          const codeActionDisposable = monacoInst.languages.registerCodeActionProvider(language, {
+            provideCodeActions: async (model, range) => {
+              const file = model.uri.fsPath || model.uri.path;
+              const actions = await getLspCodeActions(file, monacoRangeToLspRange(range));
+              return {
+                actions: actions
+                  .filter((action) => action.edit?.edits.length)
+                  .map((action) => ({
+                    title: action.title,
+                    kind: action.kind ? action.kind.replace(/\./g, ".") : "quickfix",
+                    edit: workspaceEditToMonaco(monacoInst, action.edit!),
+                  })),
+                dispose: () => {},
+              };
+            },
+          });
+          disposablesRef.current.add(codeActionDisposable);
+        }
+      }
+
       const definitionDisposable = editorInst.addAction({
         id: "agent-ide.go-to-definition",
         label: "Go to Definition",
@@ -203,8 +329,61 @@ export default function EditorContainer() {
   }, [fileContents, monacoRef, openFiles]);
 
   useEffect(() => {
+    let cancelled = false;
+    lspOpenedFilesRef.current.clear();
+    lspFileVersionsRef.current.clear();
+    setLspReady(false);
+    setLspStatus("checking");
+
+    void initializeLsp(workspacePath || null).then(({ ready, message }) => {
+      if (cancelled) return;
+      setLspReady(ready);
+      setLspStatus(ready ? "ready" : "unavailable", message);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setLspStatus, workspacePath]);
+
+  useEffect(() => {
+    if (!lspReady || !activeFile || !activeTab) return;
+    const languageId = activeTab.language || detectLanguage(activeTab.path);
+    if (!isLspLanguage(languageId)) return;
+
+    if (lspChangeTimerRef.current !== null) {
+      window.clearTimeout(lspChangeTimerRef.current);
+      lspChangeTimerRef.current = null;
+    }
+
+    if (!lspOpenedFilesRef.current.has(activeFile)) {
+      lspOpenedFilesRef.current.add(activeFile);
+      lspFileVersionsRef.current.set(activeFile, 1);
+      void openLspFile(activeFile, currentContent, languageId, 1).catch((error) => {
+        console.warn("Open LSP document failed:", error);
+      });
+      return;
+    }
+
+    lspChangeTimerRef.current = window.setTimeout(() => {
+      const nextVersion = (lspFileVersionsRef.current.get(activeFile) ?? 1) + 1;
+      lspFileVersionsRef.current.set(activeFile, nextVersion);
+      void changeLspFile(activeFile, currentContent, languageId, nextVersion).catch((error) => {
+        console.warn("Change LSP document failed:", error);
+      });
+    }, 250);
+
+    return () => {
+      if (lspChangeTimerRef.current !== null) {
+        window.clearTimeout(lspChangeTimerRef.current);
+        lspChangeTimerRef.current = null;
+      }
+    };
+  }, [activeFile, activeTab, currentContent, lspReady]);
+
+  useEffect(() => {
     if (!editorRef || !monacoRef || !activeFile || !pendingRevealLocation) return;
-    if (pendingRevealLocation.file !== activeFile) return;
+    if (!pathsEqual(pendingRevealLocation.file, activeFile)) return;
 
     const position = {
       lineNumber: Math.max(1, pendingRevealLocation.line),
@@ -267,6 +446,7 @@ export default function EditorContainer() {
               <IntentHint />
               <QuickActions />
               <DiagnosticsBridge />
+              <ProblemsMarkerBridge />
             </Suspense>
           ) : (
             <div className="h-full flex items-center justify-center">
@@ -307,4 +487,69 @@ function toMonacoCompletionKind(
     default:
       return monaco.languages.CompletionItemKind.Variable;
   }
+}
+
+function toMonacoCompletionItemKind(monaco: typeof import("monaco-editor"), kind?: number) {
+  const itemKind = monaco.languages.CompletionItemKind;
+  const mapping: Record<number, number> = {
+    1: itemKind.Text,
+    2: itemKind.Method,
+    3: itemKind.Function,
+    4: itemKind.Constructor,
+    5: itemKind.Field,
+    6: itemKind.Variable,
+    7: itemKind.Class,
+    8: itemKind.Interface,
+    9: itemKind.Module,
+    10: itemKind.Property,
+    11: itemKind.Unit,
+    12: itemKind.Value,
+    13: itemKind.Enum,
+    14: itemKind.Keyword,
+    15: itemKind.Snippet,
+    16: itemKind.Color,
+    17: itemKind.File,
+    18: itemKind.Reference,
+    21: itemKind.Constant,
+    22: itemKind.Struct,
+    23: itemKind.Event,
+    24: itemKind.Operator,
+    25: itemKind.TypeParameter,
+  };
+  return kind ? mapping[kind] ?? itemKind.Variable : itemKind.Variable;
+}
+
+function flattenDocumentSymbols(
+  monaco: typeof import("monaco-editor"),
+  symbols: LspDocumentSymbol[],
+  containerName?: string
+): import("monaco-editor").languages.DocumentSymbol[] {
+  return symbols.flatMap((symbol) => [
+    {
+      name: symbol.name,
+      detail: "",
+      kind: toMonacoSymbolKind(monaco, symbol.kind),
+      tags: [],
+      containerName,
+      range: lspRangeToMonacoRange(symbol.range),
+      selectionRange: lspRangeToMonacoRange(symbol.selectionRange),
+    },
+    ...flattenDocumentSymbols(monaco, symbol.children, symbol.name),
+  ]);
+}
+
+function workspaceEditToMonaco(
+  monaco: typeof import("monaco-editor"),
+  edit: LspWorkspaceEdit
+): import("monaco-editor").languages.WorkspaceEdit {
+  return {
+    edits: edit.edits.map((textEdit) => ({
+      resource: monaco.Uri.file(textEdit.file),
+      versionId: undefined,
+      textEdit: {
+        range: lspRangeToMonacoRange(textEdit.range),
+        text: textEdit.newText,
+      },
+    })),
+  };
 }

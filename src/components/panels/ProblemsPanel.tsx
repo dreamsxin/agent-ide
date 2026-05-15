@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
 import { useFixWithAgent } from "../../hooks/useFixWithAgent";
+import { fileNameFromPath, normalizeFilePath, pathsEqual } from "../../utils/paths";
 
 const SEVERITY_STYLE: Record<ProblemSeverity, { label: string; color: string }> = {
   error: { label: "E", color: "text-diff-remove" },
@@ -29,18 +30,20 @@ export default function ProblemsPanel() {
 
   const handleProblemClick = async (file: string, line: number, column: number) => {
     if (!file || file === "Agent") return;
-    revealLocation(file, line, column);
-    const existing = openFiles.find((tab) => tab.path === file);
+    const normalizedFile = normalizeFilePath(file);
+    const existing = openFiles.find((tab) => pathsEqual(tab.path, normalizedFile));
     if (existing) {
-      setActiveFile(file);
+      setActiveFile(existing.path);
+      revealLocation(existing.path, line, column);
       return;
     }
     await openFile({
-      path: file,
-      name: file.split(/[\\/]/).pop() || file,
+      path: normalizedFile,
+      name: fileNameFromPath(normalizedFile),
       language: "",
       isDirty: false,
     });
+    revealLocation(normalizedFile, line, column);
   };
 
   return (

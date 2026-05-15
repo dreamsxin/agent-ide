@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { useLspStore } from "../../stores/useLspStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { useTaskStore, type ProjectTaskDefinition } from "../../stores/useTaskStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -28,6 +29,8 @@ export default function TopBar() {
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const setWorkspacePath = useLayoutStore((s) => s.setWorkspacePath);
+  const lspStatus = useLspStore((s) => s.status);
+  const lspMessage = useLspStore((s) => s.message);
   const taskRuns = useTaskStore((s) => s.taskRuns);
   const { tasks } = useProjectTasks();
   const runProjectTask = useRunProjectTask();
@@ -131,6 +134,12 @@ export default function TopBar() {
 
       {/* 中间：项目命令 + Agent 模式切换 */}
       <div className="flex items-center gap-2">
+        <span
+          className={`rounded border px-1.5 py-0.5 text-[10px] ${lspStatusClass(lspStatus)}`}
+          title={lspMessage}
+        >
+          TS {lspStatus}
+        </span>
         <div className="flex items-center gap-1 rounded border border-surface-border bg-surface-base px-1 py-0.5">
           <button
             onClick={() => runProjectTask(runTask)}
@@ -277,4 +286,18 @@ function pickTask(tasks: ProjectTaskDefinition[], names: string[]) {
     tasks.find((task) => normalized.includes(task.label.toLowerCase())) ??
     tasks.find((task) => normalized.some((name) => task.id.toLowerCase().includes(name)))
   );
+}
+
+function lspStatusClass(status: string) {
+  switch (status) {
+    case "ready":
+      return "border-green-500/40 bg-green-500/10 text-green-300";
+    case "checking":
+      return "border-accent-blue/40 bg-accent-blue/10 text-accent-blue";
+    case "unavailable":
+    case "error":
+      return "border-amber-500/50 bg-amber-500/10 text-amber-300";
+    default:
+      return "border-surface-border bg-surface-base text-surface-muted";
+  }
 }

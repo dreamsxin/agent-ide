@@ -25,13 +25,17 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - Diff 审查和应用流程，支持结构化失败信息。
 - 兼容式 `agent-changes` JSON 协议，同时保留旧的 diff/new-file 代码块解析。
 - Agent diff 支持可选 `baseHash`，用于拒绝基于过期文件内容的编辑。
+- TypeScript/JavaScript 语义能力桥接：保留 Monaco fallback，并支持 `typescript-language-server` 的 hover、completion、definition、document symbols、rename、code actions 和 diagnostics。
+- Problems 已接入静态 diagnostics 与 terminal/test 失败；带文件/行/列的运行时错误会同步为编辑器 marker。
+- Explorer 增强常用右键操作：Reveal In File Explorer、Copy File、Copy File Path、Copy Relative File Path。
 
 重要缺口：
 
 - Git 工作流还缺持久化 credential storage、更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
-- `baseHash` 已支持，但 UI 还需要更完整地展示和操作。
+- LSP 仍需要工作区级索引验证、安装/配置 UX，并扩展到 TypeScript/JavaScript 之外的语言。
+- Agent change protocol 还需要更严格的 schema 校验和更完整的 provenance。
 - API key 仍保存在本地 JSON 配置中。
-- Terminal 还需要在真实 Tauri runtime 中做更多交互测试。
+- Terminal 还需要在真实 Tauri runtime 中针对面板隐藏/显示、工作区切换和长运行进程做更多交互测试。
 - 前端测试和 Tauri smoke tests 仍然不足。
 
 实现状态以 [ROADMAP.md](ROADMAP.md) 为准，详细设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)。

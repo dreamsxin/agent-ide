@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 export type ProblemSeverity = "error" | "warning" | "info";
-export type ProblemSource = "diagnostic" | "test" | "agent" | "system";
+export type ProblemSource = "diagnostic" | "lsp" | "test" | "agent" | "system";
 
 export interface ProblemEntry {
   id: string;

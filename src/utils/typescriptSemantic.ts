@@ -53,15 +53,40 @@ export function ensureOpenFileModels(
       const content = fileContents[file.path];
       if (content === undefined) continue;
       const existing = monaco.editor.getModel(uri);
+      const language = file.language || detectLanguage(file.path);
       if (existing) {
+        if (existing.getLanguageId() !== language) {
+          monaco.editor.setModelLanguage(existing, language);
+        }
         if (existing.getValue() !== content) {
           existing.setValue(content);
         }
         continue;
       }
-      monaco.editor.createModel(content, file.language, uri);
+      monaco.editor.createModel(content, language, uri);
     } catch (err) {
       console.warn("[TypeScriptSemantic] Failed to sync Monaco model:", file.path, err);
     }
   }
+}
+
+function detectLanguage(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase() || "";
+  const map: Record<string, string> = {
+    ts: "typescript",
+    tsx: "typescript",
+    js: "javascript",
+    jsx: "javascript",
+    json: "json",
+    css: "css",
+    html: "html",
+    md: "markdown",
+    rs: "rust",
+    go: "go",
+    py: "python",
+    yaml: "yaml",
+    yml: "yaml",
+    toml: "toml",
+  };
+  return map[ext] || "plaintext";
 }

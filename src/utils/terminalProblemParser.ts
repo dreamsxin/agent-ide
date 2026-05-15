@@ -1,4 +1,5 @@
 import type { ProblemEntry } from "../stores/useProblemStore";
+import { normalizeFilePath } from "./paths";
 
 const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const MAX_BUFFER_LENGTH = 24000;
@@ -89,7 +90,7 @@ function trimBuffer(buffer: string) {
 }
 
 function normalizeFile(file: string) {
-  return file.trim().replace(/\\/g, "/");
+  return normalizeFilePath(file.trim());
 }
 
 function cleanMessage(message: string) {

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { FileTab, InlineSuggestion, DiffOverlay, IntentHint } from "../types/editor";
 import type { FileMetadata, SearchResult } from "../types/project";
+import { fileNameFromPath, normalizeFilePath, pathKey, pathsEqual } from "../utils/paths";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface EditorStore {
@@ -83,10 +84,15 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   pendingRevealLocation: null,
 
   openFile: async (tab) => {
+    const normalizedTab = {
+      ...tab,
+      path: normalizeFilePath(tab.path),
+      name: tab.name || fileNameFromPath(tab.path),
+    };
     const s = get();
-    const exists = s.openFiles.find((f) => f.path === tab.path);
+    const exists = s.openFiles.find((f) => pathsEqual(f.path, normalizedTab.path));
     if (exists) {
-      set({ activeFile: tab.path });
+      set({ activeFile: exists.path });
       persistEditorSession();
       return;
     }
@@ -94,30 +100,34 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     let content = "";
     try {
       content = isTauriRuntime()
-        ? await invoke<string>("read_file_content", { path: tab.path })
-        : `// File loading is available in the Tauri app runtime.\n// ${tab.path}`;
+        ? await invoke<string>("read_file_content", { path: normalizedTab.path })
+        : `// File loading is available in the Tauri app runtime.\n// ${normalizedTab.path}`;
     } catch {
-      content = `// Failed to load: ${tab.path}`;
+      content = `// Failed to load: ${normalizedTab.path}`;
     }
 
     set((prev) => ({
-      openFiles: [...prev.openFiles, tab],
-      activeFile: tab.path,
-      fileContents: { ...prev.fileContents, [tab.path]: content },
+      openFiles: [...prev.openFiles, normalizedTab],
+      activeFile: normalizedTab.path,
+      fileContents: { ...prev.fileContents, [normalizedTab.path]: content },
     }));
     persistEditorSession();
   },
 
   closeFile: (path) => {
+    const key = pathKey(path);
     set((s) => {
-      const remaining = s.openFiles.filter((f) => f.path !== path);
+      const closing = s.openFiles.find((f) => pathKey(f.path) === key);
+      const remaining = s.openFiles.filter((f) => pathKey(f.path) !== key);
       const newActive =
-        s.activeFile === path
+        closing && s.activeFile && pathsEqual(s.activeFile, closing.path)
           ? remaining.length > 0
             ? remaining[remaining.length - 1].path
             : null
           : s.activeFile;
-      const { [path]: _, ...restContents } = s.fileContents;
+      const restContents = Object.fromEntries(
+        Object.entries(s.fileContents).filter(([file]) => pathKey(file) !== key)
+      );
       return {
         openFiles: remaining,
         activeFile: newActive,
@@ -128,7 +138,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   setActiveFile: (path) => {
-    set({ activeFile: path });
+    const existing = get().openFiles.find((file) => pathsEqual(file.path, path));
+    set({ activeFile: existing?.path ?? normalizeFilePath(path) });
     persistEditorSession();
   },
 
@@ -141,11 +152,13 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   updateFileContent: (path, content) =>
     set((s) => {
-      const isDirty = content !== s.fileContents[path];
+      const existing = s.openFiles.find((file) => pathsEqual(file.path, path));
+      const filePath = existing?.path ?? normalizeFilePath(path);
+      const isDirty = content !== s.fileContents[filePath];
       return {
-        fileContents: { ...s.fileContents, [path]: content },
+        fileContents: { ...s.fileContents, [filePath]: content },
         openFiles: s.openFiles.map((f) =>
-          f.path === path ? { ...f, isDirty } : f
+          pathsEqual(f.path, filePath) ? { ...f, isDirty } : f
         ),
       };
     }),

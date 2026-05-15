@@ -1,6 +1,7 @@
 use tauri::Manager;
 use commands::agent::AgentGlobalState;
 use commands::fs::FileWatcherState;
+use commands::lsp::LspManager;
 use commands::terminal::TerminalManager;
 
 mod commands;
@@ -17,6 +18,7 @@ pub fn run() {
         .manage(AgentGlobalState::new())
         .manage(TerminalManager::new())
         .manage(FileWatcherState::new())
+        .manage(LspManager::new())
         .setup(|app| {
             // 获取主窗口并设置标题
             if let Some(window) = app.get_webview_window("main") {
@@ -80,6 +82,16 @@ pub fn run() {
             // Tasks 命令
             commands::tasks::discover_project_tasks,
             commands::tasks::run_project_task,
+            // LSP 命令
+            commands::lsp::lsp_initialize,
+            commands::lsp::lsp_open_file,
+            commands::lsp::lsp_change_file,
+            commands::lsp::lsp_hover,
+            commands::lsp::lsp_definition,
+            commands::lsp::lsp_completion,
+            commands::lsp::lsp_document_symbols,
+            commands::lsp::lsp_rename,
+            commands::lsp::lsp_code_actions,
             // Terminal 命令
             commands::terminal::spawn_terminal,
             commands::terminal::write_to_terminal,

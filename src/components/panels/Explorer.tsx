@@ -399,7 +399,7 @@ export default function Explorer() {
     [renamePath, closeContextMenu]
   );
 
-  // 复制
+  // 复制文件/文件夹到指定路径
   const handleCopy = useCallback(
     async (node: TreeNodeData) => {
       const destName = prompt("Copy to (path):", node.path + ".copy");
@@ -413,6 +413,35 @@ export default function Explorer() {
       closeContextMenu();
     },
     [copyPath, closeContextMenu]
+  );
+
+  // 复制绝对路径
+  const handleCopyFilePath = useCallback(
+    async (node: TreeNodeData) => {
+      try {
+        await navigator.clipboard.writeText(node.path);
+        showToast(`Copied file path: ${node.path}`);
+      } catch (e) {
+        alert(`Failed to copy file path: ${e}`);
+      }
+      closeContextMenu();
+    },
+    [closeContextMenu]
+  );
+
+  // 复制相对工作区路径
+  const handleCopyRelativePath = useCallback(
+    async (node: TreeNodeData) => {
+      const relativePath = toWorkspaceRelativePath(workspacePath, node.path);
+      try {
+        await navigator.clipboard.writeText(relativePath);
+        showToast(`Copied relative path: ${relativePath}`);
+      } catch (e) {
+        alert(`Failed to copy relative path: ${e}`);
+      }
+      closeContextMenu();
+    },
+    [closeContextMenu, workspacePath]
   );
 
   // 在系统文件管理器中显示
@@ -560,7 +589,19 @@ export default function Explorer() {
             onClick={() => handleCopy(contextMenu.node)}
             className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
           >
-            <span>📋</span> Copy
+            <span>📋</span> Copy File
+          </button>
+          <button
+            onClick={() => handleCopyFilePath(contextMenu.node)}
+            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+          >
+            <span>⧉</span> Copy File Path
+          </button>
+          <button
+            onClick={() => handleCopyRelativePath(contextMenu.node)}
+            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+          >
+            <span>⧉</span> Copy Relative File Path
           </button>
           <button
             onClick={() => handleRevealInFileExplorer(contextMenu.node)}
@@ -591,4 +632,17 @@ export default function Explorer() {
       )}
     </div>
   );
+}
+
+function toWorkspaceRelativePath(workspacePath: string, targetPath: string) {
+  const normalizedWorkspace = normalizePath(workspacePath).replace(/\/+$/, "");
+  const normalizedTarget = normalizePath(targetPath);
+  if (normalizedWorkspace && normalizedTarget.toLowerCase().startsWith(`${normalizedWorkspace.toLowerCase()}/`)) {
+    return normalizedTarget.slice(normalizedWorkspace.length + 1);
+  }
+  return normalizedTarget;
+}
+
+function normalizePath(path: string) {
+  return path.replace(/\\/g, "/");
 }
