@@ -80,6 +80,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Wired editor QuickActions to real Agent prompts with active file content, selection, and selected line range.
 - Replaced static bottom-panel test/action samples with a Problems panel and store for diagnostics, Agent findings, and future test failures.
 - Synced Monaco model markers into the Problems panel and made problem rows jump to the affected file location.
+- Parsed terminal TypeScript/lint/test-style file-position errors into the Problems panel for click-through navigation.
 
 Important distinction:
 
@@ -115,6 +116,7 @@ Known local worktree note:
 - `src/utils/codeCompletion.ts`: local completion candidate extraction for Monaco suggestions.
 - `src/components/panels/`: Explorer, Git panel, terminal, logs.
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
+- `src/utils/terminalProblemParser.ts`: parses terminal output into Problems entries for common file:line:column formats.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
 - `src/stores/`: Zustand state for layout, editor, Agent, Git, logs, theme.
 - `src/hooks/`: Tauri event bridge, shortcuts, event helpers.
@@ -180,6 +182,11 @@ Monaco markers or Agent error/diff failure events
     -> useProblemStore
       -> ProblemsPanel
         -> file click opens and reveals the affected location
+
+Terminal command output
+  -> terminalProblemParser
+    -> useProblemStore.replaceProblems("test")
+      -> ProblemsPanel
 ```
 
 ### Agent Prompt
@@ -262,7 +269,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
 8. **Problems panel is only partially populated**
    - The UI/store foundation is now present.
    - Monaco diagnostics, Agent errors, and failed diff findings can be surfaced.
-   - Test/lint parser integration is still pending.
+   - Terminal TypeScript/lint/test-style file-position errors are parsed into Problems.
+   - Rich test-runner protocol integration is still pending.
    - True cross-file LSP diagnostics still require LSP backend integration.
 
 9. **Runtime modes need clearer UI messaging**
@@ -363,7 +371,7 @@ Deliverables:
 - DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.
 - Editor has local code completion for common languages and current-file symbols.
-- Problems panel replaces static test/action samples and accepts Monaco diagnostics, Agent findings, and future test failures.
+- Problems panel replaces static test/action samples and accepts Monaco diagnostics, Agent findings, and parsed terminal test/lint failures.
 - Logs panel consumes backend and Agent event streams.
 
 Acceptance checks:
@@ -439,7 +447,7 @@ target\release\agent_cli --help
 
 1. Add staged-vs-worktree diff views and multi-select to Git panel.
 2. Add LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python.
-3. Feed test/lint failures into the Problems panel.
+3. Add explicit test/lint task runners with exit status and richer parser coverage.
 4. Add per-hunk diff application and richer conflict recovery controls.
 5. Add terminal/log excerpts and selected-file packing to Agent context.
 6. Add stricter validation to the structured Agent protocol.

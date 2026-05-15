@@ -6,6 +6,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { isTauriRuntime } from "../../utils/tauri";
+import { appendAndParseTerminalProblems } from "../../utils/terminalProblemParser";
+import { useProblemStore } from "../../stores/useProblemStore";
 
 interface TerminalProps {
   terminalId?: string;
@@ -16,12 +18,16 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const readyRef = useRef(false);
+  const outputBufferRef = useRef("");
+  const replaceProblems = useProblemStore((s) => s.replaceProblems);
   const [startupError, setStartupError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     if (!containerRef.current) return;
     setStartupError(null);
+    outputBufferRef.current = "";
+    replaceProblems("test", []);
 
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
@@ -96,6 +102,13 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     listen<{ id: string; data: string }>("terminal-output", (event) => {
       if (event.payload.id === terminalId) {
         term.write(event.payload.data);
+        const parsed = appendAndParseTerminalProblems(
+          outputBufferRef.current,
+          event.payload.data,
+          terminalId
+        );
+        outputBufferRef.current = parsed.buffer;
+        replaceProblems("test", parsed.problems);
       }
     })
       .then((fn) => {
@@ -148,6 +161,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     return () => {
       disposed = true;
       readyRef.current = false;
+      outputBufferRef.current = "";
       resizeObserver.disconnect();
       unlisten?.();
       invoke("kill_terminal", { id: terminalId }).catch((err) =>
@@ -157,7 +171,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [terminalId]);
+  }, [replaceProblems, terminalId]);
 
   return (
     <div
