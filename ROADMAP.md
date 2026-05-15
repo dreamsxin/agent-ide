@@ -96,6 +96,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added non-interactive project command run history with per-run status, exit code, duration, output details, rerun, clear history, and failed-run `Fix with Agent` actions.
 - Added Terminal multi-session UI with session tabs, new session, close, restart, and active cwd/profile display while keeping inactive PTY views mounted.
 - Routed Run/Test/Debug-style project commands into dedicated Terminal sessions so long-running or interactive commands do not overwrite the main shell.
+- Added tracked Terminal task completion using per-session exit markers, so Test/Run-style commands opened in Terminal still update command status, run history, Problems, Logs, and Agent failure context.
 
 Important distinction:
 
@@ -221,6 +222,7 @@ Project Tasks
       -> run history stores exit code, duration, and output details
     -> dedicated Terminal sessions for run/test/debug-style tasks
       -> Terminal output is parsed into Problems and retained for Agent runtime context
+      -> task exit marker records exit code, duration, output, history, and failed-run Fix with Agent context
 ```
 
 ### Agent Prompt
@@ -292,6 +294,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Frontend now spawns, writes, resizes, and listens for PTY output through Tauri.
    - Persistent PTY writer is now used for terminal input.
    - Project tasks can open run/test/debug-style commands in dedicated terminal sessions.
+   - Task terminal sessions now record exit markers into Commands history with status, duration, exit code, output, Problems parsing, Logs, and Agent failure context.
    - Build/lint/check/typecheck tasks can run through a non-interactive command runner with exit code and duration.
    - TopBar and Commands panel now use the same project command execution path.
    - Terminal spawn now receives the active frontend workspace path, so newly opened terminals start in the currently opened workspace.

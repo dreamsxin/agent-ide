@@ -17,6 +17,10 @@ interface TerminalProps {
   cwd: string;
   profile: string;
   initialCommand?: string;
+  taskId?: string;
+  taskLabel?: string;
+  taskRunId?: string;
+  taskExitMarker?: string;
 }
 
 interface TerminalSession {
@@ -26,6 +30,10 @@ interface TerminalSession {
   profile: string;
   version: number;
   initialCommand?: string;
+  taskId?: string;
+  taskLabel?: string;
+  taskRunId?: string;
+  taskExitMarker?: string;
 }
 
 export default function TerminalPanel() {
@@ -62,7 +70,13 @@ export default function TerminalPanel() {
             request.terminalId,
             request.label,
             request.cwd || workspacePath,
-            request.command
+            request.command,
+            {
+              taskId: request.taskId,
+              taskLabel: request.label,
+              taskRunId: request.runId,
+              taskExitMarker: request.exitMarker,
+            }
           )
         );
       }
@@ -168,6 +182,10 @@ export default function TerminalPanel() {
               cwd={session.cwd}
               profile={session.profile}
               initialCommand={session.initialCommand}
+              taskId={session.taskId}
+              taskLabel={session.taskLabel}
+              taskRunId={session.taskRunId}
+              taskExitMarker={session.taskExitMarker}
             />
           </div>
         ))}
@@ -176,18 +194,30 @@ export default function TerminalPanel() {
   );
 }
 
-function TerminalSessionView({ terminalId, cwd, profile, initialCommand }: TerminalProps) {
+function TerminalSessionView({
+  terminalId,
+  cwd,
+  profile,
+  initialCommand,
+  taskId,
+  taskLabel,
+  taskRunId,
+  taskExitMarker,
+}: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const readyRef = useRef(false);
   const initialCommandRef = useRef(initialCommand);
   const outputBufferRef = useRef("");
+  const taskOutputRef = useRef("");
+  const taskCompletedRef = useRef(false);
   const replaceProblems = useProblemStore((s) => s.replaceProblems);
   const lastTask = useTaskStore((s) => s.lastTask);
   const consumeTerminalCommands = useTaskStore((s) => s.consumeTerminalCommands);
   const appendTerminalOutput = useTaskStore((s) => s.appendTerminalOutput);
   const clearTerminalOutput = useTaskStore((s) => s.clearTerminalOutput);
+  const finishTaskRun = useTaskStore((s) => s.finishTaskRun);
   const addLog = useLogStore((s) => s.addLog);
   const [startupError, setStartupError] = useState<string | null>(null);
 
@@ -216,7 +246,7 @@ function TerminalSessionView({ terminalId, cwd, profile, initialCommand }: Termi
     const command = initialCommandRef.current;
     if (!command) return;
     initialCommandRef.current = undefined;
-    const data = `${command}\r`;
+    const data = taskExitMarker ? `${buildTrackedCommand(command, taskExitMarker)}\r` : `${command}\r`;
     xtermRef.current?.writeln(`\r\n\x1b[90m$ ${command}\x1b[0m`);
     invoke("write_to_terminal", { id: terminalId, data }).catch((err) => {
       console.warn("[Terminal] initial command failed:", err);
@@ -228,7 +258,52 @@ function TerminalSessionView({ terminalId, cwd, profile, initialCommand }: Termi
         details: String(err),
       });
     });
-  }, [addLog, terminalId]);
+  }, [addLog, taskExitMarker, terminalId]);
+
+  const handleTaskOutput = useCallback(
+    (chunk: string) => {
+      if (!taskId || !taskExitMarker || taskCompletedRef.current) return;
+      taskOutputRef.current = `${taskOutputRef.current}${chunk}`;
+      const plainOutput = stripAnsi(taskOutputRef.current).replace(/\r\n/g, "\n");
+      const markerIndex = plainOutput.indexOf(taskExitMarker);
+      if (markerIndex < 0) return;
+
+      const beforeMarker = plainOutput.slice(0, markerIndex);
+      const markerTail = plainOutput.slice(markerIndex);
+      const exitMatch = markerTail.match(new RegExp(`${escapeRegExp(taskExitMarker)}:(-?\\d+)`));
+      if (!exitMatch) return;
+      const exitCode = exitMatch ? Number(exitMatch[1]) : null;
+      const status = exitCode === 0 ? "success" : "failed";
+      const output = cleanupTrackedOutput(beforeMarker, initialCommand ?? "");
+      const problems = appendAndParseTerminalProblems("", output, terminalId).problems;
+
+      taskCompletedRef.current = true;
+      finishTaskRun(taskId, status, {
+        exitCode,
+        durationMs: Date.now() - Number(taskRunId?.split("-")[1] ?? Date.now()),
+        output,
+      });
+      replaceProblems("test", problems);
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        level: status === "success" ? "success" : "error",
+        source: "system",
+        message: `${taskLabel ?? taskId} ${status}${exitCode === null ? "" : ` (exit ${exitCode})`}`,
+        details: output.slice(-4000),
+      });
+    },
+    [
+      addLog,
+      finishTaskRun,
+      initialCommand,
+      replaceProblems,
+      taskExitMarker,
+      taskId,
+      taskLabel,
+      taskRunId,
+      terminalId,
+    ]
+  );
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -312,6 +387,7 @@ function TerminalSessionView({ terminalId, cwd, profile, initialCommand }: Termi
       if (event.payload.id === terminalId) {
         term.write(event.payload.data);
         appendTerminalOutput(terminalId, event.payload.data);
+        handleTaskOutput(event.payload.data);
         const parsed = appendAndParseTerminalProblems(
           outputBufferRef.current,
           event.payload.data,
@@ -393,6 +469,7 @@ function TerminalSessionView({ terminalId, cwd, profile, initialCommand }: Termi
     replaceProblems,
     runQueuedCommands,
     runInitialCommand,
+    handleTaskOutput,
     terminalId,
     cwd,
     profile,
@@ -426,7 +503,8 @@ function createTerminalSession(
   id: string,
   label: string,
   cwd: string,
-  initialCommand?: string
+  initialCommand?: string,
+  taskMeta?: Pick<TerminalSession, "taskId" | "taskLabel" | "taskRunId" | "taskExitMarker">
 ): TerminalSession {
   return {
     id,
@@ -435,5 +513,30 @@ function createTerminalSession(
     profile: navigator.userAgent.includes("Windows") ? "cmd.exe" : "system shell",
     version: 0,
     initialCommand,
+    ...taskMeta,
   };
+}
+
+function buildTrackedCommand(command: string, marker: string) {
+  if (navigator.userAgent.includes("Windows")) {
+    return `${command} & call echo ${marker}:%%ERRORLEVEL%%`;
+  }
+  return `${command}; printf '\\n${marker}:%s\\n' "$?"`;
+}
+
+function stripAnsi(value: string) {
+  return value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cleanupTrackedOutput(output: string, command: string) {
+  return output
+    .replace(command, "")
+    .split("\n")
+    .filter((line) => !line.includes("__AGENT_IDE_TASK_EXIT_"))
+    .join("\n")
+    .trim();
 }

@@ -63,7 +63,14 @@ export function buildIdeRuntimeContext() {
     );
   }
 
-  const terminalOutput = taskState.terminalOutput.main?.trim();
+  const terminalOutput = Object.entries(taskState.terminalOutput)
+    .sort(([a], [b]) => (a === "main" ? -1 : b === "main" ? 1 : a.localeCompare(b)))
+    .map(([id, output]) => {
+      const trimmed = output.trim();
+      return trimmed ? `Terminal ${id}:\n${tail(trimmed, 2000)}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
   if (terminalOutput) {
     sections.push(`Recent Terminal Output:\n${tail(terminalOutput, 4000)}`);
   }

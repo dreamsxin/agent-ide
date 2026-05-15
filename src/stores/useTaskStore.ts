@@ -25,6 +25,8 @@ export interface QueuedTerminalSessionRequest {
   label: string;
   command: string;
   cwd: string;
+  runId: string;
+  exitMarker: string;
   createdAt: number;
 }
 
@@ -216,6 +218,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   queueTerminalSession: (taskId, label, command, cwd = "") => {
     const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const terminalId = `task-terminal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const runId = get().startTaskRun(taskId, command, label);
     const request: QueuedTerminalSessionRequest = {
       id,
       terminalId,
@@ -223,6 +226,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       label,
       command,
       cwd,
+      runId,
+      exitMarker: `__AGENT_IDE_TASK_EXIT_${id}__`,
       createdAt: Date.now(),
     };
     const queued: QueuedTerminalCommand = {
