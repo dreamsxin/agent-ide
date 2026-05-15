@@ -18,7 +18,7 @@ interface LayoutStore {
   leftTab: "explorer" | "git";
 
   // 当前底部面板标签
-  bottomTab: "terminal" | "problems" | "logs";
+  bottomTab: "terminal" | "tasks" | "problems" | "logs";
 
   // workspacePath
   workspacePath: string;

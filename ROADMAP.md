@@ -81,6 +81,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Replaced static bottom-panel test/action samples with a Problems panel and store for diagnostics, Agent findings, and future test failures.
 - Synced Monaco model markers into the Problems panel and made problem rows jump to the affected file location.
 - Parsed terminal TypeScript/lint/test-style file-position errors into the Problems panel for click-through navigation.
+- Added a Project Tasks panel for build, test, lint, run, and debug commands that queue into the integrated terminal.
 
 Important distinction:
 
@@ -116,6 +117,8 @@ Known local worktree note:
 - `src/utils/codeCompletion.ts`: local completion candidate extraction for Monaco suggestions.
 - `src/components/panels/`: Explorer, Git panel, terminal, logs.
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
+- `src/components/panels/TasksPanel.tsx`: project build/test/lint/run/debug task launcher.
+- `src/stores/useTaskStore.ts`: queued terminal command state for project tasks.
 - `src/utils/terminalProblemParser.ts`: parses terminal output into Problems entries for common file:line:column formats.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
 - `src/stores/`: Zustand state for layout, editor, Agent, Git, logs, theme.
@@ -187,6 +190,12 @@ Terminal command output
   -> terminalProblemParser
     -> useProblemStore.replaceProblems("test")
       -> ProblemsPanel
+
+Project Tasks
+  -> TasksPanel Build/Test/Lint/Run/Debug
+    -> useTaskStore.queueTerminalCommand()
+    -> Terminal consumes queued command when ready
+    -> terminalProblemParser feeds Problems
 ```
 
 ### Agent Prompt
@@ -256,6 +265,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
 5. **Terminal PTY integration needs runtime polish**
    - Frontend now spawns, writes, resizes, and listens for PTY output through Tauri.
    - Persistent PTY writer is now used for terminal input.
+   - Project tasks can queue build/test/lint/run/debug commands into the terminal.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Git workflow needs continued polish**
@@ -367,6 +377,7 @@ Deliverables:
   - resize
   - receive `terminal-output`
   - kill terminal
+- Project Tasks panel launches build, test, lint, run, and debug commands through the integrated terminal.
 - QuickActions sends real Agent prompts.
 - DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.
@@ -447,7 +458,7 @@ target\release\agent_cli --help
 
 1. Add staged-vs-worktree diff views and multi-select to Git panel.
 2. Add LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python.
-3. Add explicit test/lint task runners with exit status and richer parser coverage.
+3. Add exit status tracking and richer parser coverage for project tasks.
 4. Add per-hunk diff application and richer conflict recovery controls.
 5. Add terminal/log excerpts and selected-file packing to Agent context.
 6. Add stricter validation to the structured Agent protocol.

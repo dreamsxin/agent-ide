@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
@@ -8,6 +8,8 @@ import "@xterm/xterm/css/xterm.css";
 import { isTauriRuntime } from "../../utils/tauri";
 import { appendAndParseTerminalProblems } from "../../utils/terminalProblemParser";
 import { useProblemStore } from "../../stores/useProblemStore";
+import { useTaskStore } from "../../stores/useTaskStore";
+import { useLogStore } from "../../stores/useLogStore";
 
 interface TerminalProps {
   terminalId?: string;
@@ -20,7 +22,30 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const readyRef = useRef(false);
   const outputBufferRef = useRef("");
   const replaceProblems = useProblemStore((s) => s.replaceProblems);
+  const lastTask = useTaskStore((s) => s.lastTask);
+  const consumeTerminalCommands = useTaskStore((s) => s.consumeTerminalCommands);
+  const addLog = useLogStore((s) => s.addLog);
   const [startupError, setStartupError] = useState<string | null>(null);
+
+  const runQueuedCommands = useCallback(() => {
+    if (!readyRef.current) return;
+    const term = xtermRef.current;
+    const commands = consumeTerminalCommands(terminalId);
+    for (const queued of commands) {
+      const data = `${queued.command}\r`;
+      term?.writeln(`\r\n\x1b[90m$ ${queued.command}\x1b[0m`);
+      invoke("write_to_terminal", { id: terminalId, data }).catch((err) => {
+        console.warn("[Terminal] queued command failed:", err);
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          level: "error",
+          source: "system",
+          message: `Failed to run project task: ${queued.command}`,
+          details: String(err),
+        });
+      });
+    }
+  }, [addLog, consumeTerminalCommands, terminalId]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -124,12 +149,14 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       .then(() => {
         readyRef.current = true;
         sendResize();
+        runQueuedCommands();
       })
       .catch((err) => {
         const msg = String(err);
         if (msg.includes("already exists")) {
           readyRef.current = true;
           sendResize();
+          runQueuedCommands();
           return;
         }
         term.writeln(`\r\n\x1b[31mTerminal failed to start: ${msg}\x1b[0m`);
@@ -142,6 +169,8 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
         console.warn("[Terminal] write failed:", err)
       );
     });
+
+    runQueuedCommands();
 
     const resizeObserver = new ResizeObserver(() => {
       if (fitAddonRef.current) {
@@ -171,7 +200,11 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [replaceProblems, terminalId]);
+  }, [replaceProblems, runQueuedCommands, terminalId]);
+
+  useEffect(() => {
+    runQueuedCommands();
+  }, [lastTask, runQueuedCommands]);
 
   return (
     <div

@@ -77,6 +77,8 @@ export default function useShortcuts() {
       handler: () => { setLeftTab("explorer"); useLayoutStore.getState().leftVisible || toggleLeftPanel(); } },
     { id: "terminal-bottom", keys: "Ctrl+Shift+T", label: "Switch to Terminal", group: "Navigation", scope: "global",
       handler: () => { setBottomTab("terminal"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
+    { id: "tasks-bottom", keys: "Ctrl+Shift+B", label: "Switch to Tasks", group: "Navigation", scope: "global",
+      handler: () => { setBottomTab("tasks"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
     { id: "logs-bottom", keys: "Ctrl+Shift+L", label: "Switch to Logs", group: "Navigation", scope: "global",
       handler: () => { setBottomTab("logs"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
     { id: "problems-bottom", keys: "Ctrl+Shift+M", label: "Switch to Problems", group: "Navigation", scope: "global",

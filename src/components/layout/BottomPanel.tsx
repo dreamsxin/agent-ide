@@ -2,11 +2,13 @@ import { useLayoutStore } from "../../stores/useLayoutStore";
 import Terminal from "../panels/Terminal";
 import LogView from "../panels/LogView";
 import ProblemsPanel from "../panels/ProblemsPanel";
+import TasksPanel from "../panels/TasksPanel";
 
-type BottomTab = "terminal" | "problems" | "logs";
+type BottomTab = "terminal" | "tasks" | "problems" | "logs";
 
 const tabs: { id: BottomTab; label: string; icon: string; tooltip: string }[] = [
   { id: "terminal", label: "Terminal", icon: ">", tooltip: "Integrated system terminal" },
+  { id: "tasks", label: "Tasks", icon: "▶", tooltip: "Build, test, run, and debug project tasks" },
   { id: "problems", label: "Problems", icon: "!", tooltip: "Diagnostics, test failures, and Agent findings" },
   { id: "logs", label: "Logs", icon: "📋", tooltip: "Agent & system operation logs" },
 ];
@@ -40,6 +42,7 @@ export default function BottomPanel() {
       {/* Tab 内容 */}
       <div className="flex-1 overflow-hidden">
         {activeTab === "terminal" && <Terminal />}
+        {activeTab === "tasks" && <TasksPanel />}
         {activeTab === "problems" && <ProblemsPanel />}
         {activeTab === "logs" && <LogView />}
       </div>
