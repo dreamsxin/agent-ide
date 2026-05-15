@@ -7,6 +7,7 @@ import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
+import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { useLayoutStore } from "./stores/useLayoutStore";
 import { useEditorStore } from "./stores/useEditorStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
@@ -161,7 +162,9 @@ export default function App() {
         </AnimatedPanel>
 
         <div className="flex-1 min-w-0">
-          <EditorContainer />
+          <ErrorBoundary fallbackTitle="Editor failed to render">
+            <EditorContainer />
+          </ErrorBoundary>
         </div>
 
         <AnimatedPanel visible={rightVisible} className="h-full">

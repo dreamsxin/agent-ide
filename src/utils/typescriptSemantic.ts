@@ -1,7 +1,6 @@
 import type * as Monaco from "monaco-editor";
 import type { FileTab } from "../types/editor";
 
-const TS_LANGUAGES = new Set(["typescript", "javascript"]);
 let configured = false;
 
 export function configureTypeScriptSemantic(monaco: typeof Monaco) {
@@ -39,14 +38,8 @@ export function configureTypeScriptSemantic(monaco: typeof Monaco) {
   monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
 }
 
-export function isTypeScriptSemanticLanguage(language: string) {
-  return TS_LANGUAGES.has(language);
-}
-
 export function filePathToMonacoUri(monaco: typeof Monaco, path: string) {
-  const normalized = path.replace(/\\/g, "/");
-  const withLeadingSlash = /^[A-Za-z]:\//.test(normalized) ? `/${normalized}` : normalized;
-  return monaco.Uri.parse(`file://${encodeURI(withLeadingSlash)}`);
+  return monaco.Uri.file(path);
 }
 
 export function ensureOpenFileModels(
@@ -55,16 +48,20 @@ export function ensureOpenFileModels(
   fileContents: Record<string, string>
 ) {
   for (const file of openFiles) {
-    const uri = filePathToMonacoUri(monaco, file.path);
-    const content = fileContents[file.path];
-    if (content === undefined) continue;
-    const existing = monaco.editor.getModel(uri);
-    if (existing) {
-      if (existing.getValue() !== content) {
-        existing.setValue(content);
+    try {
+      const uri = filePathToMonacoUri(monaco, file.path);
+      const content = fileContents[file.path];
+      if (content === undefined) continue;
+      const existing = monaco.editor.getModel(uri);
+      if (existing) {
+        if (existing.getValue() !== content) {
+          existing.setValue(content);
+        }
+        continue;
       }
-      continue;
+      monaco.editor.createModel(content, file.language, uri);
+    } catch (err) {
+      console.warn("[TypeScriptSemantic] Failed to sync Monaco model:", file.path, err);
     }
-    monaco.editor.createModel(content, file.language, uri);
   }
 }
