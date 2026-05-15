@@ -6,9 +6,16 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Serialize)]
 pub struct GitStatusEntry {
     pub path: String,
-    pub status: String, // "modified" | "added" | "deleted" | "untracked" | "renamed"
+    pub status: String, // "modified" | "added" | "deleted" | "untracked" | "renamed" | "conflicted"
     pub old_path: Option<String>,
     pub staged: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+    pub remote: bool,
 }
 
 /// Git 状态汇总
@@ -18,6 +25,9 @@ pub struct GitStatus {
     pub entries: Vec<GitStatusEntry>,
     pub ahead: usize,
     pub behind: usize,
+    pub upstream: Option<String>,
+    pub branches: Vec<GitBranch>,
+    pub conflicts: Vec<String>,
 }
 
 /// 获取 Git 仓库状态
@@ -33,6 +43,10 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
     // 获取 ahead/behind
     let mut ahead = 0;
     let mut behind = 0;
+    let upstream_name = head
+        .shorthand()
+        .and_then(|_| current_upstream_name(&repo).ok())
+        .flatten();
     if let Ok(upstream) = repo.revparse_single("@{upstream}") {
         let local = head.peel_to_commit().map_err(|e| e.to_string())?;
         let upstream_commit = upstream.peel_to_commit().map_err(|e| e.to_string())?;
@@ -54,9 +68,20 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
         .map_err(|e| format!("Status: {}", e))?;
 
     let mut entries = Vec::new();
+    let mut conflicts = Vec::new();
     for entry in statuses.iter() {
         let status = entry.status();
         let path = entry.path().unwrap_or("").to_string();
+        if status.is_conflicted() {
+            conflicts.push(path.clone());
+            entries.push(GitStatusEntry {
+                path,
+                status: "conflicted".to_string(),
+                old_path: None,
+                staged: false,
+            });
+            continue;
+        }
 
         let old_path = if status.is_index_renamed() {
             entry
@@ -84,12 +109,120 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
         }
     }
 
+    let branches = list_branches(&repo, Some(&branch))?;
+
     Ok(GitStatus {
         branch,
         entries,
         ahead,
         behind,
+        upstream: upstream_name,
+        branches,
+        conflicts,
     })
+}
+
+#[tauri::command]
+pub fn git_checkout_branch(path: String, branch: String, create: bool) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let branch = validate_branch_name(&branch)?;
+
+    if create {
+        let head_commit = repo
+            .head()
+            .map_err(|e| format!("HEAD: {}", e))?
+            .peel_to_commit()
+            .map_err(|e| format!("Commit: {}", e))?;
+        repo.branch(&branch, &head_commit, false)
+            .map_err(|e| format!("Create branch {}: {}", branch, e))?;
+    } else {
+        repo.find_branch(&branch, git2::BranchType::Local)
+            .map_err(|e| format!("Local branch {} not found: {}", branch, e))?;
+    }
+
+    repo.set_head(&format!("refs/heads/{}", branch))
+        .map_err(|e| format!("Set HEAD: {}", e))?;
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.safe();
+    repo.checkout_head(Some(&mut checkout))
+        .map_err(|e| format!("Checkout {}: {}", branch, e))
+}
+
+#[tauri::command]
+pub fn git_fetch(path: String, remote: Option<String>) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let remote_name = remote.unwrap_or_else(|| "origin".to_string());
+    let mut remote = repo
+        .find_remote(&remote_name)
+        .map_err(|e| format!("Remote {}: {}", remote_name, e))?;
+    let mut options = remote_callbacks(&repo)?;
+    remote
+        .fetch(&[] as &[&str], Some(&mut options), None)
+        .map_err(|e| format!("Fetch {}: {}", remote_name, e))
+}
+
+#[tauri::command]
+pub fn git_pull(path: String, remote: Option<String>) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let current_branch = current_branch_name(&repo)?;
+    if has_uncommitted_changes(&repo)? {
+        return Err("Pull requires a clean working tree in this first version.".to_string());
+    }
+
+    git_fetch(path.to_string_lossy().to_string(), remote)?;
+    let upstream = current_upstream_name(&repo)?
+        .ok_or_else(|| format!("Branch {} has no upstream", current_branch))?;
+    let upstream_ref = repo
+        .find_reference(&upstream)
+        .map_err(|e| format!("Find upstream {}: {}", upstream, e))?;
+    let upstream_annotated = repo
+        .reference_to_annotated_commit(&upstream_ref)
+        .map_err(|e| format!("Upstream commit: {}", e))?;
+    let (analysis, _) = repo
+        .merge_analysis(&[&upstream_annotated])
+        .map_err(|e| format!("Merge analysis: {}", e))?;
+    if analysis.is_up_to_date() {
+        return Ok(());
+    }
+    if !analysis.is_fast_forward() {
+        return Err("Pull requires a fast-forward merge in this first version.".to_string());
+    }
+    let upstream_commit = upstream_ref
+        .peel_to_commit()
+        .map_err(|e| format!("Upstream commit: {}", e))?;
+    let mut reference = repo
+        .find_reference(&format!("refs/heads/{}", current_branch))
+        .map_err(|e| format!("Find branch {}: {}", current_branch, e))?;
+    reference
+        .set_target(upstream_commit.id(), "fast-forward pull")
+        .map_err(|e| format!("Fast-forward pull: {}", e))?;
+    repo.set_head(&format!("refs/heads/{}", current_branch))
+        .map_err(|e| format!("Set HEAD: {}", e))?;
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.safe();
+    repo.checkout_head(Some(&mut checkout))
+        .map_err(|e| format!("Checkout pulled HEAD: {}", e))
+}
+
+#[tauri::command]
+pub fn git_push(path: String, remote: Option<String>) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let branch = current_branch_name(&repo)?;
+    let remote_name = remote.unwrap_or_else(|| "origin".to_string());
+    let mut remote = repo
+        .find_remote(&remote_name)
+        .map_err(|e| format!("Remote {}: {}", remote_name, e))?;
+    let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
+    let mut options = git2::PushOptions::new();
+    let callbacks = git_remote_callbacks(&repo)?;
+    options.remote_callbacks(callbacks);
+    remote
+        .push(&[refspec.as_str()], Some(&mut options))
+        .map_err(|e| format!("Push {}: {}", remote_name, e))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +482,101 @@ fn worktree_status_string(status: git2::Status) -> Option<&'static str> {
     }
 }
 
+fn current_branch_name(repo: &git2::Repository) -> Result<String, String> {
+    let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
+    head.shorthand()
+        .map(str::to_string)
+        .ok_or_else(|| "Detached HEAD is not supported for this operation".to_string())
+}
+
+fn current_upstream_name(repo: &git2::Repository) -> Result<Option<String>, String> {
+    let branch_name = current_branch_name(repo)?;
+    let branch = repo
+        .find_branch(&branch_name, git2::BranchType::Local)
+        .map_err(|e| format!("Branch {}: {}", branch_name, e))?;
+    match branch.upstream() {
+        Ok(upstream) => Ok(upstream
+            .get()
+            .name()
+            .map(|name| name.to_string())),
+        Err(_) => Ok(None),
+    }
+}
+
+fn list_branches(repo: &git2::Repository, current: Option<&str>) -> Result<Vec<GitBranch>, String> {
+    let mut branches = Vec::new();
+    let iter = repo
+        .branches(None)
+        .map_err(|e| format!("List branches: {}", e))?;
+    for branch_result in iter {
+        let (branch, branch_type) = branch_result.map_err(|e| format!("Branch: {}", e))?;
+        let Some(name) = branch.name().map_err(|e| format!("Branch name: {}", e))? else {
+            continue;
+        };
+        branches.push(GitBranch {
+            name: name.to_string(),
+            current: current == Some(name) && branch_type == git2::BranchType::Local,
+            remote: branch_type == git2::BranchType::Remote,
+        });
+    }
+    branches.sort_by(|a, b| a.remote.cmp(&b.remote).then_with(|| a.name.cmp(&b.name)));
+    Ok(branches)
+}
+
+fn validate_branch_name(branch: &str) -> Result<String, String> {
+    let trimmed = branch.trim();
+    if trimmed.is_empty() {
+        return Err("Branch name is empty".to_string());
+    }
+    if trimmed.contains("..")
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('/')
+        || trimmed.ends_with('/')
+        || trimmed.contains('\\')
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(format!("Invalid branch name: {}", branch));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn has_uncommitted_changes(repo: &git2::Repository) -> Result<bool, String> {
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true);
+    let statuses = repo
+        .statuses(Some(&mut opts))
+        .map_err(|e| format!("Status: {}", e))?;
+    Ok(!statuses.is_empty())
+}
+
+fn remote_callbacks(repo: &git2::Repository) -> Result<git2::FetchOptions<'static>, String> {
+    let mut options = git2::FetchOptions::new();
+    options.remote_callbacks(git_remote_callbacks(repo)?);
+    Ok(options)
+}
+
+fn git_remote_callbacks(repo: &git2::Repository) -> Result<git2::RemoteCallbacks<'static>, String> {
+    let mut callbacks = git2::RemoteCallbacks::new();
+    let config = repo.config().map_err(|e| format!("Git config: {}", e))?;
+    callbacks.credentials(move |url, username_from_url, allowed| {
+        if allowed.contains(git2::CredentialType::SSH_KEY) {
+            if let Some(username) = username_from_url {
+                return git2::Cred::ssh_key_from_agent(username);
+            }
+        }
+        if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+            if let (Ok(username), Ok(password)) = (
+                std::env::var("GIT_USERNAME"),
+                std::env::var("GIT_PASSWORD"),
+            ) {
+                return git2::Cred::userpass_plaintext(&username, &password);
+            }
+        }
+        git2::Cred::credential_helper(&config, url, username_from_url)
+    });
+    Ok(callbacks)
+}
+
 fn repo_workdir(repo: &git2::Repository) -> Result<&Path, String> {
     repo.workdir()
         .ok_or_else(|| "Bare repositories are not supported".to_string())
@@ -536,6 +764,83 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.path == "tracked.txt" && !entry.staged));
+    }
+
+    #[test]
+    fn git_checkout_branch_can_create_and_switch_branch() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+
+        git_checkout_branch(
+            env.root.to_string_lossy().to_string(),
+            "feature/demo".to_string(),
+            true,
+        )
+        .unwrap();
+        let status = git_status(env.root.to_string_lossy().to_string()).unwrap();
+
+        assert_eq!(status.branch, "feature/demo");
+        assert!(status
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature/demo" && branch.current));
+    }
+
+    #[test]
+    fn git_status_reports_conflicted_files() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        let repo = git2::Repository::open(&env.root).unwrap();
+        let ancestor = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = git2::Signature::now("Agent IDE Test", "agent@example.com").unwrap();
+
+        git_checkout_branch(
+            env.root.to_string_lossy().to_string(),
+            "other".to_string(),
+            true,
+        )
+        .unwrap();
+        std::fs::write(env.root.join("tracked.txt"), "other\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "other", &tree, &[&ancestor])
+            .unwrap();
+
+        git_checkout_branch(
+            env.root.to_string_lossy().to_string(),
+            "master".to_string(),
+            false,
+        )
+        .unwrap();
+        std::fs::write(env.root.join("tracked.txt"), "master\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let master_parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "master", &tree, &[&master_parent])
+            .unwrap();
+
+        let other_ref = repo
+            .find_branch("other", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .resolve()
+            .unwrap();
+        let other = repo.reference_to_annotated_commit(&other_ref).unwrap();
+        let mut opts = git2::MergeOptions::new();
+        repo.merge(&[&other], Some(&mut opts), None).unwrap();
+        let status = git_status(env.root.to_string_lossy().to_string()).unwrap();
+
+        assert!(status.conflicts.iter().any(|path| path == "tracked.txt"));
+        assert!(status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "tracked.txt" && entry.status == "conflicted"));
     }
 
     #[test]

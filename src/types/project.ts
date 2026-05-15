@@ -17,9 +17,16 @@ export interface GitInfo {
 /** Git 状态条目 */
 export interface GitStatusEntry {
   path: string;
-  status: "modified" | "added" | "deleted" | "untracked" | "renamed";
+  status: "modified" | "added" | "deleted" | "untracked" | "renamed" | "conflicted";
   old_path: string | null;
   staged: boolean;
+}
+
+/** Git branch entry */
+export interface GitBranch {
+  name: string;
+  current: boolean;
+  remote: boolean;
 }
 
 /** Git diff view mode */
@@ -31,6 +38,9 @@ export interface GitStatus {
   entries: GitStatusEntry[];
   ahead: number;
   behind: number;
+  upstream: string | null;
+  branches: GitBranch[];
+  conflicts: string[];
 }
 
 /** 操作日志条目 */

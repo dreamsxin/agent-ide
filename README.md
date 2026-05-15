@@ -6,6 +6,8 @@ Code-centric controllable AI Agent IDE built with Tauri v2, Rust, React, TypeScr
 
 Agent IDE is not intended to be a chat-only coding tool. The product direction is an IDE where the Agent is visible, auditable, and user-controlled through task plans, role pipelines, diff review, logs, Git state, and terminal workflows.
 
+![Agent IDE screenshot](docs/screen-01.png)
+
 ## Current Status
 
 Current phase: **Phase 7 - Agent execution quality and auditability**.
@@ -15,7 +17,7 @@ Implemented core capabilities:
 - Tauri desktop shell with React/Vite frontend and Rust backend.
 - Monaco-based editor, file tabs, file tree, Git panel, terminal panel, logs, and Agent panel.
 - Workspace-scoped filesystem operations with path boundary checks.
-- Git status/diff/stage/unstage/discard/commit commands through `git2`, with staged/worktree/all diff modes and multi-select batch actions in Source Control.
+- Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push commands through `git2`, with staged/worktree/all diff modes and multi-select batch actions in Source Control.
 - PTY terminal backend using `portable-pty` and xterm.js frontend integration.
 - OpenAI-compatible streaming LLM client.
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
@@ -27,7 +29,7 @@ Implemented core capabilities:
 
 Important remaining gaps:
 
-- Git workflow still needs branch checkout/create, fetch/pull/push, and conflict state display.
+- Git workflow still needs credential UX, remote branch tracking, and richer conflict resolution controls.
 - Full workspace LSP-backed completion/diagnostics are still pending beyond Monaco open-file TypeScript/JavaScript semantics.
 - Agent change protocol still needs stricter schema validation and richer provenance.
 - API keys are still persisted in local JSON config.

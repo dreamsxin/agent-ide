@@ -10,6 +10,7 @@ const STATUS_ICONS: Record<string, { icon: string; color: string }> = {
   deleted: { icon: "D", color: "text-diff-remove" },
   untracked: { icon: "U", color: "text-accent-green" },
   renamed: { icon: "R", color: "text-accent-blue" },
+  conflicted: { icon: "!", color: "text-diff-remove" },
 };
 
 const DIFF_LABELS: Record<GitDiffKind, string> = {
@@ -39,6 +40,10 @@ export default function GitPanel() {
   const stageFiles = useGitStore((s) => s.stageFiles);
   const unstageFiles = useGitStore((s) => s.unstageFiles);
   const discardFiles = useGitStore((s) => s.discardFiles);
+  const checkoutBranch = useGitStore((s) => s.checkoutBranch);
+  const fetchRemote = useGitStore((s) => s.fetch);
+  const pullRemote = useGitStore((s) => s.pull);
+  const pushRemote = useGitStore((s) => s.push);
   const addLog = useLogStore((s) => s.addLog);
 
   const projectPath = workspacePath || ".";
@@ -47,6 +52,7 @@ export default function GitPanel() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [diffKind, setDiffKind] = useState<GitDiffKind>("all");
+  const [branchName, setBranchName] = useState("");
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -66,6 +72,7 @@ export default function GitPanel() {
   );
   const selectedStaged = selectedEntries.filter((entry) => entry.staged);
   const selectedUnstaged = selectedEntries.filter((entry) => !entry.staged);
+  const localBranches = status?.branches.filter((branch) => !branch.remote) ?? [];
 
   useEffect(() => {
     if (!selectedEntryKey) return;
@@ -149,6 +156,58 @@ export default function GitPanel() {
       setSelectedKeys([]);
     }
   }, [message, commit, projectPath, addLog, fetchStatus, clearDiff]);
+
+  const handleCheckoutBranch = useCallback(
+    async (branch: string) => {
+      if (!branch || branch === status?.branch) return;
+      if (await checkoutBranch(projectPath, branch, false)) {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          level: "success",
+          source: "git",
+          message: `Checked out ${branch}`,
+        });
+        await fetchStatus(projectPath);
+        clearDiff();
+        setSelectedEntryKey(null);
+        setSelectedFile(null);
+      }
+    },
+    [addLog, checkoutBranch, clearDiff, fetchStatus, projectPath, status?.branch]
+  );
+
+  const handleCreateBranch = useCallback(async () => {
+    const name = branchName.trim();
+    if (!name) return;
+    if (await checkoutBranch(projectPath, name, true)) {
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        level: "success",
+        source: "git",
+        message: `Created and checked out ${name}`,
+      });
+      setBranchName("");
+      await fetchStatus(projectPath);
+      clearDiff();
+    }
+  }, [addLog, branchName, checkoutBranch, clearDiff, fetchStatus, projectPath]);
+
+  const handleRemoteAction = useCallback(
+    async (kind: "fetch" | "pull" | "push") => {
+      const action = kind === "fetch" ? fetchRemote : kind === "pull" ? pullRemote : pushRemote;
+      if (await action(projectPath)) {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          level: "success",
+          source: "git",
+          message: `Git ${kind} completed`,
+        });
+        await fetchStatus(projectPath);
+        clearDiff();
+      }
+    },
+    [addLog, clearDiff, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote]
+  );
 
   const handleStage = useCallback(
     async (entries: GitStatusEntry[]) => {
@@ -269,10 +328,76 @@ export default function GitPanel() {
         <div className="px-3 py-2 border-b border-surface-border">
           <div className="flex items-center gap-1.5 text-surface-text">
             <span className="text-accent-blue">⎇</span>
-            <span className="font-mono">{status.branch}</span>
+            <select
+              value={status.branch}
+              onChange={(event) => handleCheckoutBranch(event.target.value)}
+              disabled={loading}
+              className="min-w-0 flex-1 bg-surface-base border border-surface-border rounded px-1.5 py-1 font-mono text-[11px] text-surface-text focus:outline-none focus:border-accent-blue"
+              title="Checkout branch"
+            >
+              {localBranches.map((branch) => (
+                <option key={branch.name} value={branch.name}>
+                  {branch.name}
+                </option>
+              ))}
+            </select>
           </div>
+          {status.upstream && (
+            <div className="mt-1 truncate text-[10px] text-surface-muted" title={status.upstream}>
+              upstream: {status.upstream}
+            </div>
+          )}
           {status.ahead > 0 && <div className="text-accent-blue text-[10px] mt-0.5">↑{status.ahead} ahead</div>}
           {status.behind > 0 && <div className="text-diff-modify text-[10px] mt-0.5">↓{status.behind} behind</div>}
+          <div className="mt-2 flex gap-1">
+            <button
+              onClick={() => handleRemoteAction("fetch")}
+              disabled={loading}
+              className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
+            >
+              Fetch
+            </button>
+            <button
+              onClick={() => handleRemoteAction("pull")}
+              disabled={loading}
+              className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
+            >
+              Pull
+            </button>
+            <button
+              onClick={() => handleRemoteAction("push")}
+              disabled={loading}
+              className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
+            >
+              Push
+            </button>
+          </div>
+          <div className="mt-2 flex gap-1">
+            <input
+              value={branchName}
+              onChange={(event) => setBranchName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  handleCreateBranch();
+                }
+              }}
+              placeholder="new branch"
+              className="min-w-0 flex-1 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
+            />
+            <button
+              onClick={handleCreateBranch}
+              disabled={!branchName.trim() || loading}
+              className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
+            >
+              Create
+            </button>
+          </div>
+          {status.conflicts.length > 0 && (
+            <div className="mt-2 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1 text-[10px] text-diff-remove">
+              {status.conflicts.length} conflict{status.conflicts.length === 1 ? "" : "s"} detected
+            </div>
+          )}
         </div>
       )}
 
