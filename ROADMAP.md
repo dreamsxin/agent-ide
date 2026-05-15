@@ -66,6 +66,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fed actual pending diff summaries into the Reviewer stage so review is based on proposed file/hunk changes, not only prior text output.
 - Added `docs/agent_ide_design.md` as the detailed design document for workflows, context handling, Agent orchestration, and technical boundaries.
 - Added backend Agent context enrichment with bounded project tree summaries and Git working-tree diff excerpts.
+- Added a compatible structured `agent-changes` JSON output protocol for model file changes while preserving legacy diff/new-file block parsing.
 
 Important distinction:
 
@@ -177,8 +178,9 @@ Current limitation: diff application still uses textual `find` replacement. It n
 2. **Agent protocol is still markdown/diff-block based**
    - Pipeline stages now drive backend execution.
    - Reviewer receives pending diff summaries.
-   - Model outputs are still parsed from free-form markdown blocks.
-   - Need a structured protocol with file version/hash, operation metadata, rationale, and provenance.
+   - Model outputs can now use structured `agent-changes` JSON blocks.
+   - Legacy free-form markdown diff blocks are still supported.
+   - Need file version/hash validation, stricter schema enforcement, operation metadata, and provenance.
 
 3. **Secret storage is weak**
    - LLM API key is persisted in `~/.agent-ide/config.json`.
@@ -365,7 +367,7 @@ target\release\agent_cli --help
 ## Next Immediate Tasks
 
 1. Add terminal/log excerpts and selected-file packing to Agent context.
-2. Replace markdown-only model output parsing with a structured Agent protocol.
+2. Add file version/hash metadata and stricter validation to the structured Agent protocol.
 3. Add version/hash-aware per-hunk diff application.
 4. Persist Agent action logs with prompt/context/diff provenance.
 5. Move LLM API key storage to a safer credential path.

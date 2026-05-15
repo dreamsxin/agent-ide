@@ -1,5 +1,6 @@
 use crate::agent::multi_agent::AgentRole;
 use crate::services::llm_client::{ChatMessage, LlmClient};
+use serde::Deserialize;
 use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::mpsc;
 
@@ -72,7 +73,30 @@ pub async fn execute_stage(
             "Output a concise implementation plan. Do not output code diffs."
         }
         AgentRole::Coder | AgentRole::Tester => {
-            "When code changes are needed, output ONLY Agent IDE diff/new-file blocks. Use explanations only when no code change is needed."
+            r#"When code changes are needed, prefer this structured Agent IDE protocol:
+
+```agent-changes
+{
+  "changes": [
+    {
+      "type": "edit",
+      "file": "path/to/file",
+      "rationale": "why this change is needed",
+      "hunks": [
+        { "original": "exact existing code", "updated": "replacement code" }
+      ]
+    },
+    {
+      "type": "create",
+      "file": "path/to/new-file",
+      "rationale": "why this file is needed",
+      "content": "complete file content"
+    }
+  ]
+}
+```
+
+If you cannot produce valid JSON, use Agent IDE diff/new-file blocks. Use explanations only when no code change is needed."#
         }
         AgentRole::Reviewer => {
             r#"Review the actual pending diffs, not just prior text. Use this structure:
@@ -141,6 +165,10 @@ pub fn parse_diffs(response: &str) -> Vec<crate::agent::state_machine::FileDiff>
             }
 
             match block_type.as_str() {
+                "agent-changes" => {
+                    let content = block_lines.join("\n");
+                    diffs.extend(parse_agent_changes(&content));
+                }
                 "diff" => {
                     let (original, updated) = split_diff_content(&block_lines);
                     let content = block_lines.join("\n");
@@ -176,6 +204,10 @@ fn detect_block_start(line: &str) -> Option<(String, String)> {
         return Some(("diff".into(), String::new()));
     }
 
+    if rest == "agent-changes" || rest == "agent_changes" || rest == "json:agent-changes" {
+        return Some(("agent-changes".into(), String::new()));
+    }
+
     // ```new:file
     if let Some(file) = rest.strip_prefix("new:") {
         return Some(("new".into(), file.trim().to_string()));
@@ -190,6 +222,96 @@ fn detect_block_start(line: &str) -> Option<(String, String)> {
     }
 
     None
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentChangesBlock {
+    changes: Vec<AgentChange>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentChange {
+    #[serde(rename = "type")]
+    change_type: String,
+    file: String,
+    rationale: Option<String>,
+    content: Option<String>,
+    hunks: Option<Vec<AgentChangeHunk>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentChangeHunk {
+    original: String,
+    updated: String,
+}
+
+fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff> {
+    let Ok(block) = serde_json::from_str::<AgentChangesBlock>(json) else {
+        return Vec::new();
+    };
+
+    let mut diffs = Vec::new();
+    for change in block.changes {
+        match change.change_type.as_str() {
+            "create" | "new" => {
+                if let Some(content) = change.content {
+                    if !change.file.trim().is_empty() && !content.trim().is_empty() {
+                        let mut diff = make_new_file_diff(&change.file, &content);
+                        if let Some(rationale) = change.rationale {
+                            if let Some(hunk) = diff.hunks.first_mut() {
+                                hunk.content = format!("rationale: {}\n\n{}", rationale, hunk.content);
+                            }
+                        }
+                        diffs.push(diff);
+                    }
+                }
+            }
+            "edit" | "modify" => {
+                let Some(hunks) = change.hunks else {
+                    continue;
+                };
+                let parsed_hunks: Vec<_> = hunks
+                    .into_iter()
+                    .filter(|hunk| !hunk.original.trim().is_empty())
+                    .map(|hunk| {
+                        let old_count = hunk
+                            .original
+                            .lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .count()
+                            .max(1) as u32;
+                        let new_count = hunk
+                            .updated
+                            .lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .count()
+                            .max(1) as u32;
+                        crate::agent::state_machine::DiffHunk {
+                            old_start: 0,
+                            old_lines: old_count,
+                            new_start: 0,
+                            new_lines: new_count,
+                            content: change.rationale.clone().unwrap_or_default(),
+                            original: hunk.original,
+                            updated: hunk.updated,
+                        }
+                    })
+                    .collect();
+
+                if !change.file.trim().is_empty() && !parsed_hunks.is_empty() {
+                    diffs.push(crate::agent::state_machine::FileDiff {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        file: change.file,
+                        hunks: parsed_hunks,
+                        status: "pending".to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    diffs
 }
 
 /// 分割 diff 内容为 ORIGINAL 和 UPDATED 两部分
@@ -246,5 +368,64 @@ fn make_new_file_diff(file: &str, content: &str) -> crate::agent::state_machine:
             updated: content.to_string(),
         }],
         status: "pending".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_diffs_supports_structured_agent_changes() {
+        let response = r#"```agent-changes
+{
+  "changes": [
+    {
+      "type": "edit",
+      "file": "src/app.ts",
+      "rationale": "rename value",
+      "hunks": [
+        {
+          "original": "const value = 1;",
+          "updated": "const value = 2;"
+        }
+      ]
+    },
+    {
+      "type": "create",
+      "file": "src/new.ts",
+      "rationale": "add helper",
+      "content": "export const helper = true;\n"
+    }
+  ]
+}
+```"#;
+
+        let diffs = parse_diffs(response);
+
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].file, "src/app.ts");
+        assert_eq!(diffs[0].hunks[0].original, "const value = 1;");
+        assert_eq!(diffs[0].hunks[0].updated, "const value = 2;");
+        assert_eq!(diffs[1].file, "src/new.ts");
+        assert_eq!(diffs[1].hunks[0].updated, "export const helper = true;\n");
+    }
+
+    #[test]
+    fn parse_diffs_keeps_legacy_diff_block_support() {
+        let response = r#"```diff:src/app.ts
+<<<<<<< ORIGINAL
+const value = 1;
+=======
+const value = 2;
+>>>>>>> UPDATED
+```"#;
+
+        let diffs = parse_diffs(response);
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].file, "src/app.ts");
+        assert_eq!(diffs[0].hunks[0].original, "const value = 1;");
+        assert_eq!(diffs[0].hunks[0].updated, "const value = 2;");
     }
 }

@@ -189,7 +189,32 @@ The configured pipeline lives in `AgentGlobalState.pipeline_stages` and can be c
 
 ### 4.5 Diff Review and Apply
 
-Model responses are parsed from code blocks:
+Model responses prefer a structured protocol:
+
+````text
+```agent-changes
+{
+  "changes": [
+    {
+      "type": "edit",
+      "file": "path/to/file",
+      "rationale": "why this change is needed",
+      "hunks": [
+        { "original": "exact existing code", "updated": "replacement code" }
+      ]
+    },
+    {
+      "type": "create",
+      "file": "path/to/new-file",
+      "rationale": "why this file is needed",
+      "content": "complete file content"
+    }
+  ]
+}
+```
+````
+
+Legacy markdown diff blocks are still supported for compatibility:
 
 ````text
 ```diff:path/to/file
@@ -379,7 +404,8 @@ error
 Highest-impact gaps:
 
 1. **Structured Agent protocol**
-   - Replace free-form markdown diff parsing with a schema or tool-call style protocol.
+   - `agent-changes` JSON blocks are supported as a compatibility step.
+   - Still need file version/hash, stronger validation, and eventually tool-call style protocol.
    - Include operation type, file path, file version/hash, hunks, rationale, and provenance.
 
 2. **Version-aware diff application**
