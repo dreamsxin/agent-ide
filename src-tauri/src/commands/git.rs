@@ -201,6 +201,7 @@ pub fn git_discard_files(path: String, files: Vec<String>) -> Result<(), String>
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
     let workdir = repo_workdir(&repo)?
         .canonicalize()
+        .map(workspace::shell_compatible_path)
         .map_err(|e| format!("Repository workdir is not accessible: {}", e))?;
     let paths = repo_relative_paths(&repo, &files, true)?;
     let statuses = repo
@@ -371,6 +372,7 @@ fn repo_relative_path(
 ) -> Result<PathBuf, String> {
     let workdir = repo_workdir(repo)?
         .canonicalize()
+        .map(workspace::shell_compatible_path)
         .map_err(|e| format!("Repository workdir is not accessible: {}", e))?;
     let candidate = if Path::new(file).is_absolute() {
         PathBuf::from(file)
@@ -494,6 +496,17 @@ mod tests {
         let err = git_status(outside.to_string_lossy().to_string()).unwrap_err();
 
         assert!(err.contains("outside workspace"));
+    }
+
+    #[test]
+    fn git_status_accepts_windows_verbatim_workspace_path() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        let verbatim = format!("\\\\?\\{}", env.root.to_string_lossy());
+
+        let status = git_status(verbatim).unwrap();
+
+        assert_eq!(status.branch, "master");
     }
 
     #[test]

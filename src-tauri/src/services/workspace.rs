@@ -15,7 +15,8 @@ pub fn save_workspace_path(path: &str) -> Result<(), String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Create config dir: {}", e))?;
     let file_path = dir.join("workspace.json");
-    let json = serde_json::json!({ "path": path });
+    let normalized = shell_compatible_path(PathBuf::from(path));
+    let json = serde_json::json!({ "path": normalized.to_string_lossy() });
     let content =
         serde_json::to_string_pretty(&json).map_err(|e| format!("Serialize workspace: {}", e))?;
     std::fs::write(&file_path, content).map_err(|e| format!("Write workspace: {}", e))
@@ -42,6 +43,7 @@ pub fn workspace_root() -> Result<PathBuf, String> {
         _ => std::env::current_dir().map_err(|e| format!("Current dir: {}", e))?,
     };
     root.canonicalize()
+        .map(shell_compatible_path)
         .map_err(|e| format!("Workspace does not exist or is not accessible: {}", e))
 }
 
@@ -70,6 +72,7 @@ pub fn resolve_existing(path: &str) -> Result<PathBuf, String> {
     let candidate = normalize_candidate(path)?;
     let resolved = candidate
         .canonicalize()
+        .map(shell_compatible_path)
         .map_err(|e| format!("Path does not exist or is not accessible: {}", e))?;
     ensure_within_workspace(&resolved)?;
     Ok(resolved)
@@ -77,7 +80,7 @@ pub fn resolve_existing(path: &str) -> Result<PathBuf, String> {
 
 pub fn resolve_for_write(path: &str) -> Result<PathBuf, String> {
     let candidate = normalize_candidate(path)?;
-    if let Ok(existing) = candidate.canonicalize() {
+    if let Ok(existing) = candidate.canonicalize().map(shell_compatible_path) {
         ensure_within_workspace(&existing)?;
         Ok(existing)
     } else {
@@ -85,26 +88,28 @@ pub fn resolve_for_write(path: &str) -> Result<PathBuf, String> {
             .ok_or_else(|| format!("No existing parent for path: {}", path))?;
         let ancestor_resolved = ancestor
             .canonicalize()
+            .map(shell_compatible_path)
             .map_err(|e| format!("Parent directory is not accessible: {}", e))?;
         ensure_within_workspace(&ancestor_resolved)?;
-        Ok(candidate)
+        Ok(shell_compatible_path(candidate))
     }
 }
 
 pub fn ensure_within_workspace(path: &Path) -> Result<(), String> {
     let root = workspace_root()?;
-    if path.starts_with(&root) {
+    let normalized_path = shell_compatible_path(path.to_path_buf());
+    if normalized_path.starts_with(&root) {
         Ok(())
     } else {
         Err(format!(
             "Path is outside workspace: {}",
-            path.to_string_lossy()
+            normalized_path.to_string_lossy()
         ))
     }
 }
 
 fn normalize_candidate(path: &str) -> Result<PathBuf, String> {
-    let raw = PathBuf::from(path);
+    let raw = shell_compatible_path(PathBuf::from(path));
     if raw.is_absolute() {
         Ok(raw)
     } else {
@@ -151,7 +156,7 @@ mod tests {
             let config_dir = base.join("config");
             std::fs::create_dir_all(&root).unwrap();
             std::fs::create_dir_all(&config_dir).unwrap();
-            let root = root.canonicalize().unwrap();
+            let root = shell_compatible_path(root.canonicalize().unwrap());
             std::env::set_var("AGENT_IDE_CONFIG_DIR", &config_dir);
             save_workspace_path(root.to_string_lossy().as_ref()).unwrap();
             Self { root, config_dir }
@@ -205,6 +210,28 @@ mod tests {
 
         assert!(resolved.starts_with(&env.root));
         assert!(resolved.ends_with(Path::new("src").join("main.ts")));
+    }
+
+    #[test]
+    fn resolve_existing_allows_windows_verbatim_path_inside_workspace() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+        let file = env.create_file("src/main.ts", "export const ok = true;");
+        let verbatim = format!("\\\\?\\{}", file.to_string_lossy());
+
+        let resolved = resolve_existing(&verbatim).unwrap();
+
+        assert!(resolved.starts_with(&env.root));
+        assert!(resolved.ends_with(Path::new("src").join("main.ts")));
+    }
+
+    #[test]
+    fn ensure_within_workspace_allows_windows_verbatim_workspace_root() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+        let verbatim = PathBuf::from(format!("\\\\?\\{}", env.root.to_string_lossy()));
+
+        ensure_within_workspace(&verbatim).unwrap();
     }
 
     #[test]
