@@ -97,6 +97,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added Terminal multi-session UI with session tabs, new session, close, restart, and active cwd/profile display while keeping inactive PTY views mounted.
 - Routed Run/Test/Debug-style project commands into dedicated Terminal sessions so long-running or interactive commands do not overwrite the main shell.
 - Added tracked Terminal task completion using per-session exit markers, so Test/Run-style commands opened in Terminal still update command status, run history, Problems, Logs, and Agent failure context.
+- Added TypeScript/JavaScript semantic editor defaults through the Monaco TS worker, including worker-backed diagnostics, hover/completion behavior, F12 definition action, and stable file-backed Monaco models for open files.
 
 Important distinction:
 
@@ -178,7 +179,8 @@ Explorer click
 Monaco completion trigger
   -> EditorContainer registered completion provider
     -> buildLocalCompletionCandidates()
-      -> language keywords + snippets
+    -> Monaco TypeScript worker handles TypeScript/JavaScript semantic suggestions
+    -> local provider handles non-TS languages with language keywords + snippets
       -> current model identifiers
       -> open file paths for path-like prefixes
     -> Monaco suggestions list
@@ -316,7 +318,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Monaco diagnostics, Agent errors, and failed diff findings can be surfaced.
    - Terminal TypeScript/lint/test-style file-position errors, Vitest/Jest-style stack traces, and failed test file summaries are parsed into Problems.
    - Rich test-runner protocol integration is still pending.
-   - True cross-file LSP diagnostics still require LSP backend integration.
+   - TypeScript/JavaScript open-file diagnostics now come from Monaco TS worker markers.
+   - True whole-workspace LSP diagnostics still require LSP backend integration.
 
 9. **Runtime modes need clearer UI messaging**
    - Browser preview now avoids crashes.
@@ -328,9 +331,10 @@ Current limitation: diff application still uses textual `find` replacement. It n
 
 ### Lower Priority
 
-11. **Code completion is local-only**
-   - Monaco now has stable local keyword/symbol/snippet/path suggestions.
-   - No LSP-backed semantic completion yet.
+11. **Code completion is partially semantic**
+   - Monaco now has stable local keyword/symbol/snippet/path suggestions for non-TS languages.
+   - TypeScript/JavaScript now use Monaco TS worker semantic completion/hover/diagnostics for open models.
+   - No full LSP-backed workspace semantic completion yet.
    - No LLM inline completion request path yet.
 
 12. **Large frontend bundle**

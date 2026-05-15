@@ -8,6 +8,10 @@ import IntentHint from "./IntentHint";
 import QuickActions from "./QuickActions";
 import DiagnosticsBridge from "./DiagnosticsBridge";
 import { buildLocalCompletionCandidates, type CompletionCandidateKind } from "../../utils/codeCompletion";
+import {
+  configureTypeScriptSemantic,
+  ensureOpenFileModels,
+} from "../../utils/typescriptSemantic";
 
 import type { editor } from "monaco-editor";
 
@@ -101,6 +105,7 @@ export default function EditorContainer() {
     (editorInst: editor.IStandaloneCodeEditor, monacoInst: typeof import("monaco-editor")) => {
       setEditorRef(editorInst);
       setMonacoRef(monacoInst);
+      configureTypeScriptSemantic(monacoInst);
 
       // 选区变化 → 更新 store
       const selectionDisposable = editorInst.onDidChangeCursorSelection(() => {
@@ -125,8 +130,6 @@ export default function EditorContainer() {
       if (!completionRegisteredRef.current) {
         completionRegisteredRef.current = true;
         const completionLanguages = [
-          "typescript",
-          "javascript",
           "rust",
           "python",
           "css",
@@ -176,11 +179,28 @@ export default function EditorContainer() {
           disposablesRef.current.add(completionDisposable);
         }
       }
+
+      const definitionDisposable = editorInst.addAction({
+        id: "agent-ide.go-to-definition",
+        label: "Go to Definition",
+        keybindings: [monacoInst.KeyCode.F12],
+        contextMenuGroupId: "navigation",
+        contextMenuOrder: 1,
+        run: async (ed) => {
+          await ed.getAction("editor.action.revealDefinition")?.run();
+        },
+      });
+      disposablesRef.current.add(definitionDisposable);
     },
     [setSelectedText, setSelectedRange]
   );
 
   const contextValue = { editor: editorRef, monaco: monacoRef };
+
+  useEffect(() => {
+    if (!monacoRef) return;
+    ensureOpenFileModels(monacoRef, openFiles, fileContents);
+  }, [fileContents, monacoRef, openFiles]);
 
   useEffect(() => {
     if (!editorRef || !monacoRef || !activeFile || !pendingRevealLocation) return;
@@ -214,6 +234,7 @@ export default function EditorContainer() {
             >
               <MonacoEditor
                 key={activeFile}
+                path={activeFile ?? undefined}
                 height="100%"
                 language={activeTab.language || detectLanguage(activeTab.path)}
                 theme="vs-dark"
