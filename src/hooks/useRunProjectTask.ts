@@ -20,7 +20,7 @@ export function useRunProjectTask() {
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
-  const queueTerminalCommand = useTaskStore((s) => s.queueTerminalCommand);
+  const queueTerminalSession = useTaskStore((s) => s.queueTerminalSession);
   const startTaskRun = useTaskStore((s) => s.startTaskRun);
   const finishTaskRun = useTaskStore((s) => s.finishTaskRun);
   const addLog = useLogStore((s) => s.addLog);
@@ -82,12 +82,12 @@ export function useRunProjectTask() {
         toggleBottomPanel();
       }
       setBottomTab("terminal");
-      queueTerminalCommand(task.id, task.command);
+      queueTerminalSession(task.id, task.label, task.command, workspacePath || "");
       addLog({
         time: new Date().toLocaleTimeString(),
         level: "info",
         source: "system",
-        message: `Queued project task: ${task.label}`,
+        message: `Opened terminal session for project task: ${task.label}`,
         details: task.command,
       });
     },
@@ -96,7 +96,7 @@ export function useRunProjectTask() {
       bottomVisible,
       clearProblems,
       finishTaskRun,
-      queueTerminalCommand,
+      queueTerminalSession,
       replaceProblems,
       setBottomTab,
       startTaskRun,
@@ -108,5 +108,5 @@ export function useRunProjectTask() {
 
 function shouldUseCommandRunner(task: ProjectTaskDefinition) {
   const value = `${task.id} ${task.label}`.toLowerCase();
-  return ["build", "test", "lint", "check", "typecheck"].some((name) => value.includes(name));
+  return ["build", "lint", "check", "typecheck"].some((name) => value.includes(name));
 }

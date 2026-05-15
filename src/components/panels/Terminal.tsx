@@ -13,14 +13,164 @@ import { useLogStore } from "../../stores/useLogStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 
 interface TerminalProps {
-  terminalId?: string;
+  terminalId: string;
+  cwd: string;
+  profile: string;
+  initialCommand?: string;
 }
 
-export default function Terminal({ terminalId = "main" }: TerminalProps) {
+interface TerminalSession {
+  id: string;
+  label: string;
+  cwd: string;
+  profile: string;
+  version: number;
+  initialCommand?: string;
+}
+
+export default function TerminalPanel() {
+  const workspacePath = useLayoutStore((s) => s.workspacePath);
+  const pendingSessionRequestCount = useTaskStore((s) => s.pendingTerminalSessionRequests.length);
+  const consumeTerminalSessionRequests = useTaskStore((s) => s.consumeTerminalSessionRequests);
+  const [sessions, setSessions] = useState<TerminalSession[]>(() => [
+    createTerminalSession("main", "1", workspacePath),
+  ]);
+  const [activeId, setActiveId] = useState("main");
+
+  const activeSession = sessions.find((session) => session.id === activeId) ?? sessions[0];
+
+  useEffect(() => {
+    if (pendingSessionRequestCount === 0) return;
+    const requests = consumeTerminalSessionRequests();
+    if (requests.length === 0) return;
+    setSessions((current) => {
+      const next = [...current];
+      for (const request of requests) {
+        next.push(
+          createTerminalSession(
+            request.terminalId,
+            request.label,
+            request.cwd || workspacePath,
+            request.command
+          )
+        );
+      }
+      return next;
+    });
+    setActiveId(requests[requests.length - 1].terminalId);
+  }, [consumeTerminalSessionRequests, pendingSessionRequestCount, workspacePath]);
+
+  const createSession = useCallback(() => {
+    setSessions((current) => {
+      const nextIndex = current.length + 1;
+      const session = createTerminalSession(`terminal-${Date.now()}`, String(nextIndex), workspacePath);
+      setActiveId(session.id);
+      return [...current, session];
+    });
+  }, [workspacePath]);
+
+  const restartSession = useCallback(async (sessionId: string) => {
+    await invoke("kill_terminal", { id: sessionId }).catch(() => undefined);
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId
+          ? { ...session, cwd: workspacePath || session.cwd, version: session.version + 1 }
+          : session
+      )
+    );
+  }, [workspacePath]);
+
+  const closeSession = useCallback((sessionId: string) => {
+    setSessions((current) => {
+      if (current.length <= 1) {
+        void restartSession(sessionId);
+        return current;
+      }
+      const index = current.findIndex((session) => session.id === sessionId);
+      const next = current.filter((session) => session.id !== sessionId);
+      if (activeId === sessionId) {
+        const fallback = next[Math.max(0, index - 1)] ?? next[0];
+        setActiveId(fallback.id);
+      }
+      return next;
+    });
+  }, [activeId, restartSession]);
+
+  return (
+    <div className="flex h-full flex-col bg-black">
+      <div className="flex items-center gap-1 border-b border-surface-border bg-surface-panel px-2 py-1">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-auto">
+          {sessions.map((session) => (
+            <button
+              key={session.id}
+              onClick={() => setActiveId(session.id)}
+              className={`flex max-w-[180px] items-center gap-1 rounded border px-2 py-0.5 text-[11px] ${
+                activeId === session.id
+                  ? "border-accent-blue/50 bg-accent-blue/10 text-surface-text"
+                  : "border-surface-border text-surface-muted hover:text-surface-text"
+              }`}
+              title={`${session.profile} - ${session.cwd || "workspace"}`}
+            >
+              <span>{">"}</span>
+              <span className="truncate">Terminal {session.label}</span>
+            </button>
+          ))}
+        </div>
+        <span className="hidden max-w-[40%] truncate font-mono text-[10px] text-surface-muted md:inline">
+          {activeSession?.profile} · {activeSession?.cwd || "No workspace"}
+        </span>
+        {activeSession && (
+          <>
+            <button
+              onClick={() => void restartSession(activeSession.id)}
+              className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
+              title="Restart terminal"
+            >
+              Restart
+            </button>
+            <button
+              onClick={createSession}
+              className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
+              title="New terminal"
+            >
+              +
+            </button>
+            <button
+              onClick={() => closeSession(activeSession.id)}
+              className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-diff-remove"
+              title="Close terminal"
+            >
+              x
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="min-h-0 flex-1">
+        {sessions.map((session) => (
+          <div
+            key={`${session.id}-${session.version}`}
+            className={activeId === session.id ? "h-full" : "hidden h-full"}
+          >
+            <TerminalSessionView
+              terminalId={session.id}
+              cwd={session.cwd}
+              profile={session.profile}
+              initialCommand={session.initialCommand}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TerminalSessionView({ terminalId, cwd, profile, initialCommand }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const readyRef = useRef(false);
+  const initialCommandRef = useRef(initialCommand);
   const outputBufferRef = useRef("");
   const replaceProblems = useProblemStore((s) => s.replaceProblems);
   const lastTask = useTaskStore((s) => s.lastTask);
@@ -28,7 +178,6 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const appendTerminalOutput = useTaskStore((s) => s.appendTerminalOutput);
   const clearTerminalOutput = useTaskStore((s) => s.clearTerminalOutput);
   const addLog = useLogStore((s) => s.addLog);
-  const workspacePath = useLayoutStore((s) => s.workspacePath);
   const [startupError, setStartupError] = useState<string | null>(null);
 
   const runQueuedCommands = useCallback(() => {
@@ -50,6 +199,25 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       });
     }
   }, [addLog, consumeTerminalCommands, terminalId]);
+
+  const runInitialCommand = useCallback(() => {
+    if (!readyRef.current) return;
+    const command = initialCommandRef.current;
+    if (!command) return;
+    initialCommandRef.current = undefined;
+    const data = `${command}\r`;
+    xtermRef.current?.writeln(`\r\n\x1b[90m$ ${command}\x1b[0m`);
+    invoke("write_to_terminal", { id: terminalId, data }).catch((err) => {
+      console.warn("[Terminal] initial command failed:", err);
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        level: "error",
+        source: "system",
+        message: `Failed to run project task: ${command}`,
+        details: String(err),
+      });
+    });
+  }, [addLog, terminalId]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -102,7 +270,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     term.loadAddon(webLinksAddon);
     try {
       term.open(containerRef.current);
-      term.writeln("\x1b[90mStarting terminal...\x1b[0m");
+      term.writeln(`\x1b[90mStarting ${profile} in ${cwd || "workspace"}...\x1b[0m`);
       requestAnimationFrame(() => {
         try {
           fitAddon.fit();
@@ -151,10 +319,11 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       })
       .catch((err) => console.warn("[Terminal] listen failed:", err));
 
-    invoke("spawn_terminal", { id: terminalId, cwd: workspacePath || null })
+    invoke("spawn_terminal", { id: terminalId, cwd: cwd || null })
       .then(() => {
         readyRef.current = true;
         sendResize();
+        runInitialCommand();
         runQueuedCommands();
       })
       .catch((err) => {
@@ -162,6 +331,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
         if (msg.includes("already exists")) {
           readyRef.current = true;
           sendResize();
+          runInitialCommand();
           runQueuedCommands();
           return;
         }
@@ -211,8 +381,10 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     clearTerminalOutput,
     replaceProblems,
     runQueuedCommands,
+    runInitialCommand,
     terminalId,
-    workspacePath,
+    cwd,
+    profile,
   ]);
 
   useEffect(() => {
@@ -237,4 +409,20 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       )}
     </div>
   );
+}
+
+function createTerminalSession(
+  id: string,
+  label: string,
+  cwd: string,
+  initialCommand?: string
+): TerminalSession {
+  return {
+    id,
+    label,
+    cwd,
+    profile: navigator.userAgent.includes("Windows") ? "cmd.exe" : "system shell",
+    version: 0,
+    initialCommand,
+  };
 }

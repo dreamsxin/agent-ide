@@ -93,7 +93,9 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added IDE runtime failure context injection for Agent prompts, including the latest failed project command, parsed Problems, recent Terminal output, and recent warning/error Logs.
 - Added one-click `Fix with Agent` actions in Problems and failed Commands, reusing the same IDE runtime failure context for structured repair prompts.
 - Hardened Explorer context menu behavior so it closes on outside pointer interactions, Escape, scroll, and blur, and clamps menu placement inside the viewport.
-- Added project command run history with per-run status, exit code, duration, output details, rerun, clear history, and failed-run `Fix with Agent` actions.
+- Added non-interactive project command run history with per-run status, exit code, duration, output details, rerun, clear history, and failed-run `Fix with Agent` actions.
+- Added Terminal multi-session UI with session tabs, new session, close, restart, and active cwd/profile display while keeping inactive PTY views mounted.
+- Routed Run/Test/Debug-style project commands into dedicated Terminal sessions so long-running or interactive commands do not overwrite the main shell.
 
 Important distinction:
 
@@ -131,8 +133,8 @@ Known local worktree note:
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
 - `src/components/panels/TasksPanel.tsx`: project command list for discovered build/test/lint/run/debug commands.
 - `src/hooks/useProjectTasks.ts`: shared frontend task discovery hook for TopBar and Commands.
-- `src/hooks/useRunProjectTask.ts`: shared project command executor that routes build/test/lint/check through the non-interactive runner and interactive run/debug commands through Terminal.
-- `src/stores/useTaskStore.ts`: queued terminal command state, latest task state, run history, and recent terminal output for project tasks.
+- `src/hooks/useRunProjectTask.ts`: shared project command executor that routes build/lint/check/typecheck through the non-interactive runner and run/test/debug-style commands through dedicated Terminal sessions.
+- `src/stores/useTaskStore.ts`: queued terminal command/session state, latest task state, run history, and recent terminal output for project tasks.
 - `src/utils/terminalProblemParser.ts`: parses terminal output into Problems entries for common file:line:column formats.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
 - `src/stores/`: Zustand state for layout, editor, Agent, Git, logs, theme.
@@ -213,11 +215,12 @@ Project Tasks
     -> fallback defaults when no tasks are discovered
   -> TopBar common Run/Debug/Build/Test buttons or Commands panel
     -> shared useRunProjectTask routing
-    -> non-interactive runner for build/test/lint/check
+    -> non-interactive runner for build/lint/check/typecheck
       -> Logs + Problems + task status
       -> failed command card exposes Fix with Agent
       -> run history stores exit code, duration, and output details
-    -> Terminal queue for run/debug interactive tasks
+    -> dedicated Terminal sessions for run/test/debug-style tasks
+      -> Terminal output is parsed into Problems and retained for Agent runtime context
 ```
 
 ### Agent Prompt
@@ -288,12 +291,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
 5. **Terminal PTY integration needs runtime polish**
    - Frontend now spawns, writes, resizes, and listens for PTY output through Tauri.
    - Persistent PTY writer is now used for terminal input.
-   - Project tasks can queue run/debug commands into the terminal.
-   - Build/test/lint/check tasks can run through a non-interactive command runner with exit code and duration.
+   - Project tasks can open run/test/debug-style commands in dedicated terminal sessions.
+   - Build/lint/check/typecheck tasks can run through a non-interactive command runner with exit code and duration.
    - TopBar and Commands panel now use the same project command execution path.
    - Terminal spawn now receives the active frontend workspace path, so newly opened terminals start in the currently opened workspace.
    - Windows shell startup strips `\\?\` verbatim prefixes before passing cwd to `cmd.exe`.
    - Bottom tab switches no longer unmount Terminal or reset the PTY session.
+   - Multi-session UI, restart, close, and cwd/profile display are now present.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Git workflow needs continued polish**

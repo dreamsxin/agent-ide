@@ -18,6 +18,16 @@ export interface QueuedTerminalCommand {
   createdAt: number;
 }
 
+export interface QueuedTerminalSessionRequest {
+  id: string;
+  terminalId: string;
+  taskId: string;
+  label: string;
+  command: string;
+  cwd: string;
+  createdAt: number;
+}
+
 export type ProjectTaskStatus = "idle" | "running" | "success" | "failed";
 
 export interface ProjectTaskRunState {
@@ -42,6 +52,7 @@ export interface ProjectTaskRunHistoryEntry extends ProjectTaskRunState {
 interface TaskStore {
   lastTask: QueuedTerminalCommand | null;
   pendingTerminalCommands: QueuedTerminalCommand[];
+  pendingTerminalSessionRequests: QueuedTerminalSessionRequest[];
   terminalOutput: Record<string, string>;
   discoveredTasks: ProjectTaskDefinition[];
   taskDiscoveryLoading: boolean;
@@ -59,7 +70,14 @@ interface TaskStore {
   ) => void;
   clearTaskRunHistory: () => void;
   queueTerminalCommand: (taskId: string, command: string, terminalId?: string) => QueuedTerminalCommand;
+  queueTerminalSession: (
+    taskId: string,
+    label: string,
+    command: string,
+    cwd?: string
+  ) => QueuedTerminalSessionRequest;
   consumeTerminalCommands: (terminalId: string) => QueuedTerminalCommand[];
+  consumeTerminalSessionRequests: () => QueuedTerminalSessionRequest[];
   appendTerminalOutput: (terminalId: string, output: string) => void;
   clearTerminalOutput: (terminalId?: string) => void;
 }
@@ -105,6 +123,7 @@ export const PROJECT_TASKS: ProjectTaskDefinition[] = [
 export const useTaskStore = create<TaskStore>((set, get) => ({
   lastTask: null,
   pendingTerminalCommands: [],
+  pendingTerminalSessionRequests: [],
   terminalOutput: {},
   discoveredTasks: [],
   taskDiscoveryLoading: false,
@@ -194,6 +213,32 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     return queued;
   },
 
+  queueTerminalSession: (taskId, label, command, cwd = "") => {
+    const id = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const terminalId = `task-terminal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const request: QueuedTerminalSessionRequest = {
+      id,
+      terminalId,
+      taskId,
+      label,
+      command,
+      cwd,
+      createdAt: Date.now(),
+    };
+    const queued: QueuedTerminalCommand = {
+      id,
+      terminalId,
+      command,
+      taskId,
+      createdAt: request.createdAt,
+    };
+    set((state) => ({
+      lastTask: queued,
+      pendingTerminalSessionRequests: [...state.pendingTerminalSessionRequests, request],
+    }));
+    return request;
+  },
+
   consumeTerminalCommands: (terminalId) => {
     const commands = get().pendingTerminalCommands.filter(
       (command) => command.terminalId === terminalId
@@ -205,6 +250,13 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       ),
     }));
     return commands;
+  },
+
+  consumeTerminalSessionRequests: () => {
+    const requests = get().pendingTerminalSessionRequests;
+    if (requests.length === 0) return [];
+    set({ pendingTerminalSessionRequests: [] });
+    return requests;
   },
 
   appendTerminalOutput: (terminalId, output) =>
