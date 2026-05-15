@@ -148,13 +148,16 @@ pub async fn send_agent_prompt(
 ) -> Result<String, String> {
     let llm = agent_state.get_llm_client()?;
 
-    let context = AgentContext {
+    let mut context = AgentContext {
         active_file: request.active_file,
         active_file_content: request.active_file_content,
         selection: request.selection,
         open_files: request.context_files,
         project_path: workspace::workspace_root_string(),
+        git_diff: None,
+        project_tree: None,
     };
+    context.enrich_from_workspace();
 
     // The async mutex can be held safely while the orchestrator runs.
     let compression = agent_state

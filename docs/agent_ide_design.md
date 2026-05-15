@@ -271,8 +271,11 @@ The current Agent prompt context includes:
 - `selection`
 - `open_files`
 - `project_path`
+- `project_tree`
+- `git_diff`
 
 This context is built in `send_agent_prompt` from the frontend request and the saved workspace root.
+The backend enriches it with a bounded project tree summary and, when the workspace is a Git repository, a bounded working tree diff.
 
 ### 5.2 Compression Modes
 
@@ -385,7 +388,8 @@ Highest-impact gaps:
    - Show conflicts with clear recovery options.
 
 3. **Context expansion**
-   - Add Git diff, project tree summary, selected files, terminal/log excerpts.
+   - Git diff and project tree summary are now included.
+   - Add terminal/log excerpts and selected file packing.
    - Add token budget packing.
 
 4. **Action log**

@@ -65,6 +65,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Surfaced Agent action logs in the Logs panel with expandable details, context summaries, diff summaries, stage, role, and phase.
 - Fed actual pending diff summaries into the Reviewer stage so review is based on proposed file/hunk changes, not only prior text output.
 - Added `docs/agent_ide_design.md` as the detailed design document for workflows, context handling, Agent orchestration, and technical boundaries.
+- Added backend Agent context enrichment with bounded project tree summaries and Git working-tree diff excerpts.
 
 Important distinction:
 
@@ -136,6 +137,7 @@ ChatView.handleSend()
   -> useAgentStore.sendPrompt()
     -> invoke("send_agent_prompt")
       -> AgentContext built from active file, selection, open files
+      -> context enriched with project tree and Git working-tree diff when available
       -> context compressed by selected mode
       -> AgentOrchestrator.run()
         -> planner LLM streaming
@@ -362,7 +364,7 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add Git diff and project tree summaries to Agent context.
+1. Add terminal/log excerpts and selected-file packing to Agent context.
 2. Replace markdown-only model output parsing with a structured Agent protocol.
 3. Add version/hash-aware per-hunk diff application.
 4. Persist Agent action logs with prompt/context/diff provenance.

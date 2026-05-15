@@ -129,13 +129,16 @@ async fn main() {
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
     let workspace_clone = workspace.clone();
-    let context = AgentContext {
+    let mut context = AgentContext {
         active_file: None,
         active_file_content: None,
         selection: None,
         open_files: Vec::new(),
         project_path: workspace_clone,
+        git_diff: None,
+        project_tree: None,
     };
+    context.enrich_from_workspace();
     let ctx_str = context.to_prompt_context();
 
     // Phase 1: Planning
