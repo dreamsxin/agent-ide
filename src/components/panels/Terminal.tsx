@@ -40,6 +40,17 @@ export default function TerminalPanel() {
   const activeSession = sessions.find((session) => session.id === activeId) ?? sessions[0];
 
   useEffect(() => {
+    if (!workspacePath) return;
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === "main" && session.cwd !== workspacePath
+          ? { ...session, cwd: workspacePath, version: session.version + 1 }
+          : session
+      )
+    );
+  }, [workspacePath]);
+
+  useEffect(() => {
     if (pendingSessionRequestCount === 0) return;
     const requests = consumeTerminalSessionRequests();
     if (requests.length === 0) return;

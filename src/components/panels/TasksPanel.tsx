@@ -33,9 +33,15 @@ export default function TasksPanel() {
 
   return (
     <div className="flex h-full flex-col bg-black text-xs">
-      <div className="border-b border-surface-border px-3 py-2">
-        <div className="font-semibold text-surface-text">Project Commands</div>
-        <div className="mt-0.5 text-[11px] text-surface-muted">
+      <div className="flex items-center justify-between gap-3 border-b border-surface-border px-3 py-1.5">
+        <div className="min-w-0">
+          <div className="font-semibold text-surface-text">Commands</div>
+          <div className="truncate text-[11px] text-surface-muted">
+            {tasks.length} discovered ·{" "}
+            {usingFallback ? "fallback commands" : "workspace configuration"}
+          </div>
+        </div>
+        <div className="truncate text-[11px] text-surface-muted">
           {usingFallback
             ? "No workspace tasks discovered yet. Showing fallback commands."
             : "Tasks discovered from the current workspace configuration."}
@@ -54,135 +60,133 @@ export default function TasksPanel() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-2 overflow-auto p-3 sm:grid-cols-2 xl:grid-cols-3">
-        {loading && (
-          <div className="rounded border border-surface-border bg-surface-panel p-3 text-surface-muted">
-            Loading workspace tasks...
-          </div>
-        )}
-        {tasks.map((task) => {
-          const runState = taskRuns[task.id];
-          return (
-            <div
-              key={task.id}
-              onClick={() => void runProjectTask(task)}
-              className={`rounded border border-surface-border bg-surface-panel p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-surface-border/20 ${!isTauriRuntime() ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-surface-text">{task.label}</span>
-                <span className="rounded border border-surface-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-surface-muted">
-                  {runState?.status ?? task.source}
-                </span>
-              </div>
-              <div className="mt-2 font-mono text-[11px] text-accent-blue">{task.command}</div>
-              <div className="mt-2 text-[11px] leading-relaxed text-surface-muted">
-                {task.description}
-              </div>
-              {runState?.status === "failed" && (
-                <div className="mt-3 flex items-center gap-2">
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void fixTaskFailure(runState);
-                    }}
-                    disabled={isAgentBusy}
-                    className="rounded border border-accent-blue/40 px-2 py-1 text-[11px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Fix with Agent
-                  </button>
-                  <span className="text-[10px] text-diff-remove">
-                    Exit {runState.exitCode ?? "unknown"}
-                  </span>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="grid min-h-[180px] grid-cols-[minmax(260px,0.42fr)_minmax(320px,1fr)] border-t border-surface-border">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(260px,0.38fr)_minmax(360px,1fr)]">
         <div className="min-w-0 border-r border-surface-border">
-          <div className="flex items-center justify-between gap-2 border-b border-surface-border px-3 py-1.5">
-            <span className="font-semibold text-surface-text">Run History</span>
-            {taskRunHistory.length > 0 && (
-              <button
-                onClick={clearTaskRunHistory}
-                className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
-              >
-                Clear
-              </button>
-            )}
+          <div className="grid grid-cols-[minmax(120px,0.9fr)_minmax(180px,1.3fr)_72px] border-b border-surface-border bg-surface-panel/70 px-3 py-1 text-[10px] uppercase text-surface-muted">
+            <span>Command</span>
+            <span>Script</span>
+            <span className="text-right">Status</span>
           </div>
-          <div className="max-h-44 overflow-auto">
-            {taskRunHistory.length === 0 ? (
+          <div className="h-full overflow-auto">
+            {loading && (
               <div className="px-3 py-4 text-center text-[11px] text-surface-muted">
-                No command runs yet.
+                Loading workspace commands...
               </div>
-            ) : (
-              taskRunHistory.map((run) => (
+            )}
+            {tasks.map((task) => {
+              const runState = taskRuns[task.id];
+              return (
                 <button
-                  key={run.runId}
-                  onClick={() => setSelectedRunId(run.runId)}
-                  className={`grid w-full grid-cols-[1fr_auto] gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left ${
-                    selectedRun?.runId === run.runId
-                      ? "bg-accent-blue/10"
-                      : "hover:bg-surface-border/20"
-                  }`}
+                  key={task.id}
+                  onClick={() => void runProjectTask(task)}
+                  disabled={!isTauriRuntime()}
+                  className="grid w-full grid-cols-[minmax(120px,0.9fr)_minmax(180px,1.3fr)_72px] items-center gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  title={task.description}
                 >
-                  <span className="min-w-0">
-                    <span className="block truncate font-semibold text-surface-text">
-                      {run.label}
-                    </span>
-                    <span className="block truncate font-mono text-[10px] text-surface-muted">
-                      {run.command}
-                    </span>
+                  <span className="min-w-0 truncate font-semibold text-surface-text">
+                    {task.label}
+                  </span>
+                  <span className="min-w-0 truncate font-mono text-[11px] text-accent-blue">
+                    {task.command}
                   </span>
                   <span className="text-right">
-                    <span className={statusClass(run.status)}>
-                      {run.status}
+                    <span className={statusClass(runState?.status ?? task.source)}>
+                      {runState?.status ?? task.source}
                     </span>
-                    <span className="block text-[10px] text-surface-muted">
-                      {formatDuration(run.durationMs)}
-                    </span>
+                    {runState?.status === "failed" && (
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void fixTaskFailure(runState);
+                        }}
+                        disabled={isAgentBusy}
+                        className="ml-1 rounded border border-accent-blue/40 px-1 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Fix
+                      </button>
+                    )}
                   </span>
                 </button>
-              ))
-            )}
+              );
+            })}
           </div>
         </div>
 
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 border-b border-surface-border px-3 py-1.5">
-            <span className="min-w-0 flex-1 truncate font-semibold text-surface-text">
-              {selectedRun ? selectedRun.label : "Output"}
-            </span>
-            {selectedRun && (
-              <>
-                <span className="font-mono text-[10px] text-surface-muted">
-                  exit {selectedRun.exitCode ?? "unknown"}
-                </span>
+        <div className="grid min-w-0 grid-rows-[minmax(96px,0.38fr)_minmax(120px,1fr)]">
+          <div className="min-h-0 border-b border-surface-border">
+            <div className="flex items-center justify-between gap-2 border-b border-surface-border px-3 py-1.5">
+              <span className="font-semibold text-surface-text">Run History</span>
+              {taskRunHistory.length > 0 && (
                 <button
-                  onClick={() => rerunHistoryEntry(selectedRun)}
-                  disabled={!isTauriRuntime()}
+                  onClick={clearTaskRunHistory}
                   className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Rerun
+                  Clear
                 </button>
-                {selectedRun.status === "failed" && (
+              )}
+            </div>
+            <div className="h-full overflow-auto">
+              {taskRunHistory.length === 0 ? (
+                <div className="px-3 py-4 text-center text-[11px] text-surface-muted">
+                  No command runs yet.
+                </div>
+              ) : (
+                taskRunHistory.map((run) => (
                   <button
-                    onClick={() => void fixTaskFailure(selectedRun)}
-                    disabled={isAgentBusy}
-                    className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    key={run.runId}
+                    onClick={() => setSelectedRunId(run.runId)}
+                    className={`grid w-full grid-cols-[1fr_auto_auto] items-center gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left ${
+                      selectedRun?.runId === run.runId
+                        ? "bg-accent-blue/10"
+                        : "hover:bg-surface-border/20"
+                    }`}
                   >
-                    Fix with Agent
+                    <span className="min-w-0 truncate font-semibold text-surface-text">
+                      {run.label}
+                    </span>
+                    <span className={statusClass(run.status)}>{run.status}</span>
+                    <span className="font-mono text-[10px] text-surface-muted">
+                      {formatDuration(run.durationMs)}
+                    </span>
                   </button>
-                )}
-              </>
-            )}
+                ))
+              )}
+            </div>
           </div>
-          <pre className="max-h-44 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[10px] leading-relaxed text-surface-text">
-            {selectedRun?.output?.trim() || "Select a run to inspect command output."}
-          </pre>
+
+          <div className="min-h-0">
+            <div className="flex items-center gap-2 border-b border-surface-border px-3 py-1.5">
+              <span className="min-w-0 flex-1 truncate font-semibold text-surface-text">
+                {selectedRun ? selectedRun.label : "Output"}
+              </span>
+              {selectedRun && (
+                <>
+                  <span className="font-mono text-[10px] text-surface-muted">
+                    exit {selectedRun.exitCode ?? "unknown"}
+                  </span>
+                  <button
+                    onClick={() => rerunHistoryEntry(selectedRun)}
+                    disabled={!isTauriRuntime()}
+                    className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Rerun
+                  </button>
+                  {selectedRun.status === "failed" && (
+                    <button
+                      onClick={() => void fixTaskFailure(selectedRun)}
+                      disabled={isAgentBusy}
+                      className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Fix with Agent
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            <pre className="h-full overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[10px] leading-relaxed text-surface-text">
+              {selectedRun?.output?.trim() || "Select a run to inspect command output."}
+            </pre>
+          </div>
         </div>
       </div>
 
