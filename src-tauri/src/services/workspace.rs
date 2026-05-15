@@ -16,8 +16,8 @@ pub fn save_workspace_path(path: &str) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("Create config dir: {}", e))?;
     let file_path = dir.join("workspace.json");
     let json = serde_json::json!({ "path": path });
-    let content = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("Serialize workspace: {}", e))?;
+    let content =
+        serde_json::to_string_pretty(&json).map_err(|e| format!("Serialize workspace: {}", e))?;
     std::fs::write(&file_path, content).map_err(|e| format!("Write workspace: {}", e))
 }
 
@@ -130,7 +130,8 @@ mod tests {
 
     impl TestEnv {
         fn new() -> Self {
-            let base = std::env::temp_dir().join(format!("agent-ide-workspace-test-{}", Uuid::new_v4()));
+            let base =
+                std::env::temp_dir().join(format!("agent-ide-workspace-test-{}", Uuid::new_v4()));
             let root = base.join("workspace");
             let config_dir = base.join("config");
             std::fs::create_dir_all(&root).unwrap();
@@ -221,6 +222,24 @@ mod tests {
         let outside = env.outside_path("nested/new/file.ts");
 
         let err = resolve_for_write(outside.to_string_lossy().as_ref()).unwrap_err();
+
+        assert!(err.contains("outside workspace"));
+    }
+
+    #[test]
+    fn resolve_existing_rejects_relative_traversal_outside_workspace() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+        let outside = env.outside_path("secret.txt");
+        std::fs::write(&outside, "nope").unwrap();
+
+        let relative = Path::new("..")
+            .join("..")
+            .join("outside")
+            .join("secret.txt")
+            .to_string_lossy()
+            .to_string();
+        let err = resolve_existing(&relative).unwrap_err();
 
         assert!(err.contains("outside workspace"));
     }

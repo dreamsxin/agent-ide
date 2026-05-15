@@ -37,6 +37,11 @@ export interface LogEntry {
   source: "agent" | "git" | "fs" | "system";
   message: string;
   details?: string;
+  phase?: string;
+  role?: string | null;
+  stage?: string | null;
+  contextSummary?: string | null;
+  diffSummary?: string | null;
 }
 
 /** 文件元数据 */

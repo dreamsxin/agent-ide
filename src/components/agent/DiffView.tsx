@@ -83,6 +83,9 @@ export default function DiffView() {
 
   const pendingDiffs = diffs.filter((d) => d.status === "pending");
   const hasPending = pendingDiffs.length > 0;
+  const failedMessages = new Map(
+    (lastApplyResult?.failed ?? []).map((item) => [item.diffId, item.message])
+  );
 
   const handleApplyAll = useCallback(async () => {
     await applyAllDiffs();
@@ -171,8 +174,13 @@ export default function DiffView() {
                 </div>
               )}
               {diff.status === "failed" && (
-                <div className="bg-diff-remove/10 px-3 py-1 text-center text-xs text-diff-remove">
-                  Apply failed
+                <div className="bg-diff-remove/10 px-3 py-1 text-xs text-diff-remove">
+                  <div className="font-medium">Apply failed</div>
+                  {(diff.applyError || failedMessages.get(diff.id)) && (
+                    <div className="mt-0.5 break-words text-[11px]">
+                      {diff.applyError || failedMessages.get(diff.id)}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

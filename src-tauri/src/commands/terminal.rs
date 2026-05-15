@@ -1,4 +1,5 @@
-use portable_pty::{native_pty_system, PtySize, CommandBuilder};
+use crate::services::workspace;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
@@ -56,13 +57,15 @@ pub async fn spawn_terminal(
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
     // 构建 shell 命令
+    let workspace_root = workspace::workspace_root()?;
+
     #[cfg(target_os = "windows")]
-    let cmd = CommandBuilder::new("cmd.exe");
+    let mut cmd = CommandBuilder::new("cmd.exe");
 
     #[cfg(not(target_os = "windows"))]
-    let cmd = CommandBuilder::new(
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
-    );
+    let mut cmd =
+        CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()));
+    cmd.cwd(&workspace_root);
 
     let child = pair
         .slave

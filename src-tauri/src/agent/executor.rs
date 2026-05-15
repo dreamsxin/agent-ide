@@ -1,3 +1,4 @@
+use crate::agent::multi_agent::AgentRole;
 use crate::services::llm_client::{ChatMessage, LlmClient};
 use std::sync::{Arc, atomic::AtomicBool};
 use tokio::sync::mpsc;
@@ -48,6 +49,70 @@ pub async fn execute_step(
             content: format!(
                 "Step to execute: {}\n\nContext:\n{}\n\nProvide the implementation (code/diff only):",
                 step, context
+            ),
+        },
+    ];
+
+    llm.stream_chat(messages, cancel_flag, tx).await
+}
+
+pub async fn execute_stage(
+    llm: &LlmClient,
+    role: AgentRole,
+    stage_name: &str,
+    user_prompt: &str,
+    context: &str,
+    prior_outputs: &str,
+    pending_diffs: &str,
+    cancel_flag: Arc<AtomicBool>,
+    tx: mpsc::Sender<String>,
+) -> Result<String, String> {
+    let output_rules = match role {
+        AgentRole::Architect => {
+            "Output a concise implementation plan. Do not output code diffs."
+        }
+        AgentRole::Coder | AgentRole::Tester => {
+            "When code changes are needed, output ONLY Agent IDE diff/new-file blocks. Use explanations only when no code change is needed."
+        }
+        AgentRole::Reviewer => {
+            r#"Review the actual pending diffs, not just prior text. Use this structure:
+
+## Review Summary
+Short verdict.
+
+## Findings
+- [severity] file/path: concrete issue or "No blocking findings".
+
+## Verification
+- What should be tested or was implicitly checked.
+
+If a blocking fix is required, include an Agent IDE diff/new-file block after the findings."#
+        }
+    };
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: format!("{}\n\n{}", role.system_prompt(), output_rules),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Pipeline stage: {}\nRole: {}\n\nUser task:\n{}\n\nProject context:\n{}\n\nPrior stage outputs:\n{}\n\nActual pending diffs for review:\n{}\n\nRun this stage now.",
+                stage_name,
+                role.to_string(),
+                user_prompt,
+                context,
+                if prior_outputs.trim().is_empty() {
+                    "(none)"
+                } else {
+                    prior_outputs
+                },
+                if pending_diffs.trim().is_empty() {
+                    "No pending diffs."
+                } else {
+                    pending_diffs
+                },
             ),
         },
     ];

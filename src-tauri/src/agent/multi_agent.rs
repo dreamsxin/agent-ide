@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Agent 角色
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AgentRole {
     #[serde(rename = "architect")]
@@ -23,46 +22,50 @@ impl AgentRole {
         }
     }
 
-    /// 每个角色的系统提示词
     pub fn system_prompt(&self) -> &'static str {
         match self {
-            AgentRole::Architect => r#"You are an Architect Agent. Your job is:
-1. Analyze user requirements
-2. Design system architecture
-3. Break work into well-defined task steps
-4. Define interfaces between components
-Output your design as a clear plan. Do NOT write implementation code."#,
+            AgentRole::Architect => {
+                r#"You are an Architect Agent. Your job is:
+1. Analyze the user's requirement and current project context.
+2. Design the smallest coherent implementation plan.
+3. Identify files, interfaces, risks, and validation steps.
+4. Hand off implementation-ready guidance to later stages.
 
-            AgentRole::Coder => r#"You are a Coder Agent. Your job is:
-1. Implement code according to the architecture plan
-2. Follow the defined interfaces
-3. Write clean, well-structured code
-4. Include error handling
-Output ONLY executable code or diffs. Be precise and minimal."#,
+Do not write code diffs. Output a concise architecture plan."#
+            }
+            AgentRole::Coder => {
+                r#"You are a Coder Agent. Your job is:
+1. Implement code according to the architecture plan and current stage.
+2. Keep changes minimal and compatible with the existing codebase.
+3. Include error handling and preserve existing behavior.
 
-            AgentRole::Tester => r#"You are a Tester Agent. Your job is:
-1. Write unit tests and integration tests
-2. Identify edge cases
-3. Verify code correctness
-4. Report issues with specific file/line references
-Output test code and issue reports."#,
+For code changes, output ONLY diff/new-file blocks in the required Agent IDE format."#
+            }
+            AgentRole::Tester => {
+                r#"You are a Tester Agent. Your job is:
+1. Add or adjust focused tests for the implemented behavior.
+2. Identify edge cases and likely regressions.
+3. Prefer concrete test diffs over general advice.
 
-            AgentRole::Reviewer => r#"You are a Reviewer Agent. Your job is:
-1. Review code for correctness, security, and performance
-2. Check adherence to the architecture plan
-3. Suggest improvements
-4. Approve or request changes
-Output a review report with specific recommendations."#,
+For code changes, output ONLY diff/new-file blocks in the required Agent IDE format."#
+            }
+            AgentRole::Reviewer => {
+                r#"You are a Reviewer Agent. Your job is:
+1. Review the proposed changes for correctness, security, and maintainability.
+2. Call out blockers with specific reasoning.
+3. Suggest final fixes only when they are concrete and necessary.
+
+Output review findings. Use diff/new-file blocks only for required fixes."#
+            }
         }
     }
 }
 
-/// 多 Agent 协作流水线阶段
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStage {
     pub role: AgentRole,
     pub name: String,
-    pub status: String, // "pending" | "active" | "done" | "error"
+    pub status: String,
 }
 
 impl PipelineStage {
@@ -75,7 +78,23 @@ impl PipelineStage {
     }
 }
 
-/// 完整的协作流水线
+pub fn reset_pipeline_status(stages: &[PipelineStage]) -> Vec<PipelineStage> {
+    stages
+        .iter()
+        .map(|stage| PipelineStage {
+            role: stage.role,
+            name: stage.name.clone(),
+            status: "pending".to_string(),
+        })
+        .collect()
+}
+
+pub fn mark_pipeline_stage(stages: &mut [PipelineStage], active_index: usize, status: &str) {
+    if let Some(stage) = stages.get_mut(active_index) {
+        stage.status = status.to_string();
+    }
+}
+
 pub fn default_pipeline() -> Vec<PipelineStage> {
     vec![
         PipelineStage::new(AgentRole::Architect, "Design"),
@@ -83,4 +102,34 @@ pub fn default_pipeline() -> Vec<PipelineStage> {
         PipelineStage::new(AgentRole::Tester, "Test"),
         PipelineStage::new(AgentRole::Reviewer, "Review"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_pipeline_status_preserves_roles_and_names() {
+        let mut stages = default_pipeline();
+        stages[0].status = "completed".to_string();
+        stages[1].status = "active".to_string();
+
+        let reset = reset_pipeline_status(&stages);
+
+        assert_eq!(reset.len(), stages.len());
+        assert_eq!(reset[0].role, AgentRole::Architect);
+        assert_eq!(reset[0].name, "Design");
+        assert!(reset.iter().all(|stage| stage.status == "pending"));
+    }
+
+    #[test]
+    fn mark_pipeline_stage_updates_only_target_stage() {
+        let mut stages = default_pipeline();
+
+        mark_pipeline_stage(&mut stages, 1, "active");
+
+        assert_eq!(stages[0].status, "pending");
+        assert_eq!(stages[1].status, "active");
+        assert_eq!(stages[2].status, "pending");
+    }
 }

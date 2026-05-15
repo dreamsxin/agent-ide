@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -6,7 +8,6 @@ import "@xterm/xterm/css/xterm.css";
 import { isTauriRuntime } from "../../utils/tauri";
 
 interface TerminalProps {
-  /** 终端 ID（用于后续多终端支持） */
   terminalId?: string;
 }
 
@@ -14,11 +15,14 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const readyRef = useRef(false);
 
-  // 初始化 xterm 实例
   useEffect(() => {
     if (!isTauriRuntime()) return;
     if (!containerRef.current) return;
+
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
 
     const term = new XtermTerminal({
       cursorBlink: true,
@@ -75,36 +79,77 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // 用户输入 → 发送到终端
-    term.onData((data) => {
-      if (xtermRef.current) {
-        xtermRef.current.write(data);
+    const sendResize = () => {
+      if (!readyRef.current || disposed) return;
+      const dims = fitAddonRef.current?.proposeDimensions();
+      if (!dims) return;
+      invoke("resize_terminal", {
+        id: terminalId,
+        cols: dims.cols,
+        rows: dims.rows,
+      }).catch((err) => console.warn("[Terminal] resize failed:", err));
+    };
+
+    listen<{ id: string; data: string }>("terminal-output", (event) => {
+      if (event.payload.id === terminalId) {
+        term.write(event.payload.data);
       }
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch((err) => console.warn("[Terminal] listen failed:", err));
+
+    invoke("spawn_terminal", { id: terminalId })
+      .then(() => {
+        readyRef.current = true;
+        sendResize();
+      })
+      .catch((err) => {
+        const msg = String(err);
+        if (msg.includes("already exists")) {
+          readyRef.current = true;
+          sendResize();
+          return;
+        }
+        term.writeln(`\r\n\x1b[31mTerminal failed to start: ${msg}\x1b[0m`);
+      });
+
+    term.onData((data) => {
+      if (!readyRef.current) return;
+      invoke("write_to_terminal", { id: terminalId, data }).catch((err) =>
+        console.warn("[Terminal] write failed:", err)
+      );
     });
 
-    // 欢迎信息
-    term.writeln("  \x1b[36m🧠 Agent IDE Terminal\x1b[0m");
-    term.writeln("  ─────────────────────────────");
-    term.writeln("");
-
-    // 监听 resize
     const resizeObserver = new ResizeObserver(() => {
       if (fitAddonRef.current) {
         try {
           fitAddonRef.current.fit();
+          sendResize();
         } catch {
-          // fit 可能在不可见时失败，忽略
+          // Hidden panels can briefly report invalid dimensions.
         }
       }
     });
 
-    if (containerRef.current) {
-      resizeObserver.observe(containerRef.current);
-    }
+    resizeObserver.observe(containerRef.current);
 
     return () => {
+      disposed = true;
+      readyRef.current = false;
       resizeObserver.disconnect();
+      unlisten?.();
+      invoke("kill_terminal", { id: terminalId }).catch((err) =>
+        console.warn("[Terminal] kill failed:", err)
+      );
       term.dispose();
+      xtermRef.current = null;
+      fitAddonRef.current = null;
     };
   }, [terminalId]);
 

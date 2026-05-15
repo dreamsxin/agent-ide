@@ -1,3 +1,4 @@
+use crate::services::workspace;
 use serde::Serialize;
 
 /// Git 状态条目
@@ -20,6 +21,7 @@ pub struct GitStatus {
 /// 获取 Git 仓库状态
 #[tauri::command]
 pub fn git_status(path: String) -> Result<GitStatus, String> {
+    let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
 
     // 获取当前分支名
@@ -94,6 +96,7 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
 /// 获取文件 diff
 #[tauri::command]
 pub fn git_diff(path: String, file: Option<String>) -> Result<String, String> {
+    let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
 
     let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
@@ -101,7 +104,14 @@ pub fn git_diff(path: String, file: Option<String>) -> Result<String, String> {
 
     let mut diff_opts = git2::DiffOptions::new();
     if let Some(ref f) = file {
-        diff_opts.pathspec(f);
+        let file_path = workspace::resolve_existing(f)?;
+        let workdir = repo
+            .workdir()
+            .ok_or_else(|| "Bare repositories are not supported".to_string())?;
+        let relative = file_path
+            .strip_prefix(workdir)
+            .map_err(|_| format!("File is outside repository: {}", file_path.display()))?;
+        diff_opts.pathspec(relative);
     }
 
     let diff = repo
@@ -137,6 +147,7 @@ pub fn git_commit(
     message: String,
     files: Option<Vec<String>>,
 ) -> Result<String, String> {
+    let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
 
     let signature = repo
@@ -148,8 +159,15 @@ pub fn git_commit(
     // Stage files
     if let Some(file_list) = files {
         for file in &file_list {
+            let file_path = workspace::resolve_existing(file)?;
+            let workdir = repo
+                .workdir()
+                .ok_or_else(|| "Bare repositories are not supported".to_string())?;
+            let relative = file_path
+                .strip_prefix(workdir)
+                .map_err(|_| format!("File is outside repository: {}", file_path.display()))?;
             index
-                .add_path(std::path::Path::new(file))
+                .add_path(relative)
                 .map_err(|e| format!("Add {}: {}", file, e))?;
         }
     } else {
@@ -161,8 +179,12 @@ pub fn git_commit(
 
     index.write().map_err(|e| format!("Write index: {}", e))?;
 
-    let oid = index.write_tree().map_err(|e| format!("Write tree: {}", e))?;
-    let tree = repo.find_tree(oid).map_err(|e| format!("Find tree: {}", e))?;
+    let oid = index
+        .write_tree()
+        .map_err(|e| format!("Write tree: {}", e))?;
+    let tree = repo
+        .find_tree(oid)
+        .map_err(|e| format!("Find tree: {}", e))?;
 
     let parent_commits = if let Ok(ref head_ref) = repo.head() {
         vec![head_ref
@@ -186,4 +208,111 @@ pub fn git_commit(
         .map_err(|e| format!("Commit: {}", e))?;
 
     Ok(commit_oid.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    struct TestRepo {
+        root: PathBuf,
+        config_dir: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let base = std::env::current_dir()
+                .unwrap()
+                .join("target")
+                .join("agent-ide-git-tests")
+                .join(Uuid::new_v4().to_string());
+            let root = base.join("workspace");
+            let config_dir = base.join("config");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::env::set_var("AGENT_IDE_CONFIG_DIR", &config_dir);
+            workspace::save_workspace_path(root.to_string_lossy().as_ref()).unwrap();
+
+            let repo = git2::Repository::init(&root).unwrap();
+            let tracked = root.join("tracked.txt");
+            std::fs::write(&tracked, "initial\n").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = git2::Signature::now("Agent IDE Test", "agent@example.com").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+
+            Self { root, config_dir }
+        }
+
+        fn outside_path(&self, relative: &str) -> PathBuf {
+            let path = self
+                .root
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("outside")
+                .join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            path
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            std::env::remove_var("AGENT_IDE_CONFIG_DIR");
+            let _ = std::fs::remove_dir_all(
+                self.root
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| self.root.clone()),
+            );
+            let _ = std::fs::remove_dir_all(&self.config_dir);
+        }
+    }
+
+    #[test]
+    fn git_status_distinguishes_added_and_untracked() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        std::fs::write(env.root.join("untracked.txt"), "new\n").unwrap();
+        std::fs::write(env.root.join("staged.txt"), "staged\n").unwrap();
+
+        let repo = git2::Repository::open(&env.root).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+
+        let status = git_status(env.root.to_string_lossy().to_string()).unwrap();
+
+        assert!(status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "untracked.txt" && entry.status == "untracked"));
+        assert!(status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "staged.txt" && entry.status == "added"));
+    }
+
+    #[test]
+    fn git_status_rejects_paths_outside_workspace() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        let outside = env.outside_path("repo");
+        std::fs::create_dir_all(&outside).unwrap();
+        git2::Repository::init(&outside).unwrap();
+
+        let err = git_status(outside.to_string_lossy().to_string()).unwrap_err();
+
+        assert!(err.contains("outside workspace"));
+    }
 }

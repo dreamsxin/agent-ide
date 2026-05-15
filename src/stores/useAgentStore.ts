@@ -50,6 +50,7 @@ interface AgentStore {
   setSteps: (steps: Step[]) => void;
   updateStep: (stepId: string, updates: Partial<Step>) => void;
   setDiffs: (diffs: DiffEntry[]) => void;
+  setPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
   markDiffApplied: (diffId: string) => void;
   markDiffRejected: (diffId: string) => void;
@@ -133,6 +134,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   addTask: (task) =>
     set((s) => ({ tasks: [...s.tasks, task], currentTask: task })),
   setSteps: (steps) => set({ steps }),
+  setPipeline: (pipeline) => set({ pipeline }),
   updateStep: (stepId, updates) =>
     set((s) => ({
       steps: s.steps.map((st) =>
@@ -144,13 +146,13 @@ export const useAgentStore = create<AgentStore>((set) => ({
   markDiffApplied: (diffId) =>
     set((s) => ({
       diffs: s.diffs.map((d) =>
-        d.id === diffId ? { ...d, status: "applied" as const } : d
+        d.id === diffId ? { ...d, status: "applied" as const, applyError: undefined } : d
       ),
     })),
   markDiffRejected: (diffId) =>
     set((s) => ({
       diffs: s.diffs.map((d) =>
-        d.id === diffId ? { ...d, status: "rejected" as const } : d
+        d.id === diffId ? { ...d, status: "rejected" as const, applyError: undefined } : d
       ),
     })),
   setError: (error) => set({ error, state: error ? "error" : "idle" }),
@@ -255,13 +257,16 @@ export const useAgentStore = create<AgentStore>((set) => ({
         error: result.failed.length > 0
           ? `Failed to apply ${result.failed.length} diff${result.failed.length === 1 ? "" : "s"}.`
           : null,
-        diffs: s.diffs.map((d) =>
-          result.applied.some((a) => a.id === d.id)
-            ? { ...d, status: "applied" as const }
-            : result.failed.some((f) => f.diffId === d.id)
-            ? { ...d, status: "failed" as const }
-            : d
-        ),
+        diffs: s.diffs.map((d) => {
+          if (result.applied.some((a) => a.id === d.id)) {
+            return { ...d, status: "applied" as const, applyError: undefined };
+          }
+          const failure = result.failed.find((f) => f.diffId === d.id);
+          if (failure) {
+            return { ...d, status: "failed" as const, applyError: failure.message };
+          }
+          return d;
+        }),
       }));
       return result.applied;
     } catch (err: unknown) {
@@ -278,7 +283,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
         lastApplyResult: null,
         diffs: s.diffs.map((d) =>
           rejected.some((r) => r.id === d.id)
-            ? { ...d, status: "rejected" as const }
+            ? { ...d, status: "rejected" as const, applyError: undefined }
             : d
         ),
       }));

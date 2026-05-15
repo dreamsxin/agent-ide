@@ -1,15 +1,18 @@
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::sync::mpsc;
 
 /// LLM 配置
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
-    pub endpoint: String,  // e.g. "https://api.openai.com/v1"
+    pub endpoint: String, // e.g. "https://api.openai.com/v1"
     pub api_key: String,
-    pub model: String,     // e.g. "gpt-4"
+    pub model: String, // e.g. "gpt-4"
 }
 
 /// Chat 消息
@@ -59,15 +62,22 @@ impl LlmClient {
             return Err("Agent task cancelled".to_string());
         }
 
-        let response = self
+        let request = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("LLM request failed: {}", e))?;
+            .send();
+
+        let response = tokio::select! {
+            _ = wait_for_cancel(cancel_flag.clone()) => {
+                return Err("Agent task cancelled".to_string());
+            }
+            result = request => {
+                result.map_err(|e| format!("LLM request failed: {}", e))?
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -97,10 +107,19 @@ impl LlmClient {
             reasoning_content: Option<String>,
         }
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
             if cancel_flag.load(Ordering::SeqCst) {
                 return Err("Agent task cancelled".to_string());
             }
+            let chunk_result = tokio::select! {
+                _ = wait_for_cancel(cancel_flag.clone()) => {
+                    return Err("Agent task cancelled".to_string());
+                }
+                next = stream.next() => next,
+            };
+            let Some(chunk_result) = chunk_result else {
+                break;
+            };
             let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
             // 字节追加到缓冲区，防止 SSE 行被 TCP 分片截断
             sse_buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -141,5 +160,11 @@ impl LlmClient {
         }
 
         Ok(full_response)
+    }
+}
+
+async fn wait_for_cancel(cancel_flag: Arc<AtomicBool>) {
+    while !cancel_flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 }

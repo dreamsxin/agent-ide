@@ -42,7 +42,7 @@ cargo test
 
 ## Current State
 
-Status as of 2026-04-30: **Phase 6 in progress - stabilization and Agent hardening**.
+Status as of 2026-05-15: **Phase 7 in progress - Agent execution quality and auditability**.
 
 The app is no longer just a static UI prototype. It has a working Tauri/Rust backend, file commands, Git commands, LLM streaming, Agent planning/execution scaffolding, diff review UI, and settings for model configuration. Recent work focused on correcting safety and runtime assumptions:
 
@@ -54,6 +54,17 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fixed Git untracked status classification.
 - Fixed terminal kill path to signal the reader loop.
 - Added tests for context compression behavior.
+- Added a shared diff apply module with conflict detection for missing/ambiguous hunks, new-file overwrite protection, partial-apply reporting, and CLI/orchestrator reuse.
+- Wired Agent cancellation checks through the LLM request and streaming read path.
+- Scoped Git commands and terminal cwd to the saved workspace boundary.
+- Wired the frontend terminal panel to Tauri PTY spawn/write/resize/output events.
+- Added focused tests for workspace traversal, diff apply failures, auto-apply partial failure, and Git status/workspace boundaries.
+- Surfaced structured diff apply failures inline on the affected diff cards in addition to the summary banner.
+- Wired the configured Agent pipeline into backend execution as role-aware stages: planner -> architect -> coder -> tester -> reviewer.
+- Added structured Agent action log events for prompt, planner, stage start/completion/error, diff readiness, and auto-apply.
+- Surfaced Agent action logs in the Logs panel with expandable details, context summaries, diff summaries, stage, role, and phase.
+- Fed actual pending diff summaries into the Reviewer stage so review is based on proposed file/hunk changes, not only prior text output.
+- Added `docs/agent_ide_design.md` as the detailed design document for workflows, context handling, Agent orchestration, and technical boundaries.
 
 Important distinction:
 
@@ -69,7 +80,7 @@ Last verified locally:
 ```powershell
 npm run build     # passes; Vite still warns about a large Monaco/Markdown chunk
 cargo check       # passes
-cargo test        # passes; includes context compression tests
+cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
 Known local worktree note:
@@ -128,9 +139,11 @@ ChatView.handleSend()
       -> context compressed by selected mode
       -> AgentOrchestrator.run()
         -> planner LLM streaming
-        -> executor LLM streaming
+        -> role-aware pipeline execution: architect -> coder -> tester -> reviewer
+        -> emit structured action-log events
+        -> reviewer receives pending diff summary
         -> parse model diff blocks
-        -> emit plan, step, token, diff, state events
+        -> emit plan, step, token, diff, pipeline, state events
 ```
 
 ### Apply Diff
@@ -152,36 +165,36 @@ Current limitation: diff application still uses textual `find` replacement. It n
 
 ### High Priority
 
-1. **Diff application is fragile**
-   - Current behavior depends on exact or trimmed string match.
+1. **Diff application still lacks version-aware hunks**
+   - Current behavior still depends on exact or trimmed textual hunk content.
+   - Now rejects ambiguous matches and refuses to overwrite existing files for new-file hunks.
    - Missing file hash/version checks.
-   - Partial apply errors are collected but not fully surfaced to UI.
+   - Partial apply errors are returned structurally and shown inline on failed diff cards.
    - No per-hunk apply/reject.
 
-2. **Agent cancellation is not real cancellation**
-   - `stop_agent` changes state and clears data.
-   - In-flight LLM requests are not cancelled with a cancellation token.
+2. **Agent protocol is still markdown/diff-block based**
+   - Pipeline stages now drive backend execution.
+   - Reviewer receives pending diff summaries.
+   - Model outputs are still parsed from free-form markdown blocks.
+   - Need a structured protocol with file version/hash, operation metadata, rationale, and provenance.
 
-3. **Pipeline is mostly UI/state, not execution orchestration**
-   - Roles exist.
-   - Pipeline stages can be configured.
-   - Orchestrator does not yet execute architect/coder/tester/reviewer as distinct passes.
-
-4. **Secret storage is weak**
+3. **Secret storage is weak**
    - LLM API key is persisted in `~/.agent-ide/config.json`.
    - Should move to OS keychain or a permission-hardened credential store.
 
+4. **Cancellation is cooperative, not transport-abort based**
+   - `stop_agent` now reaches the LLM request/stream loop quickly through a shared flag.
+   - The underlying HTTP request is dropped by `tokio::select!`, but there is no explicit provider-side cancellation API.
+
 ### Medium Priority
 
-5. **Terminal frontend is not fully wired to PTY commands**
-   - Backend PTY commands exist.
-   - Frontend terminal currently behaves mostly as local xterm UI.
-   - Needs spawn/write/resize/output event integration.
+5. **Terminal PTY integration needs runtime polish**
+   - Frontend now spawns, writes, resizes, and listens for PTY output through Tauri.
+   - Needs interactive runtime testing in `npm run tauri -- dev` across panel hide/show and workspace switching.
 
-6. **Workspace boundary should cover every backend surface**
-   - FS and Agent diff paths are guarded.
-   - Git and terminal working directory policy still needs a focused review.
-   - Agent CLI should align with the same policy.
+6. **Workspace boundary coverage needs continued review**
+   - FS, Agent diff paths, Git entry points, terminal cwd, and Agent CLI are now guarded or aligned.
+   - Continue reviewing any new backend command surfaces as they are added.
 
 7. **Runtime modes need clearer UI messaging**
    - Browser preview now avoids crashes.
@@ -199,7 +212,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
 
 10. **Test coverage is thin**
    - Rust context compression has tests.
-   - Need tests for workspace guard, diff apply, Git status, Agent state transitions, and frontend store behavior.
+   - Rust diff apply, workspace boundaries, pipeline helpers, and pending diff summaries have tests.
+   - Need more tests for Agent state transitions and frontend store behavior.
 
 ---
 
@@ -242,6 +256,8 @@ Deliverables:
 
 - Role-aware orchestration: architect -> coder -> tester -> reviewer.
 - Pipeline stages influence prompts and state transitions.
+- Agent action log with prompt/context/diff provenance.
+- Reviewer uses actual pending diff summaries for structured review.
 - Context sources: selected files, open files, git diff, project tree summary, terminal/log excerpts.
 - Context compression strategy interface:
   - `full`: complete active context.
@@ -249,7 +265,6 @@ Deliverables:
   - `compact`: outline and metadata.
   - `budgeted`: token-budget-aware file packing.
 - Structured model protocol instead of free-form markdown-only diff parsing.
-- Agent action log with prompt/context/diff provenance.
 
 Acceptance checks:
 
@@ -347,12 +362,12 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add workspace guard tests and fix any uncovered path edge cases.
-2. Wire frontend terminal to backend PTY commands.
-3. Replace current diff apply with structured conflict-aware apply results.
-4. Add real cancellation token through Agent orchestrator and LLM client.
+1. Add Git diff and project tree summaries to Agent context.
+2. Replace markdown-only model output parsing with a structured Agent protocol.
+3. Add version/hash-aware per-hunk diff application.
+4. Persist Agent action logs with prompt/context/diff provenance.
 5. Move LLM API key storage to a safer credential path.
 
 ---
 
-*Last updated: 2026-04-30 - Phase 6 in progress.*
+*Last updated: 2026-05-15 - Phase 7 in progress.*

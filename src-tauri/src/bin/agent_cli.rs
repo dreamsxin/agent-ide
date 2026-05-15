@@ -1,19 +1,19 @@
 // ============================================================
-// Agent IDE CLI — command-line AI coding agent
+// Agent IDE CLI - command-line AI coding agent
 // ============================================================
 // Usage:
 //   agent-cli --endpoint URL --api-key KEY --model NAME "your prompt"
 //   agent-cli --apply "your prompt"        (use env vars + write files)
 //   or set env: LLM_ENDPOINT, LLM_API_KEY, LLM_MODEL
 
-use agent_ide_lib::agent::planner;
+use agent_ide_lib::agent::diff_apply::apply_pending_diffs;
 use agent_ide_lib::agent::executor;
-use agent_ide_lib::services::llm_client::{LlmClient, LlmConfig};
+use agent_ide_lib::agent::planner;
 use agent_ide_lib::services::context::AgentContext;
-use std::sync::{Arc, atomic::AtomicBool};
-use tokio::sync::mpsc;
+use agent_ide_lib::services::llm_client::{LlmClient, LlmConfig};
 use std::path::PathBuf;
-use std::fs;
+use std::sync::{atomic::AtomicBool, Arc};
+use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() {
@@ -31,24 +31,60 @@ async fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--endpoint" => { i += 1; if i < args.len() { endpoint = args[i].clone(); } }
-            "--api-key" => { i += 1; if i < args.len() { api_key = args[i].clone(); } }
-            "--model" => { i += 1; if i < args.len() { model = args[i].clone(); } }
-            "--workspace" => { i += 1; if i < args.len() { workspace = args[i].clone(); } }
-            "--apply" => { apply = true; }
-            "--help" | "-h" => { print_help(); return; }
-            other if !other.starts_with('-') => {
-                if prompt.is_empty() { prompt = other.to_string(); }
+            "--endpoint" => {
+                i += 1;
+                if i < args.len() {
+                    endpoint = args[i].clone();
+                }
             }
-            _ => { eprintln!("Unknown flag: {}", args[i]); return; }
+            "--api-key" => {
+                i += 1;
+                if i < args.len() {
+                    api_key = args[i].clone();
+                }
+            }
+            "--model" => {
+                i += 1;
+                if i < args.len() {
+                    model = args[i].clone();
+                }
+            }
+            "--workspace" => {
+                i += 1;
+                if i < args.len() {
+                    workspace = args[i].clone();
+                }
+            }
+            "--apply" => {
+                apply = true;
+            }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            other if !other.starts_with('-') => {
+                if prompt.is_empty() {
+                    prompt = other.to_string();
+                }
+            }
+            _ => {
+                eprintln!("Unknown flag: {}", args[i]);
+                return;
+            }
         }
         i += 1;
     }
 
     // Env fallback
-    if endpoint.is_empty() { endpoint = std::env::var("LLM_ENDPOINT").unwrap_or_default(); }
-    if api_key.is_empty() { api_key = std::env::var("LLM_API_KEY").unwrap_or_default(); }
-    if model.is_empty() { model = std::env::var("LLM_MODEL").unwrap_or_default(); }
+    if endpoint.is_empty() {
+        endpoint = std::env::var("LLM_ENDPOINT").unwrap_or_default();
+    }
+    if api_key.is_empty() {
+        api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
+    }
+    if model.is_empty() {
+        model = std::env::var("LLM_MODEL").unwrap_or_default();
+    }
 
     if endpoint.is_empty() || api_key.is_empty() || model.is_empty() || prompt.is_empty() {
         return;
@@ -59,18 +95,45 @@ async fn main() {
     println!("Model:    {}", model);
     println!("Workspace:{}", workspace);
     println!("Prompt:   {}", prompt);
-    if apply { println!("Mode:     Apply (files will be written)"); }
-    else { println!("Mode:     Preview only"); }
+    if apply {
+        println!("Mode:     Apply (files will be written)");
+    } else {
+        println!("Mode:     Preview only");
+    }
     println!();
 
-    let config = LlmConfig { endpoint, api_key, model };
+    let workspace_path = match PathBuf::from(&workspace).canonicalize() {
+        Ok(path) if path.is_dir() => path,
+        Ok(path) => {
+            eprintln!("Workspace is not a directory: {}", path.display());
+            return;
+        }
+        Err(e) => {
+            eprintln!("Workspace is not accessible: {}", e);
+            return;
+        }
+    };
+    workspace = workspace_path.to_string_lossy().to_string();
+    std::env::set_var("AGENT_IDE_CONFIG_DIR", workspace_path.join(".agent-ide"));
+    if let Err(e) = agent_ide_lib::services::workspace::save_workspace_path(&workspace) {
+        eprintln!("Failed to set workspace: {}", e);
+        return;
+    }
+
+    let config = LlmConfig {
+        endpoint,
+        api_key,
+        model,
+    };
     let llm = LlmClient::new(config);
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
     let workspace_clone = workspace.clone();
     let context = AgentContext {
-        active_file: None, active_file_content: None,
-        selection: None, open_files: Vec::new(),
+        active_file: None,
+        active_file_content: None,
+        selection: None,
+        open_files: Vec::new(),
         project_path: workspace_clone,
     };
     let ctx_str = context.to_prompt_context();
@@ -79,7 +142,9 @@ async fn main() {
     println!("--- Phase 1: Planning ---");
     let (tx, mut rx) = mpsc::channel::<String>(64);
     let stream_task = tokio::spawn(async move {
-        while let Some(tok) = rx.recv().await { print!("{}", tok); }
+        while let Some(tok) = rx.recv().await {
+            print!("{}", tok);
+        }
     });
 
     match planner::plan_task(&llm, &prompt, &ctx_str, cancel_flag.clone(), tx).await {
@@ -95,17 +160,20 @@ async fn main() {
             }
             println!();
 
-            if n == 0 { println!("No steps generated."); return; }
-
-            let workspace_path = PathBuf::from(&workspace);
+            if n == 0 {
+                println!("No steps generated.");
+                return;
+            }
 
             // Phase 2: Execute each step
             let mut all_diffs: Vec<agent_ide_lib::agent::state_machine::FileDiff> = Vec::new();
             for (i, step) in steps.iter().enumerate() {
                 println!("--- Step {}/{}: {} ---", i + 1, n, step.title);
                 // Build executor context with file contents
-                let mut step_ctx = format!("Task: {}\nStep: {}\nType: {}\nContext:\n{}",
-                    prompt, step.title, step.step_type, ctx_str);
+                let mut step_ctx = format!(
+                    "Task: {}\nStep: {}\nType: {}\nContext:\n{}",
+                    prompt, step.title, step.step_type, ctx_str
+                );
 
                 // Auto-read files mentioned in step title or context, then inject
                 // their contents into the executor prompt (two-phase: collect paths, then read)
@@ -113,7 +181,14 @@ async fn main() {
 
                 // Scan step title for filenames
                 for word in step.title.split_whitespace() {
-                    let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '-' && c != '_');
+                    let w = word.trim_matches(|c: char| {
+                        !c.is_alphanumeric()
+                            && c != '.'
+                            && c != '/'
+                            && c != '\\'
+                            && c != '-'
+                            && c != '_'
+                    });
                     if w.contains('.') && w.len() > 3 {
                         paths_to_try.push(workspace_path.join(w));
                         paths_to_try.push(std::path::PathBuf::from(w));
@@ -154,15 +229,20 @@ async fn main() {
                 }
 
                 if !found_names.is_empty() {
-                    step_ctx.push_str("\n\n(File contents above are current — base your diff on them)");
+                    step_ctx
+                        .push_str("\n\n(File contents above are current - base your diff on them)");
                 }
 
                 let (tx2, mut rx2) = mpsc::channel::<String>(64);
                 let _stream2 = tokio::spawn(async move {
-                    while let Some(tok) = rx2.recv().await { print!("{}", tok); }
+                    while let Some(tok) = rx2.recv().await {
+                        print!("{}", tok);
+                    }
                 });
 
-                match executor::execute_step(&llm, &step.title, &step_ctx, cancel_flag.clone(), tx2).await {
+                match executor::execute_step(&llm, &step.title, &step_ctx, cancel_flag.clone(), tx2)
+                    .await
+                {
                     Ok(response) => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                         println!();
@@ -175,7 +255,9 @@ async fn main() {
                             all_diffs.extend(diffs);
                         }
                     }
-                    Err(e) => { println!("\n  FAILED: {}", e); }
+                    Err(e) => {
+                        println!("\n  FAILED: {}", e);
+                    }
                 }
                 println!();
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -185,8 +267,6 @@ async fn main() {
             println!("====================");
             println!("Plan:  {} step(s)", n);
             println!("Diffs: {} file(s)", all_diffs.len());
-
-            let mut files_written: usize = 0;
 
             for d in &all_diffs {
                 println!();
@@ -205,82 +285,35 @@ async fn main() {
                         println!("  ... ({} more lines)", line_count - 20);
                     }
 
-                    // Apply to filesystem if --apply
-                    if apply {
-                        // Create parent dirs
-                        if let Some(parent) = target_path.parent() {
-                            let _ = fs::create_dir_all(parent);
-                        }
-
-                        let mut written = false;
-
-                        if h.original.is_empty() && !h.updated.is_empty() {
-                            // New file
-                            match fs::write(&target_path, &h.updated) {
-                                Ok(()) => {
-                                    println!("  >> Created: {}", target_path.display());
-                                    files_written += 1;
-                                    written = true;
-                                }
-                                Err(_e) => {
-                                }
-                            }
-                        } else if !h.original.is_empty() {
-                            // Edit existing file: read → find/replace → write back
-                            match std::fs::read_to_string(&target_path) {
-                                Ok(existing) => {
-                                    // Try exact match first, then trim match
-                                    let replaced = if let Some(pos) = existing.find(&h.original) {
-                                        let mut r = String::with_capacity(existing.len() + h.updated.len());
-                                        r.push_str(&existing[..pos]);
-                                        r.push_str(&h.updated);
-                                        r.push_str(&existing[pos + h.original.len()..]);
-                                        r
-                                    } else if let Some(pos) = existing.find(h.original.trim()) {
-                                        let mut r = String::with_capacity(existing.len() + h.updated.len());
-                                        r.push_str(&existing[..pos]);
-                                        r.push_str(h.updated.trim());
-                                        r.push_str(&existing[pos + h.original.trim().len()..]);
-                                        r
-                                    } else {
-                                        h.updated.clone()
-                                    };
-                                    match fs::write(&target_path, &replaced) {
-                                        Ok(()) => {
-                                            println!("  >> Modified: {}", target_path.display());
-                                            files_written += 1;
-                                            written = true;
-                                        }
-                                        Err(_e) => {
-                                        }
-                                    }
-                                }
-                                Err(_e) => {
-                                }
-                            }
-                        }
-                        if !written {
-                        }
-                    } else {
+                    if !apply {
                         println!("  >> Preview: would write to {}", target_path.display());
                     }
                 }
             }
 
             if apply {
+                let result = apply_pending_diffs(&all_diffs);
                 println!();
                 println!("====================");
-                println!("{} file(s) written to {}", files_written, workspace);
+                for diff in &result.applied {
+                    println!("Applied: {}", diff.file);
+                }
+                for failure in &result.failed {
+                    println!("Failed:  {} - {}", failure.file, failure.message);
+                }
+                println!("{} file(s) written to {}", result.applied.len(), workspace);
             }
             println!("====================");
         }
-        Err(e) => { eprintln!("Planning failed: {}", e); }
+        Err(e) => {
+            eprintln!("Planning failed: {}", e);
+        }
     }
 }
 
-
 fn print_help() {
-    println!(r#"Agent IDE CLI - AI Coding Agent
+    println!(
+        r#"Agent IDE CLI - AI Coding Agent
 
 Usage:
   agent-cli [OPTIONS] <PROMPT>
@@ -299,5 +332,6 @@ Examples:
 
   # Write files to disk:
   agent-cli --apply --workspace ./my-project "Create a React login component"
-"#);
+"#
+    );
 }

@@ -36,12 +36,13 @@ export interface Step {
   logs: string[];
 }
 
-/** Diff 条目 */
+/** Diff entry proposed by the Agent. */
 export interface DiffEntry {
   id: string;
   file: string;
   hunks: DiffHunk[];
   status: "pending" | "applied" | "rejected" | "failed";
+  applyError?: string;
 }
 
 export interface DiffHunk {
@@ -63,6 +64,19 @@ export interface ApplyDiffError {
 export interface ApplyDiffsResult {
   applied: DiffEntry[];
   failed: ApplyDiffError[];
+}
+
+export interface AgentActionLogEntry {
+  id: string;
+  timestamp: string;
+  level: "info" | "warn" | "error" | "success";
+  phase: string;
+  role?: AgentRole | string | null;
+  stage?: string | null;
+  summary: string;
+  details: string;
+  contextSummary?: string | null;
+  diffSummary?: string | null;
 }
 
 /** Task 任务 */

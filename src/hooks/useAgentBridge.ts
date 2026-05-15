@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAgentStore } from "../stores/useAgentStore";
-import type { AgentState, Step, DiffEntry } from "../types/agent";
+import { useLogStore } from "../stores/useLogStore";
+import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
@@ -18,8 +19,10 @@ export function useAgentBridge() {
   const setSteps = useAgentStore((s) => s.setSteps);
   const updateStep = useAgentStore((s) => s.updateStep);
   const setDiffs = useAgentStore((s) => s.setDiffs);
+  const setPipeline = useAgentStore((s) => s.setPipeline);
   const appendStreamContent = useAgentStore((s) => s.appendStreamContent);
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
+  const addLog = useLogStore((s) => s.addLog);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -52,6 +55,26 @@ export function useAgentBridge() {
             setDiffs(e.payload);
           }),
 
+          listen<PipelineStage[]>("agent-pipeline-update", (e) => {
+            setPipeline(e.payload);
+          }),
+
+          listen<AgentActionLogEntry>("agent-action-log", (e) => {
+            const entry = e.payload;
+            addLog({
+              time: formatLogTime(entry.timestamp),
+              level: entry.level,
+              source: "agent",
+              message: entry.summary,
+              details: entry.details,
+              phase: entry.phase,
+              role: entry.role ?? null,
+              stage: entry.stage ?? null,
+              contextSummary: entry.contextSummary ?? null,
+              diffSummary: entry.diffSummary ?? null,
+            });
+          }),
+
           listen<string>("agent-stream-token", (e) => {
             appendStreamContent(e.payload);
           }),
@@ -72,4 +95,12 @@ export function useAgentBridge() {
       unlisteners.forEach((fn) => fn());
     };
   }, []);
+}
+
+function formatLogTime(timestamp: string) {
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date().toLocaleTimeString();
+  }
+  return parsed.toLocaleTimeString();
 }
