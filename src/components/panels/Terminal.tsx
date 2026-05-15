@@ -519,7 +519,8 @@ function createTerminalSession(
 
 function buildTrackedCommand(command: string, marker: string) {
   if (navigator.userAgent.includes("Windows")) {
-    return `${command} & echo ${marker}:%ERRORLEVEL%`;
+    const escapedCommand = command.replace(/"/g, '\\"');
+    return `cmd /v:on /c "${escapedCommand} & echo ${marker}:!ERRORLEVEL!"`;
   }
   return `${command}; printf '\\n${marker}:%s\\n' "$?"`;
 }
