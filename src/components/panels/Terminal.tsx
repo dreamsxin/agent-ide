@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
@@ -16,10 +16,12 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const readyRef = useRef(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     if (!containerRef.current) return;
+    setStartupError(null);
 
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
@@ -64,6 +66,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     term.loadAddon(webLinksAddon);
     try {
       term.open(containerRef.current);
+      term.writeln("\x1b[90mStarting terminal...\x1b[0m");
       requestAnimationFrame(() => {
         try {
           fitAddon.fit();
@@ -117,6 +120,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
           return;
         }
         term.writeln(`\r\n\x1b[31mTerminal failed to start: ${msg}\x1b[0m`);
+        setStartupError(msg);
       });
 
     term.onData((data) => {
@@ -129,6 +133,8 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     const resizeObserver = new ResizeObserver(() => {
       if (fitAddonRef.current) {
         try {
+          const rect = containerRef.current?.getBoundingClientRect();
+          if (!rect || rect.width <= 0 || rect.height <= 0) return;
           fitAddonRef.current.fit();
           sendResize();
         } catch {
@@ -156,12 +162,17 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full"
+      className="h-full w-full min-h-[120px] relative"
       style={{ padding: "4px 8px" }}
     >
       {!isTauriRuntime() && (
         <div className="h-full flex items-center justify-center text-xs text-surface-muted">
           Terminal is available in the Tauri app runtime.
+        </div>
+      )}
+      {isTauriRuntime() && startupError && (
+        <div className="absolute right-2 top-2 max-w-[60%] rounded border border-diff-remove/40 bg-surface-panel px-2 py-1 text-[10px] text-diff-remove">
+          {startupError}
         </div>
       )}
     </div>

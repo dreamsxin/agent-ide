@@ -67,6 +67,8 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added `docs/agent_ide_design.md` as the detailed design document for workflows, context handling, Agent orchestration, and technical boundaries.
 - Added backend Agent context enrichment with bounded project tree summaries and Git working-tree diff excerpts.
 - Added a compatible structured `agent-changes` JSON output protocol for model file changes while preserving legacy diff/new-file block parsing.
+- Fixed terminal PTY input handling by keeping a persistent writer per terminal instance instead of taking a new writer for each keystroke.
+- Improved terminal startup feedback and guarded resize fitting when the panel has no measurable size.
 
 Important distinction:
 
@@ -194,7 +196,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
 
 5. **Terminal PTY integration needs runtime polish**
    - Frontend now spawns, writes, resizes, and listens for PTY output through Tauri.
-   - Needs interactive runtime testing in `npm run tauri -- dev` across panel hide/show and workspace switching.
+   - Persistent PTY writer is now used for terminal input.
+   - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Workspace boundary coverage needs continued review**
    - FS, Agent diff paths, Git entry points, terminal cwd, and Agent CLI are now guarded or aligned.

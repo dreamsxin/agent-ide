@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 /// 终端实例
 struct TerminalInstance {
     pty_master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
     cancel_tx: mpsc::Sender<()>,
 }
@@ -82,6 +83,9 @@ pub async fn spawn_terminal(
     let mut reader = master
         .try_clone_reader()
         .map_err(|e| format!("Failed to clone reader: {}", e))?;
+    let writer = master
+        .take_writer()
+        .map_err(|e| format!("Failed to create PTY writer: {}", e))?;
 
     let app_clone = app.clone();
     let id_clone = id.clone();
@@ -120,6 +124,7 @@ pub async fn spawn_terminal(
             id,
             TerminalInstance {
                 pty_master: master,
+                writer,
                 _child: child,
                 cancel_tx,
             },
@@ -144,13 +149,14 @@ pub async fn write_to_terminal(
         .get_mut(&id)
         .ok_or_else(|| format!("Terminal {} not found", id))?;
 
-    let mut writer = instance
-        .pty_master
-        .take_writer()
-        .map_err(|e| format!("Failed to get writer: {}", e))?;
-    writer
+    instance
+        .writer
         .write_all(data.as_bytes())
         .map_err(|e| format!("Failed to write to PTY: {}", e))?;
+    instance
+        .writer
+        .flush()
+        .map_err(|e| format!("Failed to flush PTY input: {}", e))?;
 
     Ok(())
 }
