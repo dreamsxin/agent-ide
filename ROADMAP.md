@@ -10,10 +10,11 @@
 After any interruption, restore context in this order:
 
 1. Read this file to understand current state and next work.
-2. Read `docs/agent_ide_plan.md` for the broader technical plan.
-3. Read `docs/agent_ide_ui_design.md` for UI design intent.
-4. Check `git status --short` before editing. There may be user changes.
-5. Run verification:
+2. Read `README.md` for setup, runtime modes, and workflow overview.
+3. Read `docs/agent_ide_design.md` for detailed current design.
+4. Read `docs/agent_ide_ui_design.md` for UI design intent.
+5. Check `git status --short` before editing. There may be user changes.
+6. Run verification:
 
 ```powershell
 npm run build
@@ -69,6 +70,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added a compatible structured `agent-changes` JSON output protocol for model file changes while preserving legacy diff/new-file block parsing.
 - Fixed terminal PTY input handling by keeping a persistent writer per terminal instance instead of taking a new writer for each keystroke.
 - Improved terminal startup feedback and guarded resize fitting when the panel has no measurable size.
+- Added `README.md` with setup, runtime modes, verification, Agent workflow, protocol, and project status.
 
 Important distinction:
 
@@ -117,6 +119,7 @@ Known local worktree note:
 - `src-tauri/src/services/llm_client.rs`: OpenAI-compatible streaming client.
 - `src-tauri/src/services/context.rs`: AgentContext and context compression.
 - `src-tauri/src/services/workspace.rs`: config dir, workspace persistence, path resolution and workspace boundary checks.
+- `README.md`: setup, runtime modes, verification, Agent workflow, and current limitations.
 
 ---
 

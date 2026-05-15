@@ -1,0 +1,205 @@
+# Agent IDE
+
+Code-centric controllable AI Agent IDE built with Tauri v2, Rust, React, TypeScript, Tailwind CSS, Monaco Editor, and xterm.js.
+
+Agent IDE is not intended to be a chat-only coding tool. The product direction is an IDE where the Agent is visible, auditable, and user-controlled through task plans, role pipelines, diff review, logs, Git state, and terminal workflows.
+
+## Current Status
+
+Current phase: **Phase 7 - Agent execution quality and auditability**.
+
+Implemented core capabilities:
+
+- Tauri desktop shell with React/Vite frontend and Rust backend.
+- Monaco-based editor, file tabs, file tree, Git panel, terminal panel, logs, and Agent panel.
+- Workspace-scoped filesystem operations with path boundary checks.
+- Git status/diff/commit commands through `git2`.
+- PTY terminal backend using `portable-pty` and xterm.js frontend integration.
+- OpenAI-compatible streaming LLM client.
+- Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
+- Agent context compression modes: `full`, `focused`, `compact`.
+- Agent context enrichment with project tree summary and Git working-tree diff.
+- Structured action log events shown in the Logs panel.
+- Diff review and apply flow with structured apply failures.
+- Compatible structured `agent-changes` JSON protocol plus legacy diff/new-file block parsing.
+
+Important remaining gaps:
+
+- Diff application is not yet version/hash-aware.
+- Per-hunk apply/reject is not implemented.
+- API keys are still persisted in local JSON config.
+- Terminal still needs interactive runtime testing across panel hide/show and workspace switching.
+- Frontend test coverage and Tauri smoke tests are still thin.
+
+See [ROADMAP.md](ROADMAP.md) for the implementation source of truth and [docs/agent_ide_design.md](docs/agent_ide_design.md) for detailed design.
+
+## Runtime Modes
+
+There are two different development modes:
+
+```powershell
+npm run dev
+```
+
+Runs Vite web preview only. Tauri IPC, filesystem, terminal, Git, and Agent backend features are disabled or guarded.
+
+```powershell
+npm run tauri -- dev
+```
+
+Runs the real desktop IDE with the Rust backend and Tauri APIs.
+
+## Setup
+
+Prerequisites:
+
+- Node.js and npm
+- Rust toolchain
+- Tauri v2 prerequisites for your OS
+
+Install frontend dependencies:
+
+```powershell
+npm install
+```
+
+Run the web preview:
+
+```powershell
+npm run dev
+```
+
+Run the desktop app:
+
+```powershell
+npm run tauri -- dev
+```
+
+## Verification
+
+Run these checks before committing substantial changes:
+
+```powershell
+npm run build
+cd src-tauri
+cargo check
+cargo test
+```
+
+Known build note: Vite currently warns about a large chunk because Monaco, Markdown, xterm, and syntax tooling are bundled together. This is not a correctness failure.
+
+## Project Structure
+
+```text
+src/
+  components/
+    agent/       Agent chat, task, diff, pipeline, settings UI
+    editor/      Monaco editor, tabs, overlays, quick actions
+    layout/      top/left/right/bottom layout panels
+    panels/      Explorer, Git, Terminal, Logs
+  hooks/         Tauri event bridge and shortcuts
+  stores/        Zustand stores
+  types/         frontend DTOs
+  utils/         Tauri runtime helpers
+
+src-tauri/
+  src/
+    agent/       planner, executor, orchestrator, diff apply, roles
+    commands/    Tauri IPC commands for fs/git/terminal/agent
+    services/    workspace, context, LLM client
+    bin/         agent_cli
+
+docs/
+  agent_ide_design.md      detailed current design
+  agent_ide_plan.md        original technical plan
+  agent_ide_ui_design.md   product UI design target
+```
+
+## Agent Workflow
+
+```text
+Chat prompt
+  -> frontend gathers active file, selection, open files
+  -> backend enriches context with project tree and Git diff
+  -> planner produces task steps
+  -> pipeline executes configured roles
+     -> architect
+     -> coder
+     -> tester
+     -> reviewer
+  -> model output is parsed into pending diffs
+  -> reviewer receives actual pending diff summary
+  -> user applies or rejects diffs
+```
+
+Agent events are streamed back to the UI:
+
+- `agent-state-changed`
+- `agent-stream-token`
+- `agent-plan-ready`
+- `agent-step-update`
+- `agent-pipeline-update`
+- `agent-diff-ready`
+- `agent-action-log`
+
+## Agent Change Protocol
+
+Preferred structured output:
+
+````text
+```agent-changes
+{
+  "changes": [
+    {
+      "type": "edit",
+      "file": "path/to/file",
+      "rationale": "why this change is needed",
+      "hunks": [
+        { "original": "exact existing code", "updated": "replacement code" }
+      ]
+    },
+    {
+      "type": "create",
+      "file": "path/to/new-file",
+      "rationale": "why this file is needed",
+      "content": "complete file content"
+    }
+  ]
+}
+```
+````
+
+Legacy `diff:path` and `new:path` code blocks are still supported.
+
+## Configuration
+
+LLM config can be provided through the UI or environment variables:
+
+```powershell
+$env:LLM_ENDPOINT = "https://api.openai.com/v1"
+$env:LLM_API_KEY = "..."
+$env:LLM_MODEL = "..."
+```
+
+Current local config files are stored under `~/.agent-ide` unless `AGENT_IDE_CONFIG_DIR` is set.
+
+## CLI
+
+The Rust side includes a preview/apply CLI:
+
+```powershell
+cd src-tauri
+cargo build --bin agent_cli --release
+target\release\agent_cli --help
+```
+
+## Git Notes
+
+This repo may have local demo changes. Check status before staging:
+
+```powershell
+git status --short
+```
+
+Do not include unrelated demo/workspace changes in feature commits.
+
