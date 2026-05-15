@@ -41,9 +41,11 @@ export default function GitPanel() {
   const unstageFiles = useGitStore((s) => s.unstageFiles);
   const discardFiles = useGitStore((s) => s.discardFiles);
   const checkoutBranch = useGitStore((s) => s.checkoutBranch);
+  const checkoutRemoteBranch = useGitStore((s) => s.checkoutRemoteBranch);
   const fetchRemote = useGitStore((s) => s.fetch);
   const pullRemote = useGitStore((s) => s.pull);
   const pushRemote = useGitStore((s) => s.push);
+  const resolveConflict = useGitStore((s) => s.resolveConflict);
   const addLog = useLogStore((s) => s.addLog);
 
   const projectPath = workspacePath || ".";
@@ -53,6 +55,9 @@ export default function GitPanel() {
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [diffKind, setDiffKind] = useState<GitDiffKind>("all");
   const [branchName, setBranchName] = useState("");
+  const [remoteBranch, setRemoteBranch] = useState("");
+  const [credentialUsername, setCredentialUsername] = useState("");
+  const [credentialPassword, setCredentialPassword] = useState("");
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -73,6 +78,14 @@ export default function GitPanel() {
   const selectedStaged = selectedEntries.filter((entry) => entry.staged);
   const selectedUnstaged = selectedEntries.filter((entry) => !entry.staged);
   const localBranches = status?.branches.filter((branch) => !branch.remote) ?? [];
+  const remoteBranches = status?.branches.filter((branch) => branch.remote) ?? [];
+  const credentials =
+    credentialUsername.trim() || credentialPassword.trim()
+      ? {
+          username: credentialUsername.trim(),
+          password: credentialPassword,
+        }
+      : null;
 
   useEffect(() => {
     if (!selectedEntryKey) return;
@@ -192,10 +205,25 @@ export default function GitPanel() {
     }
   }, [addLog, branchName, checkoutBranch, clearDiff, fetchStatus, projectPath]);
 
+  const handleCheckoutRemoteBranch = useCallback(async () => {
+    if (!remoteBranch) return;
+    if (await checkoutRemoteBranch(projectPath, remoteBranch)) {
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        level: "success",
+        source: "git",
+        message: `Checked out tracking branch ${remoteBranch}`,
+      });
+      setRemoteBranch("");
+      await fetchStatus(projectPath);
+      clearDiff();
+    }
+  }, [addLog, checkoutRemoteBranch, clearDiff, fetchStatus, projectPath, remoteBranch]);
+
   const handleRemoteAction = useCallback(
     async (kind: "fetch" | "pull" | "push") => {
       const action = kind === "fetch" ? fetchRemote : kind === "pull" ? pullRemote : pushRemote;
-      if (await action(projectPath)) {
+      if (await action(projectPath, undefined, credentials)) {
         addLog({
           time: new Date().toLocaleTimeString(),
           level: "success",
@@ -206,7 +234,38 @@ export default function GitPanel() {
         clearDiff();
       }
     },
-    [addLog, clearDiff, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote]
+    [addLog, clearDiff, credentials, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote]
+  );
+
+  const handleResolveConflict = useCallback(
+    async (file: string, resolution: "current" | "incoming" | "both") => {
+      if (await resolveConflict(projectPath, file, resolution)) {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          level: "success",
+          source: "git",
+          message: `Resolved ${file} with ${resolution}`,
+        });
+        await fetchStatus(projectPath);
+        clearDiff();
+        setSelectedFile(null);
+        setSelectedEntryKey(null);
+      }
+    },
+    [addLog, clearDiff, fetchStatus, projectPath, resolveConflict]
+  );
+
+  const handleConflictDiff = useCallback(
+    (file: string) => {
+      const entry = allEntries.find((item) => item.path === file) ?? {
+        path: file,
+        status: "conflicted" as const,
+        old_path: null,
+        staged: false,
+      };
+      previewEntry(entry, "all");
+    },
+    [allEntries, previewEntry]
   );
 
   const handleStage = useCallback(
@@ -372,6 +431,21 @@ export default function GitPanel() {
               Push
             </button>
           </div>
+          <div className="mt-2 grid grid-cols-2 gap-1">
+            <input
+              value={credentialUsername}
+              onChange={(event) => setCredentialUsername(event.target.value)}
+              placeholder="git username"
+              className="min-w-0 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
+            />
+            <input
+              value={credentialPassword}
+              onChange={(event) => setCredentialPassword(event.target.value)}
+              type="password"
+              placeholder="token/password"
+              className="min-w-0 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
+            />
+          </div>
           <div className="mt-2 flex gap-1">
             <input
               value={branchName}
@@ -393,9 +467,69 @@ export default function GitPanel() {
               Create
             </button>
           </div>
+          {remoteBranches.length > 0 && (
+            <div className="mt-2 flex gap-1">
+              <select
+                value={remoteBranch}
+                onChange={(event) => setRemoteBranch(event.target.value)}
+                disabled={loading}
+                className="min-w-0 flex-1 bg-surface-base border border-surface-border rounded px-1.5 py-1 font-mono text-[10px] text-surface-text focus:outline-none focus:border-accent-blue"
+                title="Remote branch"
+              >
+                <option value="">remote branch...</option>
+                {remoteBranches.map((branch) => (
+                  <option key={branch.name} value={branch.name}>
+                    {branch.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleCheckoutRemoteBranch}
+                disabled={!remoteBranch || loading}
+                className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
+              >
+                Track
+              </button>
+            </div>
+          )}
           {status.conflicts.length > 0 && (
-            <div className="mt-2 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1 text-[10px] text-diff-remove">
-              {status.conflicts.length} conflict{status.conflicts.length === 1 ? "" : "s"} detected
+            <div className="mt-2 rounded border border-diff-remove/40 bg-diff-remove/10 p-2 text-[10px] text-diff-remove">
+              <div className="mb-1 font-semibold">
+                {status.conflicts.length} conflict{status.conflicts.length === 1 ? "" : "s"} detected
+              </div>
+              <div className="space-y-1">
+                {status.conflicts.map((file) => (
+                  <div key={file} className="rounded border border-diff-remove/20 bg-surface-panel/70 p-1">
+                    <button
+                      onClick={() => handleConflictDiff(file)}
+                      className="block w-full truncate text-left font-mono text-diff-remove hover:underline"
+                      title="Open conflict diff"
+                    >
+                      {file}
+                    </button>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      <button
+                        onClick={() => handleResolveConflict(file, "current")}
+                        className="rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
+                      >
+                        Current
+                      </button>
+                      <button
+                        onClick={() => handleResolveConflict(file, "incoming")}
+                        className="rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
+                      >
+                        Incoming
+                      </button>
+                      <button
+                        onClick={() => handleResolveConflict(file, "both")}
+                        className="rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
+                      >
+                        Both
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

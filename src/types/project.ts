@@ -29,6 +29,12 @@ export interface GitBranch {
   remote: boolean;
 }
 
+/** Git remote credentials for one operation */
+export interface GitCredentials {
+  username: string;
+  password: string;
+}
+
 /** Git diff view mode */
 export type GitDiffKind = "worktree" | "staged" | "all";
 

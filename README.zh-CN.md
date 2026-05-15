@@ -28,7 +28,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 
 重要缺口：
 
-- Git 工作流还缺 credential UX、远端分支 tracking 和更完整的 conflict resolution 控制。
+- Git 工作流还缺持久化 credential storage、更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
 - `baseHash` 已支持，但 UI 还需要更完整地展示和操作。
 - API key 仍保存在本地 JSON 配置中。
 - Terminal 还需要在真实 Tauri runtime 中做更多交互测试。

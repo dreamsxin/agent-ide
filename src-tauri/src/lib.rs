@@ -72,9 +72,11 @@ pub fn run() {
             commands::git::git_unstage_files,
             commands::git::git_discard_files,
             commands::git::git_checkout_branch,
+            commands::git::git_checkout_remote_branch,
             commands::git::git_fetch,
             commands::git::git_pull,
             commands::git::git_push,
+            commands::git::git_resolve_conflict,
             // Tasks 命令
             commands::tasks::discover_project_tasks,
             commands::tasks::run_project_task,

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { GitDiffKind, GitStatus } from "../types/project";
+import type { GitCredentials, GitDiffKind, GitStatus } from "../types/project";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface GitStore {
@@ -16,9 +16,11 @@ interface GitStore {
   unstageFiles: (path: string, files: string[]) => Promise<boolean>;
   discardFiles: (path: string, files: string[]) => Promise<boolean>;
   checkoutBranch: (path: string, branch: string, create?: boolean) => Promise<boolean>;
-  fetch: (path: string, remote?: string) => Promise<boolean>;
-  pull: (path: string, remote?: string) => Promise<boolean>;
-  push: (path: string, remote?: string) => Promise<boolean>;
+  checkoutRemoteBranch: (path: string, remoteBranch: string, localBranch?: string) => Promise<boolean>;
+  fetch: (path: string, remote?: string, credentials?: GitCredentials | null) => Promise<boolean>;
+  pull: (path: string, remote?: string, credentials?: GitCredentials | null) => Promise<boolean>;
+  push: (path: string, remote?: string, credentials?: GitCredentials | null) => Promise<boolean>;
+  resolveConflict: (path: string, file: string, resolution: "current" | "incoming" | "both") => Promise<boolean>;
   clearDiff: () => void;
 }
 
@@ -140,14 +142,34 @@ export const useGitStore = create<GitStore>((set) => ({
     }
   },
 
-  fetch: async (path, remote) => {
+  checkoutRemoteBranch: async (path, remoteBranch, localBranch) => {
+    set({ loading: true, error: null });
+    try {
+      if (!isTauriRuntime()) {
+        set({ loading: false, error: "Git remote checkout is available in the Tauri app runtime." });
+        return false;
+      }
+      await invoke("git_checkout_remote_branch", {
+        path,
+        remoteBranch,
+        localBranch: localBranch?.trim() || null,
+      });
+      set({ loading: false });
+      return true;
+    } catch (err: unknown) {
+      set({ error: String(err), loading: false });
+      return false;
+    }
+  },
+
+  fetch: async (path, remote, credentials) => {
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
         set({ loading: false, error: "Git fetch is available in the Tauri app runtime." });
         return false;
       }
-      await invoke("git_fetch", { path, remote: remote ?? null });
+      await invoke("git_fetch", { path, remote: remote ?? null, credentials: credentials ?? null });
       set({ loading: false });
       return true;
     } catch (err: unknown) {
@@ -156,14 +178,14 @@ export const useGitStore = create<GitStore>((set) => ({
     }
   },
 
-  pull: async (path, remote) => {
+  pull: async (path, remote, credentials) => {
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
         set({ loading: false, error: "Git pull is available in the Tauri app runtime." });
         return false;
       }
-      await invoke("git_pull", { path, remote: remote ?? null });
+      await invoke("git_pull", { path, remote: remote ?? null, credentials: credentials ?? null });
       set({ loading: false });
       return true;
     } catch (err: unknown) {
@@ -172,14 +194,30 @@ export const useGitStore = create<GitStore>((set) => ({
     }
   },
 
-  push: async (path, remote) => {
+  push: async (path, remote, credentials) => {
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
         set({ loading: false, error: "Git push is available in the Tauri app runtime." });
         return false;
       }
-      await invoke("git_push", { path, remote: remote ?? null });
+      await invoke("git_push", { path, remote: remote ?? null, credentials: credentials ?? null });
+      set({ loading: false });
+      return true;
+    } catch (err: unknown) {
+      set({ error: String(err), loading: false });
+      return false;
+    }
+  },
+
+  resolveConflict: async (path, file, resolution) => {
+    set({ loading: true, error: null });
+    try {
+      if (!isTauriRuntime()) {
+        set({ loading: false, error: "Git conflict resolution is available in the Tauri app runtime." });
+        return false;
+      }
+      await invoke("git_resolve_conflict", { path, file, resolution });
       set({ loading: false });
       return true;
     } catch (err: unknown) {

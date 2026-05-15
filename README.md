@@ -29,7 +29,7 @@ Implemented core capabilities:
 
 Important remaining gaps:
 
-- Git workflow still needs credential UX, remote branch tracking, and richer conflict resolution controls.
+- Git workflow still needs persistent credential storage, better SSH/passphrase UX, and richer merge editor controls.
 - Full workspace LSP-backed completion/diagnostics are still pending beyond Monaco open-file TypeScript/JavaScript semantics.
 - Agent change protocol still needs stricter schema validation and richer provenance.
 - API keys are still persisted in local JSON config.

@@ -102,6 +102,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added Git staged/worktree/all diff modes plus Source Control multi-select batch Stage, Unstage, Discard, and workspace-path-aware status loading.
 - Normalized Windows verbatim `\\?\D:\...` workspace paths across workspace resolution and Git repo path handling so Git status/diff no longer misreports active workspaces as outside the workspace.
 - Added Git branch checkout/create, Fetch/Pull/Push actions, upstream/ahead/behind display, and conflict file detection in Source Control.
+- Added one-shot Git credential inputs for remote actions, remote branch checkout/tracking, and conflict resolution controls for accept current, accept incoming, accept both, and conflict diff navigation.
 
 Important distinction:
 
@@ -313,7 +314,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - File-level stage, unstage, discard, diff, and commit are wired.
    - Staged-vs-worktree/all diff views and multi-select batch actions are wired.
    - Branch checkout/create, fetch, fast-forward-only pull, push, and conflict file detection are wired.
-   - Needs stronger credential UX, remote branch checkout/tracking, merge/rebase conflict resolution tools, and safer destructive-action UX.
+   - One-shot credential input, remote branch checkout/tracking, and basic conflict resolution controls are wired.
+   - Needs persistent credential storage, better SSH/passphrase UX, richer merge editor UI, and safer destructive-action UX.
 
 7. **Workspace boundary coverage needs continued review**
    - FS, Agent diff paths, Git entry points, terminal cwd, task cwd, and Agent CLI are now guarded or aligned.
@@ -502,8 +504,8 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add Git credential UX and remote branch checkout/tracking.
-2. Add richer Git conflict resolution UI with accept current/incoming/both and conflict file diff navigation.
+1. Add persistent credential storage and better SSH/passphrase UX for Git remote operations.
+2. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
 3. Add true LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python beyond Monaco open-file workers.
 4. Add terminal/log excerpts and selected-file packing to Agent context.
 5. Add stricter validation to the structured Agent protocol.
@@ -512,4 +514,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-15 - Phase 7 in progress; Git branch/remote first version, staged/worktree diff, multi-select, and Windows workspace path normalization completed.*
+*Last updated: 2026-05-15 - Phase 7 in progress; Git credential UX, remote tracking, conflict controls, staged/worktree diff, multi-select, and Windows workspace path normalization completed.*
