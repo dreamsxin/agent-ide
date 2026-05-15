@@ -85,6 +85,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added workspace task discovery from `package.json` scripts and Cargo manifests, with fallback default tasks when no project tasks are found.
 - Moved common project Run/Debug/Build/Test commands into the TopBar and renamed the bottom task list to Commands to keep Agent Tasks distinct.
 - Expanded terminal test-output parsing for Vitest/Jest-style failures, stack traces, and `FAIL` file summaries so `npm run test` failures can surface in Problems.
+- Added non-interactive project task runner for build/test/lint/check commands with exit code, duration, Logs integration, and Problems parsing.
 
 Important distinction:
 
@@ -201,9 +202,9 @@ Project Tasks
     -> package.json scripts + Cargo manifests
     -> fallback defaults when no tasks are discovered
   -> TopBar common Run/Debug/Build/Test buttons or Commands panel
-    -> useTaskStore.queueTerminalCommand()
-    -> Terminal consumes queued command when ready
-    -> terminalProblemParser feeds Problems
+    -> non-interactive runner for build/test/lint/check
+      -> Logs + Problems + task status
+    -> Terminal queue for run/debug interactive tasks
 ```
 
 ### Agent Prompt
@@ -273,7 +274,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
 5. **Terminal PTY integration needs runtime polish**
    - Frontend now spawns, writes, resizes, and listens for PTY output through Tauri.
    - Persistent PTY writer is now used for terminal input.
-   - Project tasks can queue build/test/lint/run/debug commands into the terminal.
+   - Project tasks can queue run/debug commands into the terminal.
+   - Build/test/lint/check tasks can run through a non-interactive command runner with exit code and duration.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Git workflow needs continued polish**
@@ -385,7 +387,7 @@ Deliverables:
   - resize
   - receive `terminal-output`
   - kill terminal
-- TopBar exposes common Run/Debug/Build/Test commands, while the bottom Commands panel lists all discovered workspace commands.
+- TopBar exposes common Run/Debug/Build/Test commands, while the bottom Commands panel lists all discovered workspace commands and task status.
 - QuickActions sends real Agent prompts.
 - DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.
@@ -466,12 +468,13 @@ target\release\agent_cli --help
 
 1. Add staged-vs-worktree diff views and multi-select to Git panel.
 2. Add LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python.
-3. Add exit status tracking and richer parser coverage for project tasks.
-4. Add per-hunk diff application and richer conflict recovery controls.
-5. Add terminal/log excerpts and selected-file packing to Agent context.
-6. Add stricter validation to the structured Agent protocol.
-7. Persist Agent action logs with prompt/context/diff provenance.
-8. Move LLM API key storage to a safer credential path.
+3. Add per-hunk diff application and richer conflict recovery controls.
+4. Add terminal/log excerpts and selected-file packing to Agent context.
+5. Add stricter validation to the structured Agent protocol.
+6. Add staged-vs-worktree Git diff views and multi-select actions.
+7. Add TypeScript LSP-backed semantic completion/definition/hover.
+8. Persist Agent action logs with prompt/context/diff provenance.
+9. Move LLM API key storage to a safer credential path.
 
 ---
 

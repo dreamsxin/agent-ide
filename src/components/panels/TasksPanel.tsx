@@ -8,6 +8,7 @@ import { useProjectTasks } from "../../hooks/useProjectTasks";
 export default function TasksPanel() {
   const queueTerminalCommand = useTaskStore((s) => s.queueTerminalCommand);
   const lastTask = useTaskStore((s) => s.lastTask);
+  const taskRuns = useTaskStore((s) => s.taskRuns);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
@@ -60,25 +61,28 @@ export default function TasksPanel() {
             Loading workspace tasks...
           </div>
         )}
-        {tasks.map((task) => (
-          <button
-            key={task.id}
-            onClick={() => runTask(task.id, task.command, task.label)}
-            disabled={!isTauriRuntime()}
-            className="rounded border border-surface-border bg-surface-panel p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-surface-border/20 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold text-surface-text">{task.label}</span>
-              <span className="rounded border border-surface-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-surface-muted">
-                {task.source}
-              </span>
-            </div>
-            <div className="mt-2 font-mono text-[11px] text-accent-blue">{task.command}</div>
-            <div className="mt-2 text-[11px] leading-relaxed text-surface-muted">
-              {task.description}
-            </div>
-          </button>
-        ))}
+        {tasks.map((task) => {
+          const runState = taskRuns[task.id];
+          return (
+            <button
+              key={task.id}
+              onClick={() => runTask(task.id, task.command, task.label)}
+              disabled={!isTauriRuntime()}
+              className="rounded border border-surface-border bg-surface-panel p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-surface-border/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-surface-text">{task.label}</span>
+                <span className="rounded border border-surface-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-surface-muted">
+                  {runState?.status ?? task.source}
+                </span>
+              </div>
+              <div className="mt-2 font-mono text-[11px] text-accent-blue">{task.command}</div>
+              <div className="mt-2 text-[11px] leading-relaxed text-surface-muted">
+                {task.description}
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       {lastTask && (

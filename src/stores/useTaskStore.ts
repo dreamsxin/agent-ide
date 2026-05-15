@@ -18,6 +18,19 @@ export interface QueuedTerminalCommand {
   createdAt: number;
 }
 
+export type ProjectTaskStatus = "idle" | "running" | "success" | "failed";
+
+export interface ProjectTaskRunState {
+  taskId: string;
+  status: ProjectTaskStatus;
+  command: string;
+  startedAt: number;
+  finishedAt?: number;
+  exitCode?: number | null;
+  durationMs?: number;
+  output?: string;
+}
+
 interface TaskStore {
   lastTask: QueuedTerminalCommand | null;
   pendingTerminalCommands: QueuedTerminalCommand[];
@@ -25,8 +38,15 @@ interface TaskStore {
   taskDiscoveryLoading: boolean;
   taskDiscoveryLoaded: boolean;
   taskDiscoveryError: string | null;
+  taskRuns: Record<string, ProjectTaskRunState>;
   setDiscoveredTasks: (tasks: ProjectTaskDefinition[]) => void;
   setTaskDiscoveryState: (loading: boolean, error?: string | null, loaded?: boolean) => void;
+  startTaskRun: (taskId: string, command: string) => void;
+  finishTaskRun: (
+    taskId: string,
+    status: Exclude<ProjectTaskStatus, "idle" | "running">,
+    updates: Pick<ProjectTaskRunState, "exitCode" | "durationMs" | "output">
+  ) => void;
   queueTerminalCommand: (taskId: string, command: string, terminalId?: string) => QueuedTerminalCommand;
   consumeTerminalCommands: (terminalId: string) => QueuedTerminalCommand[];
 }
@@ -76,6 +96,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   taskDiscoveryLoading: false,
   taskDiscoveryLoaded: false,
   taskDiscoveryError: null,
+  taskRuns: {},
 
   setDiscoveredTasks: (discoveredTasks) => set({ discoveredTasks }),
   setTaskDiscoveryState: (taskDiscoveryLoading, taskDiscoveryError = null, taskDiscoveryLoaded) =>
@@ -83,6 +104,36 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       taskDiscoveryLoading,
       taskDiscoveryError,
       taskDiscoveryLoaded: taskDiscoveryLoaded ?? state.taskDiscoveryLoaded,
+    })),
+
+  startTaskRun: (taskId, command) =>
+    set((state) => ({
+      taskRuns: {
+        ...state.taskRuns,
+        [taskId]: {
+          taskId,
+          command,
+          status: "running",
+          startedAt: Date.now(),
+        },
+      },
+    })),
+
+  finishTaskRun: (taskId, status, updates) =>
+    set((state) => ({
+      taskRuns: {
+        ...state.taskRuns,
+        [taskId]: {
+          ...(state.taskRuns[taskId] ?? {
+            taskId,
+            command: "",
+            startedAt: Date.now(),
+          }),
+          ...updates,
+          status,
+          finishedAt: Date.now(),
+        },
+      },
     })),
 
   queueTerminalCommand: (taskId, command, terminalId = "main") => {

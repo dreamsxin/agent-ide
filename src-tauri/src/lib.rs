@@ -70,6 +70,7 @@ pub fn run() {
             commands::git::git_discard_files,
             // Tasks 命令
             commands::tasks::discover_project_tasks,
+            commands::tasks::run_project_task,
             // Terminal 命令
             commands::terminal::spawn_terminal,
             commands::terminal::write_to_terminal,

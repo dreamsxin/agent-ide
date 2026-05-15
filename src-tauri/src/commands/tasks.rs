@@ -1,6 +1,8 @@
 use crate::services::workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectTask {
@@ -9,6 +11,22 @@ pub struct ProjectTask {
     pub command: String,
     pub source: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunProjectTaskRequest {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunProjectTaskResult {
+    pub command: String,
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    #[serde(rename = "durationMs")]
+    pub duration_ms: u128,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[tauri::command]
@@ -20,6 +38,41 @@ pub fn discover_project_tasks() -> Result<Vec<ProjectTask>, String> {
     tasks.extend(discover_cargo_tasks(&root));
 
     Ok(tasks)
+}
+
+#[tauri::command]
+pub async fn run_project_task(request: RunProjectTaskRequest) -> Result<RunProjectTaskResult, String> {
+    let root = workspace::workspace_root()?;
+    let command = request.command.trim().to_string();
+    if command.is_empty() {
+        return Err("Task command is empty".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let start = Instant::now();
+        let output = if cfg!(windows) {
+            Command::new("cmd")
+                .args(["/C", &command])
+                .current_dir(&root)
+                .output()
+        } else {
+            Command::new("sh")
+                .args(["-lc", &command])
+                .current_dir(&root)
+                .output()
+        }
+        .map_err(|e| format!("Run task command: {}", e))?;
+
+        Ok(RunProjectTaskResult {
+            command,
+            exit_code: output.status.code(),
+            duration_ms: start.elapsed().as_millis(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    })
+    .await
+    .map_err(|e| format!("Join task command: {}", e))?
 }
 
 fn discover_package_scripts(root: &Path) -> Result<Vec<ProjectTask>, String> {
