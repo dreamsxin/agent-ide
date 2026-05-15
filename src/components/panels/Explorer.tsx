@@ -54,6 +54,9 @@ const EXCLUDE_DIRS = new Set([
   ".workbuddy", "__pycache__", ".next",
 ]);
 
+const CONTEXT_MENU_WIDTH = 210;
+const CONTEXT_MENU_MAX_HEIGHT = 260;
+
 function detectLanguage(path: string): string {
   const ext = path.split(".").pop() || "txt";
   const map: Record<string, string> = {
@@ -139,6 +142,7 @@ export default function Explorer() {
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
 
   const explorerKey = useEditorStore((s) => s.explorerKey);
   const workspacePath = useEditorStore((s) => s.workspacePath);
@@ -282,9 +286,18 @@ export default function Explorer() {
   // 右键菜单
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, node: TreeNodeData) => {
+      const margin = 8;
+      const x = Math.min(
+        e.clientX,
+        Math.max(margin, window.innerWidth - CONTEXT_MENU_WIDTH - margin)
+      );
+      const y = Math.min(
+        e.clientY,
+        Math.max(margin, window.innerHeight - CONTEXT_MENU_MAX_HEIGHT - margin)
+      );
       setContextMenu({
-        x: e.clientX,
-        y: e.clientY,
+        x,
+        y,
         node,
       });
     },
@@ -295,15 +308,39 @@ export default function Explorer() {
     setContextMenu(null);
   }, []);
 
-  // 全局点击关闭菜单
+  // 全局交互关闭菜单
   useEffect(() => {
     if (!contextMenu) return;
-    const handler = () => closeContextMenu();
-    window.addEventListener("click", handler);
-    window.addEventListener("contextmenu", handler);
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && contextMenuRef.current?.contains(target)) return;
+      closeContextMenu();
+    };
+    const handleContextMenu = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && contextMenuRef.current?.contains(target)) return;
+      closeContextMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeContextMenu();
+      }
+    };
+    const handleScroll = () => closeContextMenu();
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("contextmenu", handleContextMenu, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("blur", closeContextMenu);
+
     return () => {
-      window.removeEventListener("click", handler);
-      window.removeEventListener("contextmenu", handler);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("contextmenu", handleContextMenu, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("blur", closeContextMenu);
     };
   }, [contextMenu, closeContextMenu]);
 
@@ -480,7 +517,7 @@ export default function Explorer() {
             // @ts-expect-error react-arborist typing
             onContextMenu={(e: React.MouseEvent, node: NodeApi<TreeNodeData>) => {
               e.preventDefault();
-              setContextMenu({ x: e.clientX, y: e.clientY, node: node.data });
+              handleContextMenu(e, node.data);
             }}
           >
             {(props: NodeRendererProps<TreeNodeData>) => (
@@ -496,7 +533,8 @@ export default function Explorer() {
       {/* 右键菜单 */}
       {contextMenu && (
         <div
-          className="fixed z-50 bg-surface-panel border border-surface-border rounded-lg shadow-lg py-1 min-w-[160px]"
+          ref={contextMenuRef}
+          className="fixed z-50 max-h-[260px] min-w-[210px] overflow-auto rounded-lg border border-surface-border bg-surface-panel py-1 shadow-lg"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           {contextMenu.node.isDir && (
