@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Tree, type NodeRendererProps } from "react-arborist";
-import type { NodeApi } from "react-arborist";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEditorStore } from "../../stores/useEditorStore";
@@ -283,9 +282,17 @@ export default function Explorer() {
     [rootData]
   );
 
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
   // 右键菜单
   const handleContextMenu = useCallback(
-    (e: React.MouseEvent, node: TreeNodeData) => {
+    (e: React.MouseEvent, node?: TreeNodeData | null) => {
+      if (!node) {
+        closeContextMenu();
+        return;
+      }
       const margin = 8;
       const x = Math.min(
         e.clientX,
@@ -301,12 +308,8 @@ export default function Explorer() {
         node,
       });
     },
-    []
+    [closeContextMenu]
   );
-
-  const closeContextMenu = useCallback(() => {
-    setContextMenu(null);
-  }, []);
 
   // 全局交互关闭菜单
   useEffect(() => {
@@ -514,10 +517,9 @@ export default function Explorer() {
                 node.toggle();
               }
             }}
-            // @ts-expect-error react-arborist typing
-            onContextMenu={(e: React.MouseEvent, node: NodeApi<TreeNodeData>) => {
+            onContextMenu={(e) => {
               e.preventDefault();
-              handleContextMenu(e, node.data);
+              closeContextMenu();
             }}
           >
             {(props: NodeRendererProps<TreeNodeData>) => (
