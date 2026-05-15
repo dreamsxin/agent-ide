@@ -100,6 +100,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added TypeScript/JavaScript semantic editor defaults through the Monaco TS worker, including worker-backed diagnostics, hover/completion behavior, F12 definition action, and stable file-backed Monaco models for open files.
 - Added per-hunk diff review controls with backend `apply_diff_hunk` and `reject_diff_hunk` commands, hunk status tracking, and Diff view Apply/Reject hunk actions.
 - Added Git staged/worktree/all diff modes plus Source Control multi-select batch Stage, Unstage, Discard, and workspace-path-aware status loading.
+- Normalized Windows verbatim `\\?\D:\...` workspace paths across workspace resolution and Git repo path handling so Git status/diff no longer misreports active workspaces as outside the workspace.
 
 Important distinction:
 
@@ -313,7 +314,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Needs branch checkout/create, fetch/pull/push, conflict state display, and stronger destructive-action UX.
 
 7. **Workspace boundary coverage needs continued review**
-   - FS, Agent diff paths, Git entry points, terminal cwd, and Agent CLI are now guarded or aligned.
+   - FS, Agent diff paths, Git entry points, terminal cwd, task cwd, and Agent CLI are now guarded or aligned.
+   - Windows verbatim path prefixes are normalized centrally in the workspace service and Git repository relative-path helpers.
    - Continue reviewing any new backend command surfaces as they are added.
 
 8. **Problems panel is only partially populated**
@@ -508,4 +510,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-15 - Phase 7 in progress; Git staged/worktree diff and multi-select completed.*
+*Last updated: 2026-05-15 - Phase 7 in progress; Git staged/worktree diff, multi-select, and Windows workspace path normalization completed.*

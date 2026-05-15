@@ -27,8 +27,9 @@ Implemented core capabilities:
 
 Important remaining gaps:
 
-- Diff application is not yet version/hash-aware.
-- Per-hunk apply/reject is not implemented.
+- Git workflow still needs branch checkout/create, fetch/pull/push, and conflict state display.
+- Full workspace LSP-backed completion/diagnostics are still pending beyond Monaco open-file TypeScript/JavaScript semantics.
+- Agent change protocol still needs stricter schema validation and richer provenance.
 - API keys are still persisted in local JSON config.
 - Terminal still needs interactive runtime testing across panel hide/show and workspace switching.
 - Frontend test coverage and Tauri smoke tests are still thin.
