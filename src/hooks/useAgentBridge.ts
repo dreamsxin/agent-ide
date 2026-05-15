@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
+import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
@@ -23,6 +24,7 @@ export function useAgentBridge() {
   const appendStreamContent = useAgentStore((s) => s.appendStreamContent);
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
   const addLog = useLogStore((s) => s.addLog);
+  const upsertProblems = useProblemStore((s) => s.upsertProblems);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -53,6 +55,20 @@ export function useAgentBridge() {
 
           listen<DiffEntry[]>("agent-diff-ready", (e) => {
             setDiffs(e.payload);
+            upsertProblems(
+              "agent",
+              e.payload
+                .filter((diff) => diff.status === "failed")
+                .map((diff) => ({
+                  id: `agent-diff-${diff.id}`,
+                  file: diff.file,
+                  line: diff.hunks[0]?.oldStart || diff.hunks[0]?.newStart || 1,
+                  column: 1,
+                  severity: "error",
+                  source: "agent",
+                  message: diff.applyError ?? "Agent diff failed to apply",
+                }))
+            );
           }),
 
           listen<PipelineStage[]>("agent-pipeline-update", (e) => {
@@ -73,6 +89,19 @@ export function useAgentBridge() {
               contextSummary: entry.contextSummary ?? null,
               diffSummary: entry.diffSummary ?? null,
             });
+            if (entry.level === "error") {
+              upsertProblems("agent", [
+                {
+                  id: `agent-log-${entry.id}`,
+                  file: entry.stage ?? "Agent",
+                  line: 1,
+                  column: 1,
+                  severity: "error",
+                  source: "agent",
+                  message: entry.summary,
+                },
+              ]);
+            }
           }),
 
           listen<string>("agent-stream-token", (e) => {
@@ -94,7 +123,7 @@ export function useAgentBridge() {
       stopped = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, []);
+  }, [addLog, appendStreamContent, clearStreamContent, setDiffs, setPipeline, setState, setSteps, updateStep, upsertProblems]);
 }
 
 function formatLogTime(timestamp: string) {

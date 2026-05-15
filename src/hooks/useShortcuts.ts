@@ -79,6 +79,8 @@ export default function useShortcuts() {
       handler: () => { setBottomTab("terminal"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
     { id: "logs-bottom", keys: "Ctrl+Shift+L", label: "Switch to Logs", group: "Navigation", scope: "global",
       handler: () => { setBottomTab("logs"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
+    { id: "problems-bottom", keys: "Ctrl+Shift+M", label: "Switch to Problems", group: "Navigation", scope: "global",
+      handler: () => { setBottomTab("problems"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
 
     // File
     { id: "open-folder", keys: "Ctrl+O", label: "Open Folder", group: "General", scope: "global",

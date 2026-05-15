@@ -1,51 +1,15 @@
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import Terminal from "../panels/Terminal";
 import LogView from "../panels/LogView";
+import ProblemsPanel from "../panels/ProblemsPanel";
 
-type BottomTab = "terminal" | "logs" | "tests" | "actions";
+type BottomTab = "terminal" | "problems" | "logs";
 
 const tabs: { id: BottomTab; label: string; icon: string; tooltip: string }[] = [
   { id: "terminal", label: "Terminal", icon: ">", tooltip: "Integrated system terminal" },
+  { id: "problems", label: "Problems", icon: "!", tooltip: "Diagnostics, test failures, and Agent findings" },
   { id: "logs", label: "Logs", icon: "📋", tooltip: "Agent & system operation logs" },
-  { id: "tests", label: "Tests", icon: "🧪", tooltip: "Test execution results" },
-  { id: "actions", label: "Actions", icon: "⚡", tooltip: "Agent action history" },
 ];
-
-function TestsTab() {
-  return (
-    <div className="h-full bg-black p-2 overflow-auto font-mono text-xs">
-      <div className="text-surface-text">Test Results</div>
-      <div className="text-surface-muted mt-2 border border-surface-border rounded p-2">
-        <div className="text-diff-add">✓ PASS auth/jwt.test.ts</div>
-        <div className="text-diff-add">✓ PASS auth/login.test.ts</div>
-        <div className="text-diff-remove">✕ FAIL auth/refresh.test.ts</div>
-        <div className="text-surface-muted mt-1">
-          ──────── Summary ────────
-          <br />2 passed, 1 failed (3 total)
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ActionsTab() {
-  const actions = [
-    { time: "15:11:05", action: "Run npm test" },
-    { time: "15:11:08", action: "Test failed: refresh.test.ts" },
-    { time: "15:12:00", action: "Agent: Fix error in refresh.test.ts" },
-  ];
-
-  return (
-    <div className="h-full bg-black p-2 overflow-auto">
-      {actions.map((a, i) => (
-        <div key={i} className="flex gap-3 py-0.5 font-mono text-xs">
-          <span className="text-surface-muted flex-shrink-0">[{a.time}]</span>
-          <span className="text-surface-text">{a.action}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 export default function BottomPanel() {
   const activeTab = useLayoutStore((s) => s.bottomTab);
@@ -76,9 +40,8 @@ export default function BottomPanel() {
       {/* Tab 内容 */}
       <div className="flex-1 overflow-hidden">
         {activeTab === "terminal" && <Terminal />}
+        {activeTab === "problems" && <ProblemsPanel />}
         {activeTab === "logs" && <LogView />}
-        {activeTab === "tests" && <TestsTab />}
-        {activeTab === "actions" && <ActionsTab />}
       </div>
     </div>
   );
