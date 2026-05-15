@@ -65,6 +65,7 @@ pub async fn spawn_terminal(
             .map_err(|e| format!("Terminal cwd does not exist or is not accessible: {}", e))?,
         _ => workspace::workspace_root()?,
     };
+    let workspace_root = workspace::shell_compatible_path(workspace_root);
 
     #[cfg(target_os = "windows")]
     let mut cmd = CommandBuilder::new("cmd.exe");

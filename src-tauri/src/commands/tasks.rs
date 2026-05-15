@@ -77,12 +77,13 @@ pub async fn run_project_task(request: RunProjectTaskRequest) -> Result<RunProje
 }
 
 fn task_workspace_root(path: Option<&str>) -> Result<std::path::PathBuf, String> {
-    match path {
+    let root = match path {
         Some(path) if !path.trim().is_empty() => std::path::PathBuf::from(path)
             .canonicalize()
             .map_err(|e| format!("Workspace does not exist or is not accessible: {}", e)),
         _ => workspace::workspace_root(),
-    }
+    }?;
+    Ok(workspace::shell_compatible_path(root))
 }
 
 fn discover_package_scripts(root: &Path) -> Result<Vec<ProjectTask>, String> {

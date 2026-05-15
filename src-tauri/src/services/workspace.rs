@@ -51,6 +51,21 @@ pub fn workspace_root_string() -> String {
         .unwrap_or_default()
 }
 
+pub fn shell_compatible_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") {
+            return PathBuf::from(format!("\\\\{}", rest));
+        }
+        if let Some(rest) = text.strip_prefix("\\\\?\\") {
+            return PathBuf::from(rest);
+        }
+    }
+
+    path
+}
+
 pub fn resolve_existing(path: &str) -> Result<PathBuf, String> {
     let candidate = normalize_candidate(path)?;
     let resolved = candidate
@@ -242,5 +257,17 @@ mod tests {
         let err = resolve_existing(&relative).unwrap_err();
 
         assert!(err.contains("outside workspace"));
+    }
+
+    #[test]
+    fn shell_compatible_path_strips_windows_verbatim_disk_prefix() {
+        let input = PathBuf::from("\\\\?\\D:\\work\\project");
+        let output = shell_compatible_path(input);
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(output, PathBuf::from("D:\\work\\project"));
+        } else {
+            assert_eq!(output, PathBuf::from("\\\\?\\D:\\work\\project"));
+        }
     }
 }
