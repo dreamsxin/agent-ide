@@ -1,5 +1,6 @@
 use crate::services::workspace;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 /// Git 状态条目
 #[derive(Debug, Serialize)]
@@ -7,6 +8,7 @@ pub struct GitStatusEntry {
     pub path: String,
     pub status: String, // "modified" | "added" | "deleted" | "untracked" | "renamed"
     pub old_path: Option<String>,
+    pub staged: bool,
 }
 
 /// Git 状态汇总
@@ -56,20 +58,6 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
         let status = entry.status();
         let path = entry.path().unwrap_or("").to_string();
 
-        let status_str = if status.is_wt_new() {
-            "untracked"
-        } else if status.is_index_new() {
-            "added"
-        } else if status.is_index_deleted() || status.is_wt_deleted() {
-            "deleted"
-        } else if status.is_index_modified() || status.is_wt_modified() {
-            "modified"
-        } else if status.is_index_renamed() || status.is_wt_renamed() {
-            "renamed"
-        } else {
-            continue; // skip clean files
-        };
-
         let old_path = if status.is_index_renamed() {
             entry
                 .index_to_workdir()
@@ -78,11 +66,22 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
             None
         };
 
-        entries.push(GitStatusEntry {
-            path,
-            status: status_str.to_string(),
-            old_path,
-        });
+        if let Some(status_str) = index_status_string(status) {
+            entries.push(GitStatusEntry {
+                path: path.clone(),
+                status: status_str.to_string(),
+                old_path: old_path.clone(),
+                staged: true,
+            });
+        }
+        if let Some(status_str) = worktree_status_string(status) {
+            entries.push(GitStatusEntry {
+                path,
+                status: status_str.to_string(),
+                old_path,
+                staged: false,
+            });
+        }
     }
 
     Ok(GitStatus {
@@ -138,6 +137,99 @@ pub fn git_diff(path: String, file: Option<String>) -> Result<String, String> {
         .collect();
 
     Ok(output)
+}
+
+#[tauri::command]
+pub fn git_stage_files(path: String, files: Vec<String>) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let mut index = repo.index().map_err(|e| format!("Index: {}", e))?;
+
+    for file in files {
+        let relative = repo_relative_path(&repo, &file, true)?;
+        let full_path = repo_workdir(&repo)?.join(&relative);
+        if full_path.exists() {
+            index
+                .add_path(&relative)
+                .map_err(|e| format!("Stage {}: {}", file, e))?;
+        } else {
+            index
+                .remove_path(&relative)
+                .map_err(|e| format!("Stage deletion {}: {}", file, e))?;
+        }
+    }
+
+    index.write().map_err(|e| format!("Write index: {}", e))
+}
+
+#[tauri::command]
+pub fn git_unstage_files(path: String, files: Vec<String>) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let paths = repo_relative_paths(&repo, &files, true)?;
+    let head = repo
+        .head()
+        .map_err(|e| format!("HEAD: {}", e))?
+        .peel_to_commit()
+        .map_err(|e| format!("Commit: {}", e))?;
+
+    repo.reset_default(Some(head.as_object()), paths.iter())
+        .map_err(|e| format!("Unstage: {}", e))
+}
+
+#[tauri::command]
+pub fn git_discard_files(path: String, files: Vec<String>) -> Result<(), String> {
+    let path = workspace::resolve_existing(&path)?;
+    let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let workdir = repo_workdir(&repo)?
+        .canonicalize()
+        .map_err(|e| format!("Repository workdir is not accessible: {}", e))?;
+    let paths = repo_relative_paths(&repo, &files, true)?;
+    let statuses = repo
+        .statuses(Some(git2::StatusOptions::new().include_untracked(true)))
+        .map_err(|e| format!("Status: {}", e))?;
+
+    for relative in &paths {
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
+        let status = statuses
+            .iter()
+            .find(|entry| entry.path() == Some(rel_str.as_str()))
+            .map(|entry| entry.status())
+            .unwrap_or(git2::Status::CURRENT);
+        let full_path = workdir.join(relative);
+        workspace::ensure_within_workspace(&full_path)?;
+
+        if status.is_wt_new() || status.is_index_new() {
+            if full_path.is_dir() {
+                std::fs::remove_dir_all(&full_path)
+                    .map_err(|e| format!("Remove {}: {}", full_path.display(), e))?;
+            } else if full_path.exists() {
+                std::fs::remove_file(&full_path)
+                    .map_err(|e| format!("Remove {}: {}", full_path.display(), e))?;
+            }
+            if status.is_index_new() {
+                let mut index = repo.index().map_err(|e| format!("Index: {}", e))?;
+                let _ = index.remove_path(relative);
+                index.write().map_err(|e| format!("Write index: {}", e))?;
+            }
+        }
+    }
+
+    let head = repo
+        .head()
+        .map_err(|e| format!("HEAD: {}", e))?
+        .peel_to_commit()
+        .map_err(|e| format!("Commit: {}", e))?;
+    repo.reset_default(Some(head.as_object()), paths.iter())
+        .map_err(|e| format!("Reset index: {}", e))?;
+
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.force();
+    for path in &paths {
+        checkout.path(path);
+    }
+    repo.checkout_head(Some(&mut checkout))
+        .map_err(|e| format!("Checkout: {}", e))
 }
 
 /// 提交变更
@@ -208,6 +300,76 @@ pub fn git_commit(
         .map_err(|e| format!("Commit: {}", e))?;
 
     Ok(commit_oid.to_string())
+}
+
+fn index_status_string(status: git2::Status) -> Option<&'static str> {
+    if status.is_index_new() {
+        Some("added")
+    } else if status.is_index_deleted() {
+        Some("deleted")
+    } else if status.is_index_modified() {
+        Some("modified")
+    } else if status.is_index_renamed() {
+        Some("renamed")
+    } else {
+        None
+    }
+}
+
+fn worktree_status_string(status: git2::Status) -> Option<&'static str> {
+    if status.is_wt_new() {
+        Some("untracked")
+    } else if status.is_wt_deleted() {
+        Some("deleted")
+    } else if status.is_wt_modified() {
+        Some("modified")
+    } else if status.is_wt_renamed() {
+        Some("renamed")
+    } else {
+        None
+    }
+}
+
+fn repo_workdir(repo: &git2::Repository) -> Result<&Path, String> {
+    repo.workdir()
+        .ok_or_else(|| "Bare repositories are not supported".to_string())
+}
+
+fn repo_relative_paths(
+    repo: &git2::Repository,
+    files: &[String],
+    allow_missing: bool,
+) -> Result<Vec<PathBuf>, String> {
+    files
+        .iter()
+        .map(|file| repo_relative_path(repo, file, allow_missing))
+        .collect()
+}
+
+fn repo_relative_path(
+    repo: &git2::Repository,
+    file: &str,
+    allow_missing: bool,
+) -> Result<PathBuf, String> {
+    let workdir = repo_workdir(repo)?
+        .canonicalize()
+        .map_err(|e| format!("Repository workdir is not accessible: {}", e))?;
+    let candidate = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
+    } else {
+        workdir.join(file)
+    };
+    let resolved = if candidate.exists() {
+        workspace::resolve_existing(candidate.to_string_lossy().as_ref())?
+    } else if allow_missing {
+        workspace::resolve_for_write(candidate.to_string_lossy().as_ref())?
+    } else {
+        return Err(format!("File does not exist: {}", file));
+    };
+    resolved
+        .strip_prefix(workdir)
+        .map(Path::to_path_buf)
+        .map_err(|_| format!("File is outside repository: {}", resolved.display()))
 }
 
 #[cfg(test)]
@@ -296,11 +458,11 @@ mod tests {
         assert!(status
             .entries
             .iter()
-            .any(|entry| entry.path == "untracked.txt" && entry.status == "untracked"));
+            .any(|entry| entry.path == "untracked.txt" && entry.status == "untracked" && !entry.staged));
         assert!(status
             .entries
             .iter()
-            .any(|entry| entry.path == "staged.txt" && entry.status == "added"));
+            .any(|entry| entry.path == "staged.txt" && entry.status == "added" && entry.staged));
     }
 
     #[test]
@@ -314,5 +476,52 @@ mod tests {
         let err = git_status(outside.to_string_lossy().to_string()).unwrap_err();
 
         assert!(err.contains("outside workspace"));
+    }
+
+    #[test]
+    fn git_stage_and_unstage_file_updates_status() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        std::fs::write(env.root.join("tracked.txt"), "changed\n").unwrap();
+
+        git_stage_files(
+            env.root.to_string_lossy().to_string(),
+            vec!["tracked.txt".to_string()],
+        )
+        .unwrap();
+        let staged_status = git_status(env.root.to_string_lossy().to_string()).unwrap();
+        assert!(staged_status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "tracked.txt" && entry.staged));
+
+        git_unstage_files(
+            env.root.to_string_lossy().to_string(),
+            vec!["tracked.txt".to_string()],
+        )
+        .unwrap();
+        let unstaged_status = git_status(env.root.to_string_lossy().to_string()).unwrap();
+        assert!(unstaged_status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "tracked.txt" && !entry.staged));
+    }
+
+    #[test]
+    fn git_discard_file_restores_tracked_content() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        std::fs::write(env.root.join("tracked.txt"), "changed\n").unwrap();
+
+        git_discard_files(
+            env.root.to_string_lossy().to_string(),
+            vec!["tracked.txt".to_string()],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(env.root.join("tracked.txt"))
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert_eq!(content, "initial\n");
     }
 }

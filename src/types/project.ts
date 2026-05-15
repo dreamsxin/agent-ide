@@ -19,6 +19,7 @@ export interface GitStatusEntry {
   path: string;
   status: "modified" | "added" | "deleted" | "untracked" | "renamed";
   old_path: string | null;
+  staged: boolean;
 }
 
 /** Git 状态汇总 */

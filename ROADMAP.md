@@ -74,6 +74,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added optional `baseHash` metadata to structured Agent diffs and reject stale edit diffs when the file content hash no longer matches.
 - Added `README.zh-CN.md` as the Chinese project README and linked it from the English README.
 - Surfaced diff `baseHash` metadata in the Diff view and added stale-diff guidance when hash validation fails.
+- Added Git file management commands and UI actions for stage, unstage, and discard through a file context menu.
 
 Important distinction:
 
@@ -207,25 +208,29 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Persistent PTY writer is now used for terminal input.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
-6. **Workspace boundary coverage needs continued review**
+6. **Git workflow needs continued polish**
+   - File-level stage, unstage, discard, diff, and commit are wired.
+   - Needs staged-vs-worktree diff views, multi-select, and stronger destructive-action UX.
+
+7. **Workspace boundary coverage needs continued review**
    - FS, Agent diff paths, Git entry points, terminal cwd, and Agent CLI are now guarded or aligned.
    - Continue reviewing any new backend command surfaces as they are added.
 
-7. **Runtime modes need clearer UI messaging**
+8. **Runtime modes need clearer UI messaging**
    - Browser preview now avoids crashes.
    - Some panels still need explicit disabled states for web preview mode.
 
-8. **Encoding cleanup is incomplete**
+9. **Encoding cleanup is incomplete**
    - Many files had historical mojibake comments/text.
    - User-visible text should be cleaned progressively.
 
 ### Lower Priority
 
-9. **Large frontend bundle**
+10. **Large frontend bundle**
    - Monaco, Markdown, xterm and syntax tooling create a large chunk.
    - Add dynamic imports/manual chunks later.
 
-10. **Test coverage is thin**
+11. **Test coverage is thin**
    - Rust context compression has tests.
    - Rust diff apply, workspace boundaries, pipeline helpers, and pending diff summaries have tests.
    - Need more tests for Agent state transitions and frontend store behavior.
@@ -377,11 +382,12 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add terminal/log excerpts and selected-file packing to Agent context.
-2. Add stricter validation to the structured Agent protocol.
-3. Add per-hunk diff application and richer conflict recovery controls.
-4. Persist Agent action logs with prompt/context/diff provenance.
-5. Move LLM API key storage to a safer credential path.
+1. Add staged-vs-worktree diff views and multi-select to Git panel.
+2. Add terminal/log excerpts and selected-file packing to Agent context.
+3. Add stricter validation to the structured Agent protocol.
+4. Add per-hunk diff application and richer conflict recovery controls.
+5. Persist Agent action logs with prompt/context/diff provenance.
+6. Move LLM API key storage to a safer credential path.
 
 ---
 

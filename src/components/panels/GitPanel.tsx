@@ -20,11 +20,19 @@ export default function GitPanel() {
   const fetchDiff = useGitStore((s) => s.fetchDiff);
   const clearDiff = useGitStore((s) => s.clearDiff);
   const commit = useGitStore((s) => s.commit);
+  const stageFiles = useGitStore((s) => s.stageFiles);
+  const unstageFiles = useGitStore((s) => s.unstageFiles);
+  const discardFiles = useGitStore((s) => s.discardFiles);
   const addLog = useLogStore((s) => s.addLog);
 
   const [message, setMessage] = useState("");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [projectPath, setProjectPath] = useState(".");
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    entry: GitStatusEntry;
+  } | null>(null);
 
   // 自动检测项目路径
   useEffect(() => {
@@ -81,9 +89,90 @@ export default function GitPanel() {
     }
   }, [message, commit, projectPath, addLog, fetchStatus, clearDiff]);
 
+  const refreshAfterAction = useCallback(async (logMessage: string) => {
+    addLog({
+      time: new Date().toLocaleTimeString(),
+      level: "success",
+      source: "git",
+      message: logMessage,
+    });
+    await fetchStatus(projectPath);
+    clearDiff();
+    setSelectedFile(null);
+    setMenu(null);
+  }, [addLog, fetchStatus, projectPath, clearDiff]);
+
+  const handleStage = useCallback(async (entry: GitStatusEntry) => {
+    if (await stageFiles(projectPath, [entry.path])) {
+      await refreshAfterAction(`Staged ${entry.path}`);
+    }
+  }, [stageFiles, projectPath, refreshAfterAction]);
+
+  const handleUnstage = useCallback(async (entry: GitStatusEntry) => {
+    if (await unstageFiles(projectPath, [entry.path])) {
+      await refreshAfterAction(`Unstaged ${entry.path}`);
+    }
+  }, [unstageFiles, projectPath, refreshAfterAction]);
+
+  const handleDiscard = useCallback(async (entry: GitStatusEntry) => {
+    const ok = window.confirm(`Discard changes in ${entry.path}? This cannot be undone.`);
+    if (!ok) return;
+    if (await discardFiles(projectPath, [entry.path])) {
+      await refreshAfterAction(`Discarded ${entry.path}`);
+    }
+  }, [discardFiles, projectPath, refreshAfterAction]);
+
+  const handleContextMenu = useCallback((event: React.MouseEvent, entry: GitStatusEntry) => {
+    event.preventDefault();
+    setMenu({ x: event.clientX, y: event.clientY, entry });
+  }, []);
+
   // Group entries by status
-  const staged = status?.entries.filter((e) => ["modified", "added", "deleted"].includes(e.status)) ?? [];
-  const unstaged = status?.entries.filter((e) => e.status === "untracked") ?? [];
+  const staged = status?.entries.filter((e) => e.staged) ?? [];
+  const unstaged = status?.entries.filter((e) => !e.staged) ?? [];
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+    };
+  }, [menu]);
+
+  const renderEntry = (entry: GitStatusEntry) => {
+    const info = STATUS_ICONS[entry.status] ?? { icon: "?", color: "text-surface-muted" };
+    const isSelected = selectedFile === entry.path;
+    return (
+      <div
+        key={`${entry.staged ? "staged" : "unstaged"}-${entry.path}-${entry.status}`}
+        onClick={() => handleFileClick(entry)}
+        onContextMenu={(event) => handleContextMenu(event, entry)}
+        className={`group flex items-center gap-1.5 px-3 py-1 cursor-pointer transition-colors ${
+          isSelected
+            ? "bg-accent-blue/10 text-surface-text"
+            : "text-surface-text hover:bg-surface-border/20"
+        }`}
+      >
+        <span className={`w-4 text-center font-bold text-[10px] ${info.color}`}>
+          {info.icon}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{entry.path}</span>
+        <button
+          onClick={(event) => {
+            event.stopPropagation();
+            entry.staged ? handleUnstage(entry) : handleStage(entry);
+          }}
+          title={entry.staged ? "Unstage" : "Stage"}
+          className="opacity-0 group-hover:opacity-100 text-surface-muted hover:text-surface-text px-1"
+        >
+          {entry.staged ? "-" : "+"}
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="h-full flex flex-col bg-surface-panel text-xs">
@@ -135,50 +224,21 @@ export default function GitPanel() {
 
       {/* Staged changes */}
       {staged.length > 0 && (
-        <div className="flex-1 overflow-auto">
+        <div className="overflow-auto">
           <div className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
-            Changes ({staged.length})
+            Staged Changes ({staged.length})
           </div>
-          {staged.map((entry) => {
-            const info = STATUS_ICONS[entry.status] ?? { icon: "?", color: "text-surface-muted" };
-            const isSelected = selectedFile === entry.path;
-            return (
-              <div
-                key={entry.path}
-                onClick={() => handleFileClick(entry)}
-                className={`flex items-center gap-1.5 px-3 py-1 cursor-pointer transition-colors ${
-                  isSelected
-                    ? "bg-accent-blue/10 text-surface-text"
-                    : "text-surface-text hover:bg-surface-border/20"
-                }`}
-              >
-                <span className={`w-4 text-center font-bold text-[10px] ${info.color}`}>
-                  {info.icon}
-                </span>
-                <span className="truncate font-mono text-[11px]">{entry.path}</span>
-              </div>
-            );
-          })}
+          {staged.map(renderEntry)}
         </div>
       )}
 
-      {/* Untracked */}
+      {/* Unstaged */}
       {unstaged.length > 0 && (
-        <div>
+        <div className="flex-1 overflow-auto">
           <div className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
-            Untracked ({unstaged.length})
+            Changes ({unstaged.length})
           </div>
-          {unstaged.map((entry) => (
-            <div
-              key={entry.path}
-              className="flex items-center gap-1.5 px-3 py-1 text-surface-muted"
-            >
-              <span className="w-4 text-center font-bold text-[10px] text-accent-green">
-                U
-              </span>
-              <span className="truncate font-mono text-[11px]">{entry.path}</span>
-            </div>
-          ))}
+          {unstaged.map(renderEntry)}
         </div>
       )}
 
@@ -243,6 +303,37 @@ export default function GitPanel() {
             className="mt-1.5 w-full bg-accent-blue text-white rounded py-1 text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
           >
             {loading ? "Committing..." : "Commit (Ctrl+Enter)"}
+          </button>
+        </div>
+      )}
+
+      {menu && (
+        <div
+          className="fixed z-50 min-w-36 rounded border border-surface-border bg-surface-panel py-1 text-xs shadow-xl"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {!menu.entry.staged && (
+            <button
+              onClick={() => handleStage(menu.entry)}
+              className="block w-full px-3 py-1.5 text-left text-surface-text hover:bg-surface-border/30"
+            >
+              Stage
+            </button>
+          )}
+          {menu.entry.staged && (
+            <button
+              onClick={() => handleUnstage(menu.entry)}
+              className="block w-full px-3 py-1.5 text-left text-surface-text hover:bg-surface-border/30"
+            >
+              Unstage
+            </button>
+          )}
+          <button
+            onClick={() => handleDiscard(menu.entry)}
+            className="block w-full px-3 py-1.5 text-left text-diff-remove hover:bg-diff-remove/10"
+          >
+            Discard Changes
           </button>
         </div>
       )}

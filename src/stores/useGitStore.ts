@@ -12,6 +12,9 @@ interface GitStore {
   fetchStatus: (path: string) => Promise<void>;
   fetchDiff: (path: string, file?: string) => Promise<void>;
   commit: (path: string, message: string, files?: string[]) => Promise<string | null>;
+  stageFiles: (path: string, files: string[]) => Promise<boolean>;
+  unstageFiles: (path: string, files: string[]) => Promise<boolean>;
+  discardFiles: (path: string, files: string[]) => Promise<boolean>;
   clearDiff: () => void;
 }
 
@@ -66,6 +69,54 @@ export const useGitStore = create<GitStore>((set) => ({
     } catch (err: unknown) {
       set({ error: String(err), loading: false });
       return null;
+    }
+  },
+
+  stageFiles: async (path, files) => {
+    set({ loading: true, error: null });
+    try {
+      if (!isTauriRuntime()) {
+        set({ loading: false, error: "Git stage is available in the Tauri app runtime." });
+        return false;
+      }
+      await invoke("git_stage_files", { path, files });
+      set({ loading: false });
+      return true;
+    } catch (err: unknown) {
+      set({ error: String(err), loading: false });
+      return false;
+    }
+  },
+
+  unstageFiles: async (path, files) => {
+    set({ loading: true, error: null });
+    try {
+      if (!isTauriRuntime()) {
+        set({ loading: false, error: "Git unstage is available in the Tauri app runtime." });
+        return false;
+      }
+      await invoke("git_unstage_files", { path, files });
+      set({ loading: false });
+      return true;
+    } catch (err: unknown) {
+      set({ error: String(err), loading: false });
+      return false;
+    }
+  },
+
+  discardFiles: async (path, files) => {
+    set({ loading: true, error: null });
+    try {
+      if (!isTauriRuntime()) {
+        set({ loading: false, error: "Git discard is available in the Tauri app runtime." });
+        return false;
+      }
+      await invoke("git_discard_files", { path, files });
+      set({ loading: false });
+      return true;
+    } catch (err: unknown) {
+      set({ error: String(err), loading: false });
+      return false;
     }
   },
 
