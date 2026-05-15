@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useCallback, useState, useRef } from "react"
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLspStore } from "../../stores/useLspStore";
+import { useLogStore } from "../../stores/useLogStore";
 import { pathsEqual } from "../../utils/paths";
 import { MonacoContext } from "./MonacoContext";
 import EditorTabs from "./EditorTabs";
@@ -32,6 +33,7 @@ import {
   openLspFile,
   toMonacoSymbolKind,
   type LspDocumentSymbol,
+  type LspDiagnostic,
   type LspWorkspaceEdit,
 } from "../../utils/lspClient";
 
@@ -79,6 +81,7 @@ export default function EditorContainer() {
   const fileContents = useEditorStore((s) => s.fileContents);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const setLspStatus = useLspStore((s) => s.setStatus);
+  const addLog = useLogStore((s) => s.addLog);
   const updateFileContent = useEditorStore((s) => s.updateFileContent);
   const saveCurrentFile = useEditorStore((s) => s.saveCurrentFile);
   const setSelectedText = useEditorStore((s) => s.setSelectedText);
@@ -289,20 +292,68 @@ export default function EditorContainer() {
           const codeActionDisposable = monacoInst.languages.registerCodeActionProvider(language, {
             provideCodeActions: async (model, range) => {
               const file = model.uri.fsPath || model.uri.path;
-              const actions = await getLspCodeActions(file, monacoRangeToLspRange(range));
+              const diagnostics = markersToLspDiagnostics(
+                monacoInst,
+                file,
+                monacoInst.editor.getModelMarkers({ resource: model.uri }).filter((marker) =>
+                  markerIntersectsRange(marker, range)
+                )
+              );
+              const actions = await getLspCodeActions(file, monacoRangeToLspRange(range), diagnostics);
               return {
                 actions: actions
                   .filter((action) => action.edit?.edits.length)
                   .map((action) => ({
                     title: action.title,
                     kind: action.kind ? action.kind.replace(/\./g, ".") : "quickfix",
-                    edit: workspaceEditToMonaco(monacoInst, action.edit!),
+                    command: {
+                      id: "agent-ide.apply-code-action",
+                      title: action.title,
+                      arguments: [action.title, action.edit!],
+                    },
                   })),
                 dispose: () => {},
               };
             },
           });
           disposablesRef.current.add(codeActionDisposable);
+
+          const applyCodeActionDisposable = monacoInst.editor.registerCommand(
+            "agent-ide.apply-code-action",
+            async (_accessor, title: string, edit: LspWorkspaceEdit) => {
+              try {
+                const applied = applyWorkspaceEdit(editorInst, monacoInst, edit);
+                if (!applied) {
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    level: "error",
+                    source: "system",
+                    message: `Code action failed: ${title}`,
+                    details: "Monaco rejected the workspace edit.",
+                  });
+                  return;
+                }
+                syncWorkspaceEditToStore(monacoInst, edit, updateFileContent);
+                await syncWorkspaceEditToLsp(monacoInst, edit);
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  level: "success",
+                  source: "system",
+                  message: `Code action applied: ${title}`,
+                  details: `${edit.edits.length} edit(s) applied.`,
+                });
+              } catch (error) {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  level: "error",
+                  source: "system",
+                  message: `Code action failed: ${title}`,
+                  details: String(error),
+                });
+              }
+            }
+          );
+          disposablesRef.current.add(applyCodeActionDisposable);
         }
       }
 
@@ -318,7 +369,7 @@ export default function EditorContainer() {
       });
       disposablesRef.current.add(definitionDisposable);
     },
-    [setSelectedText, setSelectedRange]
+    [addLog, setSelectedRange, setSelectedText, updateFileContent]
   );
 
   const contextValue = { editor: editorRef, monaco: monacoRef };
@@ -552,4 +603,110 @@ function workspaceEditToMonaco(
       },
     })),
   };
+}
+
+function applyWorkspaceEdit(
+  editor: import("monaco-editor").editor.IStandaloneCodeEditor,
+  monaco: typeof import("monaco-editor"),
+  edit: LspWorkspaceEdit
+) {
+  const activeModel = editor.getModel();
+  if (!activeModel) return false;
+  const activeFile = activeModel.uri.fsPath || activeModel.uri.path;
+  const activeFileEdits = edit.edits.filter((textEdit) => pathsEqual(textEdit.file, activeFile));
+  const otherFileEdits = edit.edits.filter((textEdit) => !pathsEqual(textEdit.file, activeFile));
+
+  const activeApplied = activeFileEdits.length
+    ? editor.executeEdits(
+        "agent-ide-code-action",
+        activeFileEdits.map((textEdit) => ({
+          range: lspRangeToMonacoRange(textEdit.range),
+          text: textEdit.newText,
+        }))
+      )
+    : true;
+
+  if (!activeApplied) return false;
+
+  for (const textEdit of otherFileEdits) {
+    const model = findModelForFile(monaco, textEdit.file);
+    if (!model) return false;
+    model.applyEdits([
+      {
+        range: lspRangeToMonacoRange(textEdit.range),
+        text: textEdit.newText,
+      },
+    ]);
+  }
+  return true;
+}
+
+function syncWorkspaceEditToStore(
+  monaco: typeof import("monaco-editor"),
+  edit: LspWorkspaceEdit,
+  updateFileContent: (path: string, content: string) => void
+) {
+  const touchedFiles = new Set(edit.edits.map((textEdit) => textEdit.file));
+  for (const file of touchedFiles) {
+    const model = findModelForFile(monaco, file);
+    if (model) updateFileContent(file, model.getValue());
+  }
+}
+
+async function syncWorkspaceEditToLsp(
+  monaco: typeof import("monaco-editor"),
+  edit: LspWorkspaceEdit
+) {
+  const touchedFiles = new Set(edit.edits.map((textEdit) => textEdit.file));
+  await Promise.all(
+    [...touchedFiles].map(async (file) => {
+      const model = findModelForFile(monaco, file);
+      if (!model || !isLspLanguage(model.getLanguageId())) return;
+      await changeLspFile(file, model.getValue(), model.getLanguageId(), model.getVersionId());
+    })
+  );
+}
+
+function findModelForFile(monaco: typeof import("monaco-editor"), file: string) {
+  return (
+    monaco.editor.getModel(monaco.Uri.file(file)) ??
+    monaco.editor
+      .getModels()
+      .find((model) => pathsEqual(model.uri.fsPath || model.uri.path, file))
+  );
+}
+
+function markersToLspDiagnostics(
+  monaco: typeof import("monaco-editor"),
+  file: string,
+  markers: import("monaco-editor").editor.IMarker[]
+): LspDiagnostic[] {
+  return markers.map((marker) => ({
+    file,
+    range: monacoRangeToLspRange(marker),
+    severity: markerSeverityToLsp(monaco, marker.severity),
+    message: marker.message,
+    source: marker.source,
+  }));
+}
+
+function markerSeverityToLsp(
+  monaco: typeof import("monaco-editor"),
+  severity: import("monaco-editor").MarkerSeverity
+): LspDiagnostic["severity"] {
+  if (severity === monaco.MarkerSeverity.Error) return "error";
+  if (severity === monaco.MarkerSeverity.Warning) return "warning";
+  return "info";
+}
+
+function markerIntersectsRange(
+  marker: import("monaco-editor").editor.IMarker,
+  range: import("monaco-editor").IRange
+) {
+  return !(
+    marker.endLineNumber < range.startLineNumber ||
+    marker.startLineNumber > range.endLineNumber ||
+    (marker.endLineNumber === range.startLineNumber && marker.endColumn < range.startColumn) ||
+    (marker.startLineNumber === range.endLineNumber && marker.startColumn > range.endColumn)
+  );
 }

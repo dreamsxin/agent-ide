@@ -103,6 +103,11 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Normalized Windows verbatim `\\?\D:\...` workspace paths across workspace resolution and Git repo path handling so Git status/diff no longer misreports active workspaces as outside the workspace.
 - Added Git branch checkout/create, Fetch/Pull/Push actions, upstream/ahead/behind display, and conflict file detection in Source Control.
 - Added one-shot Git credential inputs for remote actions, remote branch checkout/tracking, and conflict resolution controls for accept current, accept incoming, accept both, and conflict diff navigation.
+- Added TypeScript LSP status details in the TopBar, including server path, workspace, opened document count, change count, diagnostics count, last error, and recent per-file diagnostics summaries.
+- Routed Monaco Quick Fix/code actions through an explicit apply command that logs success/failure, syncs editor store state, and triggers LSP `didChange` so Problems and markers refresh after fixes.
+- Enabled JavaScript semantic diagnostics in Monaco TS worker defaults instead of syntax-only JavaScript validation.
+- Added frontend Vitest coverage for Windows/file-URI path normalization and terminal output problem parsing.
+- Routed build/test/lint/check-style project commands through the non-interactive command runner so Test also records exit code, duration, output, Problems, Logs, and failed-run Agent repair context.
 
 Important distinction:
 
@@ -117,6 +122,7 @@ Last verified locally:
 
 ```powershell
 npm run build     # passes; Vite still warns about a large Monaco/Markdown chunk
+npm test          # passes; covers path normalization and terminal problem parsing
 cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
@@ -135,7 +141,9 @@ Known local worktree note:
 - `src/components/layout/`: titlebar, left/right/bottom panels, resize handles.
 - `src/components/editor/`: Monaco editor, tabs, inline suggestions, diff overlays, quick actions.
 - `src/components/editor/DiagnosticsBridge.tsx`: syncs Monaco diagnostics into Problems.
+- `src/components/editor/ProblemsMarkerBridge.tsx`: mirrors runtime/test/Agent/system Problems into Monaco markers and active-line decorations.
 - `src/utils/codeCompletion.ts`: local completion candidate extraction for Monaco suggestions.
+- `src/utils/lspClient.ts`: frontend bridge for TypeScript LSP hover, completion, definition, symbols, rename, code actions, diagnostics, and status snapshots.
 - `src/components/panels/`: Explorer, Git panel, terminal, logs.
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
 - `src/components/panels/TasksPanel.tsx`: project command list for discovered build/test/lint/run/debug commands.
@@ -223,7 +231,7 @@ Project Tasks
     -> fallback defaults when no tasks are discovered
   -> TopBar common Run/Debug/Build/Test buttons or Commands panel
     -> shared useRunProjectTask routing
-    -> non-interactive runner for build/lint/check/typecheck
+    -> non-interactive runner for build/test/lint/check/typecheck
       -> Logs + Problems + task status
       -> failed command card exposes Fix with Agent
       -> run history stores exit code, duration, and output details
@@ -326,9 +334,11 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The UI/store foundation is now present.
    - Monaco diagnostics, Agent errors, and failed diff findings can be surfaced.
    - Terminal TypeScript/lint/test-style file-position errors, Vitest/Jest-style stack traces, and failed test file summaries are parsed into Problems.
+   - Frontend smoke tests now cover file URI parsing and terminal problem extraction.
    - Rich test-runner protocol integration is still pending.
    - TypeScript/JavaScript open-file diagnostics now come from Monaco TS worker markers.
-   - True whole-workspace LSP diagnostics still require LSP backend integration.
+   - TypeScript LSP diagnostics are surfaced through Problems, Monaco markers, and TopBar diagnostics summaries.
+   - Whole-workspace diagnostics still need indexing/runtime validation beyond opened files.
 
 9. **Runtime modes need clearer UI messaging**
    - Browser preview now avoids crashes.
@@ -343,7 +353,9 @@ Current limitation: diff application still uses textual `find` replacement. It n
 11. **Code completion is partially semantic**
    - Monaco now has stable local keyword/symbol/snippet/path suggestions for non-TS languages.
    - TypeScript/JavaScript now use Monaco TS worker semantic completion/hover/diagnostics for open models.
-   - No full LSP-backed workspace semantic completion yet.
+   - TypeScript LSP-backed hover, completion, definition, document symbols, rename, code actions, diagnostics, and status snapshots are wired.
+   - Code actions now log apply success/failure and trigger LSP diagnostics refresh after edits.
+   - Workspace-wide LSP indexing still needs runtime validation.
    - No LLM inline completion request path yet.
 
 12. **Large frontend bundle**
@@ -506,12 +518,12 @@ target\release\agent_cli --help
 
 1. Add persistent credential storage and better SSH/passphrase UX for Git remote operations.
 2. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
-3. Add true LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python beyond Monaco open-file workers.
-4. Add terminal/log excerpts and selected-file packing to Agent context.
+3. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and workspace indexing behavior.
+4. Add Rust/Python LSP adapters after TypeScript runtime validation.
 5. Add stricter validation to the structured Agent protocol.
 6. Persist Agent action logs with prompt/context/diff provenance.
 7. Move LLM API key storage to a safer credential path.
 
 ---
 
-*Last updated: 2026-05-15 - Phase 7 in progress; Git credential UX, remote tracking, conflict controls, staged/worktree diff, multi-select, and Windows workspace path normalization completed.*
+*Last updated: 2026-05-15 - Phase 7 in progress; TypeScript LSP status/code-action feedback, JavaScript diagnostics, terminal problem parser smoke tests, and command runner Test history completed.*

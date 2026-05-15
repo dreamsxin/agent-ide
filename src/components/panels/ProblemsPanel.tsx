@@ -85,17 +85,17 @@ export default function ProblemsPanel() {
               <div
                 key={problem.id}
                 onClick={() => void handleProblemClick(problem.file, problem.line, problem.column)}
-                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_72px_64px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
+                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_64px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
               >
                 <span className={`font-bold ${style.color}`}>{style.label}</span>
                 <span className="min-w-0">
                   <span className="block truncate text-surface-text">{problem.message}</span>
                   <span className="block truncate font-mono text-[10px] text-surface-muted">
-                    {problem.file} ({problem.line}:{problem.column})
+                    {formatProblemLocation(problem.file, problem.line, problem.column)}
                   </span>
                 </span>
                 <span className="truncate text-[10px] uppercase text-surface-muted">
-                  {problem.source}
+                  {problem.source} · {problem.severity}
                 </span>
                 <button
                   onClick={(event) => {
@@ -114,4 +114,8 @@ export default function ProblemsPanel() {
       </div>
     </div>
   );
+}
+
+function formatProblemLocation(file: string, line: number, column: number) {
+  return `${file} (${line}:${column})`;
 }

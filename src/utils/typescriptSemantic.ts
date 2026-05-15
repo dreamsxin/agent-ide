@@ -32,7 +32,7 @@ export function configureTypeScriptSemantic(monaco: typeof Monaco) {
   monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions(diagnosticsOptions);
   monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
     ...diagnosticsOptions,
-    noSemanticValidation: true,
+    noSemanticValidation: false,
   });
   monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
   monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);

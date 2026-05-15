@@ -14,6 +14,7 @@ interface LspDiagnosticsEvent {
 export function useLspDiagnostics(monaco: typeof import("monaco-editor") | null) {
   const replaceProblems = useProblemStore((s) => s.replaceProblems);
   const setLspStatus = useLspStore((s) => s.setStatus);
+  const setDiagnosticSummary = useLspStore((s) => s.setDiagnosticSummary);
   const diagnosticsByFileRef = useRef<Map<string, LspDiagnosticsEvent>>(new Map());
 
   useEffect(() => {
@@ -39,6 +40,7 @@ export function useLspDiagnostics(monaco: typeof import("monaco-editor") | null)
         }))
       );
       replaceProblems("lsp", problems);
+      setDiagnosticSummary(summarizeDiagnostics(event.payload));
 
       if (monaco) applyMarkers(monaco, event.payload.file, event.payload.diagnostics);
     });
@@ -46,7 +48,7 @@ export function useLspDiagnostics(monaco: typeof import("monaco-editor") | null)
     return () => {
       void unlisten.then((dispose) => dispose());
     };
-  }, [monaco, replaceProblems]);
+  }, [monaco, replaceProblems, setDiagnosticSummary]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -71,6 +73,21 @@ export function useLspDiagnostics(monaco: typeof import("monaco-editor") | null)
     const disposable = monaco.editor.onDidCreateModel(syncCachedMarkers);
     return () => disposable.dispose();
   }, [monaco]);
+}
+
+function summarizeDiagnostics(event: LspDiagnosticsEvent) {
+  return event.diagnostics.reduce(
+    (summary, diagnostic) => {
+      summary[diagnostic.severity] += 1;
+      return summary;
+    },
+    {
+      file: normalizeFilePath(event.file),
+      error: 0,
+      warning: 0,
+      info: 0,
+    }
+  );
 }
 
 function toMonacoMarkerSeverity(

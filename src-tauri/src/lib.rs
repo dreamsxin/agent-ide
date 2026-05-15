@@ -92,6 +92,7 @@ pub fn run() {
             commands::lsp::lsp_document_symbols,
             commands::lsp::lsp_rename,
             commands::lsp::lsp_code_actions,
+            commands::lsp::lsp_status,
             // Terminal 命令
             commands::terminal::spawn_terminal,
             commands::terminal::write_to_terminal,

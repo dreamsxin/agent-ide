@@ -64,6 +64,17 @@ export interface LspCodeAction {
   edit?: LspWorkspaceEdit;
 }
 
+export interface LspStatusSnapshot {
+  status: string;
+  message: string;
+  workspaceRoot?: string;
+  serverPath?: string;
+  openedDocuments: number;
+  changeCount: number;
+  diagnosticsCount: number;
+  lastError?: string;
+}
+
 export function isLspLanguage(languageId: string) {
   return ["typescript", "javascript"].includes(languageId);
 }
@@ -82,6 +93,16 @@ export async function initializeLsp(workspacePath: string | null): Promise<{ rea
   } catch (error) {
     console.warn("TypeScript LSP unavailable:", error);
     return { ready: false, message: String(error) };
+  }
+}
+
+export async function getLspStatus() {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await invoke<LspStatusSnapshot>("lsp_status");
+  } catch (error) {
+    console.warn("Read TypeScript LSP status failed:", error);
+    return null;
   }
 }
 
@@ -149,10 +170,14 @@ export async function getLspRename(file: string, line: number, character: number
   }
 }
 
-export async function getLspCodeActions(file: string, range: LspRange) {
+export async function getLspCodeActions(
+  file: string,
+  range: LspRange,
+  diagnostics: LspDiagnostic[] = []
+) {
   if (!isTauriRuntime()) return [];
   try {
-    return await invoke<LspCodeAction[]>("lsp_code_actions", { file, range });
+    return await invoke<LspCodeAction[]>("lsp_code_actions", { file, range, diagnostics });
   } catch {
     return [];
   }

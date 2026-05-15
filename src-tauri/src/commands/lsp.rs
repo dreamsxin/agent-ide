@@ -26,6 +26,11 @@ struct LspServer {
     stdin: ChildStdin,
     pending: HashMap<u64, mpsc::Sender<Value>>,
     workspace_root: PathBuf,
+    executable: PathBuf,
+    opened_documents: usize,
+    change_count: usize,
+    diagnostics_count: usize,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +45,7 @@ pub struct LspRange {
     pub end: LspPosition,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspDiagnostic {
     pub file: String,
     pub range: LspRange,
@@ -59,6 +64,24 @@ pub struct LspDiagnosticsEvent {
 pub struct LspStatusEvent {
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LspStatusSnapshot {
+    pub status: String,
+    pub message: String,
+    #[serde(rename = "workspaceRoot")]
+    pub workspace_root: Option<String>,
+    #[serde(rename = "serverPath")]
+    pub server_path: Option<String>,
+    #[serde(rename = "openedDocuments")]
+    pub opened_documents: usize,
+    #[serde(rename = "changeCount")]
+    pub change_count: usize,
+    #[serde(rename = "diagnosticsCount")]
+    pub diagnostics_count: usize,
+    #[serde(rename = "lastError")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,6 +215,11 @@ pub fn lsp_initialize(
             stdin,
             pending: HashMap::new(),
             workspace_root: root.clone(),
+            executable: executable.clone(),
+            opened_documents: 0,
+            change_count: 0,
+            diagnostics_count: 0,
+            last_error: None,
         });
     }
 
@@ -240,6 +268,9 @@ pub fn lsp_open_file(
     request: LspTextDocumentRequest,
 ) -> Result<(), String> {
     let file = workspace::resolve_existing(&request.file)?;
+    update_server_stats(&manager, |server| {
+        server.opened_documents = server.opened_documents.saturating_add(1);
+    });
     notify(
         &manager,
         "textDocument/didOpen",
@@ -260,6 +291,9 @@ pub fn lsp_change_file(
     request: LspTextDocumentRequest,
 ) -> Result<(), String> {
     let file = workspace::resolve_for_write(&request.file)?;
+    update_server_stats(&manager, |server| {
+        server.change_count = server.change_count.saturating_add(1);
+    });
     notify(
         &manager,
         "textDocument/didChange",
@@ -380,6 +414,7 @@ pub fn lsp_code_actions(
     manager: tauri::State<'_, LspManager>,
     file: String,
     range: LspRange,
+    diagnostics: Vec<LspDiagnostic>,
 ) -> Result<Vec<LspCodeAction>, String> {
     let file = workspace::resolve_existing(&file)?;
     let response = request(
@@ -388,13 +423,43 @@ pub fn lsp_code_actions(
         json!({
             "textDocument": { "uri": path_to_uri(&file) },
             "range": range,
-            "context": { "diagnostics": [] }
+            "context": {
+                "diagnostics": diagnostics.into_iter().map(lsp_diagnostic_to_protocol).collect::<Vec<_>>()
+            }
         }),
     )?;
     let Some(result) = response.get("result") else {
         return Ok(Vec::new());
     };
     Ok(parse_code_actions(result))
+}
+
+#[tauri::command]
+pub fn lsp_status(manager: tauri::State<'_, LspManager>) -> Result<LspStatusSnapshot, String> {
+    let guard = manager.inner.server.lock().map_err(|e| e.to_string())?;
+    let Some(server) = guard.as_ref() else {
+        return Ok(LspStatusSnapshot {
+            status: "unavailable".to_string(),
+            message: "TypeScript LSP is not initialized.".to_string(),
+            workspace_root: None,
+            server_path: None,
+            opened_documents: 0,
+            change_count: 0,
+            diagnostics_count: 0,
+            last_error: None,
+        });
+    };
+
+    Ok(LspStatusSnapshot {
+        status: "ready".to_string(),
+        message: "TypeScript LSP ready.".to_string(),
+        workspace_root: Some(server.workspace_root.to_string_lossy().to_string()),
+        server_path: Some(server.executable.to_string_lossy().to_string()),
+        opened_documents: server.opened_documents,
+        change_count: server.change_count,
+        diagnostics_count: server.diagnostics_count,
+        last_error: server.last_error.clone(),
+    })
 }
 
 fn request(manager: &LspManager, method: &str, params: Value) -> Result<Value, String> {
@@ -439,6 +504,7 @@ fn read_lsp_output(app: AppHandle, state: Arc<LspInner>, stdout: std::process::C
         let message = match read_message(&mut reader) {
             Ok(Some(message)) => message,
             Ok(None) => {
+                set_server_error(&state, "TypeScript LSP stdout closed.");
                 let _ = app.emit("lsp-status", LspStatusEvent {
                     status: "error".to_string(),
                     message: "TypeScript LSP stdout closed.".to_string(),
@@ -446,6 +512,7 @@ fn read_lsp_output(app: AppHandle, state: Arc<LspInner>, stdout: std::process::C
                 break;
             }
             Err(error) => {
+                set_server_error(&state, &error);
                 let _ = app.emit("lsp-status", LspStatusEvent {
                     status: "error".to_string(),
                     message: error,
@@ -471,10 +538,41 @@ fn read_lsp_output(app: AppHandle, state: Arc<LspInner>, stdout: std::process::C
         if method == Some("textDocument/publishDiagnostics") {
             if let Some(params) = message.get("params") {
                 let diagnostics = parse_diagnostics(params);
+                update_server_stats_inner(&state, |server| {
+                    server.diagnostics_count = server.diagnostics_count.saturating_add(diagnostics.diagnostics.len());
+                });
                 let _ = app.emit("lsp-diagnostics", diagnostics);
             }
         }
     }
+}
+
+fn update_server_stats<F>(manager: &LspManager, update: F)
+where
+    F: FnOnce(&mut LspServer),
+{
+    if let Ok(mut guard) = manager.inner.server.lock() {
+        if let Some(server) = guard.as_mut() {
+            update(server);
+        }
+    }
+}
+
+fn update_server_stats_inner<F>(state: &Arc<LspInner>, update: F)
+where
+    F: FnOnce(&mut LspServer),
+{
+    if let Ok(mut guard) = state.server.lock() {
+        if let Some(server) = guard.as_mut() {
+            update(server);
+        }
+    }
+}
+
+fn set_server_error(state: &Arc<LspInner>, error: &str) {
+    update_server_stats_inner(state, |server| {
+        server.last_error = Some(error.to_string());
+    });
 }
 
 fn handle_server_request(state: &Arc<LspInner>, id: Value, method: &str, params: Option<Value>) {
@@ -602,6 +700,20 @@ fn parse_diagnostics(params: &Value) -> LspDiagnosticsEvent {
         .unwrap_or_default();
 
     LspDiagnosticsEvent { file, diagnostics }
+}
+
+fn lsp_diagnostic_to_protocol(diagnostic: LspDiagnostic) -> Value {
+    json!({
+        "range": diagnostic.range,
+        "severity": match diagnostic.severity.as_str() {
+            "error" => 1,
+            "warning" => 2,
+            "info" => 3,
+            _ => 4,
+        },
+        "source": diagnostic.source,
+        "message": diagnostic.message
+    })
 }
 
 fn parse_hover(value: &Value) -> Option<LspHover> {

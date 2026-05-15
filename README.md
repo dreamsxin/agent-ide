@@ -27,7 +27,10 @@ Implemented core capabilities:
 - Diff review and apply flow with structured apply failures.
 - Compatible structured `agent-changes` JSON protocol plus legacy diff/new-file block parsing.
 - TypeScript/JavaScript semantic bridge with Monaco fallback plus `typescript-language-server` support for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
+- TopBar TypeScript LSP status details with server/workspace information and recent diagnostics summaries.
+- Quick Fix/code action application feedback through Logs, with editor state sync and diagnostics refresh after fixes.
 - Problems integration for static diagnostics and terminal/test failures, including severity-colored editor line decorations, minimap markers, and runtime failure markers for file/line/column locations.
+- Command runner history for build/test/lint/check commands with exit code, duration, output details, Problems parsing, and failed-run Agent repair context.
 - Explorer quality-of-life actions including reveal in file explorer, copy file, copy absolute file path, and copy relative file path.
 
 Important remaining gaps:
@@ -89,6 +92,7 @@ Run these checks before committing substantial changes:
 
 ```powershell
 npm run build
+npm test
 cd src-tauri
 cargo check
 cargo test

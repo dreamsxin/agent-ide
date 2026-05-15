@@ -11,6 +11,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
 import { isTauriRuntime } from "../../utils/tauri";
+import { getLspStatus, type LspStatusSnapshot } from "../../utils/lspClient";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 
@@ -31,11 +32,14 @@ export default function TopBar() {
   const setWorkspacePath = useLayoutStore((s) => s.setWorkspacePath);
   const lspStatus = useLspStore((s) => s.status);
   const lspMessage = useLspStore((s) => s.message);
+  const diagnosticSummaries = useLspStore((s) => s.diagnosticSummaries);
   const taskRuns = useTaskStore((s) => s.taskRuns);
   const { tasks } = useProjectTasks();
   const runProjectTask = useRunProjectTask();
 
   const [isMaximized, setIsMaximized] = useState(false);
+  const [lspDetailsOpen, setLspDetailsOpen] = useState(false);
+  const [lspDetails, setLspDetails] = useState<LspStatusSnapshot | null>(null);
 
   const isRunning =
     agentState !== "idle" && agentState !== "done" && agentState !== "error";
@@ -64,6 +68,12 @@ export default function TopBar() {
 
   const handleHelp = useCallback(() => {
     window.dispatchEvent(new CustomEvent("toggle-shortcuts-help"));
+  }, []);
+
+  const handleLspStatusClick = useCallback(async () => {
+    setLspDetailsOpen((value) => !value);
+    const snapshot = await getLspStatus();
+    setLspDetails(snapshot);
   }, []);
 
   // 窗口控制
@@ -133,13 +143,69 @@ export default function TopBar() {
       </div>
 
       {/* 中间：项目命令 + Agent 模式切换 */}
-      <div className="flex items-center gap-2">
-        <span
+      <div className="relative flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleLspStatusClick}
           className={`rounded border px-1.5 py-0.5 text-[10px] ${lspStatusClass(lspStatus)}`}
           title={lspMessage}
         >
           TS {lspStatus}
-        </span>
+        </button>
+        {lspDetailsOpen && (
+          <div className="absolute top-10 left-1/2 z-50 w-[360px] -translate-x-1/2 rounded border border-surface-border bg-surface-panel p-3 text-[11px] text-surface-text shadow-xl">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="font-semibold">TypeScript LSP</span>
+              <button
+                type="button"
+                onClick={() => setLspDetailsOpen(false)}
+                className="text-surface-muted hover:text-surface-text"
+              >
+                x
+              </button>
+            </div>
+            <LspDetailRow label="Status" value={lspDetails?.status ?? lspStatus} />
+            <LspDetailRow label="Message" value={lspDetails?.message ?? lspMessage} />
+            <LspDetailRow label="Server" value={lspDetails?.serverPath ?? "-"} />
+            <LspDetailRow label="Workspace" value={lspDetails?.workspaceRoot ?? (workspacePath || "-")} />
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              <LspMetric label="Opened" value={lspDetails?.openedDocuments ?? 0} />
+              <LspMetric label="Changes" value={lspDetails?.changeCount ?? 0} />
+              <LspMetric label="Diagnostics" value={lspDetails?.diagnosticsCount ?? 0} />
+            </div>
+            {lspDetails?.lastError && (
+              <div className="mt-2 rounded border border-diff-remove/30 bg-diff-remove/10 p-2 text-diff-remove">
+                {lspDetails.lastError}
+              </div>
+            )}
+            <div className="mt-3 border-t border-surface-border pt-2">
+              <div className="mb-1 text-[10px] uppercase text-surface-muted">Recent diagnostics</div>
+              {diagnosticSummaries.length === 0 ? (
+                <div className="text-surface-muted">No diagnostics received yet.</div>
+              ) : (
+                <div className="max-h-28 space-y-1 overflow-auto">
+                  {diagnosticSummaries.map((summary) => (
+                    <div
+                      key={summary.file}
+                      className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded bg-surface-base px-2 py-1"
+                    >
+                      <span className="truncate font-mono" title={summary.file}>
+                        {summary.file}
+                      </span>
+                      <span className="font-mono text-[10px]">
+                        <span className="text-diff-remove">{summary.error}</span>
+                        <span className="text-surface-muted">/</span>
+                        <span className="text-diff-modify">{summary.warning}</span>
+                        <span className="text-surface-muted">/</span>
+                        <span className="text-accent-blue">{summary.info}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         <div className="flex items-center gap-1 rounded border border-surface-border bg-surface-base px-1 py-0.5">
           <button
             onClick={() => runProjectTask(runTask)}
@@ -276,6 +342,26 @@ export default function TopBar() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function LspDetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-0.5">
+      <span className="text-surface-muted">{label}</span>
+      <span className="truncate font-mono" title={value}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function LspMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded border border-surface-border bg-surface-base px-2 py-1">
+      <div className="text-[10px] uppercase text-surface-muted">{label}</div>
+      <div className="font-mono text-surface-text">{value}</div>
     </div>
   );
 }

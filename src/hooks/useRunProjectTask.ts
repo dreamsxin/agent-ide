@@ -108,5 +108,5 @@ export function useRunProjectTask() {
 
 function shouldUseCommandRunner(task: ProjectTaskDefinition) {
   const value = `${task.id} ${task.label}`.toLowerCase();
-  return ["build", "lint", "check", "typecheck"].some((name) => value.includes(name));
+  return ["build", "test", "lint", "check", "typecheck"].some((name) => value.includes(name));
 }

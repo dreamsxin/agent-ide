@@ -49,6 +49,10 @@ export function parseTerminalProblems(output: string, terminalId = "main"): Prob
       );
       const severity = inferSeverity(message);
       const id = `terminal-${terminalId}-${file}-${line}-${column}-${message}`;
+      const locationKey = `${file}:${line}:${column}`;
+      if ([...problems.values()].some((problem) => `${problem.file}:${problem.line}:${problem.column}` === locationKey)) {
+        continue;
+      }
 
       problems.set(id, {
         id,
