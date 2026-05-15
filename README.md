@@ -27,7 +27,7 @@ Implemented core capabilities:
 - Diff review and apply flow with structured apply failures.
 - Compatible structured `agent-changes` JSON protocol plus legacy diff/new-file block parsing.
 - TypeScript/JavaScript semantic bridge with Monaco fallback plus `typescript-language-server` support for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
-- Problems integration for static diagnostics and terminal/test failures, including editor markers for runtime failures with file/line/column locations.
+- Problems integration for static diagnostics and terminal/test failures, including severity-colored editor line decorations, minimap markers, and runtime failure markers for file/line/column locations.
 - Explorer quality-of-life actions including reveal in file explorer, copy file, copy absolute file path, and copy relative file path.
 
 Important remaining gaps:

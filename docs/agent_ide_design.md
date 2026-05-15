@@ -321,6 +321,7 @@ The editor has three marker bridges:
 - Monaco diagnostics are read into Problems through `DiagnosticsBridge`.
 - TypeScript LSP diagnostics are written to Problems and Monaco markers through `useLspDiagnostics`.
 - Runtime Problems from terminal/test/Agent/system sources are written back to Monaco markers through `ProblemsMarkerBridge`.
+- All Problems sources are mirrored into severity-colored editor decorations for the active model, including whole-line background, line-decoration gutter, minimap, and overview ruler indicators.
 
 Paths are normalized before tab matching, marker matching, and problem navigation. This avoids duplicate tabs and broken paths such as URL-encoded Windows drive paths.
 

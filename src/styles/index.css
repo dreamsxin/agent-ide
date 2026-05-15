@@ -88,6 +88,47 @@
   margin-left: 3px;
 }
 
+/* ---- Runtime/Test Problem Decorations ---- */
+.runtime-problem-line-error {
+  background: rgba(218, 54, 51, 0.16);
+  border-left: 3px solid #DA3633;
+}
+.runtime-problem-line-warning {
+  background: rgba(210, 153, 34, 0.16);
+  border-left: 3px solid #D29922;
+}
+.runtime-problem-line-info {
+  background: rgba(59, 130, 246, 0.12);
+  border-left: 3px solid #3B82F6;
+}
+.runtime-problem-glyph-error {
+  background: #DA3633;
+  width: 4px !important;
+  margin-left: 3px;
+}
+.runtime-problem-glyph-warning {
+  background: #D29922;
+  width: 4px !important;
+  margin-left: 3px;
+}
+.runtime-problem-glyph-info {
+  background: #3B82F6;
+  width: 4px !important;
+  margin-left: 3px;
+}
+.runtime-problem-line-number-error {
+  border-left: 3px solid #DA3633;
+  background: rgba(218, 54, 51, 0.28);
+}
+.runtime-problem-line-number-warning {
+  border-left: 3px solid #D29922;
+  background: rgba(210, 153, 34, 0.28);
+}
+.runtime-problem-line-number-info {
+  border-left: 3px solid #3B82F6;
+  background: rgba(59, 130, 246, 0.24);
+}
+
 /* ---- Intent Hint Widget ---- */
 .intent-hint-widget {
   display: flex;

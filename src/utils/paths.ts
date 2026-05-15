@@ -1,5 +1,6 @@
 export function normalizeFilePath(path: string) {
   return decodePath(path)
+    .replace(/^file:\/\/\/?/i, "")
     .replace(/^\/([a-zA-Z]:)/, "$1")
     .replace(/\\/g, "/");
 }

@@ -5,9 +5,10 @@ const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const MAX_BUFFER_LENGTH = 24000;
 
 const LOCATION_PATTERNS = [
+  /(?<file>file:\/\/\/?[A-Za-z]:\/[^:\r\n)]+?\.(?:ts|tsx|js|jsx|rs|py|go|vue|svelte|css|scss|html)):(?<line>\d+):(?<column>\d+)(?:\s*[-:]?\s*(?<message>.*))?/g,
   /(?<file>[A-Za-z]:[\\/][^:\r\n]+|\.[\\/][^:\r\n]+|[^:\s\r\n][^:\r\n]*?\.(?:ts|tsx|js|jsx|rs|py|go|vue|svelte|css|scss|html)):(?<line>\d+):(?<column>\d+)(?:\s*[-:]?\s*(?<message>.*))?/g,
   /(?<file>[A-Za-z]:[\\/][^( \r\n]+|\.[\\/][^( \r\n]+|[^(\s\r\n][^(\r\n]*?\.(?:ts|tsx|js|jsx|rs|py|go|vue|svelte|css|scss|html))\((?<line>\d+),(?<column>\d+)\):\s*(?<message>.*)/g,
-  /(?:at\s+.*?)?\(?(?<file>[A-Za-z]:[\\/][^:\r\n)]+|\.[\\/][^:\r\n)]+|[^:\s\r\n()][^:\r\n()]*?\.(?:ts|tsx|js|jsx|rs|py|go|vue|svelte|css|scss|html)):(?<line>\d+):(?<column>\d+)\)?/g,
+  /(?:at\s+.*?)?\(?(?<file>file:\/\/\/?[A-Za-z]:\/[^:\r\n)]+|\b[A-Za-z]:[\\/][^:\r\n)]+|\.[\\/][^:\r\n)]+|[^:\s\r\n()][^:\r\n()]*?\.(?:ts|tsx|js|jsx|rs|py|go|vue|svelte|css|scss|html)):(?<line>\d+):(?<column>\d+)\)?/g,
 ];
 
 const TEST_FILE_PATTERN =

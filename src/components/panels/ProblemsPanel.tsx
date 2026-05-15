@@ -85,17 +85,14 @@ export default function ProblemsPanel() {
               <div
                 key={problem.id}
                 onClick={() => void handleProblemClick(problem.file, problem.line, problem.column)}
-                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_90px_96px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
+                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_72px_64px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
               >
                 <span className={`font-bold ${style.color}`}>{style.label}</span>
                 <span className="min-w-0">
                   <span className="block truncate text-surface-text">{problem.message}</span>
                   <span className="block truncate font-mono text-[10px] text-surface-muted">
-                    {problem.file}
+                    {problem.file} ({problem.line}:{problem.column})
                   </span>
-                </span>
-                <span className="font-mono text-[10px] text-surface-muted">
-                  {problem.line}:{problem.column}
                 </span>
                 <span className="truncate text-[10px] uppercase text-surface-muted">
                   {problem.source}
