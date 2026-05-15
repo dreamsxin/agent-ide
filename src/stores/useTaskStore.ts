@@ -21,7 +21,9 @@ export interface QueuedTerminalCommand {
 export type ProjectTaskStatus = "idle" | "running" | "success" | "failed";
 
 export interface ProjectTaskRunState {
+  runId?: string;
   taskId: string;
+  label?: string;
   status: ProjectTaskStatus;
   command: string;
   startedAt: number;
@@ -29,6 +31,12 @@ export interface ProjectTaskRunState {
   exitCode?: number | null;
   durationMs?: number;
   output?: string;
+}
+
+export interface ProjectTaskRunHistoryEntry extends ProjectTaskRunState {
+  runId: string;
+  taskId: string;
+  label: string;
 }
 
 interface TaskStore {
@@ -40,14 +48,16 @@ interface TaskStore {
   taskDiscoveryLoaded: boolean;
   taskDiscoveryError: string | null;
   taskRuns: Record<string, ProjectTaskRunState>;
+  taskRunHistory: ProjectTaskRunHistoryEntry[];
   setDiscoveredTasks: (tasks: ProjectTaskDefinition[]) => void;
   setTaskDiscoveryState: (loading: boolean, error?: string | null, loaded?: boolean) => void;
-  startTaskRun: (taskId: string, command: string) => void;
+  startTaskRun: (taskId: string, command: string, label?: string) => string;
   finishTaskRun: (
     taskId: string,
     status: Exclude<ProjectTaskStatus, "idle" | "running">,
     updates: Pick<ProjectTaskRunState, "exitCode" | "durationMs" | "output">
   ) => void;
+  clearTaskRunHistory: () => void;
   queueTerminalCommand: (taskId: string, command: string, terminalId?: string) => QueuedTerminalCommand;
   consumeTerminalCommands: (terminalId: string) => QueuedTerminalCommand[];
   appendTerminalOutput: (terminalId: string, output: string) => void;
@@ -101,6 +111,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   taskDiscoveryLoaded: false,
   taskDiscoveryError: null,
   taskRuns: {},
+  taskRunHistory: [],
 
   setDiscoveredTasks: (discoveredTasks) => set({ discoveredTasks }),
   setTaskDiscoveryState: (taskDiscoveryLoading, taskDiscoveryError = null, taskDiscoveryLoaded) =>
@@ -110,35 +121,63 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       taskDiscoveryLoaded: taskDiscoveryLoaded ?? state.taskDiscoveryLoaded,
     })),
 
-  startTaskRun: (taskId, command) =>
+  startTaskRun: (taskId, command, label = taskId) => {
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     set((state) => ({
       taskRuns: {
         ...state.taskRuns,
         [taskId]: {
+          runId,
           taskId,
+          label,
           command,
           status: "running",
           startedAt: Date.now(),
         },
       },
-    })),
+    }));
+    return runId;
+  },
 
   finishTaskRun: (taskId, status, updates) =>
-    set((state) => ({
-      taskRuns: {
-        ...state.taskRuns,
-        [taskId]: {
-          ...(state.taskRuns[taskId] ?? {
-            taskId,
-            command: "",
-            startedAt: Date.now(),
-          }),
-          ...updates,
-          status,
-          finishedAt: Date.now(),
+    set((state) => {
+      const finishedAt = Date.now();
+      const current = state.taskRuns[taskId] ?? {
+        runId: `run-${finishedAt}-${Math.random().toString(36).slice(2, 8)}`,
+        taskId,
+        label: taskId,
+        command: "",
+        startedAt: finishedAt,
+      };
+      const nextRun: ProjectTaskRunState = {
+        ...current,
+        ...updates,
+        status,
+        finishedAt,
+      };
+      const historyEntry: ProjectTaskRunHistoryEntry = {
+        runId: nextRun.runId ?? `run-${finishedAt}-${Math.random().toString(36).slice(2, 8)}`,
+        taskId,
+        label: nextRun.label ?? taskId,
+        command: nextRun.command,
+        startedAt: nextRun.startedAt,
+        finishedAt,
+        status,
+        exitCode: nextRun.exitCode,
+        durationMs: nextRun.durationMs,
+        output: nextRun.output,
+      };
+
+      return {
+        taskRuns: {
+          ...state.taskRuns,
+          [taskId]: nextRun,
         },
-      },
-    })),
+        taskRunHistory: [historyEntry, ...state.taskRunHistory].slice(0, 100),
+      };
+    }),
+
+  clearTaskRunHistory: () => set({ taskRunHistory: [] }),
 
   queueTerminalCommand: (taskId, command, terminalId = "main") => {
     const queued: QueuedTerminalCommand = {

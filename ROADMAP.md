@@ -93,6 +93,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added IDE runtime failure context injection for Agent prompts, including the latest failed project command, parsed Problems, recent Terminal output, and recent warning/error Logs.
 - Added one-click `Fix with Agent` actions in Problems and failed Commands, reusing the same IDE runtime failure context for structured repair prompts.
 - Hardened Explorer context menu behavior so it closes on outside pointer interactions, Escape, scroll, and blur, and clamps menu placement inside the viewport.
+- Added project command run history with per-run status, exit code, duration, output details, rerun, clear history, and failed-run `Fix with Agent` actions.
 
 Important distinction:
 
@@ -131,7 +132,7 @@ Known local worktree note:
 - `src/components/panels/TasksPanel.tsx`: project command list for discovered build/test/lint/run/debug commands.
 - `src/hooks/useProjectTasks.ts`: shared frontend task discovery hook for TopBar and Commands.
 - `src/hooks/useRunProjectTask.ts`: shared project command executor that routes build/test/lint/check through the non-interactive runner and interactive run/debug commands through Terminal.
-- `src/stores/useTaskStore.ts`: queued terminal command state for project tasks.
+- `src/stores/useTaskStore.ts`: queued terminal command state, latest task state, run history, and recent terminal output for project tasks.
 - `src/utils/terminalProblemParser.ts`: parses terminal output into Problems entries for common file:line:column formats.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
 - `src/stores/`: Zustand state for layout, editor, Agent, Git, logs, theme.
@@ -215,6 +216,7 @@ Project Tasks
     -> non-interactive runner for build/test/lint/check
       -> Logs + Problems + task status
       -> failed command card exposes Fix with Agent
+      -> run history stores exit code, duration, and output details
     -> Terminal queue for run/debug interactive tasks
 ```
 

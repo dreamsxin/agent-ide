@@ -33,7 +33,7 @@ export function useRunProjectTask() {
       clearProblems("test");
 
       if (shouldUseCommandRunner(task)) {
-        startTaskRun(task.id, task.command);
+        startTaskRun(task.id, task.command, task.label);
         addLog({
           time: new Date().toLocaleTimeString(),
           level: "info",
