@@ -92,6 +92,7 @@ export default function App() {
         console.log("[App] Restoring workspace:", saved);
         useLayoutStore.getState().setWorkspacePath(saved);
         useEditorStore.getState().setWorkspacePath(saved);
+        void useEditorStore.getState().restoreEditorSession(saved);
       } else {
         console.log("[App] No saved workspace found, starting empty");
       }

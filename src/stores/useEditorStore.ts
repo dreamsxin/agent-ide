@@ -54,6 +54,7 @@ interface EditorStore {
 
   // ====== 工作目录 ======
   setWorkspacePath: (path: string) => void;
+  restoreEditorSession: (workspacePath: string) => Promise<void>;
 
   // ====== AI 增强层 ======
   setInlineSuggestion: (suggestion: InlineSuggestion | null) => void;
@@ -86,6 +87,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     const exists = s.openFiles.find((f) => f.path === tab.path);
     if (exists) {
       set({ activeFile: tab.path });
+      persistEditorSession();
       return;
     }
 
@@ -103,9 +105,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       activeFile: tab.path,
       fileContents: { ...prev.fileContents, [tab.path]: content },
     }));
+    persistEditorSession();
   },
 
-  closeFile: (path) =>
+  closeFile: (path) => {
     set((s) => {
       const remaining = s.openFiles.filter((f) => f.path !== path);
       const newActive =
@@ -120,9 +123,14 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         activeFile: newActive,
         fileContents: restContents,
       };
-    }),
+    });
+    persistEditorSession();
+  },
 
-  setActiveFile: (path) => set({ activeFile: path }),
+  setActiveFile: (path) => {
+    set({ activeFile: path });
+    persistEditorSession();
+  },
 
   markDirty: (path, dirty) =>
     set((s) => ({
@@ -243,6 +251,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       })(),
       explorerKey: s.explorerKey + 1,
     }));
+    persistEditorSession();
   },
 
   // ====== 文件监听 ======
@@ -267,10 +276,44 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   // ====== 工作目录 ======
 
-  setWorkspacePath: (path) => set((prev) => ({
-    workspacePath: path,
-    explorerKey: prev.explorerKey + 1,  // 触发 Explorer 刷新
-  })),
+  setWorkspacePath: (path) => {
+    set((prev) => ({
+      workspacePath: path,
+      explorerKey: prev.explorerKey + 1,  // 触发 Explorer 刷新
+    }));
+  },
+
+  restoreEditorSession: async (workspacePath) => {
+    const saved = loadEditorSession();
+    if (!saved || saved.workspacePath !== workspacePath || saved.openFiles.length === 0) return;
+
+    const restoredFiles: FileTab[] = [];
+    const restoredContents: Record<string, string> = {};
+    for (const tab of saved.openFiles.slice(0, 20)) {
+      try {
+        const content = isTauriRuntime()
+          ? await invoke<string>("read_file_content", { path: tab.path })
+          : `// File loading is available in the Tauri app runtime.\n// ${tab.path}`;
+        restoredFiles.push({ ...tab, isDirty: false });
+        restoredContents[tab.path] = content;
+      } catch {
+        // Skip files that no longer exist or cannot be read.
+      }
+    }
+
+    if (restoredFiles.length === 0) return;
+    const activeFile =
+      saved.activeFile && restoredFiles.some((file) => file.path === saved.activeFile)
+        ? saved.activeFile
+        : restoredFiles[0].path;
+
+    set({
+      openFiles: restoredFiles,
+      activeFile,
+      fileContents: restoredContents,
+    });
+    persistEditorSession();
+  },
 
   // ====== AI 增强层 ======
 
@@ -304,3 +347,35 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     set({ pendingRevealLocation: { file, line, column } }),
   clearPendingRevealLocation: () => set({ pendingRevealLocation: null }),
 }));
+
+interface PersistedEditorSession {
+  workspacePath: string;
+  openFiles: FileTab[];
+  activeFile: string | null;
+}
+
+const EDITOR_SESSION_KEY = "agent-ide-editor-session";
+
+function persistEditorSession() {
+  if (typeof window === "undefined") return;
+  const { workspacePath, openFiles, activeFile } = useEditorStore.getState();
+  const session: PersistedEditorSession = {
+    workspacePath,
+    openFiles: openFiles.map((file) => ({ ...file, isDirty: false })),
+    activeFile,
+  };
+  localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(session));
+}
+
+function loadEditorSession(): PersistedEditorSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(EDITOR_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedEditorSession;
+    if (!parsed || !Array.isArray(parsed.openFiles)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
