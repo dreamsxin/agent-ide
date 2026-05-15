@@ -25,6 +25,8 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
   const replaceProblems = useProblemStore((s) => s.replaceProblems);
   const lastTask = useTaskStore((s) => s.lastTask);
   const consumeTerminalCommands = useTaskStore((s) => s.consumeTerminalCommands);
+  const appendTerminalOutput = useTaskStore((s) => s.appendTerminalOutput);
+  const clearTerminalOutput = useTaskStore((s) => s.clearTerminalOutput);
   const addLog = useLogStore((s) => s.addLog);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const [startupError, setStartupError] = useState<string | null>(null);
@@ -54,6 +56,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     if (!containerRef.current) return;
     setStartupError(null);
     outputBufferRef.current = "";
+    clearTerminalOutput(terminalId);
     replaceProblems("test", []);
 
     let disposed = false;
@@ -129,6 +132,7 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
     listen<{ id: string; data: string }>("terminal-output", (event) => {
       if (event.payload.id === terminalId) {
         term.write(event.payload.data);
+        appendTerminalOutput(terminalId, event.payload.data);
         const parsed = appendAndParseTerminalProblems(
           outputBufferRef.current,
           event.payload.data,
@@ -202,7 +206,14 @@ export default function Terminal({ terminalId = "main" }: TerminalProps) {
       xtermRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [replaceProblems, runQueuedCommands, terminalId, workspacePath]);
+  }, [
+    appendTerminalOutput,
+    clearTerminalOutput,
+    replaceProblems,
+    runQueuedCommands,
+    terminalId,
+    workspacePath,
+  ]);
 
   useEffect(() => {
     runQueuedCommands();

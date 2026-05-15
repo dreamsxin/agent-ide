@@ -34,6 +34,7 @@ export interface ProjectTaskRunState {
 interface TaskStore {
   lastTask: QueuedTerminalCommand | null;
   pendingTerminalCommands: QueuedTerminalCommand[];
+  terminalOutput: Record<string, string>;
   discoveredTasks: ProjectTaskDefinition[];
   taskDiscoveryLoading: boolean;
   taskDiscoveryLoaded: boolean;
@@ -49,6 +50,8 @@ interface TaskStore {
   ) => void;
   queueTerminalCommand: (taskId: string, command: string, terminalId?: string) => QueuedTerminalCommand;
   consumeTerminalCommands: (terminalId: string) => QueuedTerminalCommand[];
+  appendTerminalOutput: (terminalId: string, output: string) => void;
+  clearTerminalOutput: (terminalId?: string) => void;
 }
 
 export const PROJECT_TASKS: ProjectTaskDefinition[] = [
@@ -92,6 +95,7 @@ export const PROJECT_TASKS: ProjectTaskDefinition[] = [
 export const useTaskStore = create<TaskStore>((set, get) => ({
   lastTask: null,
   pendingTerminalCommands: [],
+  terminalOutput: {},
   discoveredTasks: [],
   taskDiscoveryLoading: false,
   taskDiscoveryLoaded: false,
@@ -163,4 +167,23 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     }));
     return commands;
   },
+
+  appendTerminalOutput: (terminalId, output) =>
+    set((state) => {
+      const previous = state.terminalOutput[terminalId] ?? "";
+      const next = `${previous}${output}`.slice(-12000);
+      return {
+        terminalOutput: {
+          ...state.terminalOutput,
+          [terminalId]: next,
+        },
+      };
+    }),
+
+  clearTerminalOutput: (terminalId) =>
+    set((state) => {
+      if (!terminalId) return { terminalOutput: {} };
+      const { [terminalId]: _, ...rest } = state.terminalOutput;
+      return { terminalOutput: rest };
+    }),
 }));

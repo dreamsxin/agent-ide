@@ -90,6 +90,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fixed workspace switching for Commands and Terminal by passing the active frontend workspace path into task discovery, task execution, and terminal spawn instead of relying only on previously persisted backend workspace state.
 - Normalized Windows verbatim workspace paths before spawning Terminal or project task shells so `cmd.exe` starts in `D:\...` paths instead of rejecting `\\?\D:\...` as a UNC path.
 - Kept the integrated Terminal mounted across bottom-tab switches and bottom-panel hide/show so switching to Commands, Problems, or Logs does not kill and recreate the PTY session.
+- Added IDE runtime failure context injection for Agent prompts, including the latest failed project command, parsed Problems, recent Terminal output, and recent warning/error Logs.
 
 Important distinction:
 
@@ -218,6 +219,7 @@ Project Tasks
 ```text
 ChatView.handleSend()
   -> useAgentStore.sendPrompt()
+    -> append IDE runtime context from failed tasks, Problems, Terminal output, and Logs
     -> invoke("send_agent_prompt")
       -> AgentContext built from active file, selection, open files
       -> context enriched with project tree and Git working-tree diff when available
