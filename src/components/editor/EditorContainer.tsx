@@ -6,6 +6,7 @@ import InlineSuggestion from "./InlineSuggestion";
 import DiffOverlay from "./DiffOverlay";
 import IntentHint from "./IntentHint";
 import QuickActions from "./QuickActions";
+import DiagnosticsBridge from "./DiagnosticsBridge";
 import { buildLocalCompletionCandidates, type CompletionCandidateKind } from "../../utils/codeCompletion";
 
 import type { editor } from "monaco-editor";
@@ -54,6 +55,8 @@ export default function EditorContainer() {
   const saveCurrentFile = useEditorStore((s) => s.saveCurrentFile);
   const setSelectedText = useEditorStore((s) => s.setSelectedText);
   const setSelectedRange = useEditorStore((s) => s.setSelectedRange);
+  const pendingRevealLocation = useEditorStore((s) => s.pendingRevealLocation);
+  const clearPendingRevealLocation = useEditorStore((s) => s.clearPendingRevealLocation);
 
   const [editorRef, setEditorRef] = useState<editor.IStandaloneCodeEditor | null>(null);
   const [monacoRef, setMonacoRef] = useState<typeof import("monaco-editor") | null>(null);
@@ -179,6 +182,20 @@ export default function EditorContainer() {
 
   const contextValue = { editor: editorRef, monaco: monacoRef };
 
+  useEffect(() => {
+    if (!editorRef || !monacoRef || !activeFile || !pendingRevealLocation) return;
+    if (pendingRevealLocation.file !== activeFile) return;
+
+    const position = {
+      lineNumber: Math.max(1, pendingRevealLocation.line),
+      column: Math.max(1, pendingRevealLocation.column),
+    };
+    editorRef.setPosition(position);
+    editorRef.revealPositionInCenter(position, monacoRef.editor.ScrollType.Smooth);
+    editorRef.focus();
+    clearPendingRevealLocation();
+  }, [activeFile, clearPendingRevealLocation, editorRef, monacoRef, pendingRevealLocation]);
+
   return (
     <div className="h-full flex flex-col bg-surface-base" ref={editorContainerRef}>
       {/* 文件标签栏 */}
@@ -228,6 +245,7 @@ export default function EditorContainer() {
               <DiffOverlay />
               <IntentHint />
               <QuickActions />
+              <DiagnosticsBridge />
             </Suspense>
           ) : (
             <div className="h-full flex items-center justify-center">

@@ -24,6 +24,7 @@ interface EditorStore {
   // 选区
   selectedText: string | null;
   selectedRange: { startLine: number; endLine: number } | null;
+  pendingRevealLocation: { file: string; line: number; column: number } | null;
 
   // ====== 文件打开/关闭 ======
   openFile: (tab: FileTab) => Promise<void>;
@@ -63,6 +64,8 @@ interface EditorStore {
 
   setSelectedText: (text: string | null) => void;
   setSelectedRange: (range: { startLine: number; endLine: number } | null) => void;
+  revealLocation: (file: string, line: number, column: number) => void;
+  clearPendingRevealLocation: () => void;
 }
 
 export const useEditorStore = create<EditorStore>((set, get) => ({
@@ -76,6 +79,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   intentHints: [],
   selectedText: null,
   selectedRange: null,
+  pendingRevealLocation: null,
 
   openFile: async (tab) => {
     const s = get();
@@ -296,4 +300,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setSelectedText: (selectedText) => set({ selectedText }),
   setSelectedRange: (selectedRange) => set({ selectedRange }),
+  revealLocation: (file, line, column) =>
+    set({ pendingRevealLocation: { file, line, column } }),
+  clearPendingRevealLocation: () => set({ pendingRevealLocation: null }),
 }));

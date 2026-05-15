@@ -13,6 +13,7 @@ export default function ProblemsPanel() {
   const clearProblems = useProblemStore((s) => s.clearProblems);
   const openFile = useEditorStore((s) => s.openFile);
   const setActiveFile = useEditorStore((s) => s.setActiveFile);
+  const revealLocation = useEditorStore((s) => s.revealLocation);
   const openFiles = useEditorStore((s) => s.openFiles);
 
   const counts = useMemo(
@@ -24,8 +25,9 @@ export default function ProblemsPanel() {
     [problems]
   );
 
-  const handleProblemClick = async (file: string) => {
+  const handleProblemClick = async (file: string, line: number, column: number) => {
     if (!file || file === "Agent") return;
+    revealLocation(file, line, column);
     const existing = openFiles.find((tab) => tab.path === file);
     if (existing) {
       setActiveFile(file);
@@ -68,7 +70,7 @@ export default function ProblemsPanel() {
             return (
               <button
                 key={problem.id}
-                onClick={() => void handleProblemClick(problem.file)}
+                onClick={() => void handleProblemClick(problem.file, problem.line, problem.column)}
                 className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_90px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
               >
                 <span className={`font-bold ${style.color}`}>{style.label}</span>
