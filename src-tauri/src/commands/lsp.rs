@@ -915,7 +915,7 @@ fn parse_position(value: &Value) -> Option<LspPosition> {
 
 fn path_to_uri(path: &Path) -> String {
     let path = workspace::shell_compatible_path(path.to_path_buf());
-    let text = path.to_string_lossy().replace('\\', "/");
+    let text = encode_uri_path(&path.to_string_lossy().replace('\\', "/"));
     if cfg!(windows) {
         format!("file:///{}", text)
     } else {
@@ -930,7 +930,43 @@ fn uri_to_path(uri: &str) -> Option<String> {
     } else {
         decoded
     };
-    Some(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+    Some(decode_uri_path(path)?.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+fn encode_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'/'
+            | b':' => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn decode_uri_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = path.get(index + 1..index + 3)?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 impl Drop for LspServer {
@@ -967,5 +1003,39 @@ fn server_binary_name() -> &'static str {
         "typescript-language-server.cmd"
     } else {
         "typescript-language-server"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsp_uri_round_trips_spaces_and_symbols() {
+        let path = if cfg!(windows) {
+            PathBuf::from(r"D:\work\agent ide\src\[demo].ts")
+        } else {
+            PathBuf::from("/tmp/agent ide/src/[demo].ts")
+        };
+        let uri = path_to_uri(&path);
+
+        assert!(uri.contains("agent%20ide"));
+        assert!(uri.contains("%5Bdemo%5D.ts"));
+        assert_eq!(uri_to_path(&uri).map(PathBuf::from), Some(path));
+    }
+
+    #[test]
+    fn lsp_uri_decode_rejects_invalid_percent_encoding() {
+        assert_eq!(uri_to_path("file:///D:/work/%ZZ/demo.ts"), None);
+    }
+
+    #[test]
+    fn lsp_uri_strips_windows_verbatim_prefix() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let uri = path_to_uri(Path::new(r"\\?\D:\work\agent-ide\src\main.ts"));
+        assert_eq!(uri, "file:///D:/work/agent-ide/src/main.ts");
     }
 }
