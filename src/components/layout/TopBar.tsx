@@ -4,8 +4,6 @@ import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { useTaskStore, type ProjectTaskDefinition } from "../../stores/useTaskStore";
-import { useLogStore } from "../../stores/useLogStore";
-import { useProblemStore } from "../../stores/useProblemStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -13,15 +11,7 @@ import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
 import { isTauriRuntime } from "../../utils/tauri";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
-import { parseTerminalProblems } from "../../utils/terminalProblemParser";
-
-interface RunProjectTaskResult {
-  command: string;
-  exitCode: number | null;
-  durationMs: number;
-  stdout: string;
-  stderr: string;
-}
+import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
@@ -34,19 +24,13 @@ export default function TopBar() {
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
-  const bottomVisible = useLayoutStore((s) => s.bottomVisible);
-  const setBottomTab = useLayoutStore((s) => s.setBottomTab);
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const setWorkspacePath = useLayoutStore((s) => s.setWorkspacePath);
-  const queueTerminalCommand = useTaskStore((s) => s.queueTerminalCommand);
-  const startTaskRun = useTaskStore((s) => s.startTaskRun);
-  const finishTaskRun = useTaskStore((s) => s.finishTaskRun);
   const taskRuns = useTaskStore((s) => s.taskRuns);
-  const addLog = useLogStore((s) => s.addLog);
-  const replaceProblems = useProblemStore((s) => s.replaceProblems);
   const { tasks } = useProjectTasks();
+  const runProjectTask = useRunProjectTask();
 
   const [isMaximized, setIsMaximized] = useState(false);
 
@@ -74,79 +58,6 @@ export default function TopBar() {
   const handleStop = useCallback(() => {
     stopAgent();
   }, [stopAgent]);
-
-  const runProjectTask = useCallback(
-    async (task: ProjectTaskDefinition | undefined) => {
-      if (!task || !isTauriRuntime()) return;
-      if (shouldUseCommandRunner(task)) {
-        startTaskRun(task.id, task.command);
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          level: "info",
-          source: "system",
-          message: `Running project task: ${task.label}`,
-          details: task.command,
-        });
-        try {
-          const result = await invoke<RunProjectTaskResult>("run_project_task", {
-            request: { command: task.command },
-          });
-          const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
-          const status = result.exitCode === 0 ? "success" : "failed";
-          finishTaskRun(task.id, status, {
-            exitCode: result.exitCode,
-            durationMs: result.durationMs,
-            output,
-          });
-          replaceProblems("test", parseTerminalProblems(output, "task"));
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            level: status === "success" ? "success" : "error",
-            source: "system",
-            message: `${task.label} ${status} (${result.durationMs} ms)`,
-            details: output.slice(0, 4000),
-          });
-        } catch (err) {
-          finishTaskRun(task.id, "failed", {
-            exitCode: null,
-            durationMs: 0,
-            output: String(err),
-          });
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            level: "error",
-            source: "system",
-            message: `Failed to run project task: ${task.label}`,
-            details: String(err),
-          });
-        }
-        return;
-      }
-
-      if (!bottomVisible) {
-        toggleBottomPanel();
-      }
-      setBottomTab("terminal");
-      queueTerminalCommand(task.id, task.command);
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        level: "info",
-        source: "system",
-        message: `Queued project task: ${task.label}`,
-        details: task.command,
-      });
-    },
-    [
-      addLog,
-      bottomVisible,
-      finishTaskRun,
-      queueTerminalCommand,
-      replaceProblems,
-      setBottomTab,
-      startTaskRun,
-      toggleBottomPanel,
-    ]
-  );
 
   const handleHelp = useCallback(() => {
     window.dispatchEvent(new CustomEvent("toggle-shortcuts-help"));
@@ -367,9 +278,4 @@ function pickTask(tasks: ProjectTaskDefinition[], names: string[]) {
     tasks.find((task) => normalized.includes(task.label.toLowerCase())) ??
     tasks.find((task) => normalized.some((name) => task.id.toLowerCase().includes(name)))
   );
-}
-
-function shouldUseCommandRunner(task: ProjectTaskDefinition) {
-  const value = `${task.id} ${task.label}`.toLowerCase();
-  return ["build", "test", "lint", "check", "typecheck"].some((name) => value.includes(name));
 }

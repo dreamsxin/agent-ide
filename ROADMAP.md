@@ -86,6 +86,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Moved common project Run/Debug/Build/Test commands into the TopBar and renamed the bottom task list to Commands to keep Agent Tasks distinct.
 - Expanded terminal test-output parsing for Vitest/Jest-style failures, stack traces, and `FAIL` file summaries so `npm run test` failures can surface in Problems.
 - Added non-interactive project task runner for build/test/lint/check commands with exit code, duration, Logs integration, and Problems parsing.
+- Unified TopBar and Commands panel project command execution through a shared runner/terminal routing hook, so build/test/lint/check feed Logs and Problems consistently while run/debug stay interactive in Terminal.
 
 Important distinction:
 
@@ -123,6 +124,7 @@ Known local worktree note:
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
 - `src/components/panels/TasksPanel.tsx`: project command list for discovered build/test/lint/run/debug commands.
 - `src/hooks/useProjectTasks.ts`: shared frontend task discovery hook for TopBar and Commands.
+- `src/hooks/useRunProjectTask.ts`: shared project command executor that routes build/test/lint/check through the non-interactive runner and interactive run/debug commands through Terminal.
 - `src/stores/useTaskStore.ts`: queued terminal command state for project tasks.
 - `src/utils/terminalProblemParser.ts`: parses terminal output into Problems entries for common file:line:column formats.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
@@ -202,6 +204,7 @@ Project Tasks
     -> package.json scripts + Cargo manifests
     -> fallback defaults when no tasks are discovered
   -> TopBar common Run/Debug/Build/Test buttons or Commands panel
+    -> shared useRunProjectTask routing
     -> non-interactive runner for build/test/lint/check
       -> Logs + Problems + task status
     -> Terminal queue for run/debug interactive tasks
@@ -276,6 +279,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Persistent PTY writer is now used for terminal input.
    - Project tasks can queue run/debug commands into the terminal.
    - Build/test/lint/check tasks can run through a non-interactive command runner with exit code and duration.
+   - TopBar and Commands panel now use the same project command execution path.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Git workflow needs continued polish**

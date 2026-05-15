@@ -1,36 +1,13 @@
 import { useTaskStore } from "../../stores/useTaskStore";
-import { useLayoutStore } from "../../stores/useLayoutStore";
-import { useLogStore } from "../../stores/useLogStore";
-import { useProblemStore } from "../../stores/useProblemStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
+import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 
 export default function TasksPanel() {
-  const queueTerminalCommand = useTaskStore((s) => s.queueTerminalCommand);
   const lastTask = useTaskStore((s) => s.lastTask);
   const taskRuns = useTaskStore((s) => s.taskRuns);
-  const setBottomTab = useLayoutStore((s) => s.setBottomTab);
-  const bottomVisible = useLayoutStore((s) => s.bottomVisible);
-  const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
-  const addLog = useLogStore((s) => s.addLog);
-  const clearProblems = useProblemStore((s) => s.clearProblems);
   const { tasks, usingFallback, loading, error } = useProjectTasks();
-
-  const runTask = (taskId: string, command: string, label: string) => {
-    if (!bottomVisible) {
-      toggleBottomPanel();
-    }
-    setBottomTab("terminal");
-    clearProblems("test");
-    queueTerminalCommand(taskId, command);
-    addLog({
-      time: new Date().toLocaleTimeString(),
-      level: "info",
-      source: "system",
-      message: `Queued project task: ${label}`,
-      details: command,
-    });
-  };
+  const runProjectTask = useRunProjectTask();
 
   return (
     <div className="flex h-full flex-col bg-black text-xs">
@@ -66,7 +43,7 @@ export default function TasksPanel() {
           return (
             <button
               key={task.id}
-              onClick={() => runTask(task.id, task.command, task.label)}
+              onClick={() => void runProjectTask(task)}
               disabled={!isTauriRuntime()}
               className="rounded border border-surface-border bg-surface-panel p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-surface-border/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
