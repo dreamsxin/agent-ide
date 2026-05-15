@@ -145,16 +145,26 @@ export default function DiffView() {
               key={diff.id}
               className="overflow-hidden rounded-lg border border-surface-border bg-surface-base"
             >
-              <div className="flex items-center justify-between border-b border-surface-border bg-surface-panel px-3 py-2">
-                <span className="flex-1 truncate text-xs font-medium text-surface-text">
-                  {diff.file}
-                </span>
-                <span className="mr-1 text-[10px] text-diff-add">
-                  +{diff.hunks.reduce((sum, h) => sum + h.newLines, 0)}
-                </span>
-                <span className="text-[10px] text-diff-remove">
-                  -{diff.hunks.reduce((sum, h) => sum + h.oldLines, 0)}
-                </span>
+              <div className="border-b border-surface-border bg-surface-panel px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex-1 truncate text-xs font-medium text-surface-text">
+                    {diff.file}
+                  </span>
+                  <span className="mr-1 text-[10px] text-diff-add">
+                    +{diff.hunks.reduce((sum, h) => sum + h.newLines, 0)}
+                  </span>
+                  <span className="text-[10px] text-diff-remove">
+                    -{diff.hunks.reduce((sum, h) => sum + h.oldLines, 0)}
+                  </span>
+                </div>
+                {diff.baseHash && (
+                  <div className="mt-1 flex items-center gap-1 text-[10px] text-surface-muted">
+                    <span className="rounded border border-surface-border px-1 py-0.5">
+                      baseHash
+                    </span>
+                    <span className="truncate font-mono">{diff.baseHash}</span>
+                  </div>
+                )}
               </div>
 
               <div className="max-h-60 overflow-auto">
@@ -181,6 +191,11 @@ export default function DiffView() {
                       {diff.applyError || failedMessages.get(diff.id)}
                     </div>
                   )}
+                  {isHashMismatch(diff.applyError || failedMessages.get(diff.id)) && (
+                    <div className="mt-1 rounded border border-diff-remove/30 bg-surface-base/70 px-2 py-1 text-[10px] text-surface-muted">
+                      The file changed after the Agent generated this diff. Ask the Agent to regenerate the change against the current file before applying.
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -196,4 +211,9 @@ export default function DiffView() {
       </div>
     </div>
   );
+}
+
+function isHashMismatch(message?: string) {
+  if (!message) return false;
+  return message.includes("baseHash") || message.includes("File changed since diff was generated");
 }

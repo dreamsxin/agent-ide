@@ -40,6 +40,7 @@ export interface Step {
 export interface DiffEntry {
   id: string;
   file: string;
+  baseHash?: string | null;
   hunks: DiffHunk[];
   status: "pending" | "applied" | "rejected" | "failed";
   applyError?: string;

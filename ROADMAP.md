@@ -73,6 +73,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added `README.md` with setup, runtime modes, verification, Agent workflow, protocol, and project status.
 - Added optional `baseHash` metadata to structured Agent diffs and reject stale edit diffs when the file content hash no longer matches.
 - Added `README.zh-CN.md` as the Chinese project README and linked it from the English README.
+- Surfaced diff `baseHash` metadata in the Diff view and added stale-diff guidance when hash validation fails.
 
 Important distinction:
 
@@ -378,7 +379,7 @@ target\release\agent_cli --help
 
 1. Add terminal/log excerpts and selected-file packing to Agent context.
 2. Add stricter validation to the structured Agent protocol.
-3. Add per-hunk diff application and expose baseHash in the review UI.
+3. Add per-hunk diff application and richer conflict recovery controls.
 4. Persist Agent action logs with prompt/context/diff provenance.
 5. Move LLM API key storage to a safer credential path.
 
