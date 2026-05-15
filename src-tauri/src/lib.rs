@@ -68,6 +68,8 @@ pub fn run() {
             commands::git::git_stage_files,
             commands::git::git_unstage_files,
             commands::git::git_discard_files,
+            // Tasks 命令
+            commands::tasks::discover_project_tasks,
             // Terminal 命令
             commands::terminal::spawn_terminal,
             commands::terminal::write_to_terminal,

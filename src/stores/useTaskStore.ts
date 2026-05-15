@@ -3,24 +3,25 @@ import { create } from "zustand";
 export type ProjectTaskKind = "build" | "test" | "lint" | "run" | "debug";
 
 export interface ProjectTaskDefinition {
-  id: ProjectTaskKind;
+  id: string;
   label: string;
   command: string;
   description: string;
+  source: string;
 }
 
 export interface QueuedTerminalCommand {
   id: string;
   terminalId: string;
   command: string;
-  taskId: ProjectTaskKind;
+  taskId: string;
   createdAt: number;
 }
 
 interface TaskStore {
   lastTask: QueuedTerminalCommand | null;
   pendingTerminalCommands: QueuedTerminalCommand[];
-  queueTerminalCommand: (taskId: ProjectTaskKind, command: string, terminalId?: string) => QueuedTerminalCommand;
+  queueTerminalCommand: (taskId: string, command: string, terminalId?: string) => QueuedTerminalCommand;
   consumeTerminalCommands: (terminalId: string) => QueuedTerminalCommand[];
 }
 
@@ -30,30 +31,35 @@ export const PROJECT_TASKS: ProjectTaskDefinition[] = [
     label: "Build",
     command: "npm run build",
     description: "Compile TypeScript and create the production web build.",
+    source: "default",
   },
   {
     id: "test",
     label: "Test",
     command: "cd src-tauri; cargo test; cd ..",
     description: "Run the Rust backend test suite.",
+    source: "default",
   },
   {
     id: "lint",
     label: "Lint",
     command: "npx tsc --noEmit",
     description: "Run TypeScript checking without emitting files.",
+    source: "default",
   },
   {
     id: "run",
     label: "Run",
     command: "npm run tauri -- dev",
     description: "Start the real Tauri IDE runtime.",
+    source: "default",
   },
   {
     id: "debug",
     label: "Debug",
     command: "npm run dev",
     description: "Start the Vite web preview for frontend debugging.",
+    source: "default",
   },
 ];
 

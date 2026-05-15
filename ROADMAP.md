@@ -82,6 +82,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Synced Monaco model markers into the Problems panel and made problem rows jump to the affected file location.
 - Parsed terminal TypeScript/lint/test-style file-position errors into the Problems panel for click-through navigation.
 - Added a Project Tasks panel for build, test, lint, run, and debug commands that queue into the integrated terminal.
+- Added workspace task discovery from `package.json` scripts and Cargo manifests, with fallback default tasks when no project tasks are found.
 
 Important distinction:
 
@@ -130,6 +131,7 @@ Known local worktree note:
 - `src-tauri/src/lib.rs`: Tauri plugin setup and command registration.
 - `src-tauri/src/commands/fs.rs`: workspace-scoped file operations and watcher.
 - `src-tauri/src/commands/git.rs`: Git status, diff, commit.
+- `src-tauri/src/commands/tasks.rs`: project task discovery from workspace configuration.
 - `src-tauri/src/commands/terminal.rs`: PTY lifecycle.
 - `src-tauri/src/commands/agent.rs`: Agent commands, LLM config, context compression config.
 - `src-tauri/src/agent/`: state machine, planner, executor, orchestrator, diff helpers, roles/pipeline models.
@@ -192,7 +194,10 @@ Terminal command output
       -> ProblemsPanel
 
 Project Tasks
-  -> TasksPanel Build/Test/Lint/Run/Debug
+  -> discover_project_tasks()
+    -> package.json scripts + Cargo manifests
+    -> fallback defaults when no tasks are discovered
+  -> TasksPanel
     -> useTaskStore.queueTerminalCommand()
     -> Terminal consumes queued command when ready
     -> terminalProblemParser feeds Problems
@@ -377,7 +382,7 @@ Deliverables:
   - resize
   - receive `terminal-output`
   - kill terminal
-- Project Tasks panel launches build, test, lint, run, and debug commands through the integrated terminal.
+- Project Tasks panel discovers workspace scripts/manifests and launches build, test, lint, run, and debug commands through the integrated terminal.
 - QuickActions sends real Agent prompts.
 - DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.

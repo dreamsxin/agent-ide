@@ -1,4 +1,6 @@
-import { PROJECT_TASKS, useTaskStore } from "../../stores/useTaskStore";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { PROJECT_TASKS, useTaskStore, type ProjectTaskDefinition } from "../../stores/useTaskStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { useProblemStore } from "../../stores/useProblemStore";
@@ -12,8 +14,39 @@ export default function TasksPanel() {
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const addLog = useLogStore((s) => s.addLog);
   const clearProblems = useProblemStore((s) => s.clearProblems);
+  const [discoveredTasks, setDiscoveredTasks] = useState<ProjectTaskDefinition[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const runTask = (taskId: (typeof PROJECT_TASKS)[number]["id"], command: string, label: string) => {
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    invoke<ProjectTaskDefinition[]>("discover_project_tasks")
+      .then((tasks) => {
+        if (!cancelled) setDiscoveredTasks(tasks);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(String(err));
+          setDiscoveredTasks([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const tasks = discoveredTasks.length > 0 ? discoveredTasks : PROJECT_TASKS;
+  const usingFallback = discoveredTasks.length === 0;
+
+  const runTask = (taskId: string, command: string, label: string) => {
     if (!bottomVisible) {
       toggleBottomPanel();
     }
@@ -34,7 +67,9 @@ export default function TasksPanel() {
       <div className="border-b border-surface-border px-3 py-2">
         <div className="font-semibold text-surface-text">Project Tasks</div>
         <div className="mt-0.5 text-[11px] text-surface-muted">
-          Run common build, test, lint, run, and debug commands in the integrated terminal.
+          {usingFallback
+            ? "No workspace tasks discovered yet. Showing fallback commands."
+            : "Tasks discovered from the current workspace configuration."}
         </div>
       </div>
 
@@ -44,8 +79,19 @@ export default function TasksPanel() {
         </div>
       )}
 
+      {loadError && (
+        <div className="border-b border-surface-border px-3 py-2 text-[11px] text-diff-remove">
+          Failed to discover workspace tasks: {loadError}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-2 overflow-auto p-3 sm:grid-cols-2 xl:grid-cols-3">
-        {PROJECT_TASKS.map((task) => (
+        {loading && (
+          <div className="rounded border border-surface-border bg-surface-panel p-3 text-surface-muted">
+            Loading workspace tasks...
+          </div>
+        )}
+        {tasks.map((task) => (
           <button
             key={task.id}
             onClick={() => runTask(task.id, task.command, task.label)}
@@ -55,7 +101,7 @@ export default function TasksPanel() {
             <div className="flex items-center justify-between gap-2">
               <span className="font-semibold text-surface-text">{task.label}</span>
               <span className="rounded border border-surface-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-surface-muted">
-                {task.id}
+                {task.source}
               </span>
             </div>
             <div className="mt-2 font-mono text-[11px] text-accent-blue">{task.command}</div>
