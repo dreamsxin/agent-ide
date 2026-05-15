@@ -6,6 +6,7 @@ import InlineSuggestion from "./InlineSuggestion";
 import DiffOverlay from "./DiffOverlay";
 import IntentHint from "./IntentHint";
 import QuickActions from "./QuickActions";
+import { buildLocalCompletionCandidates, type CompletionCandidateKind } from "../../utils/codeCompletion";
 
 import type { editor } from "monaco-editor";
 
@@ -58,6 +59,7 @@ export default function EditorContainer() {
   const [monacoRef, setMonacoRef] = useState<typeof import("monaco-editor") | null>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const disposablesRef = useRef<Set<{ dispose(): void }>>(new Set());
+  const completionRegisteredRef = useRef(false);
 
   const activeTab = openFiles.find((f) => f.path === activeFile);
   const currentContent = activeFile ? fileContents[activeFile] ?? "" : "";
@@ -116,6 +118,61 @@ export default function EditorContainer() {
         }
       });
       disposablesRef.current.add(selectionDisposable);
+
+      if (!completionRegisteredRef.current) {
+        completionRegisteredRef.current = true;
+        const completionLanguages = [
+          "typescript",
+          "javascript",
+          "rust",
+          "python",
+          "css",
+          "html",
+          "json",
+          "markdown",
+          "yaml",
+          "toml",
+        ];
+        for (const language of completionLanguages) {
+          const completionDisposable = monacoInst.languages.registerCompletionItemProvider(language, {
+            triggerCharacters: [".", "/", "\\", "'", "\"", "@", "<"],
+            provideCompletionItems: (model, position) => {
+              const word = model.getWordUntilPosition(position);
+              const currentWord = word.word;
+              const range = {
+                startLineNumber: position.lineNumber,
+                endLineNumber: position.lineNumber,
+                startColumn: word.startColumn,
+                endColumn: word.endColumn,
+              };
+              const editorState = useEditorStore.getState();
+              const candidates = buildLocalCompletionCandidates({
+                content: model.getValue(),
+                language: model.getLanguageId(),
+                currentWord,
+                linePrefix: model.getLineContent(position.lineNumber).slice(0, position.column - 1),
+                openFilePaths: editorState.openFiles.map((file) => file.path),
+              });
+
+              return {
+                suggestions: candidates.map((candidate) => ({
+                  label: candidate.label,
+                  kind: toMonacoCompletionKind(monacoInst, candidate.kind),
+                  insertText: candidate.insertText,
+                  insertTextRules:
+                    candidate.kind === "snippet"
+                      ? monacoInst.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                      : undefined,
+                  detail: candidate.detail,
+                  sortText: `${999 - candidate.score}-${candidate.label}`,
+                  range,
+                })),
+              };
+            },
+          });
+          disposablesRef.current.add(completionDisposable);
+        }
+      }
     },
     [setSelectedText, setSelectedRange]
   );
@@ -194,4 +251,21 @@ export default function EditorContainer() {
       </div>
     </div>
   );
+}
+
+function toMonacoCompletionKind(
+  monaco: typeof import("monaco-editor"),
+  kind: CompletionCandidateKind
+) {
+  switch (kind) {
+    case "keyword":
+      return monaco.languages.CompletionItemKind.Keyword;
+    case "file":
+      return monaco.languages.CompletionItemKind.File;
+    case "snippet":
+      return monaco.languages.CompletionItemKind.Snippet;
+    case "symbol":
+    default:
+      return monaco.languages.CompletionItemKind.Variable;
+  }
 }

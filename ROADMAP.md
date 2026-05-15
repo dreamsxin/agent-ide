@@ -76,6 +76,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Surfaced diff `baseHash` metadata in the Diff view and added stale-diff guidance when hash validation fails.
 - Added Git file management commands and UI actions for stage, unstage, and discard through a file context menu.
 - Added per-file diff apply/reject commands and Diff view controls so reviewers can accept or reject individual pending files instead of only applying or rejecting the full batch.
+- Added Monaco local code completion provider for stable low-latency suggestions from language keywords, current-file symbols, snippets, and open file paths.
 
 Important distinction:
 
@@ -107,6 +108,7 @@ Known local worktree note:
 - `src/App.tsx`: layout, panel visibility, shortcut help, workspace restore.
 - `src/components/layout/`: titlebar, left/right/bottom panels, resize handles.
 - `src/components/editor/`: Monaco editor, tabs, inline suggestions, diff overlays, quick actions.
+- `src/utils/codeCompletion.ts`: local completion candidate extraction for Monaco suggestions.
 - `src/components/panels/`: Explorer, Git panel, terminal, logs.
 - `src/components/agent/`: chat, tasks, diff review, role selector, pipeline, settings.
 - `src/stores/`: Zustand state for layout, editor, Agent, Git, logs, theme.
@@ -140,6 +142,18 @@ Explorer click
       -> Rust fs command resolves path inside workspace
         -> editor store caches content
           -> Monaco renders active file
+```
+
+### Code Completion
+
+```text
+Monaco completion trigger
+  -> EditorContainer registered completion provider
+    -> buildLocalCompletionCandidates()
+      -> language keywords + snippets
+      -> current model identifiers
+      -> open file paths for path-like prefixes
+    -> Monaco suggestions list
 ```
 
 ### Agent Prompt
@@ -229,11 +243,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
 
 ### Lower Priority
 
-10. **Large frontend bundle**
+10. **Code completion is local-only**
+   - Monaco now has stable local keyword/symbol/snippet/path suggestions.
+   - No LSP-backed semantic completion yet.
+   - No LLM inline completion request path yet.
+
+11. **Large frontend bundle**
    - Monaco, Markdown, xterm and syntax tooling create a large chunk.
    - Add dynamic imports/manual chunks later.
 
-11. **Test coverage is thin**
+12. **Test coverage is thin**
    - Rust context compression has tests.
    - Rust diff apply, workspace boundaries, pipeline helpers, and pending diff summaries have tests.
    - Need more tests for Agent state transitions and frontend store behavior.
@@ -311,6 +330,7 @@ Deliverables:
 - QuickActions sends real Agent prompts.
 - DiffView supports per-file apply/reject; per-hunk apply/reject remains pending.
 - Git panel supports stage, unstage, discard with confirmation.
+- Editor has local code completion for common languages and current-file symbols.
 - Tests tab reflects real test commands instead of static sample data.
 - Logs panel consumes backend and Agent event streams.
 
@@ -386,11 +406,12 @@ target\release\agent_cli --help
 ## Next Immediate Tasks
 
 1. Add staged-vs-worktree diff views and multi-select to Git panel.
-2. Add per-hunk diff application and richer conflict recovery controls.
-3. Add terminal/log excerpts and selected-file packing to Agent context.
-4. Add stricter validation to the structured Agent protocol.
-5. Persist Agent action logs with prompt/context/diff provenance.
-6. Move LLM API key storage to a safer credential path.
+2. Add LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python.
+3. Add per-hunk diff application and richer conflict recovery controls.
+4. Add terminal/log excerpts and selected-file packing to Agent context.
+5. Add stricter validation to the structured Agent protocol.
+6. Persist Agent action logs with prompt/context/diff provenance.
+7. Move LLM API key storage to a safer credential path.
 
 ---
 
