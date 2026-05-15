@@ -13,7 +13,17 @@ import { useAgentBridge } from "./hooks/useAgentBridge";
 import useShortcuts from "./hooks/useShortcuts";
 import { isTauriRuntime } from "./utils/tauri";
 
-function AnimatedPanel({ visible, className = "", children }: { visible: boolean; className?: string; children: React.ReactNode }) {
+function AnimatedPanel({
+  visible,
+  className = "",
+  keepMounted = false,
+  children,
+}: {
+  visible: boolean;
+  className?: string;
+  keepMounted?: boolean;
+  children: React.ReactNode;
+}) {
   const [shouldRender, setShouldRender] = useState(visible);
   const [animClass, setAnimClass] = useState("");
 
@@ -21,16 +31,23 @@ function AnimatedPanel({ visible, className = "", children }: { visible: boolean
     if (visible) {
       setShouldRender(true);
       requestAnimationFrame(() => setAnimClass("panel-enter"));
+    } else if (keepMounted) {
+      setAnimClass("");
+      setShouldRender(true);
     } else {
       setAnimClass("");
       const timer = setTimeout(() => setShouldRender(false), 200);
       return () => clearTimeout(timer);
     }
-  }, [visible]);
+  }, [visible, keepMounted]);
 
   if (!shouldRender) return null;
 
-  return <div className={`${animClass} ${className}`}>{children}</div>;
+  return (
+    <div className={`${animClass} ${className} ${visible ? "" : "hidden"}`}>
+      {children}
+    </div>
+  );
 }
 
 export default function App() {
@@ -137,7 +154,7 @@ export default function App() {
         </AnimatedPanel>
       </div>
 
-      <AnimatedPanel visible={bottomVisible} className="flex-shrink-0">
+      <AnimatedPanel visible={bottomVisible} keepMounted className="flex-shrink-0">
         <div>
           <ResizeHandle direction="vertical" onResize={onBottomResize} />
           <div style={{ height: `${bottomHeight}px` }} className="flex-shrink-0">

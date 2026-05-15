@@ -89,6 +89,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Unified TopBar and Commands panel project command execution through a shared runner/terminal routing hook, so build/test/lint/check feed Logs and Problems consistently while run/debug stay interactive in Terminal.
 - Fixed workspace switching for Commands and Terminal by passing the active frontend workspace path into task discovery, task execution, and terminal spawn instead of relying only on previously persisted backend workspace state.
 - Normalized Windows verbatim workspace paths before spawning Terminal or project task shells so `cmd.exe` starts in `D:\...` paths instead of rejecting `\\?\D:\...` as a UNC path.
+- Kept the integrated Terminal mounted across bottom-tab switches and bottom-panel hide/show so switching to Commands, Problems, or Logs does not kill and recreate the PTY session.
 
 Important distinction:
 
@@ -284,6 +285,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - TopBar and Commands panel now use the same project command execution path.
    - Terminal spawn now receives the active frontend workspace path, so newly opened terminals start in the currently opened workspace.
    - Windows shell startup strips `\\?\` verbatim prefixes before passing cwd to `cmd.exe`.
+   - Bottom tab switches no longer unmount Terminal or reset the PTY session.
    - Needs interactive runtime testing in `npm run tauri -- dev` across shell startup, panel hide/show, workspace switching, and long-running commands.
 
 6. **Git workflow needs continued polish**

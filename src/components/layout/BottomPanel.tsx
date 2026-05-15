@@ -41,10 +41,18 @@ export default function BottomPanel() {
 
       {/* Tab 内容 */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === "terminal" && <Terminal />}
-        {activeTab === "commands" && <TasksPanel />}
-        {activeTab === "problems" && <ProblemsPanel />}
-        {activeTab === "logs" && <LogView />}
+        <div className={activeTab === "terminal" ? "h-full" : "hidden h-full"}>
+          <Terminal />
+        </div>
+        <div className={activeTab === "commands" ? "h-full" : "hidden h-full"}>
+          <TasksPanel />
+        </div>
+        <div className={activeTab === "problems" ? "h-full" : "hidden h-full"}>
+          <ProblemsPanel />
+        </div>
+        <div className={activeTab === "logs" ? "h-full" : "hidden h-full"}>
+          <LogView />
+        </div>
       </div>
     </div>
   );
