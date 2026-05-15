@@ -75,6 +75,8 @@ pub struct TaskStep {
 pub struct FileDiff {
     pub id: String,
     pub file: String,
+    #[serde(rename = "baseHash", default)]
+    pub base_hash: Option<String>,
     pub hunks: Vec<DiffHunk>,
     pub status: String,
 }

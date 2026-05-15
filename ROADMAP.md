@@ -71,6 +71,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fixed terminal PTY input handling by keeping a persistent writer per terminal instance instead of taking a new writer for each keystroke.
 - Improved terminal startup feedback and guarded resize fitting when the panel has no measurable size.
 - Added `README.md` with setup, runtime modes, verification, Agent workflow, protocol, and project status.
+- Added optional `baseHash` metadata to structured Agent diffs and reject stale edit diffs when the file content hash no longer matches.
 
 Important distinction:
 
@@ -185,7 +186,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Reviewer receives pending diff summaries.
    - Model outputs can now use structured `agent-changes` JSON blocks.
    - Legacy free-form markdown diff blocks are still supported.
-   - Need file version/hash validation, stricter schema enforcement, operation metadata, and provenance.
+   - Optional `baseHash` validation now rejects stale edit diffs.
+   - Need stricter schema enforcement, operation metadata, and richer provenance.
 
 3. **Secret storage is weak**
    - LLM API key is persisted in `~/.agent-ide/config.json`.
@@ -373,8 +375,8 @@ target\release\agent_cli --help
 ## Next Immediate Tasks
 
 1. Add terminal/log excerpts and selected-file packing to Agent context.
-2. Add file version/hash metadata and stricter validation to the structured Agent protocol.
-3. Add version/hash-aware per-hunk diff application.
+2. Add stricter validation to the structured Agent protocol.
+3. Add per-hunk diff application and expose baseHash in the review UI.
 4. Persist Agent action logs with prompt/context/diff provenance.
 5. Move LLM API key storage to a safer credential path.
 

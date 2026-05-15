@@ -536,6 +536,7 @@ mod tests {
         FileDiff {
             id: Uuid::new_v4().to_string(),
             file: file.to_string(),
+            base_hash: None,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 old_lines: 1,

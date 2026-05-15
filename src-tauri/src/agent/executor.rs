@@ -81,6 +81,7 @@ pub async fn execute_stage(
     {
       "type": "edit",
       "file": "path/to/file",
+      "baseHash": "optional current file hash when known",
       "rationale": "why this change is needed",
       "hunks": [
         { "original": "exact existing code", "updated": "replacement code" }
@@ -234,6 +235,8 @@ struct AgentChange {
     #[serde(rename = "type")]
     change_type: String,
     file: String,
+    #[serde(rename = "baseHash")]
+    base_hash: Option<String>,
     rationale: Option<String>,
     content: Option<String>,
     hunks: Option<Vec<AgentChangeHunk>>,
@@ -302,6 +305,7 @@ fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff>
                     diffs.push(crate::agent::state_machine::FileDiff {
                         id: uuid::Uuid::new_v4().to_string(),
                         file: change.file,
+                        base_hash: change.base_hash,
                         hunks: parsed_hunks,
                         status: "pending".to_string(),
                     });
@@ -340,6 +344,7 @@ fn make_diff(file: &str, content: &str, original: &[String], updated: &[String])
     crate::agent::state_machine::FileDiff {
         id: uuid::Uuid::new_v4().to_string(),
         file: file.to_string(),
+        base_hash: None,
         hunks: vec![crate::agent::state_machine::DiffHunk {
             old_start: 0,
             old_lines: old_count,
@@ -358,6 +363,7 @@ fn make_new_file_diff(file: &str, content: &str) -> crate::agent::state_machine:
     crate::agent::state_machine::FileDiff {
         id: uuid::Uuid::new_v4().to_string(),
         file: file.to_string(),
+        base_hash: None,
         hunks: vec![crate::agent::state_machine::DiffHunk {
             old_start: 0,
             old_lines: 0,

@@ -1,5 +1,6 @@
 use crate::agent::state_machine::{ApplyDiffError, ApplyDiffsResult, FileDiff};
 use crate::services::workspace;
+use std::hash::{Hash, Hasher};
 
 pub(crate) fn apply_diff_to_path(
     file_path: &std::path::Path,
@@ -53,6 +54,7 @@ fn build_updated_content(
 
     let mut content = fs::read_to_string(file_path)
         .map_err(|_| format!("File not found: {}", file_path.display()))?;
+    validate_base_hash(&content, diff, file_path)?;
 
     for hunk in &diff.hunks {
         if hunk.original.is_empty() {
@@ -72,6 +74,33 @@ fn build_updated_content(
     }
 
     Ok(Some(content))
+}
+
+fn validate_base_hash(
+    content: &str,
+    diff: &FileDiff,
+    file_path: &std::path::Path,
+) -> Result<(), String> {
+    let Some(expected) = diff.base_hash.as_deref() else {
+        return Ok(());
+    };
+    let actual = content_hash(content);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "File changed since diff was generated for {}: expected baseHash {}, got {}",
+            file_path.display(),
+            expected,
+            actual
+        ))
+    }
+}
+
+pub fn content_hash(content: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
@@ -194,6 +223,7 @@ mod tests {
         FileDiff {
             id: Uuid::new_v4().to_string(),
             file: file.to_string(),
+            base_hash: None,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 old_lines: original.lines().count().max(1) as u32,
@@ -330,6 +360,38 @@ mod tests {
 
         assert!(err.contains("Could not find original content"));
         assert_eq!(content, "const first = 1;\nconst second = 1;\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn apply_diff_to_path_rejects_stale_base_hash() {
+        let dir = temp_dir();
+        let path = dir.join("edit.ts");
+        std::fs::write(&path, "const value = 1;\n").unwrap();
+        let mut diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        diff.base_hash = Some(content_hash("const value = 0;\n"));
+
+        let err = apply_diff_to_path(&path, &diff).unwrap_err();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(err.contains("File changed since diff was generated"));
+        assert_eq!(content, "const value = 1;\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn apply_diff_to_path_accepts_matching_base_hash() {
+        let dir = temp_dir();
+        let path = dir.join("edit.ts");
+        std::fs::write(&path, "const value = 1;\n").unwrap();
+        let mut diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        diff.base_hash = Some(content_hash("const value = 1;\n"));
+
+        let written = apply_diff_to_path(&path, &diff).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(written);
+        assert_eq!(content, "const value = 2;\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

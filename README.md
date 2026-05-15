@@ -153,6 +153,7 @@ Preferred structured output:
     {
       "type": "edit",
       "file": "path/to/file",
+      "baseHash": "optional current file hash when known",
       "rationale": "why this change is needed",
       "hunks": [
         { "original": "exact existing code", "updated": "replacement code" }
@@ -202,4 +203,3 @@ git status --short
 ```
 
 Do not include unrelated demo/workspace changes in feature commits.
-

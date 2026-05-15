@@ -198,6 +198,7 @@ Model responses prefer a structured protocol:
     {
       "type": "edit",
       "file": "path/to/file",
+      "baseHash": "optional current file hash when known",
       "rationale": "why this change is needed",
       "hunks": [
         { "original": "exact existing code", "updated": "replacement code" }
@@ -409,7 +410,7 @@ Highest-impact gaps:
    - Include operation type, file path, file version/hash, hunks, rationale, and provenance.
 
 2. **Version-aware diff application**
-   - Add file hash or revision metadata.
+   - Optional `baseHash` metadata is now supported and checked before edit diffs are applied.
    - Support per-file and per-hunk apply/reject.
    - Show conflicts with clear recovery options.
 
