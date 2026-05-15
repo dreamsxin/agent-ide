@@ -54,6 +54,28 @@ const PROVIDERS: ProviderPreset[] = [
   },
 ];
 
+const CONTEXT_MODES: Array<{
+  id: ContextCompressionMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "focused",
+    label: "Focused",
+    description: "Selection, active-file excerpt, project summary, Git diff.",
+  },
+  {
+    id: "compact",
+    label: "Compact",
+    description: "Outline and metadata for cheaper broad-context prompts.",
+  },
+  {
+    id: "full",
+    label: "Full",
+    description: "Complete active context when accuracy matters more than tokens.",
+  },
+];
+
 // ====== SettingsPanel ======
 export default function SettingsPanel() {
   const llmEndpoint = useAgentStore((s) => s.llmEndpoint);
@@ -163,20 +185,34 @@ export default function SettingsPanel() {
   return (
     <div className="p-3 text-xs overflow-auto h-full">
       <div className="text-surface-muted mb-3 font-semibold tracking-wide">
-        Model Configuration
+        Agent Context
       </div>
 
       <div className="mb-4">
-        <label className="block text-surface-muted mb-1 text-[11px]">Context Compression</label>
-        <select
-          value={compression}
-          onChange={(e) => handleCompressionChange(e.target.value as ContextCompressionMode)}
-          className="w-full px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
-        >
-          <option value="focused">Focused - active file excerpt</option>
-          <option value="compact">Compact - outline and metadata</option>
-          <option value="full">Full - complete active file</option>
-        </select>
+        <div className="grid grid-cols-3 gap-1">
+          {CONTEXT_MODES.map((mode) => (
+            <button
+              key={mode.id}
+              type="button"
+              onClick={() => handleCompressionChange(mode.id)}
+              className={`rounded border px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                compression === mode.id
+                  ? "border-accent-blue bg-accent-blue/10 text-surface-text"
+                  : "border-surface-border text-surface-muted hover:bg-surface-border/20 hover:text-surface-text"
+              }`}
+              title={mode.description}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
+        <div className="mt-2 rounded border border-surface-border bg-surface-border/10 px-2 py-1.5 text-[10px] leading-relaxed text-surface-muted">
+          {CONTEXT_MODES.find((mode) => mode.id === compression)?.description}
+        </div>
+      </div>
+
+      <div className="text-surface-muted mb-3 font-semibold tracking-wide">
+        Model Configuration
       </div>
 
       {/* 当前配置状态卡 */}
