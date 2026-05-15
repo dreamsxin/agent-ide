@@ -2,6 +2,7 @@ use serde::Serialize;
 use crate::services::workspace;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use tauri::AppHandle;
@@ -139,6 +140,67 @@ pub fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     }
     fs::rename(&old_resolved, &new_resolved)
         .map_err(|e| format!("Failed to rename: {}", e))
+}
+
+/// Open the system file manager at the selected file or directory.
+#[tauri::command]
+pub fn reveal_in_file_explorer(path: String) -> Result<(), String> {
+    let resolved = workspace::resolve_existing(&path)?;
+    reveal_path(&resolved)
+}
+
+fn reveal_path(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if path.is_dir() {
+            Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open File Explorer: {}", e))?;
+        } else {
+            Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn()
+                .map_err(|e| format!("Failed to reveal in File Explorer: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if path.is_dir() {
+            Command::new("open")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to open Finder: {}", e))?;
+        } else {
+            Command::new("open")
+                .arg("-R")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("Failed to reveal in Finder: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        Err("Reveal in file explorer is not supported on this platform.".to_string())
+    }
 }
 
 // ====== 增强文件操作 ======

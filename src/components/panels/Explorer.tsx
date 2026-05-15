@@ -375,6 +375,20 @@ export default function Explorer() {
     [copyPath, closeContextMenu]
   );
 
+  // 在系统文件管理器中显示
+  const handleRevealInFileExplorer = useCallback(
+    async (node: TreeNodeData) => {
+      try {
+        await invoke("reveal_in_file_explorer", { path: node.path });
+        showToast(`Revealed: ${node.name}`);
+      } catch (e) {
+        alert(`Failed to reveal in file explorer: ${e}`);
+      }
+      closeContextMenu();
+    },
+    [closeContextMenu]
+  );
+
   // 删除
   const handleDelete = useCallback(
     async (node: TreeNodeData) => {
@@ -507,6 +521,12 @@ export default function Explorer() {
             className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
           >
             <span>📋</span> Copy
+          </button>
+          <button
+            onClick={() => handleRevealInFileExplorer(contextMenu.node)}
+            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+          >
+            <span>📂</span> Reveal In File Explorer
           </button>
           <button
             onClick={() => handleRename(contextMenu.node)}

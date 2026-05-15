@@ -34,6 +34,7 @@ pub fn run() {
             commands::fs::create_file,
             commands::fs::create_directory,
             commands::fs::rename_path,
+            commands::fs::reveal_in_file_explorer,
             commands::fs::copy_path,
             commands::fs::get_file_metadata,
             commands::fs::search_files,
