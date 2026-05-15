@@ -64,6 +64,8 @@ React UI
   -> useAgentBridge / UI refresh
 ```
 
+The Agent path is intentionally split across small modules. UI components do not call the LLM directly. They dispatch through `useAgentStore`, cross the Tauri command boundary, and let the Rust orchestrator control planning, role execution, diff parsing, review, action logging, and optional apply behavior.
+
 Important runtime distinction:
 
 - `npm run dev`: browser/Vite preview only. Tauri IPC-dependent features are guarded or disabled.
@@ -142,6 +144,8 @@ ChatView.handleSend()
   -> useAgentStore.sendPrompt()
   -> invoke("send_agent_prompt", { request })
   -> AgentGlobalState clones LLM client, context compression, and current pipeline
+  -> AgentContext is enriched with workspace project tree and Git diff
+  -> ContextCompressionMode formats the context as full/focused/compact
   -> AgentOrchestrator.run()
 ```
 
@@ -155,6 +159,29 @@ The Agent emits events while running:
 | `agent-step-update` | `TaskStep` | step status/logs |
 | `agent-pipeline-update` | `PipelineStage[]` | pipeline timeline |
 | `agent-diff-ready` | `FileDiff[]` | diff review |
+| `agent-action-log` | `ActionLogEntry` | logs/audit trail |
+
+Frontend scheduling responsibilities:
+
+| Module | Role |
+|--------|------|
+| `ChatView` | Captures the user prompt and active editor context. |
+| `QuickActions` | Creates focused prompts from the current editor selection. |
+| `useAgentStore` | Holds Agent state and invokes backend commands. |
+| `useAgentBridge` | Listens to Agent events and updates messages, task steps, diffs, pipeline stages, and logs. |
+| `DiffView` | Lets the user apply/reject all diffs, individual files, or individual hunks. |
+
+Backend scheduling responsibilities:
+
+| Module | Role |
+|--------|------|
+| `commands/agent.rs` | IPC boundary, request validation, context construction, pipeline/config lookup. |
+| `services/context.rs` | Workspace context enrichment and compression. |
+| `agent/orchestrator.rs` | State transitions, planner call, pipeline sequencing, reviewer context, action logs. |
+| `agent/planner.rs` | Converts the user prompt and context into task steps. |
+| `agent/executor.rs` | Runs role-specific model calls and streams output. |
+| `agent/multi_agent.rs` | Defines role prompts and pipeline stage semantics. |
+| `agent/diff_apply.rs` | Applies validated pending diffs inside the workspace. |
 
 ### 4.4 Agent Pipeline
 
@@ -186,6 +213,10 @@ Each stage receives:
 - Role-specific system prompt and output rules.
 
 The configured pipeline lives in `AgentGlobalState.pipeline_stages` and can be changed through `get_pipeline`, `update_pipeline`, and `reset_pipeline`.
+
+Reviewer behavior is tied to actual proposed changes. After earlier stages produce model output, the orchestrator parses pending diffs and sends a summary of those concrete file/hunk changes into the reviewer stage. That prevents review from relying only on previous prose.
+
+Action logs are emitted for prompt receipt, planner completion, stage start/completion/failure, diff readiness, review context, and apply results. The frontend displays these logs so users can audit what the Agent did and what context summary was used.
 
 ### 4.5 Diff Review and Apply
 
@@ -284,8 +315,19 @@ Git commands resolve paths through the workspace service and then use `git2`:
 - `git_unstage_files(path, files)`
 - `git_discard_files(path, files)`
 - `git_commit(path, message)`
+- `git_checkout_branch(path, branch, create)`
+- `git_fetch(path, remote?)`
+- `git_pull(path, remote?)`
+- `git_push(path, remote?)`
 
-Current Git scope covers status, staged/worktree/all diff views, file and multi-file stage/unstage/discard, and commit. Branch operations, network operations, and conflict-resolution UI remain product roadmap work.
+Current Git scope covers status, staged/worktree/all diff views, file and multi-file stage/unstage/discard, commit, local branch checkout/create, fetch, fast-forward-only pull, push, upstream/ahead/behind display, and conflict file detection.
+
+Remaining Git roadmap work:
+
+- Credential UX for HTTPS/SSH authentication failures.
+- Remote branch checkout and tracking setup.
+- Merge/rebase conflict resolution controls such as accept current, accept incoming, accept both, and conflict navigation.
+- Safer destructive-action UX for discard/revert/reset workflows.
 
 ---
 
@@ -305,6 +347,7 @@ The current Agent prompt context includes:
 
 This context is built in `send_agent_prompt` from the frontend request and the saved workspace root.
 The backend enriches it with a bounded project tree summary and, when the workspace is a Git repository, a bounded working tree diff.
+Runtime failure prompts can also include recent Problems, failed command output, terminal excerpts, and warning/error logs before reaching the backend.
 
 ### 5.2 Compression Modes
 
@@ -331,6 +374,12 @@ The Agent should not receive more context than needed. Preferred priority:
 5. Terminal/log excerpts when the task is about runtime errors.
 
 Context should carry provenance in future action logs so users can inspect what was sent to the model.
+
+Current provenance level:
+
+- Action logs include prompt phase, role/stage, context summary, diff summary, and details.
+- Reviewer receives pending diff summaries generated from actual proposed changes.
+- Full persistent action-log history and exact context source manifests are still future work.
 
 ---
 

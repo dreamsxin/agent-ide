@@ -120,22 +120,51 @@ docs/
 
 ## Agent 工作流
 
+Agent IDE 以 Chat 作为用户入口，但 Agent 不是单轮自由聊天，而是由 IDE runtime 调度的可审计执行链路。
+
 ```text
 Chat prompt
-  -> 前端收集 active file、selection、open files
-  -> 后端补充 project tree 和 Git diff
+  -> ChatView 收集 prompt、active file、selection 和附加上下文文件
+  -> useAgentStore.sendPrompt() 通过 Tauri IPC 调用 send_agent_prompt
+  -> commands/agent.rs 构建 AgentContext 并读取当前 pipeline 配置
+  -> services/context.rs 补充并压缩上下文
+  -> agent/orchestrator.rs 运行 Agent 状态机
   -> planner 生成任务步骤
-  -> pipeline 执行配置好的角色
+  -> role pipeline 按配置执行阶段
      -> architect
      -> coder
      -> tester
      -> reviewer
-  -> 模型输出被解析为 pending diffs
+  -> executor 通过 services/llm_client.rs 流式调用模型
+  -> diff parser 将模型输出转换为 pending diffs
   -> reviewer 接收实际 pending diff 摘要进行审查
-  -> 用户 apply 或 reject diffs
+  -> useAgentBridge 接收后端事件并刷新 Chat/Tasks/Pipeline/Diff/Logs
+  -> 用户通过 commands/agent.rs 和 agent/diff_apply.rs apply/reject diffs
 ```
 
-Agent 事件会流式回传给前端：
+主要调度模块：
+
+| 层级 | 模块 | 职责 |
+|------|------|------|
+| UI | `src/components/agent/*` | Chat 输入、任务视图、流水线视图、Diff 审查、设置。 |
+| 前端状态 | `src/stores/useAgentStore.ts` | Agent 状态、IPC 调用、消息、步骤、diff、pipeline 配置。 |
+| 事件桥接 | `src/hooks/useAgentBridge.ts` | 监听后端事件并写入 Zustand stores。 |
+| IPC 边界 | `src-tauri/src/commands/agent.rs` | 校验请求、构建上下文、启动/停止 Agent、应用/拒绝 diff。 |
+| 上下文 | `src-tauri/src/services/context.rs` | 组合 active file、selection、open files、project tree、Git diff 和压缩模式。 |
+| 编排 | `src-tauri/src/agent/orchestrator.rs` | 运行 planner、角色阶段、reviewer、action log 和状态转换。 |
+| 角色执行 | `src-tauri/src/agent/executor.rs` | 构造角色提示词，调用 LLM 并流式返回。 |
+| LLM | `src-tauri/src/services/llm_client.rs` | OpenAI 兼容的流式 chat client。 |
+| Diff 应用 | `src-tauri/src/agent/diff_apply.rs` | 在 workspace 边界内应用可审查文件改动。 |
+
+上下文压缩模式在 Agent 面板的 Settings tab 中配置：
+
+| 模式 | 用途 |
+|------|------|
+| `focused` | 默认实用模式：selection、active-file excerpt、project summary、Git diff。 |
+| `compact` | 低 token 模式：用 outline 和 metadata 表达更宽的上下文。 |
+| `full` | 高保真模式：尽量包含完整 active context，适合准确性优先的任务。 |
+
+Agent 事件会流式回传给前端和 action log：
 
 - `agent-state-changed`
 - `agent-stream-token`
@@ -144,6 +173,8 @@ Agent 事件会流式回传给前端：
 - `agent-pipeline-update`
 - `agent-diff-ready`
 - `agent-action-log`
+
+完整设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)，重点阅读 4.3 Agent Prompt、4.4 Agent Pipeline、5 Context Model、6 Agent Modes and Safety。
 
 ## Agent Change Protocol
 
