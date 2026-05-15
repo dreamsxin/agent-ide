@@ -91,6 +91,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Normalized Windows verbatim workspace paths before spawning Terminal or project task shells so `cmd.exe` starts in `D:\...` paths instead of rejecting `\\?\D:\...` as a UNC path.
 - Kept the integrated Terminal mounted across bottom-tab switches and bottom-panel hide/show so switching to Commands, Problems, or Logs does not kill and recreate the PTY session.
 - Added IDE runtime failure context injection for Agent prompts, including the latest failed project command, parsed Problems, recent Terminal output, and recent warning/error Logs.
+- Added one-click `Fix with Agent` actions in Problems and failed Commands, reusing the same IDE runtime failure context for structured repair prompts.
 
 Important distinction:
 
@@ -202,6 +203,7 @@ Terminal command output
   -> terminalProblemParser
     -> useProblemStore.replaceProblems("test")
       -> ProblemsPanel
+        -> Fix with Agent sends a focused repair prompt with current runtime context
 
 Project Tasks
   -> discover_project_tasks(active workspace path)
@@ -211,6 +213,7 @@ Project Tasks
     -> shared useRunProjectTask routing
     -> non-interactive runner for build/test/lint/check
       -> Logs + Problems + task status
+      -> failed command card exposes Fix with Agent
     -> Terminal queue for run/debug interactive tasks
 ```
 

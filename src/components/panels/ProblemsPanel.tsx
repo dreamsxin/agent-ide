@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
+import { useFixWithAgent } from "../../hooks/useFixWithAgent";
 
 const SEVERITY_STYLE: Record<ProblemSeverity, { label: string; color: string }> = {
   error: { label: "E", color: "text-diff-remove" },
@@ -15,6 +16,7 @@ export default function ProblemsPanel() {
   const setActiveFile = useEditorStore((s) => s.setActiveFile);
   const revealLocation = useEditorStore((s) => s.revealLocation);
   const openFiles = useEditorStore((s) => s.openFiles);
+  const { fixProblem, isAgentBusy } = useFixWithAgent();
 
   const counts = useMemo(
     () => ({
@@ -50,12 +52,21 @@ export default function ProblemsPanel() {
         <span className="text-accent-blue">{counts.info} info</span>
         <div className="flex-1" />
         {problems.length > 0 && (
-          <button
-            onClick={() => clearProblems()}
-            className="rounded border border-surface-border px-2 py-0.5 text-[11px] text-surface-muted hover:text-surface-text"
-          >
-            Clear
-          </button>
+          <>
+            <button
+              onClick={() => void fixProblem()}
+              disabled={isAgentBusy}
+              className="rounded border border-accent-blue/40 px-2 py-0.5 text-[11px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Fix with Agent
+            </button>
+            <button
+              onClick={() => clearProblems()}
+              className="rounded border border-surface-border px-2 py-0.5 text-[11px] text-surface-muted hover:text-surface-text"
+            >
+              Clear
+            </button>
+          </>
         )}
       </div>
 
@@ -68,10 +79,10 @@ export default function ProblemsPanel() {
           problems.map((problem) => {
             const style = SEVERITY_STYLE[problem.severity];
             return (
-              <button
+              <div
                 key={problem.id}
                 onClick={() => void handleProblemClick(problem.file, problem.line, problem.column)}
-                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_90px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
+                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_90px_96px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
               >
                 <span className={`font-bold ${style.color}`}>{style.label}</span>
                 <span className="min-w-0">
@@ -86,7 +97,17 @@ export default function ProblemsPanel() {
                 <span className="truncate text-[10px] uppercase text-surface-muted">
                   {problem.source}
                 </span>
-              </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void fixProblem(problem);
+                  }}
+                  disabled={isAgentBusy}
+                  className="rounded border border-accent-blue/30 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Fix
+                </button>
+              </div>
             );
           })
         )}

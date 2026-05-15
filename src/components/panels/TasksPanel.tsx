@@ -2,12 +2,14 @@ import { useTaskStore } from "../../stores/useTaskStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
+import { useFixWithAgent } from "../../hooks/useFixWithAgent";
 
 export default function TasksPanel() {
   const lastTask = useTaskStore((s) => s.lastTask);
   const taskRuns = useTaskStore((s) => s.taskRuns);
   const { tasks, usingFallback, loading, error } = useProjectTasks();
   const runProjectTask = useRunProjectTask();
+  const { fixTaskFailure, isAgentBusy } = useFixWithAgent();
 
   return (
     <div className="flex h-full flex-col bg-black text-xs">
@@ -41,11 +43,10 @@ export default function TasksPanel() {
         {tasks.map((task) => {
           const runState = taskRuns[task.id];
           return (
-            <button
+            <div
               key={task.id}
               onClick={() => void runProjectTask(task)}
-              disabled={!isTauriRuntime()}
-              className="rounded border border-surface-border bg-surface-panel p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-surface-border/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className={`rounded border border-surface-border bg-surface-panel p-3 text-left transition-colors hover:border-accent-blue/50 hover:bg-surface-border/20 ${!isTauriRuntime() ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="font-semibold text-surface-text">{task.label}</span>
@@ -57,7 +58,24 @@ export default function TasksPanel() {
               <div className="mt-2 text-[11px] leading-relaxed text-surface-muted">
                 {task.description}
               </div>
-            </button>
+              {runState?.status === "failed" && (
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void fixTaskFailure(runState);
+                    }}
+                    disabled={isAgentBusy}
+                    className="rounded border border-accent-blue/40 px-2 py-1 text-[11px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Fix with Agent
+                  </button>
+                  <span className="text-[10px] text-diff-remove">
+                    Exit {runState.exitCode ?? "unknown"}
+                  </span>
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
