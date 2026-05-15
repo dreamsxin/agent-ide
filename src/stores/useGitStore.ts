@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { GitStatus } from "../types/project";
+import type { GitDiffKind, GitStatus } from "../types/project";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface GitStore {
@@ -10,7 +10,7 @@ interface GitStore {
   error: string | null;
 
   fetchStatus: (path: string) => Promise<void>;
-  fetchDiff: (path: string, file?: string) => Promise<void>;
+  fetchDiff: (path: string, file?: string, kind?: GitDiffKind) => Promise<void>;
   commit: (path: string, message: string, files?: string[]) => Promise<string | null>;
   stageFiles: (path: string, files: string[]) => Promise<boolean>;
   unstageFiles: (path: string, files: string[]) => Promise<boolean>;
@@ -38,14 +38,14 @@ export const useGitStore = create<GitStore>((set) => ({
     }
   },
 
-  fetchDiff: async (path: string, file?: string) => {
+  fetchDiff: async (path: string, file?: string, kind: GitDiffKind = "all") => {
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
         set({ diff: null, loading: false, error: "Git diff is available in the Tauri app runtime." });
         return;
       }
-      const diff = await invoke<string>("git_diff", { path, file: file ?? null });
+      const diff = await invoke<string>("git_diff", { path, file: file ?? null, kind });
       set({ diff, loading: false });
     } catch (err: unknown) {
       set({ error: String(err), loading: false });

@@ -13,7 +13,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - Tauri 桌面壳，React/Vite 前端，Rust 后端。
 - Monaco 编辑器、文件标签、文件树、Git 面板、Terminal 面板、Logs 面板和 Agent 面板。
 - 工作区范围内的文件系统操作，并带路径边界检查。
-- 基于 `git2` 的 Git status/diff/commit 命令。
+- 基于 `git2` 的 Git status/diff/stage/unstage/discard/commit 命令，Source Control 支持 staged/worktree/all diff 和多选批量操作。
 - 基于 `portable-pty` 的 PTY 后端和 xterm.js 前端终端。
 - OpenAI 兼容的流式 LLM 客户端。
 - 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
@@ -26,7 +26,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 
 重要缺口：
 
-- Diff 应用还没有完整的 per-hunk apply/reject。
+- Git 工作流还缺 branch checkout/create、fetch/pull/push 和 conflict 状态展示。
 - `baseHash` 已支持，但 UI 还需要更完整地展示和操作。
 - API key 仍保存在本地 JSON 配置中。
 - Terminal 还需要在真实 Tauri runtime 中做更多交互测试。
@@ -204,4 +204,3 @@ git status --short
 ```
 
 不要把无关 demo/workspace 改动带进功能提交。
-

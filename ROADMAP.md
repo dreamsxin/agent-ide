@@ -99,6 +99,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added tracked Terminal task completion using per-session exit markers, so Test/Run-style commands opened in Terminal still update command status, run history, Problems, Logs, and Agent failure context.
 - Added TypeScript/JavaScript semantic editor defaults through the Monaco TS worker, including worker-backed diagnostics, hover/completion behavior, F12 definition action, and stable file-backed Monaco models for open files.
 - Added per-hunk diff review controls with backend `apply_diff_hunk` and `reject_diff_hunk` commands, hunk status tracking, and Diff view Apply/Reject hunk actions.
+- Added Git staged/worktree/all diff modes plus Source Control multi-select batch Stage, Unstage, Discard, and workspace-path-aware status loading.
 
 Important distinction:
 
@@ -308,7 +309,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
 
 6. **Git workflow needs continued polish**
    - File-level stage, unstage, discard, diff, and commit are wired.
-   - Needs staged-vs-worktree diff views, multi-select, and stronger destructive-action UX.
+   - Staged-vs-worktree/all diff views and multi-select batch actions are wired.
+   - Needs branch checkout/create, fetch/pull/push, conflict state display, and stronger destructive-action UX.
 
 7. **Workspace boundary coverage needs continued review**
    - FS, Agent diff paths, Git entry points, terminal cwd, and Agent CLI are now guarded or aligned.
@@ -496,16 +498,14 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add staged-vs-worktree diff views and multi-select to Git panel.
-2. Add LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python.
-3. Add per-hunk diff application and richer conflict recovery controls.
+1. Add Git branch checkout/create plus fetch/pull/push status actions.
+2. Add richer Git conflict state display and safer destructive-action UX.
+3. Add true LSP-backed semantic completion/diagnostics for TypeScript/Rust/Python beyond Monaco open-file workers.
 4. Add terminal/log excerpts and selected-file packing to Agent context.
 5. Add stricter validation to the structured Agent protocol.
-6. Add staged-vs-worktree Git diff views and multi-select actions.
-7. Add TypeScript LSP-backed semantic completion/definition/hover.
-8. Persist Agent action logs with prompt/context/diff provenance.
-9. Move LLM API key storage to a safer credential path.
+6. Persist Agent action logs with prompt/context/diff provenance.
+7. Move LLM API key storage to a safer credential path.
 
 ---
 
-*Last updated: 2026-05-15 - Phase 7 in progress.*
+*Last updated: 2026-05-15 - Phase 7 in progress; Git staged/worktree diff and multi-select completed.*

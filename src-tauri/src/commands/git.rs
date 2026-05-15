@@ -92,30 +92,48 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitDiffKind {
+    Worktree,
+    Staged,
+    All,
+}
+
+impl GitDiffKind {
+    fn parse(kind: Option<String>) -> Result<Self, String> {
+        match kind.as_deref().unwrap_or("all") {
+            "worktree" => Ok(Self::Worktree),
+            "staged" => Ok(Self::Staged),
+            "all" => Ok(Self::All),
+            other => Err(format!("Unsupported git diff kind: {}", other)),
+        }
+    }
+}
+
 /// 获取文件 diff
 #[tauri::command]
-pub fn git_diff(path: String, file: Option<String>) -> Result<String, String> {
+pub fn git_diff(path: String, file: Option<String>, kind: Option<String>) -> Result<String, String> {
     let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
+    let diff_kind = GitDiffKind::parse(kind)?;
 
     let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
     let tree = head.peel_to_tree().map_err(|e| format!("Tree: {}", e))?;
 
     let mut diff_opts = git2::DiffOptions::new();
+    diff_opts.include_untracked(true).recurse_untracked_dirs(true);
     if let Some(ref f) = file {
-        let file_path = workspace::resolve_existing(f)?;
-        let workdir = repo
-            .workdir()
-            .ok_or_else(|| "Bare repositories are not supported".to_string())?;
-        let relative = file_path
-            .strip_prefix(workdir)
-            .map_err(|_| format!("File is outside repository: {}", file_path.display()))?;
+        let relative = repo_relative_path(&repo, f, true)?;
         diff_opts.pathspec(relative);
     }
 
-    let diff = repo
-        .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut diff_opts))
-        .map_err(|e| format!("Diff: {}", e))?;
+    let index = repo.index().map_err(|e| format!("Index: {}", e))?;
+    let diff = match diff_kind {
+        GitDiffKind::Worktree => repo.diff_index_to_workdir(Some(&index), Some(&mut diff_opts)),
+        GitDiffKind::Staged => repo.diff_tree_to_index(Some(&tree), Some(&index), Some(&mut diff_opts)),
+        GitDiffKind::All => repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut diff_opts)),
+    }
+    .map_err(|e| format!("Diff: {}", e))?;
 
     let mut patch_buf = Vec::new();
     diff.print(git2::DiffFormat::Patch, |_, _, line| {
@@ -505,6 +523,45 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.path == "tracked.txt" && !entry.staged));
+    }
+
+    #[test]
+    fn git_diff_can_select_staged_or_worktree_changes() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::new();
+        std::fs::write(env.root.join("tracked.txt"), "staged change\n").unwrap();
+
+        git_stage_files(
+            env.root.to_string_lossy().to_string(),
+            vec!["tracked.txt".to_string()],
+        )
+        .unwrap();
+        std::fs::write(env.root.join("tracked.txt"), "worktree change\n").unwrap();
+
+        let staged = git_diff(
+            env.root.to_string_lossy().to_string(),
+            Some("tracked.txt".to_string()),
+            Some("staged".to_string()),
+        )
+        .unwrap();
+        let worktree = git_diff(
+            env.root.to_string_lossy().to_string(),
+            Some("tracked.txt".to_string()),
+            Some("worktree".to_string()),
+        )
+        .unwrap();
+        let all = git_diff(
+            env.root.to_string_lossy().to_string(),
+            Some("tracked.txt".to_string()),
+            Some("all".to_string()),
+        )
+        .unwrap();
+
+        assert!(staged.contains("+staged change"));
+        assert!(!staged.contains("+worktree change"));
+        assert!(worktree.contains("-staged change"));
+        assert!(worktree.contains("+worktree change"));
+        assert!(all.contains("+worktree change"));
     }
 
     #[test]

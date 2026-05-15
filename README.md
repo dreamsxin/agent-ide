@@ -15,7 +15,7 @@ Implemented core capabilities:
 - Tauri desktop shell with React/Vite frontend and Rust backend.
 - Monaco-based editor, file tabs, file tree, Git panel, terminal panel, logs, and Agent panel.
 - Workspace-scoped filesystem operations with path boundary checks.
-- Git status/diff/commit commands through `git2`.
+- Git status/diff/stage/unstage/discard/commit commands through `git2`, with staged/worktree/all diff modes and multi-select batch actions in Source Control.
 - PTY terminal backend using `portable-pty` and xterm.js frontend integration.
 - OpenAI-compatible streaming LLM client.
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.

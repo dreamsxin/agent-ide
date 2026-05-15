@@ -258,7 +258,7 @@ Current conflict behavior:
 Known limitation:
 
 - Hunks are still text-match based and do not include file version/hash metadata.
-- Per-hunk apply/reject is not implemented yet.
+- Per-hunk apply/reject is implemented in the backend and Diff view; mixed hunk states still need clearer partial-status semantics.
 
 ### 4.6 Terminal
 
@@ -279,10 +279,13 @@ Terminal cwd is scoped to the saved workspace. Browser preview shows a disabled-
 Git commands resolve paths through the workspace service and then use `git2`:
 
 - `git_status(path)`
-- `git_diff(path, file?)`
+- `git_diff(path, file?, kind?)`, where `kind` is `worktree`, `staged`, or `all`
+- `git_stage_files(path, files)`
+- `git_unstage_files(path, files)`
+- `git_discard_files(path, files)`
 - `git_commit(path, message)`
 
-Current Git scope is status/diff/commit. Stage, unstage, and discard are still product roadmap work.
+Current Git scope covers status, staged/worktree/all diff views, file and multi-file stage/unstage/discard, and commit. Branch operations, network operations, and conflict-resolution UI remain product roadmap work.
 
 ---
 

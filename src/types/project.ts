@@ -22,6 +22,9 @@ export interface GitStatusEntry {
   staged: boolean;
 }
 
+/** Git diff view mode */
+export type GitDiffKind = "worktree" | "staged" | "all";
+
 /** Git 状态汇总 */
 export interface GitStatus {
   branch: string;
