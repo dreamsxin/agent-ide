@@ -238,7 +238,7 @@ $env:LLM_MODEL = "..."
 
 ## CLI
 
-Rust 侧包含一个 headless 预览/应用模式的 CLI：
+Rust 侧包含一个 headless automation CLI：
 
 ```powershell
 cd src-tauri
@@ -246,7 +246,9 @@ cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
 
-CLI 模式适合脚本化的一次性 Agent 运行和后端 smoke check，但它还不是完整的命令行 IDE 替代方案。它目前没有桌面 IDE 中的可视化 Agent Plan 控制、Problems/Terminal/Git 闭环、LSP 能力、Run History 或 per-hunk review UI。
+CLI 模式已经完成 headless automation 第一版。它支持 `doctor`、`context estimate`、`plan`、`run`，支持 text/JSON/NDJSON 输出、运行 artifacts、可选 apply、项目命令检查、有边界的 repair iterations、命令 allow-list、timeout/output/diff 限制，以及经过 smoke test 覆盖的 `repair-chain.json` / `repair-summary.json` artifacts。
+
+它有意不作为完整命令行 IDE 替代方案。可视化 Agent Plan 控制、Problems/Terminal/Git 闭环、LSP 视图、Run History 和 per-hunk review UI 仍然属于桌面 IDE 工作流。
 
 使用方式、安全注意事项和当前完成度见 [docs/agent_cli_manual.md](docs/agent_cli_manual.md)。面向工具链集成和全自动执行的目标架构见 [docs/agent_cli_design.md](docs/agent_cli_design.md)。
 

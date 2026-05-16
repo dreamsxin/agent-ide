@@ -239,7 +239,7 @@ Current local config files are stored under `~/.agent-ide` unless `AGENT_IDE_CON
 
 ## CLI
 
-The Rust side includes a headless preview/apply CLI:
+The Rust side includes a headless automation CLI:
 
 ```powershell
 cd src-tauri
@@ -247,7 +247,9 @@ cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
 
-CLI mode is useful for scripted one-off Agent runs and backend smoke checks, but it is not yet a full command-line replacement for the desktop IDE. It does not provide the visual Agent plan controls, Problems/Terminal/Git integration, LSP features, run history, or per-hunk review UI available in the Tauri app.
+CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, and `run`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `repair-chain.json` / `repair-summary.json` artifacts.
+
+It is intentionally not a full command-line IDE replacement. Visual Agent plan controls, Problems/Terminal/Git integration, LSP views, run history, and per-hunk review UI remain desktop IDE workflows.
 
 See [docs/agent_cli_manual.md](docs/agent_cli_manual.md) for usage, safety notes, and the current completeness assessment. See [docs/agent_cli_design.md](docs/agent_cli_design.md) for the planned toolchain-integration and full-automation architecture.
 

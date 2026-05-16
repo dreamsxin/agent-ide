@@ -46,6 +46,12 @@ cargo test
 
 Status as of 2026-05-16: **Phase 7/8 in progress - daily IDE replacement hardening**.
 
+Reassessment as of 2026-05-16:
+
+- CLI work is now intentionally scoped and first-pass complete as a headless automation runner. Do not keep expanding it into a second interactive IDE unless that becomes an explicit product goal.
+- The highest-value next work is back in the desktop IDE path: real Tauri runtime validation, Agent workflow interaction polish, LSP/workspace indexing validation, richer merge/diff review, and frontend/Tauri smoke coverage.
+- Further CLI work should be limited to maintenance, smoke coverage, and policy hardening unless external toolchain requirements appear.
+
 The app is no longer just a static UI prototype. It has a working Tauri/Rust backend, file commands, Git commands, LLM streaming, Agent planning/execution scaffolding, diff review UI, and settings for model configuration. Recent work focused on correcting safety and runtime assumptions:
 
 - Added workspace path resolution and path-bound file operations.
@@ -428,6 +434,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
 Goal: make the IDE feel like a controllable Agent workspace, not a chat box bolted onto an editor.
 
 Planned interaction TODO:
+
+Current priority after reassessment:
+
+1. Runtime validation in `npm run tauri -- dev` for Terminal sessions, Commands/Run History, Problems markers, LSP diagnostics, Git remote/conflict flows, and Agent repair loops.
+2. Desktop Agent interaction polish: reviewer findings bound to hunks, clearer partial hunk states, and workflow input/output provenance in the UI.
+3. IDE semantic reliability: large TypeScript/Go workspace indexing validation and next language adapters only after runtime behavior is stable.
+4. Frontend/Tauri smoke tests that exercise daily IDE workflows end to end.
 
 1. Agent workflow visualization
    - Show current pipeline phase, input sources, output state, retry/skip controls, and stage-level provenance.
