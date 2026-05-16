@@ -37,7 +37,7 @@ Implemented core capabilities:
 - Quick Fix/code action application feedback through Logs, with editor state sync and diagnostics refresh after fixes.
 - Problems integration for static diagnostics and terminal/test failures, including severity-colored editor line decorations, minimap markers, and runtime failure markers for file/line/column locations.
 - Command runner history for build/test/lint/check commands with exit code, duration, output details, Problems parsing, and failed-run Agent repair context.
-- Explorer quality-of-life actions including reveal in file explorer, copy file, copy absolute file path, and copy relative file path.
+- Explorer quality-of-life actions including reveal in file explorer, VS Code-style copy/paste file, copy absolute file path, and copy relative file path.
 
 Important remaining gaps:
 

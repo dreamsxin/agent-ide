@@ -29,6 +29,19 @@ interface ContextMenuState {
   node: TreeNodeData;
 }
 
+interface FileClipboardState {
+  node: TreeNodeData;
+  operation: "copy";
+}
+
+interface NameDialogState {
+  title: string;
+  label: string;
+  initialValue: string;
+  confirmText: string;
+  onConfirm: (value: string) => Promise<void>;
+}
+
 // ====== 文件图标 ======
 const FILE_ICONS: Record<string, string> = {
   ts: "🟦", tsx: "⚛️", js: "🟨", jsx: "⚛️",
@@ -140,6 +153,10 @@ export default function Explorer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [fileClipboard, setFileClipboard] = useState<FileClipboardState | null>(null);
+  const [nameDialog, setNameDialog] = useState<NameDialogState | null>(null);
+  const [nameDialogValue, setNameDialogValue] = useState("");
+  const [nameDialogError, setNameDialogError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
@@ -286,6 +303,19 @@ export default function Explorer() {
     setContextMenu(null);
   }, []);
 
+  const openNameDialog = useCallback((state: NameDialogState) => {
+    setNameDialog(state);
+    setNameDialogValue(state.initialValue);
+    setNameDialogError(null);
+    closeContextMenu();
+  }, [closeContextMenu]);
+
+  const closeNameDialog = useCallback(() => {
+    setNameDialog(null);
+    setNameDialogValue("");
+    setNameDialogError(null);
+  }, []);
+
   // 右键菜单
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, node?: TreeNodeData | null) => {
@@ -350,69 +380,84 @@ export default function Explorer() {
   // 新建文件
   const handleNewFile = useCallback(
     async (parentPath: string) => {
-      const name = prompt("File name:");
-      if (!name) return;
-      const path = parentPath + "/" + name;
-      try {
-        await createFile(path);
-      } catch (e) {
-        alert(`Failed to create file: ${e}`);
-      }
-      closeContextMenu();
+      openNameDialog({
+        title: "New File",
+        label: "File name",
+        initialValue: "",
+        confirmText: "Create",
+        onConfirm: async (name) => {
+          const path = joinPath(parentPath, name);
+          await createFile(path);
+          showToast(`Created file: ${name}`);
+        },
+      });
     },
-    [createFile, closeContextMenu]
+    [createFile, openNameDialog]
   );
 
   // 新建文件夹
   const handleNewFolder = useCallback(
     async (parentPath: string) => {
-      const name = prompt("Folder name:");
-      if (!name) return;
-      const path = parentPath + "/" + name;
-      try {
-        await createDirectory(path);
-      } catch (e) {
-        alert(`Failed to create folder: ${e}`);
-      }
-      closeContextMenu();
+      openNameDialog({
+        title: "New Folder",
+        label: "Folder name",
+        initialValue: "",
+        confirmText: "Create",
+        onConfirm: async (name) => {
+          const path = joinPath(parentPath, name);
+          await createDirectory(path);
+          showToast(`Created folder: ${name}`);
+        },
+      });
     },
-    [createDirectory, closeContextMenu]
+    [createDirectory, openNameDialog]
   );
 
   // 重命名
   const handleRename = useCallback(
     async (node: TreeNodeData) => {
-      const newName = prompt("New name:", node.name);
-      if (!newName || newName === node.name) return;
-
-      const parts = node.path.split(/[/\\]/);
-      parts[parts.length - 1] = newName;
-      const newPath = parts.join("/");
-
-      try {
-        await renamePath(node.path, newPath);
-      } catch (e) {
-        alert(`Failed to rename: ${e}`);
-      }
-      closeContextMenu();
+      openNameDialog({
+        title: "Rename",
+        label: "New name",
+        initialValue: node.name,
+        confirmText: "Rename",
+        onConfirm: async (newName) => {
+          if (newName === node.name) return;
+          const parts = node.path.split(/[/\\]/);
+          parts[parts.length - 1] = newName;
+          const newPath = parts.join("/");
+          await renamePath(node.path, newPath);
+          showToast(`Renamed: ${newName}`);
+        },
+      });
     },
-    [renamePath, closeContextMenu]
+    [openNameDialog, renamePath]
   );
 
-  // 复制文件/文件夹到指定路径
+  // 复制文件/文件夹到内部剪贴板
   const handleCopy = useCallback(
-    async (node: TreeNodeData) => {
-      const destName = prompt("Copy to (path):", node.path + ".copy");
-      if (!destName) return;
+    (node: TreeNodeData) => {
+      setFileClipboard({ node, operation: "copy" });
+      showToast(`Copied to Explorer clipboard: ${node.name}`);
+      closeContextMenu();
+    },
+    [closeContextMenu]
+  );
+
+  const handlePaste = useCallback(
+    async (targetNode?: TreeNodeData | null) => {
+      if (!fileClipboard) return;
+      const targetDirectory = targetNode?.isDir ? targetNode.path : workspacePath;
+      if (!targetDirectory) return;
       try {
-        await copyPath(node.path, destName);
-        showToast(`Copied: ${node.name}`);
+        const destination = await copyWithUniqueName(fileClipboard.node.path, targetDirectory, fileClipboard.node.name, copyPath);
+        showToast(`Pasted: ${basename(destination)}`);
       } catch (e) {
-        alert(`Failed to copy: ${e}`);
+        showToast(`Failed to paste: ${e}`);
       }
       closeContextMenu();
     },
-    [copyPath, closeContextMenu]
+    [closeContextMenu, copyPath, fileClipboard, workspacePath]
   );
 
   // 复制绝对路径
@@ -484,7 +529,7 @@ export default function Explorer() {
         <div className="flex gap-0.5">
           <button
             onClick={() => {
-              const cwd = ".";
+              const cwd = workspacePath;
               handleNewFile(cwd);
             }}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
@@ -494,7 +539,7 @@ export default function Explorer() {
           </button>
           <button
             onClick={() => {
-              const cwd = ".";
+              const cwd = workspacePath;
               handleNewFolder(cwd);
             }}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
@@ -561,6 +606,18 @@ export default function Explorer() {
         )}
       </div>
 
+      {fileClipboard && (
+        <div className="border-t border-surface-border/50 px-2 py-1.5 text-[10px] text-surface-muted">
+          Copied: <span className="font-mono text-surface-text">{fileClipboard.node.name}</span>
+          <button
+            onClick={() => handlePaste(null)}
+            className="ml-2 rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
+          >
+            Paste
+          </button>
+        </div>
+      )}
+
       {/* 右键菜单 */}
       {contextMenu && (
         <div
@@ -584,6 +641,14 @@ export default function Explorer() {
               </button>
               <div className="border-t border-surface-border my-0.5" />
             </>
+          )}
+          {contextMenu.node.isDir && fileClipboard && (
+            <button
+              onClick={() => handlePaste(contextMenu.node)}
+              className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+            >
+              <span>📌</span> Paste
+            </button>
           )}
           <button
             onClick={() => handleCopy(contextMenu.node)}
@@ -624,6 +689,60 @@ export default function Explorer() {
         </div>
       )}
 
+      {nameDialog && (
+        <div className="fixed inset-0 z-[60] flex items-start justify-center bg-black/20 pt-24">
+          <form
+            className="w-[360px] rounded border border-surface-border bg-surface-panel p-3 shadow-xl"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const value = nameDialogValue.trim();
+              if (!value) return;
+              try {
+                await nameDialog.onConfirm(value);
+                closeNameDialog();
+              } catch (e) {
+                setNameDialogError(String(e));
+              }
+            }}
+          >
+            <div className="mb-3 text-sm font-semibold text-surface-text">{nameDialog.title}</div>
+            <label className="block text-[11px] text-surface-muted">
+              {nameDialog.label}
+              <input
+                autoFocus
+                value={nameDialogValue}
+                onChange={(event) => setNameDialogValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") closeNameDialog();
+                }}
+                className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 font-mono text-xs text-surface-text outline-none focus:border-accent-blue"
+              />
+            </label>
+            {nameDialogError && (
+              <div className="mt-2 rounded border border-diff-remove/30 bg-diff-remove/10 px-2 py-1 text-[11px] text-diff-remove">
+                {nameDialogError}
+              </div>
+            )}
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeNameDialog}
+                className="rounded border border-surface-border px-3 py-1 text-xs text-surface-muted hover:text-surface-text"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!nameDialogValue.trim()}
+                className="rounded bg-accent-blue px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+              >
+                {nameDialog.confirmText}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Toast 通知 */}
       {toast && (
         <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-surface-panel border border-surface-border rounded-lg px-3 py-1.5 text-xs text-surface-text shadow-lg animate-fade-in z-50">
@@ -645,4 +764,46 @@ function toWorkspaceRelativePath(workspacePath: string, targetPath: string) {
 
 function normalizePath(path: string) {
   return path.replace(/\\/g, "/");
+}
+
+function joinPath(parent: string, name: string) {
+  const cleanParent = parent.replace(/[\\/]+$/, "");
+  return `${cleanParent}/${name}`;
+}
+
+function basename(path: string) {
+  return normalizePath(path).split("/").pop() || path;
+}
+
+async function copyWithUniqueName(
+  sourcePath: string,
+  parent: string,
+  sourceName: string,
+  copyPath: (src: string, dest: string) => Promise<void>
+) {
+  const candidates = copyNameCandidates(parent, sourceName);
+  let lastError: unknown = null;
+  for (const destination of candidates) {
+    try {
+      await copyPath(sourcePath, destination);
+      return destination;
+    } catch (error) {
+      lastError = error;
+      if (!String(error).toLowerCase().includes("destination already exists")) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new Error("No available copy name");
+}
+
+function copyNameCandidates(parent: string, sourceName: string) {
+  const dotIndex = sourceName.lastIndexOf(".");
+  const hasExtension = dotIndex > 0;
+  const stem = hasExtension ? sourceName.slice(0, dotIndex) : sourceName;
+  const ext = hasExtension ? sourceName.slice(dotIndex) : "";
+  return Array.from({ length: 50 }, (_, index) => {
+    const suffix = index === 0 ? " Copy" : ` Copy ${index + 1}`;
+    return joinPath(parent, `${stem}${suffix}${ext}`);
+  });
 }

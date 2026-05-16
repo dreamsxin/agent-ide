@@ -36,7 +36,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - Quick Fix/code action 应用会写入 Logs，并在应用后同步编辑器状态、触发 diagnostics 刷新。
 - Problems 已接入静态 diagnostics 与 terminal/test 失败；所有问题会按严重级别显示编辑器整行高亮、minimap 标记，带文件/行/列的运行时错误会同步为编辑器 marker。
 - build/test/lint/check 命令会进入 command runner history，记录 exit code、耗时、输出详情、Problems 解析和失败后 Agent 修复上下文。
-- Explorer 增强常用右键操作：Reveal In File Explorer、Copy File、Copy File Path、Copy Relative File Path。
+- Explorer 增强常用右键操作：Reveal In File Explorer、VS Code 式 Copy/Paste File、Copy File Path、Copy Relative File Path。
 
 重要缺口：
 

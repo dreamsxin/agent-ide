@@ -94,6 +94,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added IDE runtime failure context injection for Agent prompts, including the latest failed project command, parsed Problems, recent Terminal output, and recent warning/error Logs.
 - Added one-click `Fix with Agent` actions in Problems and failed Commands, reusing the same IDE runtime failure context for structured repair prompts.
 - Hardened Explorer context menu behavior so it closes on outside pointer interactions, Escape, scroll, and blur, and clamps menu placement inside the viewport.
+- Replaced Explorer browser prompt flows for new file/folder/rename with an in-app dialog and changed Copy File to VS Code-style copy/paste with automatic `Copy`, `Copy 2`, etc. names.
 - Added non-interactive project command run history with per-run status, exit code, duration, output details, rerun, clear history, and failed-run `Fix with Agent` actions.
 - Added Terminal multi-session UI with session tabs, new session, close, restart, and active cwd/profile display while keeping inactive PTY views mounted.
 - Routed Run/Test/Debug-style project commands into dedicated Terminal sessions so long-running or interactive commands do not overwrite the main shell.
