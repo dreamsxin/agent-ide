@@ -274,6 +274,8 @@ fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
             change_index: Some(change_index),
             source_role: None,
             source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
         };
 
         match change_type {
@@ -433,6 +435,8 @@ fn make_diff(file: &str, content: &str, original: &[String], updated: &[String])
             change_index: None,
             source_role: None,
             source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
         }),
         hunks: vec![crate::agent::state_machine::DiffHunk {
             old_start: 0,
@@ -462,6 +466,8 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
             change_index: None,
             source_role: None,
             source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
         }),
         hunks: vec![crate::agent::state_machine::DiffHunk {
             old_start: 0,

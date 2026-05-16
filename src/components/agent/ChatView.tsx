@@ -6,7 +6,7 @@ import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
 import ReactMarkdown from "react-markdown";
-import type { AgentState, ContextCompressionMode } from "../../types/agent";
+import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
 
 type ChatContextOptions = {
   activeFile: boolean;
@@ -174,6 +174,7 @@ export default function ChatView() {
   const [input, setInput] = useState("");
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextOptions, setContextOptions] = useState<ChatContextOptions>(() => loadContextOptions());
+  const [contextEstimate, setContextEstimate] = useState<ContextEstimateResponse | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const agentState = useAgentStore((s) => s.state);
@@ -181,6 +182,7 @@ export default function ChatView() {
   const streamContent = useAgentStore((s) => s.streamContent);
   const isStreaming = useAgentStore((s) => s.isStreaming);
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
+  const estimateContext = useAgentStore((s) => s.estimateContext);
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const llmProfiles = useAgentStore((s) => s.llmProfiles);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
@@ -228,18 +230,7 @@ export default function ChatView() {
     contextOptions.gitDiff ? "git diff" : null,
     contextOptions.projectTree ? "project tree" : null,
   ].filter(Boolean);
-  const estimatedSelectedChars =
-    (contextOptions.activeFile && activeFile ? fileContents[activeFile]?.length ?? 0 : 0) +
-    (contextOptions.selection ? selectedText?.length ?? 0 : 0) +
-    (contextOptions.terminalOutput
-      ? Object.values(terminalOutput).reduce((sum, output) => sum + Math.min(output.length, 4000), 0)
-      : 0) +
-    (contextOptions.problems ? problems.length * 240 : 0) +
-    (contextOptions.failedTask ? failedTaskCount * 1200 : 0) +
-    (contextOptions.logs ? warningLogCount * 320 : 0) +
-    (contextOptions.gitDiff ? 12000 : 0) +
-    (contextOptions.projectTree ? 6000 : 0);
-  const estimatedSelectedTokens = Math.ceil(estimatedSelectedChars / 4);
+  const estimatedSelectedTokens = contextEstimate?.estimatedTokens ?? 0;
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
@@ -284,6 +275,28 @@ export default function ChatView() {
       contextFiles: contextOptions.openFiles ? openFiles.map((file) => file.path) : [],
     };
   }, [activeFile, fileContents, selectedText, openFiles, contextOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ctx = buildContext();
+    const handle = window.setTimeout(() => {
+      void estimateContext({
+        ...ctx,
+        profileId: selectedProfileId || undefined,
+        contextCompression: selectedContextMode,
+        contextSources: {
+          includeGitDiff: contextOptions.gitDiff,
+          includeProjectTree: contextOptions.projectTree,
+        },
+      }).then((estimate) => {
+        if (!cancelled) setContextEstimate(estimate);
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || isActing) return;
@@ -390,16 +403,19 @@ export default function ChatView() {
             <option value="full">Mode: Full</option>
           </select>
         </div>
-        {selectedProfile?.effectiveInputTokens !== undefined && (
+        {(selectedProfile?.effectiveInputTokens !== undefined || contextEstimate) && (
           <div className="mb-1.5 px-0.5 text-[10px] text-surface-muted">
             Estimated input budget:{" "}
             <span className="font-mono text-surface-text">
-              {selectedProfile.effectiveInputTokens.toLocaleString()}
+              {(contextEstimate?.inputBudgetTokens ?? selectedProfile?.effectiveInputTokens ?? 0).toLocaleString()}
             </span>{" "}
-            tokens · selected context approx{" "}
+            tokens · selected context{" "}
             <span className="font-mono text-surface-text">
               {estimatedSelectedTokens.toLocaleString()}
             </span>
+            {contextEstimate?.trimmed ? (
+              <span className="text-diff-remove"> · trimmed</span>
+            ) : null}
           </div>
         )}
         <div className="mb-1.5 rounded border border-surface-border bg-surface-base/60">
@@ -415,61 +431,79 @@ export default function ChatView() {
             <span>{contextPreviewOpen ? "Hide" : "Edit"}</span>
           </button>
           {contextPreviewOpen && (
-            <div className="grid grid-cols-2 gap-1 border-t border-surface-border p-2 text-[11px]">
-              <ContextToggle
-                label="Active file"
-                detail={activeFile ? activeFile.split(/[/\\]/).pop() ?? activeFile : "none"}
-                checked={contextOptions.activeFile}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, activeFile: checked }))}
-              />
-              <ContextToggle
-                label="Selection"
-                detail={selectedText ? `${selectedText.length} chars` : "none"}
-                checked={contextOptions.selection}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, selection: checked }))}
-              />
-              <ContextToggle
-                label="Open files"
-                detail={`${openFiles.length}`}
-                checked={contextOptions.openFiles}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, openFiles: checked }))}
-              />
-              <ContextToggle
-                label="Problems"
-                detail={`${problems.length}`}
-                checked={contextOptions.problems}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, problems: checked }))}
-              />
-              <ContextToggle
-                label="Failed run"
-                detail={`${failedTaskCount}`}
-                checked={contextOptions.failedTask}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, failedTask: checked }))}
-              />
-              <ContextToggle
-                label="Terminal"
-                detail={`${terminalSessionCount}`}
-                checked={contextOptions.terminalOutput}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, terminalOutput: checked }))}
-              />
-              <ContextToggle
-                label="Logs"
-                detail={`${warningLogCount}`}
-                checked={contextOptions.logs}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, logs: checked }))}
-              />
-              <ContextToggle
-                label="Git diff"
-                detail="workspace"
-                checked={contextOptions.gitDiff}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, gitDiff: checked }))}
-              />
-              <ContextToggle
-                label="Project tree"
-                detail="summary"
-                checked={contextOptions.projectTree}
-                onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectTree: checked }))}
-              />
+            <div className="space-y-2 border-t border-surface-border p-2 text-[11px]">
+              <div className="grid grid-cols-2 gap-1">
+                <ContextToggle
+                  label="Active file"
+                  detail={activeFile ? activeFile.split(/[/\\]/).pop() ?? activeFile : "none"}
+                  checked={contextOptions.activeFile}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, activeFile: checked }))}
+                />
+                <ContextToggle
+                  label="Selection"
+                  detail={selectedText ? `${selectedText.length} chars` : "none"}
+                  checked={contextOptions.selection}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, selection: checked }))}
+                />
+                <ContextToggle
+                  label="Open files"
+                  detail={`${openFiles.length}`}
+                  checked={contextOptions.openFiles}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, openFiles: checked }))}
+                />
+                <ContextToggle
+                  label="Problems"
+                  detail={`${problems.length}`}
+                  checked={contextOptions.problems}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, problems: checked }))}
+                />
+                <ContextToggle
+                  label="Failed run"
+                  detail={`${failedTaskCount}`}
+                  checked={contextOptions.failedTask}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, failedTask: checked }))}
+                />
+                <ContextToggle
+                  label="Terminal"
+                  detail={`${terminalSessionCount}`}
+                  checked={contextOptions.terminalOutput}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, terminalOutput: checked }))}
+                />
+                <ContextToggle
+                  label="Logs"
+                  detail={`${warningLogCount}`}
+                  checked={contextOptions.logs}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, logs: checked }))}
+                />
+                <ContextToggle
+                  label="Git diff"
+                  detail={formatEstimateDetail(contextEstimate, "git_diff", "workspace")}
+                  checked={contextOptions.gitDiff}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, gitDiff: checked }))}
+                />
+                <ContextToggle
+                  label="Project tree"
+                  detail={formatEstimateDetail(contextEstimate, "project_tree", "summary")}
+                  checked={contextOptions.projectTree}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectTree: checked }))}
+                />
+              </div>
+              {contextEstimate && (
+                <div className="space-y-1 rounded border border-surface-border/60 bg-surface-panel/60 p-1.5">
+                  {contextEstimate.sections.map((section) => (
+                    <div key={section.id} className="flex items-center gap-2 text-[10px]">
+                      <span className={`h-1.5 w-1.5 rounded-full ${section.included ? "bg-diff-add" : "bg-diff-remove"}`} />
+                      <span className="min-w-0 flex-1 truncate text-surface-muted">{section.label}</span>
+                      <span className="font-mono text-surface-text">{section.estimatedTokens.toLocaleString()} tok</span>
+                      {(section.trimmed || section.excludedReason) && (
+                        <span className="max-w-[140px] truncate text-diff-remove" title={section.excludedReason ?? "trimmed"}>
+                          {section.excludedReason ?? "trimmed"}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -575,4 +609,16 @@ function persistContextOptions(options: ChatContextOptions) {
   } catch {
     // Ignore persistence failures.
   }
+}
+
+function formatEstimateDetail(
+  estimate: ContextEstimateResponse | null,
+  sectionId: string,
+  fallback: string
+) {
+  const section = estimate?.sections.find((item) => item.id === sectionId);
+  if (!section) return fallback;
+  if (!section.included) return "excluded";
+  const suffix = section.trimmed ? " trimmed" : "";
+  return `${section.estimatedTokens.toLocaleString()} tok${suffix}`;
 }

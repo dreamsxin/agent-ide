@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useEditorStore } from "../../stores/useEditorStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
 
 function HunkBlock({
@@ -8,12 +9,14 @@ function HunkBlock({
   diffStatus,
   onApply,
   onReject,
+  onRegenerate,
 }: {
   hunk: DiffHunk;
   index: number;
   diffStatus: DiffEntry["status"];
   onApply: () => void;
   onReject: () => void;
+  onRegenerate: () => void;
 }) {
   const hasOriginal = hunk.original && hunk.original.trim().length > 0;
   const hasUpdated = hunk.updated && hunk.updated.trim().length > 0;
@@ -39,6 +42,14 @@ function HunkBlock({
           >
             Reject hunk
           </button>
+          {diffStatus === "failed" && (
+            <button
+              onClick={onRegenerate}
+              className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10"
+            >
+              Regenerate
+            </button>
+          )}
         </span>
       )}
     </div>
@@ -125,6 +136,10 @@ export default function DiffView() {
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
   const rejectDiffHunk = useAgentStore((s) => s.rejectDiffHunk);
+  const regenerateDiff = useAgentStore((s) => s.regenerateDiff);
+  const activeFile = useEditorStore((s) => s.activeFile);
+  const openFiles = useEditorStore((s) => s.openFiles);
+  const fileContents = useEditorStore((s) => s.fileContents);
 
   const pendingDiffs = diffs.filter((d) => d.status === "pending");
   const hasPending = pendingDiffs.length > 0;
@@ -152,6 +167,25 @@ export default function DiffView() {
       await rejectDiff(diffId);
     },
     [rejectDiff]
+  );
+
+  const handleRegenerateDiff = useCallback(
+    async (diff: DiffEntry, hunkIndex?: number) => {
+      const currentContent = fileContents[diff.file] ?? fileContents[activeFile ?? ""];
+      await regenerateDiff({
+        diff,
+        hunkIndex,
+        activeFile: diff.file,
+        activeFileContent: currentContent,
+        currentFileContent: currentContent,
+        contextFiles: openFiles.map((file) => file.path),
+        contextSources: {
+          includeGitDiff: true,
+          includeProjectTree: true,
+        },
+      });
+    },
+    [activeFile, fileContents, openFiles, regenerateDiff]
   );
 
   return (
@@ -267,6 +301,16 @@ export default function DiffView() {
                     </button>
                   </div>
                 )}
+                {diff.status === "failed" && (
+                  <div className="mt-2">
+                    <button
+                      onClick={() => void handleRegenerateDiff(diff)}
+                      className="rounded border border-accent-blue/40 bg-accent-blue/10 px-2 py-1 text-[11px] text-accent-blue transition-colors hover:bg-accent-blue/20"
+                    >
+                      Regenerate against current file
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="max-h-60 overflow-auto">
@@ -278,6 +322,7 @@ export default function DiffView() {
                     diffStatus={diff.status}
                     onApply={() => void applyDiffHunk(diff.id, i)}
                     onReject={() => void rejectDiffHunk(diff.id, i)}
+                    onRegenerate={() => void handleRegenerateDiff(diff, i)}
                   />
                 ))}
               </div>

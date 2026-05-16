@@ -1,4 +1,5 @@
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useEditorStore } from "../../stores/useEditorStore";
 import type { Step } from "../../types/agent";
 
 const statusConfig: Record<Step["status"], { icon: string; color: string }> = {
@@ -6,14 +7,50 @@ const statusConfig: Record<Step["status"], { icon: string; color: string }> = {
   doing: { icon: "◉", color: "text-accent-blue" },
   done: { icon: "●", color: "text-diff-add" },
   error: { icon: "✕", color: "text-diff-remove" },
+  skipped: { icon: "⊘", color: "text-surface-muted" },
 };
 
 export default function TaskView() {
   const steps = useAgentStore((s) => s.steps);
   const agentState = useAgentStore((s) => s.state);
   const currentTask = useAgentStore((s) => s.currentTask);
+  const chatProfileId = useAgentStore((s) => s.chatProfileId);
+  const activeProfileId = useAgentStore((s) => s.activeProfileId);
+  const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
+  const contextCompression = useAgentStore((s) => s.contextCompression);
+  const updateAgentStep = useAgentStore((s) => s.updateAgentStep);
+  const skipAgentStep = useAgentStore((s) => s.skipAgentStep);
+  const runAgentStep = useAgentStore((s) => s.runAgentStep);
+  const activeFile = useEditorStore((s) => s.activeFile);
+  const openFiles = useEditorStore((s) => s.openFiles);
+  const fileContents = useEditorStore((s) => s.fileContents);
+  const selectedText = useEditorStore((s) => s.selectedText);
 
   const title = currentTask?.title ?? "Agent Task";
+  const canRun = agentState === "idle" || agentState === "done" || agentState === "waiting_user" || agentState === "error";
+
+  const updateStepField = async (step: Step, updates: Partial<Step>) => {
+    await updateAgentStep({ ...step, ...updates });
+  };
+
+  const runStep = async (step: Step, moreContext = false) => {
+    await runAgentStep({
+      step,
+      activeFile: activeFile ?? undefined,
+      activeFileContent: activeFile ? fileContents[activeFile] : undefined,
+      selection: selectedText ?? undefined,
+      contextFiles: openFiles.map((file) => file.path),
+      profileId: chatProfileId ?? activeProfileId,
+      contextCompression: chatContextCompression ?? contextCompression,
+      contextSources: {
+        includeGitDiff: moreContext || true,
+        includeProjectTree: moreContext || true,
+      },
+      extraPrompt: moreContext
+        ? "Regenerate this step with broader context. Include workspace tree, git diff, Problems, failed run output, terminal output, and recent warning/error logs when available."
+        : undefined,
+    });
+  };
 
   return (
     <div className="p-3 space-y-2 animate-fade-in h-full overflow-auto">
@@ -30,33 +67,75 @@ export default function TaskView() {
           return (
             <div
               key={step.id}
-              className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs border border-transparent transition-colors ${
+              className={`space-y-2 px-2 py-2 rounded text-xs border border-transparent transition-colors ${
                 step.status === "doing"
                   ? "bg-accent-blue/10 border-accent-blue/30"
                   : "hover:bg-surface-border/20"
               }`}
             >
-              <span
-                className={`${config.color} ${
-                  step.status === "doing" ? "animate-pulse-dot" : ""
-                }`}
-              >
-                {config.icon}
-              </span>
-              <span
-                className={`flex-1 truncate ${
-                  step.status === "done"
-                    ? "line-through text-surface-muted"
-                    : "text-surface-text"
-                }`}
-              >
-                {step.title}
-              </span>
-              {step.status === "error" && (
-                <button className="text-[10px] text-accent-blue hover:underline">
-                  Retry
+              <div className="flex items-center gap-2">
+                <span
+                  className={`${config.color} ${
+                    step.status === "doing" ? "animate-pulse-dot" : ""
+                  }`}
+                >
+                  {config.icon}
+                </span>
+                <input
+                  value={step.title}
+                  onChange={(event) => void updateStepField(step, { title: event.target.value })}
+                  className={`min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 outline-none focus:border-accent-blue focus:bg-surface-base ${
+                    step.status === "done" || step.status === "skipped"
+                      ? "text-surface-muted"
+                      : "text-surface-text"
+                  }`}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <select
+                  value={step.scope ?? "workspace"}
+                  onChange={(event) => void updateStepField(step, { scope: event.target.value as Step["scope"] })}
+                  className="rounded border border-surface-border bg-surface-base px-1 py-0.5 text-[10px] text-surface-text"
+                >
+                  <option value="selection">Selection</option>
+                  <option value="active_file">Active file</option>
+                  <option value="open_files">Open files</option>
+                  <option value="workspace">Workspace</option>
+                </select>
+                <select
+                  value={step.executionMode ?? "diff"}
+                  onChange={(event) => void updateStepField(step, { executionMode: event.target.value as Step["executionMode"] })}
+                  className="rounded border border-surface-border bg-surface-base px-1 py-0.5 text-[10px] text-surface-text"
+                >
+                  <option value="analyze">Analyze</option>
+                  <option value="diff">Diff</option>
+                  <option value="test">Test</option>
+                  <option value="fix">Fix</option>
+                </select>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                <button
+                  disabled={!canRun || step.status === "doing"}
+                  onClick={() => void runStep(step)}
+                  className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Run only
                 </button>
-              )}
+                <button
+                  disabled={!canRun || step.status === "doing"}
+                  onClick={() => void runStep(step, true)}
+                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Regenerate
+                </button>
+                <button
+                  disabled={step.status === "doing" || step.status === "skipped"}
+                  onClick={() => void skipAgentStep(step.id)}
+                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Skip
+                </button>
+              </div>
             </div>
           );
         })

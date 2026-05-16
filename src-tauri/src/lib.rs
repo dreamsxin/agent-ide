@@ -1,11 +1,11 @@
-use tauri::Manager;
 use commands::agent::AgentGlobalState;
 use commands::fs::FileWatcherState;
 use commands::lsp::LspManager;
 use commands::terminal::TerminalManager;
+use tauri::Manager;
 
-mod commands;
 pub mod agent;
+mod commands;
 pub mod services;
 
 /// 应用运行入口
@@ -44,8 +44,12 @@ pub fn run() {
             commands::fs::watch_stop,
             // Agent 命令
             commands::agent::get_agent_state,
+            commands::agent::estimate_agent_context,
             commands::agent::send_agent_prompt,
             commands::agent::stop_agent,
+            commands::agent::update_agent_step,
+            commands::agent::skip_agent_step,
+            commands::agent::run_agent_step,
             commands::agent::set_agent_mode,
             commands::agent::apply_diffs,
             commands::agent::apply_diff,

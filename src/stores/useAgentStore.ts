@@ -16,6 +16,7 @@ import type {
   DiffEntry,
   ApplyDiffsResult,
   ChatMessage,
+  ContextEstimateResponse,
 } from "../types/agent";
 
 interface AgentStore {
@@ -93,6 +94,11 @@ interface AgentStore {
   rejectAllDiffs: () => Promise<DiffEntry[]>;
   rejectDiff: (diffId: string) => Promise<DiffEntry | null>;
   rejectDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry | null>;
+  estimateContext: (params: AgentContextParams) => Promise<ContextEstimateResponse | null>;
+  updateAgentStep: (step: Step) => Promise<Step | null>;
+  skipAgentStep: (stepId: string) => Promise<Step | null>;
+  runAgentStep: (params: AgentStepRunParams) => Promise<void>;
+  regenerateDiff: (params: RegenerateDiffParams) => Promise<void>;
 
   // ====== 模型配置 ======
   fetchLlmConfig: () => Promise<void>;
@@ -115,6 +121,32 @@ interface AgentStore {
 
   // ====== 连通性测试 ======
   testLlmConnection: () => Promise<string>;
+}
+
+interface AgentContextParams {
+  contextFiles?: string[];
+  activeFile?: string;
+  activeFileContent?: string;
+  selection?: string;
+  profileId?: string;
+  contextCompression?: ContextCompressionMode;
+  contextSources?: {
+    includeProjectTree?: boolean;
+    includeGitDiff?: boolean;
+  };
+}
+
+interface AgentStepRunParams extends AgentContextParams {
+  step: Step;
+  extraPrompt?: string;
+  regeneratedFromDiffId?: string;
+  regeneratedFromHunkIndex?: number;
+}
+
+interface RegenerateDiffParams extends AgentContextParams {
+  diff: DiffEntry;
+  hunkIndex?: number;
+  currentFileContent?: string;
 }
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
@@ -444,6 +476,135 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       console.warn("[AgentStore] reject_diff_hunk failed:", err);
       return null;
     }
+  },
+
+  estimateContext: async (params) => {
+    try {
+      if (!isTauriRuntime()) return null;
+      return await invoke<ContextEstimateResponse>("estimate_agent_context", {
+        request: {
+          contextFiles: params.contextFiles ?? [],
+          activeFile: params.activeFile ?? null,
+          activeFileContent: params.activeFileContent ?? null,
+          selection: params.selection ?? null,
+          profileId: params.profileId ?? get().chatProfileId,
+          contextCompression: params.contextCompression ?? get().chatContextCompression,
+          contextSources: params.contextSources ?? null,
+        },
+      });
+    } catch (err: unknown) {
+      console.warn("[AgentStore] estimate_agent_context failed:", err);
+      return null;
+    }
+  },
+
+  updateAgentStep: async (step) => {
+    try {
+      if (!isTauriRuntime()) {
+        get().updateStep(step.id, step);
+        return step;
+      }
+      const updated = await invoke<Step>("update_agent_step", { step });
+      get().updateStep(updated.id, updated);
+      return updated;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] update_agent_step failed:", err);
+      return null;
+    }
+  },
+
+  skipAgentStep: async (stepId) => {
+    try {
+      if (!isTauriRuntime()) {
+        get().updateStep(stepId, { status: "skipped" });
+        return get().steps.find((step) => step.id === stepId) ?? null;
+      }
+      const updated = await invoke<Step>("skip_agent_step", { stepId });
+      get().updateStep(updated.id, updated);
+      return updated;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] skip_agent_step failed:", err);
+      return null;
+    }
+  },
+
+  runAgentStep: async (params) => {
+    set({ error: null, lastApplyResult: null, streamContent: "", isStreaming: true });
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("Agent backend is available in the Tauri app runtime.");
+      }
+      await invoke("run_agent_step", {
+        request: {
+          step: params.step,
+          contextFiles: params.contextFiles ?? [],
+          activeFile: params.activeFile ?? null,
+          activeFileContent: params.activeFileContent ?? null,
+          selection: params.selection ?? null,
+          profileId: params.profileId ?? get().chatProfileId,
+          contextCompression: params.contextCompression ?? get().chatContextCompression,
+          contextSources: params.contextSources ?? null,
+          extraPrompt: params.extraPrompt ?? null,
+          regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
+          regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,
+        },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "Agent task cancelled") {
+        set({ error: null, state: "idle" });
+      } else {
+        set({ error: msg, state: "error" });
+      }
+    } finally {
+      set({ isStreaming: false });
+    }
+  },
+
+  regenerateDiff: async (params) => {
+    const hunk = params.hunkIndex != null ? params.diff.hunks[params.hunkIndex] : undefined;
+    const targetHunks = hunk ? [hunk] : params.diff.hunks;
+    const prompt = [
+      "Regenerate this Agent IDE diff against the current file content.",
+      "Keep the original intent, but make the replacement hunks match the file as it exists now.",
+      "Return reviewable Agent IDE diffs for this file only.",
+      "",
+      `File: ${params.diff.file}`,
+      `Failed diff id: ${params.diff.id}`,
+      params.hunkIndex != null ? `Failed hunk index: ${params.hunkIndex}` : null,
+      params.diff.applyError ? `Apply error: ${params.diff.applyError}` : null,
+      params.diff.provenance ? `Original provenance: ${JSON.stringify(params.diff.provenance)}` : null,
+      "",
+      "Original generated hunks:",
+      JSON.stringify(targetHunks, null, 2),
+      "",
+      "Current file content:",
+      "```",
+      params.currentFileContent ?? params.activeFileContent ?? "",
+      "```",
+    ].filter(Boolean).join("\n");
+
+    await get().runAgentStep({
+      step: {
+        id: `regen-${params.diff.id}-${params.hunkIndex ?? "file"}-${Date.now()}`,
+        title: `Regenerate ${params.diff.file}`,
+        type: "edit",
+        status: "todo",
+        logs: [],
+        scope: "active_file",
+        executionMode: "fix",
+      },
+      contextFiles: params.contextFiles,
+      activeFile: params.activeFile ?? params.diff.file,
+      activeFileContent: params.currentFileContent ?? params.activeFileContent,
+      selection: params.selection,
+      profileId: params.profileId,
+      contextCompression: params.contextCompression,
+      contextSources: params.contextSources,
+      extraPrompt: prompt,
+      regeneratedFromDiffId: params.diff.id,
+      regeneratedFromHunkIndex: params.hunkIndex,
+    });
   },
 
   // ========== 模型配置 ==========

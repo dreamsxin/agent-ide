@@ -1,6 +1,6 @@
-use crate::services::llm_client::{ChatMessage, LlmClient};
-use std::sync::{Arc, atomic::AtomicBool};
 use crate::agent::state_machine::TaskStep;
+use crate::services::llm_client::{ChatMessage, LlmClient};
+use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::mpsc;
 
 const PLANNER_PROMPT: &str = r#"You are an expert software engineering planner. Analyze the task and produce an execution plan.
@@ -54,6 +54,8 @@ pub fn parse_plan(response: &str) -> Vec<TaskStep> {
                     step_type,
                     status: "todo".to_string(),
                     logs: Vec::new(),
+                    scope: None,
+                    execution_mode: None,
                 });
             }
         }
@@ -63,18 +65,26 @@ pub fn parse_plan(response: &str) -> Vec<TaskStep> {
     if steps.is_empty() {
         for line in response.lines() {
             let line = line.trim().to_string();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
 
             let title: Option<String> = if line.starts_with("- ") || line.starts_with("* ") {
                 Some(line[2..].to_string())
             } else {
                 let chars: Vec<char> = line.chars().collect();
                 let mut idx = 0usize;
-                while idx < chars.len() && chars[idx].is_ascii_digit() { idx += 1; }
+                while idx < chars.len() && chars[idx].is_ascii_digit() {
+                    idx += 1;
+                }
                 if idx > 0 && idx < chars.len() && (chars[idx] == '.' || chars[idx] == ')') {
-                    let text: String = chars[idx+1..].iter().collect();
+                    let text: String = chars[idx + 1..].iter().collect();
                     let text = text.trim().to_string();
-                    if !text.is_empty() { Some(text) } else { None }
+                    if !text.is_empty() {
+                        Some(text)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -85,8 +95,11 @@ pub fn parse_plan(response: &str) -> Vec<TaskStep> {
                 let step_type: String;
                 if let Some(idx) = title_str.rfind('(') {
                     let t = title_str[..idx].trim().to_string();
-                    let ty = title_str[idx+1..].trim_end_matches(')').trim().to_lowercase();
-                    let valid = ["create","edit","run","test","analyze"].contains(&ty.as_str());
+                    let ty = title_str[idx + 1..]
+                        .trim_end_matches(')')
+                        .trim()
+                        .to_lowercase();
+                    let valid = ["create", "edit", "run", "test", "analyze"].contains(&ty.as_str());
                     step_title = t;
                     step_type = if valid { ty } else { "edit".to_string() };
                 } else {
@@ -101,6 +114,8 @@ pub fn parse_plan(response: &str) -> Vec<TaskStep> {
                         step_type,
                         status: "todo".to_string(),
                         logs: Vec::new(),
+                        scope: None,
+                        execution_mode: None,
                     });
                 }
             }
@@ -120,6 +135,8 @@ pub fn parse_plan(response: &str) -> Vec<TaskStep> {
                         step_type: "edit".to_string(),
                         status: "todo".to_string(),
                         logs: Vec::new(),
+                        scope: None,
+                        execution_mode: None,
                     });
                 }
             }
@@ -134,6 +151,8 @@ pub fn parse_plan(response: &str) -> Vec<TaskStep> {
             step_type: "edit".to_string(),
             status: "todo".to_string(),
             logs: Vec::new(),
+            scope: None,
+            execution_mode: None,
         });
     }
 

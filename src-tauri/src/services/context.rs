@@ -25,7 +25,10 @@ pub struct ContextBuildOptions {
 
 impl ContextBuildOptions {
     pub fn new(compression: ContextCompressionMode, budget: Option<ContextBudget>) -> Self {
-        Self { compression, budget }
+        Self {
+            compression,
+            budget,
+        }
     }
 }
 
@@ -35,6 +38,40 @@ pub struct ContextSourceOptions {
     pub include_project_tree: bool,
     #[serde(default, rename = "includeGitDiff")]
     pub include_git_diff: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextEstimateSection {
+    pub id: String,
+    pub label: String,
+    pub chars: usize,
+    #[serde(rename = "estimatedTokens")]
+    pub estimated_tokens: usize,
+    pub included: bool,
+    pub trimmed: bool,
+    #[serde(rename = "excludedReason")]
+    pub excluded_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextEstimateResponse {
+    pub sections: Vec<ContextEstimateSection>,
+    #[serde(rename = "rawChars")]
+    pub raw_chars: usize,
+    #[serde(rename = "finalChars")]
+    pub final_chars: usize,
+    #[serde(rename = "estimatedTokens")]
+    pub estimated_tokens: usize,
+    #[serde(rename = "inputBudgetTokens")]
+    pub input_budget_tokens: Option<usize>,
+    pub trimmed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextSection {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub content: String,
 }
 
 impl Default for ContextCompressionMode {
@@ -115,70 +152,107 @@ impl AgentContext {
     }
 
     pub fn to_prompt_context_with_options(&self, options: &ContextBuildOptions) -> String {
-        let mode = &options.compression;
-        let mut ctx = String::new();
-        ctx.push_str("=== Project Context ===\n");
-        ctx.push_str(&format!("Project: {}\n", self.project_path));
-        ctx.push_str(&format!("Context mode: {}\n", mode));
+        build_context_with_estimate(self.build_prompt_sections(&options.compression), options).0
+    }
+
+    pub fn estimate_prompt_context(
+        &self,
+        options: &ContextBuildOptions,
+    ) -> ContextEstimateResponse {
+        build_context_with_estimate(self.build_prompt_sections(&options.compression), options).1
+    }
+
+    pub fn build_prompt_sections(&self, mode: &ContextCompressionMode) -> Vec<ContextSection> {
+        let mut sections = vec![ContextSection {
+            id: "project",
+            label: "Project",
+            content: format!(
+                "=== Project Context ===\nProject: {}\nContext mode: {}\n",
+                self.project_path, mode
+            ),
+        }];
 
         if let Some(ref file) = self.active_file {
-            ctx.push_str(&format!("Active file: {}\n", file));
+            sections.push(ContextSection {
+                id: "active_file_path",
+                label: "Active file path",
+                content: format!("Active file: {}\n", file),
+            });
         }
         if let Some(ref selection) = self.selection {
-            ctx.push_str(&format!("Selected code:\n```\n{}\n```\n", selection));
+            sections.push(ContextSection {
+                id: "selection",
+                label: "Selection",
+                content: format!("Selected code:\n```\n{}\n```\n", selection),
+            });
         }
         if let Some(ref content) = self.active_file_content {
-            match mode {
+            let section_content = match mode {
                 ContextCompressionMode::Full => {
-                    ctx.push_str(&format!("Current file content:\n```\n{}\n```\n", content));
+                    format!("Current file content:\n```\n{}\n```\n", content)
                 }
                 ContextCompressionMode::Focused => {
-                    ctx.push_str(&format!(
+                    format!(
                         "Current file excerpt:\n```\n{}\n```\n",
                         excerpt_text(content, 16_000)
-                    ));
+                    )
                 }
                 ContextCompressionMode::Compact => {
-                    ctx.push_str(&format!(
-                        "Current file summary: {} bytes, {} lines.\n",
+                    format!(
+                        "Current file summary: {} bytes, {} lines.\nCurrent file outline:\n```\n{}\n```\n",
                         content.len(),
-                        content.lines().count()
-                    ));
-                    ctx.push_str(&format!(
-                        "Current file outline:\n```\n{}\n```\n",
+                        content.lines().count(),
                         outline_text(content, 80)
-                    ));
+                    )
                 }
-            }
+            };
+            sections.push(ContextSection {
+                id: "active_file_content",
+                label: "Active file content",
+                content: section_content,
+            });
         }
         if !self.open_files.is_empty() {
-            ctx.push_str(&format!("Open files: {:?}\n", self.open_files));
+            sections.push(ContextSection {
+                id: "open_files",
+                label: "Open files",
+                content: format!("Open files: {:?}\n", self.open_files),
+            });
         }
         if let Some(ref tree) = self.project_tree {
             if !tree.trim().is_empty() {
-                ctx.push_str(&format!("Project tree summary:\n```\n{}\n```\n", tree));
+                sections.push(ContextSection {
+                    id: "project_tree",
+                    label: "Project tree",
+                    content: format!("Project tree summary:\n```\n{}\n```\n", tree),
+                });
             }
         }
         if let Some(ref diff) = self.git_diff {
             if !diff.trim().is_empty() {
-                match mode {
+                let section_content = match mode {
                     ContextCompressionMode::Full => {
-                        ctx.push_str(&format!("Git working tree diff:\n```diff\n{}\n```\n", diff));
+                        format!("Git working tree diff:\n```diff\n{}\n```\n", diff)
                     }
                     ContextCompressionMode::Focused => {
-                        ctx.push_str(&format!(
+                        format!(
                             "Git working tree diff excerpt:\n```diff\n{}\n```\n",
                             excerpt_text(diff, 12_000)
-                        ));
+                        )
                     }
                     ContextCompressionMode::Compact => {
-                        ctx.push_str(&format!("Git diff summary: {}\n", summarize_diff(diff)));
+                        format!("Git diff summary: {}\n", summarize_diff(diff))
                     }
-                }
+                };
+                sections.push(ContextSection {
+                    id: "git_diff",
+                    label: "Git diff",
+                    content: section_content,
+                });
             }
         }
 
-        fit_context_to_budget(ctx, options.budget.as_ref())
+        sections
     }
 }
 
@@ -188,18 +262,75 @@ pub fn estimated_input_tokens_from_budget(budget: &ContextBudget) -> Option<usiz
     Some(max_context.saturating_sub(reserved).saturating_sub(512))
 }
 
-fn fit_context_to_budget(context: String, budget: Option<&ContextBudget>) -> String {
-    let Some(budget) = budget else {
-        return context;
-    };
-    let Some(input_tokens) = estimated_input_tokens_from_budget(budget) else {
-        return context;
-    };
-    let max_chars = input_tokens.saturating_mul(4);
-    if max_chars == 0 || context.len() <= max_chars {
-        return context;
+fn build_context_with_estimate(
+    sections: Vec<ContextSection>,
+    options: &ContextBuildOptions,
+) -> (String, ContextEstimateResponse) {
+    let raw_chars = sections.iter().map(|section| section.content.len()).sum();
+    let input_budget_tokens = options
+        .budget
+        .as_ref()
+        .and_then(estimated_input_tokens_from_budget);
+    let max_chars = input_budget_tokens.map(|tokens| tokens.saturating_mul(4));
+    let mut remaining = max_chars.unwrap_or(usize::MAX);
+    let mut output = String::new();
+    let mut estimates = Vec::new();
+
+    for section in sections {
+        let raw_section_chars = section.content.len();
+        let mut included = true;
+        let mut trimmed = false;
+        let mut excluded_reason = None;
+        let mut content = section.content;
+
+        if max_chars.is_some() {
+            if remaining == 0 {
+                included = false;
+                content.clear();
+                excluded_reason = Some("excluded because budget was exhausted".to_string());
+            } else if content.len() > remaining {
+                trimmed = true;
+                content = excerpt_text(&content, remaining);
+                remaining = 0;
+                excluded_reason = Some("trimmed to fit input budget".to_string());
+            } else {
+                remaining = remaining.saturating_sub(content.len());
+            }
+        }
+
+        if included {
+            output.push_str(&content);
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+
+        estimates.push(ContextEstimateSection {
+            id: section.id.to_string(),
+            label: section.label.to_string(),
+            chars: raw_section_chars,
+            estimated_tokens: estimate_tokens(raw_section_chars),
+            included,
+            trimmed,
+            excluded_reason,
+        });
     }
-    excerpt_text(&context, max_chars)
+
+    let final_chars = output.len();
+    let response = ContextEstimateResponse {
+        sections: estimates,
+        raw_chars,
+        final_chars,
+        estimated_tokens: estimate_tokens(final_chars),
+        input_budget_tokens,
+        trimmed: final_chars < raw_chars,
+    };
+
+    (output, response)
+}
+
+pub fn estimate_tokens(chars: usize) -> usize {
+    chars.saturating_add(3) / 4
 }
 
 pub fn build_project_tree_summary(max_entries: usize, max_depth: usize) -> Result<String, String> {
@@ -437,9 +568,8 @@ mod tests {
     #[test]
     fn compact_mode_summarizes_git_diff() {
         let mut ctx = sample_context("const a = 1;");
-        ctx.git_diff = Some(
-            "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n-old\n+new\n".to_string(),
-        );
+        ctx.git_diff =
+            Some("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n-old\n+new\n".to_string());
 
         let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Compact);
 
@@ -484,5 +614,31 @@ mod tests {
 
         assert!(prompt.len() <= 4_000 + 80);
         assert!(prompt.contains("context truncated"));
+    }
+
+    #[test]
+    fn context_estimate_reports_sections_and_trim_reasons() {
+        let mut ctx = sample_context(&"x".repeat(20_000));
+        ctx.project_tree = Some("src/\n  src/app.ts".to_string());
+        ctx.git_diff = Some("diff --git a/src/app.ts b/src/app.ts\n+const a = 2;\n".to_string());
+
+        let estimate = ctx.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            Some(ContextBudget {
+                max_context_tokens: Some(1200),
+                reserved_output_tokens: Some(200),
+            }),
+        ));
+
+        assert!(estimate.raw_chars > estimate.final_chars);
+        assert!(estimate.trimmed);
+        assert!(estimate
+            .sections
+            .iter()
+            .any(|section| section.id == "active_file_content"));
+        assert!(estimate
+            .sections
+            .iter()
+            .any(|section| section.trimmed || section.excluded_reason.is_some()));
     }
 }

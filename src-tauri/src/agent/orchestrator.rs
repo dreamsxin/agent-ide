@@ -491,6 +491,8 @@ impl AgentOrchestrator {
             step_type: stage.role.to_string().to_string(),
             status: "todo".to_string(),
             logs: Vec::new(),
+            scope: None,
+            execution_mode: None,
         });
         self.steps.len() - 1
     }
@@ -584,6 +586,8 @@ fn attach_stage_provenance(
             change_index: None,
             source_role: None,
             source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
         });
         provenance.source_role = Some(role.to_string());
         provenance.source_stage = Some(stage.to_string());

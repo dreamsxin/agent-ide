@@ -125,6 +125,9 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Persisted frontend Logs/action-log entries per workspace in local storage and restore them when the workspace is reopened.
 - Persisted Chat context source flags per workspace, included workspace context source flags in prompt action-log entries, and emit action-log events for apply/reject diff decisions.
 - Persisted Agent pending diff/review metadata per workspace so the Diff tab can recover proposed changes and hunk statuses after reload.
+- Added backend Agent context section estimates and replaced Chat's rough source estimate with real backend section sizes, budget trimming, and included/excluded source reasons.
+- Added interactive Agent plan controls for editing step title/scope/mode, skipping steps, running one step only, and regenerating a step with broader context.
+- Added regenerate-against-current-file actions for failed/stale Agent diffs and hunks, preserving the original failed diff while adding provenance on regenerated changes.
 
 Important distinction:
 
@@ -431,7 +434,9 @@ Planned interaction TODO:
 Current first implementation:
 
 - Chat now exposes a compact context preview and lets users include/exclude active file, selection, open files, Problems, failed run, terminal output, and warning/error logs per Agent run.
-- Git diff and project tree are also per-run context toggles, with a rough selected-context token estimate shown beside the model budget.
+- Git diff and project tree are also per-run context toggles, with backend section estimates, token budget visibility, and trimmed/excluded source reasons.
+- Agent Tasks can now edit step metadata, skip a step, run only one step, or regenerate a step with broader workspace context.
+- Failed/stale Agent diffs and hunks can be regenerated against the current file while preserving the original failed review item.
 
 ---
 
@@ -580,14 +585,12 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add per-source token estimates that use actual backend context section sizes instead of frontend heuristics.
-2. Add interactive Agent plan controls: edit step, skip step, run only this step, regenerate step.
-3. Add regenerate-against-current-file for stale or failed diff hunks.
-4. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
-5. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
-6. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
-7. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
+1. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
+2. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
+3. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
+4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
+5. Expand Agent plan controls with reorder, pause-before-stage approval, and persisted in-flight task recovery.
 
 ---
 
-*Last updated: 2026-05-16 - Continued TODO execution: pending Agent diff/review metadata now persists per workspace and restores after app reload.*
+*Last updated: 2026-05-16 - Agent interaction loop: backend context section estimates, editable/single-step Agent plans, and failed diff regeneration are wired.*

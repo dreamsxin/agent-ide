@@ -13,6 +13,8 @@ export type AgentState =
 export type AgentMode = "suggest" | "edit" | "auto";
 
 export type ContextCompressionMode = "full" | "focused" | "compact";
+export type StepScope = "selection" | "active_file" | "open_files" | "workspace";
+export type StepExecutionMode = "analyze" | "diff" | "test" | "fix";
 
 /** Agent 角色 */
 export type AgentRole = "architect" | "coder" | "tester" | "reviewer";
@@ -31,9 +33,11 @@ export interface PipelineStage {
 export interface Step {
   id: string;
   title: string;
-  type: "create" | "edit" | "run" | "test";
-  status: "todo" | "doing" | "done" | "error";
+  type: "create" | "edit" | "run" | "test" | "analyze";
+  status: "todo" | "doing" | "done" | "error" | "skipped";
   logs: string[];
+  scope?: StepScope | null;
+  executionMode?: StepExecutionMode | null;
 }
 
 /** Diff entry proposed by the Agent. */
@@ -55,6 +59,8 @@ export interface DiffProvenance {
   changeIndex?: number | null;
   sourceRole?: string | null;
   sourceStage?: string | null;
+  regeneratedFromDiffId?: string | null;
+  regeneratedFromHunkIndex?: number | null;
 }
 
 export interface DiffHunk {
@@ -151,6 +157,25 @@ export interface LlmProfilesResponse {
   profiles: LlmProfile[];
   active_profile_id: string;
   context_compression: ContextCompressionMode;
+}
+
+export interface ContextEstimateSection {
+  id: string;
+  label: string;
+  chars: number;
+  estimatedTokens: number;
+  included: boolean;
+  trimmed: boolean;
+  excludedReason?: string | null;
+}
+
+export interface ContextEstimateResponse {
+  sections: ContextEstimateSection[];
+  rawChars: number;
+  finalChars: number;
+  estimatedTokens: number;
+  inputBudgetTokens?: number | null;
+  trimmed: boolean;
 }
 
 export interface SaveLlmProfileRequest {

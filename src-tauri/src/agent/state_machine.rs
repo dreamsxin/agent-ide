@@ -68,6 +68,10 @@ pub struct TaskStep {
     pub step_type: String,
     pub status: String,
     pub logs: Vec<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(rename = "executionMode", default)]
+    pub execution_mode: Option<String>,
 }
 
 /// 文件 Diff（可序列化，用于跨 IPC 传输）
@@ -97,6 +101,10 @@ pub struct DiffProvenance {
     pub source_role: Option<String>,
     #[serde(rename = "sourceStage", default)]
     pub source_stage: Option<String>,
+    #[serde(rename = "regeneratedFromDiffId", default)]
+    pub regenerated_from_diff_id: Option<String>,
+    #[serde(rename = "regeneratedFromHunkIndex", default)]
+    pub regenerated_from_hunk_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

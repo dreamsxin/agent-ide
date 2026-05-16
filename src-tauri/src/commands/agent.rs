@@ -1,9 +1,12 @@
 use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
-use crate::agent::state_machine::{AgentMode, AgentState, ApplyDiffsResult, FileDiff, TaskStep};
+use crate::agent::state_machine::{
+    AgentMode, AgentState, ApplyDiffsResult, DiffProvenance, FileDiff, TaskStep,
+};
 use crate::services::context::{
-    AgentContext, ContextBudget, ContextCompressionMode, ContextSourceOptions,
+    AgentContext, ContextBudget, ContextBuildOptions, ContextCompressionMode,
+    ContextEstimateResponse, ContextSourceOptions,
 };
 use crate::services::credentials;
 use crate::services::llm_client::{LlmClient, LlmConfig};
@@ -93,7 +96,10 @@ impl LlmProfile {
 
     fn effective_input_tokens(&self) -> Option<u32> {
         let max_context = self.max_context_tokens?;
-        let reserved = self.reserved_output_tokens.or(self.max_output_tokens).unwrap_or(4096);
+        let reserved = self
+            .reserved_output_tokens
+            .or(self.max_output_tokens)
+            .unwrap_or(4096);
         Some(max_context.saturating_sub(reserved).saturating_sub(512))
     }
 
@@ -101,10 +107,12 @@ impl LlmProfile {
         if !self.api_key.trim().is_empty() {
             return Ok(self.api_key.clone());
         }
-        let credential_ref = self
-            .credential_ref
-            .as_ref()
-            .ok_or_else(|| format!("LLM credential is not configured for profile '{}'", self.name))?;
+        let credential_ref = self.credential_ref.as_ref().ok_or_else(|| {
+            format!(
+                "LLM credential is not configured for profile '{}'",
+                self.name
+            )
+        })?;
         credentials::read_secret(credential_ref)
     }
 
@@ -169,31 +177,37 @@ fn parse_llm_profiles_config_with_migration(
             .unwrap_or(&profiles[0].id)
             .to_string();
         let (profiles, credentials_migrated) = migrate_profile_credentials(profiles);
-        return Some((LlmProfilesConfig {
-            profiles,
-            active_profile_id,
-            context_compression,
-        }, credentials_migrated));
+        return Some((
+            LlmProfilesConfig {
+                profiles,
+                active_profile_id,
+                context_compression,
+            },
+            credentials_migrated,
+        ));
     }
 
     let api_key = parsed.get("api_key")?.as_str()?.to_string();
     let (profiles, credentials_migrated) = migrate_profile_credentials(vec![LlmProfile {
-            id: DEFAULT_PROFILE_ID.to_string(),
-            name: "Default".to_string(),
-            provider: "custom".to_string(),
-            endpoint: parsed.get("endpoint")?.as_str()?.to_string(),
-            credential_ref: None,
-            api_key,
-            model: parsed.get("model")?.as_str()?.to_string(),
-            max_context_tokens: None,
-            reserved_output_tokens: None,
-            max_output_tokens: None,
-        }]);
-    Some((LlmProfilesConfig {
-        profiles,
-        active_profile_id: DEFAULT_PROFILE_ID.to_string(),
-        context_compression,
-    }, credentials_migrated))
+        id: DEFAULT_PROFILE_ID.to_string(),
+        name: "Default".to_string(),
+        provider: "custom".to_string(),
+        endpoint: parsed.get("endpoint")?.as_str()?.to_string(),
+        credential_ref: None,
+        api_key,
+        model: parsed.get("model")?.as_str()?.to_string(),
+        max_context_tokens: None,
+        reserved_output_tokens: None,
+        max_output_tokens: None,
+    }]);
+    Some((
+        LlmProfilesConfig {
+            profiles,
+            active_profile_id: DEFAULT_PROFILE_ID.to_string(),
+            context_compression,
+        },
+        credentials_migrated,
+    ))
 }
 
 fn migrate_profile_credentials(mut profiles: Vec<LlmProfile>) -> (Vec<LlmProfile>, bool) {
@@ -335,6 +349,47 @@ pub struct SendPromptRequest {
     pub context_sources: Option<ContextSourceOptions>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EstimateContextRequest {
+    #[serde(rename = "contextFiles")]
+    pub context_files: Vec<String>,
+    #[serde(rename = "activeFile")]
+    pub active_file: Option<String>,
+    #[serde(rename = "activeFileContent")]
+    pub active_file_content: Option<String>,
+    pub selection: Option<String>,
+    #[serde(rename = "profileId")]
+    pub profile_id: Option<String>,
+    #[serde(rename = "contextCompression")]
+    pub context_compression: Option<String>,
+    #[serde(default, rename = "contextSources")]
+    pub context_sources: Option<ContextSourceOptions>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunAgentStepRequest {
+    pub step: TaskStep,
+    #[serde(rename = "contextFiles")]
+    pub context_files: Vec<String>,
+    #[serde(rename = "activeFile")]
+    pub active_file: Option<String>,
+    #[serde(rename = "activeFileContent")]
+    pub active_file_content: Option<String>,
+    pub selection: Option<String>,
+    #[serde(rename = "profileId")]
+    pub profile_id: Option<String>,
+    #[serde(rename = "contextCompression")]
+    pub context_compression: Option<String>,
+    #[serde(default, rename = "contextSources")]
+    pub context_sources: Option<ContextSourceOptions>,
+    #[serde(rename = "extraPrompt")]
+    pub extra_prompt: Option<String>,
+    #[serde(rename = "regeneratedFromDiffId")]
+    pub regenerated_from_diff_id: Option<String>,
+    #[serde(rename = "regeneratedFromHunkIndex")]
+    pub regenerated_from_hunk_index: Option<usize>,
+}
+
 /// Get the current Agent state.
 #[tauri::command]
 pub async fn get_agent_state(
@@ -348,6 +403,28 @@ pub async fn get_agent_state(
     })
 }
 
+#[tauri::command]
+pub async fn estimate_agent_context(
+    request: EstimateContextRequest,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<ContextEstimateResponse, String> {
+    let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
+    let mut context = build_agent_context(
+        request.active_file,
+        request.active_file_content,
+        request.selection,
+        request.context_files,
+    );
+    let context_sources = request
+        .context_sources
+        .unwrap_or_else(default_context_sources);
+    context.enrich_from_workspace_with_sources(&context_sources);
+    let compression =
+        resolve_context_compression(&agent_state, request.context_compression.as_deref())?;
+
+    Ok(context.estimate_prompt_context(&ContextBuildOptions::new(compression, context_budget)))
+}
+
 /// Send a prompt to the Agent.
 #[tauri::command]
 pub async fn send_agent_prompt(
@@ -358,30 +435,20 @@ pub async fn send_agent_prompt(
     let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
-    let mut context = AgentContext {
-        active_file: request.active_file,
-        active_file_content: request.active_file_content,
-        selection: request.selection,
-        open_files: request.context_files,
-        project_path: workspace::workspace_root_string(),
-        git_diff: None,
-        project_tree: None,
-    };
-    let context_sources = request.context_sources.unwrap_or_else(|| ContextSourceOptions {
-            include_project_tree: true,
-            include_git_diff: true,
-    });
+    let mut context = build_agent_context(
+        request.active_file,
+        request.active_file_content,
+        request.selection,
+        request.context_files,
+    );
+    let context_sources = request
+        .context_sources
+        .unwrap_or_else(default_context_sources);
     context.enrich_from_workspace_with_sources(&context_sources);
 
     // The async mutex can be held safely while the orchestrator runs.
-    let compression = match request.context_compression.as_deref() {
-        Some(mode) => ContextCompressionMode::from_str(mode)?,
-        None => agent_state
-            .context_compression
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone(),
-    };
+    let compression =
+        resolve_context_compression(&agent_state, request.context_compression.as_deref())?;
     let pipeline = agent_state
         .pipeline_stages
         .lock()
@@ -428,6 +495,231 @@ pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<Stri
     orch.steps.clear();
     orch.diffs.clear();
     Ok("Agent stopped".to_string())
+}
+
+#[tauri::command]
+pub async fn update_agent_step(
+    step: TaskStep,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<TaskStep, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(existing) = orch.steps.iter_mut().find(|item| item.id == step.id) else {
+        return Err(format!("Step not found: {}", step.id));
+    };
+    *existing = step.clone();
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "plan_update",
+        &format!("Updated step {}", step.title),
+        &format!(
+            "Step: {}\nScope: {}\nExecution mode: {}",
+            step.title,
+            step.scope.as_deref().unwrap_or("default"),
+            step.execution_mode.as_deref().unwrap_or("default")
+        ),
+    );
+    Ok(step)
+}
+
+#[tauri::command]
+pub async fn skip_agent_step(
+    step_id: String,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<TaskStep, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(step) = orch.steps.iter_mut().find(|item| item.id == step_id) else {
+        return Err(format!("Step not found: {}", step_id));
+    };
+    step.status = "skipped".to_string();
+    step.logs.push("Skipped by user".to_string());
+    let updated = step.clone();
+    let _ = app_handle.emit(
+        "agent-step-update",
+        serde_json::to_value(&updated).unwrap_or_default(),
+    );
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "plan_skip",
+        &format!("Skipped step {}", updated.title),
+        &format!("Step id: {}", updated.id),
+    );
+    Ok(updated)
+}
+
+#[tauri::command]
+pub async fn run_agent_step(
+    request: RunAgentStepRequest,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
+    let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
+    let mut context = build_agent_context(
+        request.active_file,
+        request.active_file_content,
+        request.selection,
+        request.context_files,
+    );
+    let context_sources = request
+        .context_sources
+        .unwrap_or_else(default_context_sources);
+    context.enrich_from_workspace_with_sources(&context_sources);
+    let compression =
+        resolve_context_compression(&agent_state, request.context_compression.as_deref())?;
+    let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
+        compression.clone(),
+        context_budget,
+    ));
+    let mut step = request.step;
+    let step_prompt = format_step_prompt(&step, request.extra_prompt.as_deref());
+
+    agent_state.cancel_flag.store(false, Ordering::SeqCst);
+    let cancel_flag = agent_state.cancel_flag.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(32);
+    let app_clone = app_handle.clone();
+    tokio::spawn(async move {
+        while let Some(token) = rx.recv().await {
+            let _ = app_clone.emit("agent-stream-token", token);
+        }
+    });
+
+    {
+        let mut orch = agent_state.orchestrator.lock().await;
+        upsert_step_status(
+            &mut orch.steps,
+            &step,
+            "doing",
+            "Single step execution started",
+        );
+        let _ = app_handle.emit(
+            "agent-step-update",
+            serde_json::to_value(
+                &orch
+                    .steps
+                    .iter()
+                    .find(|item| item.id == step.id)
+                    .unwrap_or(&step),
+            )
+            .unwrap_or_default(),
+        );
+        orch.emit_review_action_log(
+            &app_handle,
+            "info",
+            "plan_run_step",
+            &format!("Running step {}", step.title),
+            &format!(
+                "Scope: {}\nExecution mode: {}\nContext mode: {}",
+                step.scope.as_deref().unwrap_or("workspace"),
+                step.execution_mode.as_deref().unwrap_or("diff"),
+                compression
+            ),
+        );
+    }
+
+    let response =
+        crate::agent::executor::execute_step(&llm, &step_prompt, &ctx_str, cancel_flag, tx).await;
+    let mut orch = agent_state.orchestrator.lock().await;
+    match response {
+        Ok(response) => {
+            step.status = "done".to_string();
+            step.logs.push(format!(
+                "Single step response: {}...",
+                response.chars().take(200).collect::<String>()
+            ));
+            upsert_step(&mut orch.steps, step.clone());
+
+            let mut diffs = crate::agent::executor::parse_diffs(&response);
+            attach_step_provenance(
+                &mut diffs,
+                &step,
+                request.regenerated_from_diff_id.as_deref(),
+                request.regenerated_from_hunk_index,
+            );
+            orch.diffs.extend(diffs);
+            let _ = app_handle.emit(
+                "agent-step-update",
+                serde_json::to_value(&step).unwrap_or_default(),
+            );
+            let _ = app_handle.emit(
+                "agent-diff-ready",
+                serde_json::to_value(&orch.diffs).unwrap_or_default(),
+            );
+            orch.state_mgr.set(AgentState::WaitingUser);
+            let _ = app_handle.emit(
+                "agent-state-changed",
+                serde_json::json!({ "state": orch.state_mgr.state.to_string(), "mode": orch.mode.to_string() }),
+            );
+            orch.emit_review_action_log(
+                &app_handle,
+                "success",
+                "plan_run_step",
+                &format!(
+                    "Step completed with {} pending diff{}",
+                    orch.diffs
+                        .iter()
+                        .filter(|diff| diff.status == "pending")
+                        .count(),
+                    if orch
+                        .diffs
+                        .iter()
+                        .filter(|diff| diff.status == "pending")
+                        .count()
+                        == 1
+                    {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                &response,
+            );
+            Ok("Agent step completed".to_string())
+        }
+        Err(err) if is_cancelled_error(&err) => {
+            upsert_step_status(
+                &mut orch.steps,
+                &step,
+                "todo",
+                "Single step execution cancelled",
+            );
+            orch.state_mgr.set(AgentState::Idle);
+            let _ = app_handle.emit(
+                "agent-state-changed",
+                serde_json::json!({ "state": orch.state_mgr.state.to_string(), "mode": orch.mode.to_string() }),
+            );
+            Ok("Agent task cancelled".to_string())
+        }
+        Err(err) => {
+            upsert_step_status(&mut orch.steps, &step, "error", &format!("Error: {}", err));
+            let _ = app_handle.emit(
+                "agent-step-update",
+                serde_json::to_value(
+                    orch.steps
+                        .iter()
+                        .find(|item| item.id == step.id)
+                        .unwrap_or(&step),
+                )
+                .unwrap_or_default(),
+            );
+            orch.state_mgr.set(AgentState::Error(err.clone()));
+            let _ = app_handle.emit(
+                "agent-state-changed",
+                serde_json::json!({ "state": orch.state_mgr.state.to_string(), "mode": orch.mode.to_string() }),
+            );
+            orch.emit_review_action_log(
+                &app_handle,
+                "error",
+                "plan_run_step",
+                &format!("Step failed {}", step.title),
+                &err,
+            );
+            Err(err)
+        }
+    }
 }
 
 /// Set the Agent mode.
@@ -501,12 +793,7 @@ pub async fn apply_diff(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<ApplyDiffsResult, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let Some(diff) = orch
-        .diffs
-        .iter()
-        .find(|item| item.id == diff_id)
-        .cloned()
-    else {
+    let Some(diff) = orch.diffs.iter().find(|item| item.id == diff_id).cloned() else {
         return Err(format!("Diff not found: {}", diff_id));
     };
 
@@ -561,12 +848,7 @@ pub async fn apply_diff_hunk(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<ApplyDiffsResult, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let Some(diff) = orch
-        .diffs
-        .iter()
-        .find(|item| item.id == diff_id)
-        .cloned()
-    else {
+    let Some(diff) = orch.diffs.iter().find(|item| item.id == diff_id).cloned() else {
         return Err(format!("Diff not found: {}", diff_id));
     };
 
@@ -664,7 +946,11 @@ pub async fn reject_diffs(
         &app_handle,
         "info",
         "diff_reject",
-        &format!("Rejected {} diff{}", rejected.len(), if rejected.len() == 1 { "" } else { "s" }),
+        &format!(
+            "Rejected {} diff{}",
+            rejected.len(),
+            if rejected.len() == 1 { "" } else { "s" }
+        ),
         &format_diff_list_details(&rejected),
     );
 
@@ -817,6 +1103,105 @@ fn set_review_state_after_single_diff(orch: &mut AgentOrchestrator) {
     }
 }
 
+fn build_agent_context(
+    active_file: Option<String>,
+    active_file_content: Option<String>,
+    selection: Option<String>,
+    context_files: Vec<String>,
+) -> AgentContext {
+    AgentContext {
+        active_file,
+        active_file_content,
+        selection,
+        open_files: context_files,
+        project_path: workspace::workspace_root_string(),
+        git_diff: None,
+        project_tree: None,
+    }
+}
+
+fn default_context_sources() -> ContextSourceOptions {
+    ContextSourceOptions {
+        include_project_tree: true,
+        include_git_diff: true,
+    }
+}
+
+fn resolve_context_compression(
+    agent_state: &State<'_, AgentGlobalState>,
+    requested: Option<&str>,
+) -> Result<ContextCompressionMode, String> {
+    match requested {
+        Some(mode) => ContextCompressionMode::from_str(mode),
+        None => agent_state
+            .context_compression
+            .lock()
+            .map_err(|e| e.to_string())
+            .map(|mode| mode.clone()),
+    }
+}
+
+fn format_step_prompt(step: &TaskStep, extra_prompt: Option<&str>) -> String {
+    let mut lines = vec![
+        format!("Run this Agent plan step only: {}", step.title),
+        format!("Step type: {}", step.step_type),
+        format!("Scope: {}", step.scope.as_deref().unwrap_or("workspace")),
+        format!(
+            "Execution mode: {}",
+            step.execution_mode.as_deref().unwrap_or("diff")
+        ),
+    ];
+    if let Some(extra_prompt) = extra_prompt.filter(|value| !value.trim().is_empty()) {
+        lines.push("Additional instruction:".to_string());
+        lines.push(extra_prompt.to_string());
+    }
+    lines.push(
+        "Return reviewable Agent IDE diffs when code changes are needed. Do not run unrelated plan steps."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn upsert_step(steps: &mut Vec<TaskStep>, step: TaskStep) {
+    if let Some(existing) = steps.iter_mut().find(|item| item.id == step.id) {
+        *existing = step;
+    } else {
+        steps.push(step);
+    }
+}
+
+fn upsert_step_status(steps: &mut Vec<TaskStep>, step: &TaskStep, status: &str, log: &str) {
+    let mut updated = step.clone();
+    updated.status = status.to_string();
+    updated.logs.push(log.to_string());
+    upsert_step(steps, updated);
+}
+
+fn attach_step_provenance(
+    diffs: &mut [FileDiff],
+    step: &TaskStep,
+    regenerated_from_diff_id: Option<&str>,
+    regenerated_from_hunk_index: Option<usize>,
+) {
+    for diff in diffs {
+        let provenance = diff.provenance.get_or_insert_with(|| DiffProvenance {
+            protocol: "unknown".to_string(),
+            operation: "unknown".to_string(),
+            rationale: None,
+            schema_version: None,
+            change_index: None,
+            source_role: None,
+            source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
+        });
+        provenance.source_role = Some("agent-step".to_string());
+        provenance.source_stage = Some(step.title.clone());
+        provenance.regenerated_from_diff_id = regenerated_from_diff_id.map(str::to_string);
+        provenance.regenerated_from_hunk_index = regenerated_from_hunk_index;
+    }
+}
+
 fn mask_api_key(api_key: &str) -> String {
     if api_key.len() > 8 {
         format!("{}****{}", &api_key[..4], &api_key[api_key.len() - 4..])
@@ -849,7 +1234,11 @@ fn upsert_profile(profiles: &mut Vec<LlmProfile>, profile: LlmProfile) {
 
 fn profiles_response(config: &LlmProfilesConfig) -> LlmProfilesResponse {
     LlmProfilesResponse {
-        profiles: config.profiles.iter().map(LlmProfile::to_response).collect(),
+        profiles: config
+            .profiles
+            .iter()
+            .map(LlmProfile::to_response)
+            .collect(),
         active_profile_id: config.active_profile_id.clone(),
         context_compression: config.context_compression.to_string(),
     }
@@ -922,6 +1311,54 @@ mod llm_profile_tests {
         assert_eq!(serialized["credentialRef"], "llm-profile:p1");
         assert!(serialized.get("api_key").is_none());
     }
+
+    #[test]
+    fn step_prompt_includes_scope_and_mode() {
+        let step = TaskStep {
+            id: "s1".to_string(),
+            title: "Fix parser".to_string(),
+            step_type: "edit".to_string(),
+            status: "todo".to_string(),
+            logs: Vec::new(),
+            scope: Some("active_file".to_string()),
+            execution_mode: Some("fix".to_string()),
+        };
+
+        let prompt = format_step_prompt(&step, Some("Use more context"));
+
+        assert!(prompt.contains("Fix parser"));
+        assert!(prompt.contains("Scope: active_file"));
+        assert!(prompt.contains("Execution mode: fix"));
+        assert!(prompt.contains("Use more context"));
+    }
+
+    #[test]
+    fn step_provenance_records_regeneration_source() {
+        let step = TaskStep {
+            id: "s1".to_string(),
+            title: "Regenerate stale hunk".to_string(),
+            step_type: "edit".to_string(),
+            status: "todo".to_string(),
+            logs: Vec::new(),
+            scope: None,
+            execution_mode: None,
+        };
+        let mut diffs = vec![FileDiff {
+            id: "d2".to_string(),
+            file: "src/app.ts".to_string(),
+            base_hash: None,
+            provenance: None,
+            hunks: Vec::new(),
+            status: "pending".to_string(),
+        }];
+
+        attach_step_provenance(&mut diffs, &step, Some("d1"), Some(2));
+
+        let provenance = diffs[0].provenance.as_ref().expect("provenance");
+        assert_eq!(provenance.source_role.as_deref(), Some("agent-step"));
+        assert_eq!(provenance.regenerated_from_diff_id.as_deref(), Some("d1"));
+        assert_eq!(provenance.regenerated_from_hunk_index, Some(2));
+    }
 }
 
 /// Get the current steps.
@@ -962,7 +1399,10 @@ pub async fn update_llm_config(
         reserved_output_tokens: None,
         max_output_tokens: None,
     };
-    credentials::store_secret(&credentials::llm_credential_ref(DEFAULT_PROFILE_ID), &api_key)?;
+    credentials::store_secret(
+        &credentials::llm_credential_ref(DEFAULT_PROFILE_ID),
+        &api_key,
+    )?;
     let compression = agent_state
         .context_compression
         .lock()
@@ -1010,7 +1450,11 @@ pub async fn get_llm_config(
             .lock()
             .map_err(|e| e.to_string())?
             .to_string(),
-        profiles: config.profiles.iter().map(LlmProfile::to_response).collect(),
+        profiles: config
+            .profiles
+            .iter()
+            .map(LlmProfile::to_response)
+            .collect(),
         active_profile_id: config.active_profile_id.clone(),
     })
 }
@@ -1046,7 +1490,10 @@ pub async fn save_llm_profile(
     request: SaveLlmProfileRequest,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<LlmProfilesResponse, String> {
-    if request.name.trim().is_empty() || request.endpoint.trim().is_empty() || request.model.trim().is_empty() {
+    if request.name.trim().is_empty()
+        || request.endpoint.trim().is_empty()
+        || request.model.trim().is_empty()
+    {
         return Err("Profile name, endpoint, and model are required".to_string());
     }
     let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
@@ -1104,7 +1551,11 @@ pub async fn set_active_llm_profile(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<LlmProfilesResponse, String> {
     let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
-    if !config.profiles.iter().any(|profile| profile.id == profile_id) {
+    if !config
+        .profiles
+        .iter()
+        .any(|profile| profile.id == profile_id)
+    {
         return Err(format!("LLM profile not found: {}", profile_id));
     }
     config.active_profile_id = profile_id;
@@ -1121,7 +1572,11 @@ pub async fn delete_llm_profile(
     if config.profiles.len() <= 1 {
         return Err("At least one LLM profile is required".to_string());
     }
-    if let Some(profile) = config.profiles.iter().find(|profile| profile.id == profile_id) {
+    if let Some(profile) = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+    {
         if let Some(credential_ref) = profile.credential_ref.as_ref() {
             let _ = credentials::delete_secret(credential_ref);
         }
