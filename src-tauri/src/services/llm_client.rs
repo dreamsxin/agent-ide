@@ -13,6 +13,8 @@ pub struct LlmConfig {
     pub endpoint: String, // e.g. "https://api.openai.com/v1"
     pub api_key: String,
     pub model: String, // e.g. "gpt-4"
+    pub provider: String,
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Chat 消息
@@ -44,19 +46,8 @@ impl LlmClient {
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
     ) -> Result<String, String> {
-        #[derive(Serialize)]
-        struct ChatRequest {
-            model: String,
-            messages: Vec<ChatMessage>,
-            stream: bool,
-        }
-
         let url = format!("{}/chat/completions", self.config.endpoint);
-        let body = ChatRequest {
-            model: self.config.model.clone(),
-            messages,
-            stream: true,
-        };
+        let body = build_chat_request(&self.config, messages);
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -166,5 +157,78 @@ impl LlmClient {
 async fn wait_for_cancel(cancel_flag: Arc<AtomicBool>) {
     while !cancel_flag.load(Ordering::SeqCst) {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+}
+
+fn build_chat_request(config: &LlmConfig, messages: Vec<ChatMessage>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "messages": messages,
+        "stream": true,
+    });
+
+    let Some(max_output_tokens) = config.max_output_tokens else {
+        return body;
+    };
+
+    let key = output_token_key(config);
+    if let Some(object) = body.as_object_mut() {
+        object.insert(key.to_string(), serde_json::json!(max_output_tokens));
+    }
+    body
+}
+
+fn output_token_key(config: &LlmConfig) -> &'static str {
+    let provider = config.provider.to_ascii_lowercase();
+    let model = config.model.to_ascii_lowercase();
+    if provider == "openai"
+        && (model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4")
+            || model.starts_with("gpt-5"))
+    {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(provider: &str, model: &str, max_output_tokens: Option<u32>) -> LlmConfig {
+        LlmConfig {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            provider: provider.to_string(),
+            max_output_tokens,
+        }
+    }
+
+    #[test]
+    fn chat_request_omits_output_limit_when_unset() {
+        let body = build_chat_request(&config("openai", "gpt-4o", None), Vec::new());
+
+        assert_eq!(body["stream"], true);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_request_maps_output_limit_for_openai_compatible_models() {
+        let body = build_chat_request(&config("deepseek", "deepseek-chat", Some(2048)), Vec::new());
+
+        assert_eq!(body["max_tokens"], 2048);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_request_maps_output_limit_for_openai_reasoning_models() {
+        let body = build_chat_request(&config("openai", "gpt-5", Some(8192)), Vec::new());
+
+        assert_eq!(body["max_completion_tokens"], 8192);
+        assert!(body.get("max_tokens").is_none());
     }
 }

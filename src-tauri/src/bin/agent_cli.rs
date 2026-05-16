@@ -124,6 +124,8 @@ async fn main() {
         endpoint,
         api_key,
         model,
+        provider: "custom".to_string(),
+        max_output_tokens: None,
     };
     let llm = LlmClient::new(config);
     let cancel_flag = Arc::new(AtomicBool::new(false));

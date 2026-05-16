@@ -18,6 +18,9 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://api.openai.com/v1",
     defaultModel: "gpt-4o",
     models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
+    defaultMaxContextTokens: 128000,
+    defaultReservedOutputTokens: 4096,
+    defaultMaxOutputTokens: 4096,
   },
   {
     id: "anthropic",
@@ -30,6 +33,9 @@ const PROVIDERS: ProviderPreset[] = [
       "claude-3-haiku-20240307",
       "claude-3-5-sonnet-20241022",
     ],
+    defaultMaxContextTokens: 200000,
+    defaultReservedOutputTokens: 8192,
+    defaultMaxOutputTokens: 8192,
   },
   {
     id: "azure",
@@ -37,6 +43,9 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://{resource}.openai.azure.com",
     defaultModel: "gpt-4",
     models: ["gpt-4", "gpt-4o", "gpt-35-turbo"],
+    defaultMaxContextTokens: 128000,
+    defaultReservedOutputTokens: 4096,
+    defaultMaxOutputTokens: 4096,
   },
   {
     id: "deepseek",
@@ -44,6 +53,9 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://api.deepseek.com",
     defaultModel: "deepseek-chat",
     models: ["deepseek-chat", "deepseek-v4-flash"],
+    defaultMaxContextTokens: 64000,
+    defaultReservedOutputTokens: 4096,
+    defaultMaxOutputTokens: 4096,
   },
   {
     id: "custom",
@@ -117,6 +129,9 @@ export default function SettingsPanel() {
       if (preset) {
         setEndpoint(preset.defaultEndpoint);
         setModel(preset.defaultModel);
+        setMaxContextTokens(numberToInput(preset.defaultMaxContextTokens));
+        setReservedOutputTokens(numberToInput(preset.defaultReservedOutputTokens));
+        setMaxOutputTokens(numberToInput(preset.defaultMaxOutputTokens));
       }
       // 不清除 apiKey
     },

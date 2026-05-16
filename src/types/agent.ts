@@ -162,4 +162,7 @@ export interface ProviderPreset {
   defaultEndpoint: string;
   defaultModel: string;
   models: string[];
+  defaultMaxContextTokens?: number;
+  defaultReservedOutputTokens?: number;
+  defaultMaxOutputTokens?: number;
 }

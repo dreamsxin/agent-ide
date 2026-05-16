@@ -65,6 +65,8 @@ impl LlmProfile {
             endpoint: self.endpoint.clone(),
             api_key: self.api_key.clone(),
             model: self.model.clone(),
+            provider: self.provider.clone(),
+            max_output_tokens: self.max_output_tokens,
         }
     }
 

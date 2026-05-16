@@ -218,7 +218,7 @@ Expected:
 Automated coverage:
 
 - Rust tests cover legacy config migration and API key masking.
-- Max context and reserved output fields are used for estimated context trimming. Max output is stored and displayed but is not yet mapped into provider request bodies.
+- Max context and reserved output fields are used for estimated context trimming. Max output is mapped into OpenAI-compatible chat request bodies and should be runtime-verified per provider endpoint.
 
 ## 11. Release Smoke Notes
 

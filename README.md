@@ -25,6 +25,7 @@ Implemented core capabilities:
 - Multiple LLM provider profiles, with Chat-level provider/model and context compression mode selection.
 - Provider profiles can store model budget metadata such as max context, reserved output, and max output tokens; Chat displays the estimated input budget for the selected profile.
 - Agent context building uses the selected profile's max context and reserved output metadata for estimated budget-aware trimming.
+- OpenAI-compatible requests use the selected profile's max output token limit when configured.
 - Agent context enrichment with project tree summary and Git working-tree diff.
 - Structured action log events shown in the Logs panel.
 - Diff review and apply flow with structured apply failures.
