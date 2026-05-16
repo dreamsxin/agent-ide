@@ -22,7 +22,7 @@ Implemented core capabilities:
 - OpenAI-compatible streaming LLM client.
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
 - Agent context compression modes: `full`, `focused`, `compact`.
-- Multiple LLM provider profiles, with Chat-level provider/model and context-size selection.
+- Multiple LLM provider profiles, with Chat-level provider/model and context compression mode selection.
 - Agent context enrichment with project tree summary and Git working-tree diff.
 - Structured action log events shown in the Logs panel.
 - Diff review and apply flow with structured apply failures.

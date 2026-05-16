@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
-import type { ContextCompressionMode, ModelProvider, ProviderPreset } from "../../types/agent";
+import type { ModelProvider, ProviderPreset } from "../../types/agent";
 
 // ====== 提供商预设 ======
 const providerLabels: Record<string, string> = {
@@ -54,28 +54,6 @@ const PROVIDERS: ProviderPreset[] = [
   },
 ];
 
-const CONTEXT_MODES: Array<{
-  id: ContextCompressionMode;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: "focused",
-    label: "Focused",
-    description: "Selection, active-file excerpt, project summary, Git diff.",
-  },
-  {
-    id: "compact",
-    label: "Compact",
-    description: "Outline and metadata for cheaper broad-context prompts.",
-  },
-  {
-    id: "full",
-    label: "Full",
-    description: "Complete active context when accuracy matters more than tokens.",
-  },
-];
-
 // ====== SettingsPanel ======
 export default function SettingsPanel() {
   const llmEndpoint = useAgentStore((s) => s.llmEndpoint);
@@ -84,12 +62,10 @@ export default function SettingsPanel() {
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const llmProfiles = useAgentStore((s) => s.llmProfiles);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
-  const contextCompression = useAgentStore((s) => s.contextCompression);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
   const saveLlmProfile = useAgentStore((s) => s.saveLlmProfile);
   const deleteLlmProfile = useAgentStore((s) => s.deleteLlmProfile);
   const setActiveLlmProfile = useAgentStore((s) => s.setActiveLlmProfile);
-  const updateContextCompression = useAgentStore((s) => s.updateContextCompression);
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
 
   const [profileId, setProfileId] = useState("");
@@ -98,7 +74,6 @@ export default function SettingsPanel() {
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
-  const [compression, setCompression] = useState<ContextCompressionMode>("focused");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
@@ -125,9 +100,8 @@ export default function SettingsPanel() {
       }
       setEndpoint(llmEndpoint);
       setModel(llmModel);
-      setCompression(contextCompression);
     }
-  }, [activeProfileId, contextCompression, llmConfigured, llmEndpoint, llmModel, llmProfiles]);
+  }, [activeProfileId, llmConfigured, llmEndpoint, llmModel, llmProfiles]);
 
   // 切换 provider 时自动填默认值
   const handleProviderChange = useCallback(
@@ -249,45 +223,9 @@ export default function SettingsPanel() {
   }, [deleteLlmProfile, profileId]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
-  const handleCompressionChange = useCallback(async (mode: ContextCompressionMode) => {
-    setCompression(mode);
-    try {
-      await updateContextCompression(mode);
-    } catch (e) {
-      setCompression(contextCompression);
-      setMessage({ type: "err", text: `Context mode update failed: ${e}` });
-    }
-  }, [contextCompression, updateContextCompression]);
 
   return (
     <div className="p-3 text-xs overflow-auto h-full">
-      <div className="text-surface-muted mb-3 font-semibold tracking-wide">
-        Agent Context
-      </div>
-
-      <div className="mb-4">
-        <div className="grid grid-cols-3 gap-1">
-          {CONTEXT_MODES.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              onClick={() => handleCompressionChange(mode.id)}
-              className={`rounded border px-2 py-1.5 text-[11px] font-medium transition-colors ${
-                compression === mode.id
-                  ? "border-accent-blue bg-accent-blue/10 text-surface-text"
-                  : "border-surface-border text-surface-muted hover:bg-surface-border/20 hover:text-surface-text"
-              }`}
-              title={mode.description}
-            >
-              {mode.label}
-            </button>
-          ))}
-        </div>
-        <div className="mt-2 rounded border border-surface-border bg-surface-border/10 px-2 py-1.5 text-[10px] leading-relaxed text-surface-muted">
-          {CONTEXT_MODES.find((mode) => mode.id === compression)?.description}
-        </div>
-      </div>
-
       <div className="text-surface-muted mb-3 font-semibold tracking-wide">
         Provider Profiles
       </div>

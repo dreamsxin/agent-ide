@@ -110,7 +110,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added frontend Vitest coverage for Windows/file-URI path normalization and terminal output problem parsing.
 - Routed build/test/lint/check-style project commands through the non-interactive command runner so Test also records exit code, duration, output, Problems, Logs, and failed-run Agent repair context.
 - Added `docs/smoke_test.md` as the real Tauri runtime regression checklist for LSP, Problems, Quick Fix, Commands/Run History, Terminal, Git, and Agent repair loops.
-- Added LLM provider profiles with backward-compatible legacy config migration, Settings profile management, Chat-level profile selection, and per-run context size selection.
+- Added LLM provider profiles with backward-compatible legacy config migration, Settings profile management, Chat-level profile selection, and per-run context compression mode selection.
 
 Important distinction:
 
@@ -489,7 +489,7 @@ Deliverables:
 | 2026-04-30 | Tauri runtime guard in frontend | Vite web preview should not crash without Tauri APIs |
 | 2026-04-30 | Workspace path service | Centralized path resolution and workspace boundary checks |
 | 2026-04-30 | `ReactMarkdown skipHtml` for Agent output | Avoid rendering arbitrary LLM HTML |
-| 2026-04-30 | Context compression modes | Let users choose prompt context size/detail |
+| 2026-04-30 | Context compression modes | Let users choose prompt context compression strategy |
 
 ---
 
@@ -528,7 +528,8 @@ target\release\agent_cli --help
 6. Add stricter validation to the structured Agent protocol.
 7. Persist Agent action logs with prompt/context/diff provenance.
 8. Move LLM API key storage to a safer credential path.
+9. Add explicit context budget controls separate from compression mode, such as token/byte presets or per-provider budget defaults.
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; multi-provider LLM profiles and Chat-level profile/context selection implemented; runtime profile smoke validation is next.*
+*Last updated: 2026-05-16 - Phase 7 in progress; multi-provider LLM profiles and Chat-level profile/context-mode selection implemented; explicit context budget controls remain separate future work.*

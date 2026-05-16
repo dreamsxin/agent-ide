@@ -280,11 +280,11 @@ export default function ChatView() {
             onChange={(event) => setChatContextCompression(event.target.value as ContextCompressionMode)}
             disabled={isSending}
             className="rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
-            title="Context size for this chat run"
+            title="Context compression mode for this chat run"
           >
-            <option value="focused">Focused</option>
-            <option value="compact">Compact</option>
-            <option value="full">Full</option>
+            <option value="focused">Mode: Focused</option>
+            <option value="compact">Mode: Compact</option>
+            <option value="full">Mode: Full</option>
           </select>
         </div>
 
