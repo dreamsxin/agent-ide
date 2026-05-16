@@ -49,12 +49,13 @@ Expected:
 
 - Status becomes `ready` when `typescript-language-server` is available.
 - Details show server path, workspace root, opened documents, changes, diagnostics count, and last error when present.
+- Details show server source, install command, detected `tsconfig.json`/`jsconfig.json`/`package.json`, and indexing mode.
 - Recent diagnostics show per-file `error/warning/info` counts after diagnostics are published.
 - If the server is unavailable, the status explains how to install it.
 
 Automated coverage:
 
-- Rust tests cover LSP file URI encoding/decoding and Windows verbatim path normalization.
+- Rust tests cover LSP file URI encoding/decoding, Windows verbatim path normalization, and indexing-state detection.
 - Frontend tests cover file URI/path normalization.
 
 ## 4. Diagnostics to Problems to Editor Markers

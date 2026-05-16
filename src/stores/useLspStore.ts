@@ -40,7 +40,7 @@ function defaultMessage(status: LspStatus) {
     case "ready":
       return "TypeScript LSP ready.";
     case "unavailable":
-      return "TypeScript LSP unavailable. Install: npm install -g typescript typescript-language-server";
+      return "TypeScript LSP unavailable. Install in this workspace: npm install -D typescript typescript-language-server";
     case "error":
       return "TypeScript LSP failed.";
     case "idle":

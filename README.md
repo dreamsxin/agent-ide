@@ -32,7 +32,7 @@ Implemented core capabilities:
 - Diff review and apply flow with structured apply failures.
 - Compatible structured `agent-changes` JSON protocol plus legacy diff/new-file block parsing.
 - TypeScript/JavaScript semantic bridge with Monaco fallback plus `typescript-language-server` support for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
-- TopBar TypeScript LSP status details with server/workspace information and recent diagnostics summaries.
+- TopBar TypeScript LSP status details with server/workspace information, install guidance, workspace indexing mode, config-file detection, and recent diagnostics summaries.
 - Quick Fix/code action application feedback through Logs, with editor state sync and diagnostics refresh after fixes.
 - Problems integration for static diagnostics and terminal/test failures, including severity-colored editor line decorations, minimap markers, and runtime failure markers for file/line/column locations.
 - Command runner history for build/test/lint/check commands with exit code, duration, output details, Problems parsing, and failed-run Agent repair context.
@@ -41,7 +41,7 @@ Implemented core capabilities:
 Important remaining gaps:
 
 - Git workflow still needs better SSH/passphrase UX and richer merge editor controls.
-- LSP support still needs workspace-wide indexing validation, install/configuration UX, and broader language coverage beyond TypeScript/JavaScript.
+- LSP support still needs broader language coverage beyond TypeScript/JavaScript and real-runtime validation on larger workspaces.
 - Agent change protocol still needs stricter schema validation and richer provenance.
 - LLM credential storage needs real-runtime validation across Windows Credential Manager, macOS Keychain, and Linux secret service.
 - Terminal still needs deeper interactive runtime testing across panel hide/show, workspace switching, and long-running processes.

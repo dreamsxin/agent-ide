@@ -11,7 +11,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
 import { isTauriRuntime } from "../../utils/tauri";
-import { getLspStatus, type LspStatusSnapshot } from "../../utils/lspClient";
+import { getLspStatus, probeLsp, type LspStatusSnapshot } from "../../utils/lspClient";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 
@@ -72,9 +72,14 @@ export default function TopBar() {
 
   const handleLspStatusClick = useCallback(async () => {
     setLspDetailsOpen((value) => !value);
-    const snapshot = await getLspStatus();
+    const snapshot = (await getLspStatus()) ?? (await probeLsp(workspacePath || null));
+    if (snapshot?.status === "unavailable") {
+      const probe = await probeLsp(workspacePath || null);
+      setLspDetails(probe ?? snapshot);
+      return;
+    }
     setLspDetails(snapshot);
-  }, []);
+  }, [workspacePath]);
 
   // 窗口控制
   const handleMinimize = () => {
@@ -167,12 +172,30 @@ export default function TopBar() {
             <LspDetailRow label="Status" value={lspDetails?.status ?? lspStatus} />
             <LspDetailRow label="Message" value={lspDetails?.message ?? lspMessage} />
             <LspDetailRow label="Server" value={lspDetails?.serverPath ?? "-"} />
+            <LspDetailRow label="Source" value={lspDetails?.serverSource ?? "-"} />
             <LspDetailRow label="Workspace" value={lspDetails?.workspaceRoot ?? (workspacePath || "-")} />
+            <LspDetailRow label="Indexing" value={`${lspDetails?.indexingStatus ?? "unknown"} - ${lspDetails?.indexingMessage ?? "No indexing details."}`} />
+            <LspDetailRow
+              label="Config"
+              value={
+                lspDetails?.workspaceConfigFiles?.length
+                  ? lspDetails.workspaceConfigFiles.join(", ")
+                  : "No tsconfig/jsconfig/package.json detected"
+              }
+            />
             <div className="mt-2 grid grid-cols-3 gap-2">
               <LspMetric label="Opened" value={lspDetails?.openedDocuments ?? 0} />
               <LspMetric label="Changes" value={lspDetails?.changeCount ?? 0} />
               <LspMetric label="Diagnostics" value={lspDetails?.diagnosticsCount ?? 0} />
             </div>
+            {(lspDetails?.status ?? lspStatus) !== "ready" && (
+              <div className="mt-2 rounded border border-diff-modify/30 bg-diff-modify/10 p-2">
+                <div className="mb-1 text-[10px] uppercase text-surface-muted">Install</div>
+                <code className="block select-text break-all font-mono text-[10px] text-surface-text">
+                  {lspDetails?.installCommand ?? "npm install -D typescript typescript-language-server"}
+                </code>
+              </div>
+            )}
             {lspDetails?.lastError && (
               <div className="mt-2 rounded border border-diff-remove/30 bg-diff-remove/10 p-2 text-diff-remove">
                 {lspDetails.lastError}

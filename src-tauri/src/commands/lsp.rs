@@ -27,6 +27,11 @@ struct LspServer {
     pending: HashMap<u64, mpsc::Sender<Value>>,
     workspace_root: PathBuf,
     executable: PathBuf,
+    server_source: String,
+    install_command: String,
+    workspace_config_files: Vec<String>,
+    indexing_status: String,
+    indexing_message: String,
     opened_documents: usize,
     change_count: usize,
     diagnostics_count: usize,
@@ -74,6 +79,16 @@ pub struct LspStatusSnapshot {
     pub workspace_root: Option<String>,
     #[serde(rename = "serverPath")]
     pub server_path: Option<String>,
+    #[serde(rename = "serverSource")]
+    pub server_source: Option<String>,
+    #[serde(rename = "installCommand")]
+    pub install_command: String,
+    #[serde(rename = "workspaceConfigFiles")]
+    pub workspace_config_files: Vec<String>,
+    #[serde(rename = "indexingStatus")]
+    pub indexing_status: String,
+    #[serde(rename = "indexingMessage")]
+    pub indexing_message: String,
     #[serde(rename = "openedDocuments")]
     pub opened_documents: usize,
     #[serde(rename = "changeCount")]
@@ -82,6 +97,44 @@ pub struct LspStatusSnapshot {
     pub diagnostics_count: usize,
     #[serde(rename = "lastError")]
     pub last_error: Option<String>,
+}
+
+#[tauri::command]
+pub fn lsp_probe(workspace_path: Option<String>) -> Result<LspStatusSnapshot, String> {
+    let root = match workspace_path {
+        Some(path) if !path.trim().is_empty() => workspace::resolve_existing(&path)?,
+        _ => workspace::workspace_root()?,
+    };
+    let root = workspace::shell_compatible_path(root);
+    let executable = find_typescript_language_server(&root);
+    let workspace_config_files = detect_lsp_workspace_config_files(&root);
+    let (indexing_status, indexing_message) = infer_indexing_state(&root, &workspace_config_files);
+    let install_command = "npm install -D typescript typescript-language-server".to_string();
+    let status = if executable.is_some() { "available" } else { "unavailable" };
+    let message = if executable.is_some() {
+        "TypeScript language server executable was found but is not initialized.".to_string()
+    } else {
+        format!(
+            "typescript-language-server was not found. Install in this workspace with: {}",
+            install_command
+        )
+    };
+
+    Ok(LspStatusSnapshot {
+        status: status.to_string(),
+        message,
+        workspace_root: Some(root.to_string_lossy().to_string()),
+        server_path: executable.as_ref().map(|path| path.to_string_lossy().to_string()),
+        server_source: executable.as_ref().map(|path| classify_lsp_server_source(&root, path)),
+        install_command,
+        workspace_config_files,
+        indexing_status,
+        indexing_message,
+        opened_documents: 0,
+        change_count: 0,
+        diagnostics_count: 0,
+        last_error: None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,9 +235,16 @@ pub fn lsp_initialize(
         }
     }
 
+    let install_command = "npm install -D typescript typescript-language-server".to_string();
     let executable = find_typescript_language_server(&root).ok_or_else(|| {
-        "Start TypeScript LSP failed: typescript-language-server was not found. Install globally with: npm install -g typescript typescript-language-server, or add it to this workspace devDependencies.".to_string()
+        format!(
+            "Start TypeScript LSP failed: typescript-language-server was not found. Install in this workspace with: {}, or install globally with: npm install -g typescript typescript-language-server.",
+            install_command
+        )
     })?;
+    let server_source = classify_lsp_server_source(&root, &executable);
+    let workspace_config_files = detect_lsp_workspace_config_files(&root);
+    let (indexing_status, indexing_message) = infer_indexing_state(&root, &workspace_config_files);
     let mut child = Command::new(&executable)
         .arg("--stdio")
         .current_dir(&root)
@@ -216,6 +276,11 @@ pub fn lsp_initialize(
             pending: HashMap::new(),
             workspace_root: root.clone(),
             executable: executable.clone(),
+            server_source,
+            install_command,
+            workspace_config_files,
+            indexing_status,
+            indexing_message,
             opened_documents: 0,
             change_count: 0,
             diagnostics_count: 0,
@@ -443,6 +508,11 @@ pub fn lsp_status(manager: tauri::State<'_, LspManager>) -> Result<LspStatusSnap
             message: "TypeScript LSP is not initialized.".to_string(),
             workspace_root: None,
             server_path: None,
+            server_source: None,
+            install_command: "npm install -D typescript typescript-language-server".to_string(),
+            workspace_config_files: Vec::new(),
+            indexing_status: "unavailable".to_string(),
+            indexing_message: "Start TypeScript LSP to validate workspace indexing.".to_string(),
             opened_documents: 0,
             change_count: 0,
             diagnostics_count: 0,
@@ -455,6 +525,11 @@ pub fn lsp_status(manager: tauri::State<'_, LspManager>) -> Result<LspStatusSnap
         message: "TypeScript LSP ready.".to_string(),
         workspace_root: Some(server.workspace_root.to_string_lossy().to_string()),
         server_path: Some(server.executable.to_string_lossy().to_string()),
+        server_source: Some(server.server_source.clone()),
+        install_command: server.install_command.clone(),
+        workspace_config_files: server.workspace_config_files.clone(),
+        indexing_status: server.indexing_status.clone(),
+        indexing_message: server.indexing_message.clone(),
         opened_documents: server.opened_documents,
         change_count: server.change_count,
         diagnostics_count: server.diagnostics_count,
@@ -998,6 +1073,66 @@ fn find_typescript_language_server(workspace_root: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
+fn classify_lsp_server_source(workspace_root: &Path, executable: &Path) -> String {
+    let executable = workspace::shell_compatible_path(executable.to_path_buf());
+    let workspace_root = workspace::shell_compatible_path(workspace_root.to_path_buf());
+    let workspace_bin = workspace_root.join("node_modules").join(".bin");
+    if executable.starts_with(&workspace_bin) {
+        "workspace devDependency".to_string()
+    } else {
+        "global PATH".to_string()
+    }
+}
+
+fn detect_lsp_workspace_config_files(workspace_root: &Path) -> Vec<String> {
+    ["tsconfig.json", "jsconfig.json", "package.json"]
+        .iter()
+        .filter_map(|name| {
+            let path = workspace_root.join(name);
+            path.is_file().then(|| name.to_string())
+        })
+        .collect()
+}
+
+fn infer_indexing_state(workspace_root: &Path, config_files: &[String]) -> (String, String) {
+    if config_files.iter().any(|file| file == "tsconfig.json" || file == "jsconfig.json") {
+        return (
+            "configured".to_string(),
+            "Workspace has tsconfig/jsconfig; TypeScript server can index project references and compiler options.".to_string(),
+        );
+    }
+    if config_files.iter().any(|file| file == "package.json") {
+        return (
+            "implicit".to_string(),
+            "No tsconfig/jsconfig found; TypeScript server will use inferred project indexing from opened JS/TS files.".to_string(),
+        );
+    }
+    if has_ts_like_files(workspace_root) {
+        return (
+            "implicit".to_string(),
+            "TypeScript/JavaScript files found without package.json or tsconfig/jsconfig; indexing is limited to inferred projects.".to_string(),
+        );
+    }
+    (
+        "empty".to_string(),
+        "No TypeScript/JavaScript project files detected in the workspace.".to_string(),
+    )
+}
+
+fn has_ts_like_files(workspace_root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(workspace_root) else {
+        return false;
+    };
+    entries.flatten().take(200).any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext, "ts" | "tsx" | "js" | "jsx"))
+            .unwrap_or(false)
+    })
+}
+
 fn server_binary_name() -> &'static str {
     if cfg!(windows) {
         "typescript-language-server.cmd"
@@ -1037,5 +1172,43 @@ mod tests {
 
         let uri = path_to_uri(Path::new(r"\\?\D:\work\agent-ide\src\main.ts"));
         assert_eq!(uri, "file:///D:/work/agent-ide/src/main.ts");
+    }
+
+    #[test]
+    fn lsp_indexing_state_detects_configured_workspace() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("lsp-indexing-configured");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("tsconfig.json"), "{}").unwrap();
+
+        let configs = detect_lsp_workspace_config_files(&root);
+        let (status, message) = infer_indexing_state(&root, &configs);
+
+        assert_eq!(configs, vec!["tsconfig.json".to_string()]);
+        assert_eq!(status, "configured");
+        assert!(message.contains("tsconfig/jsconfig"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lsp_indexing_state_detects_implicit_workspace() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("lsp-indexing-implicit");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+
+        let configs = detect_lsp_workspace_config_files(&root);
+        let (status, message) = infer_indexing_state(&root, &configs);
+
+        assert_eq!(configs, vec!["package.json".to_string()]);
+        assert_eq!(status, "implicit");
+        assert!(message.contains("inferred"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

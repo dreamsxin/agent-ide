@@ -334,13 +334,13 @@ Current TypeScript/JavaScript semantic support uses two layers:
 - Monaco TypeScript/JavaScript worker fallback for open-file syntax and semantic diagnostics.
 - Optional `typescript-language-server` backend for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
 
-The Rust backend searches for `typescript-language-server` in workspace `node_modules/.bin`, `%APPDATA%\npm` on Windows, and `PATH`. TopBar shows `TS checking`, `TS ready`, or `TS unavailable`; the unavailable tooltip includes the backend startup error.
+The Rust backend searches for `typescript-language-server` in workspace `node_modules/.bin`, `%APPDATA%\npm` on Windows, and `PATH`. TopBar shows `TS checking`, `TS ready`, or `TS unavailable`; the details popover includes startup errors, install command, server source, detected `tsconfig.json`/`jsconfig.json`/`package.json`, and the inferred indexing mode.
 
 Remaining semantic work:
 
 - Validate workspace-wide indexing across larger TypeScript projects.
-- Add installation/configuration UX for missing language servers.
 - Add Rust/Python LSP adapters.
+- Runtime-validate indexing behavior on larger monorepos and project-reference workspaces.
 - Feed code actions with actual diagnostics context for richer quick fixes.
 
 ### 4.7 Git

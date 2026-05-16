@@ -69,6 +69,11 @@ export interface LspStatusSnapshot {
   message: string;
   workspaceRoot?: string;
   serverPath?: string;
+  serverSource?: string;
+  installCommand: string;
+  workspaceConfigFiles: string[];
+  indexingStatus: string;
+  indexingMessage: string;
   openedDocuments: number;
   changeCount: number;
   diagnosticsCount: number;
@@ -102,6 +107,16 @@ export async function getLspStatus() {
     return await invoke<LspStatusSnapshot>("lsp_status");
   } catch (error) {
     console.warn("Read TypeScript LSP status failed:", error);
+    return null;
+  }
+}
+
+export async function probeLsp(workspacePath: string | null) {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await invoke<LspStatusSnapshot>("lsp_probe", { workspacePath });
+  } catch (error) {
+    console.warn("Probe TypeScript LSP failed:", error);
     return null;
   }
 }

@@ -105,7 +105,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added Git branch checkout/create, Fetch/Pull/Push actions, upstream/ahead/behind display, and conflict file detection in Source Control.
 - Added one-shot Git credential inputs for remote actions, remote branch checkout/tracking, and conflict resolution controls for accept current, accept incoming, accept both, and conflict diff navigation.
 - Added optional OS credential storage for HTTPS Git remote username/token inputs used by fetch, pull, and push.
-- Added TypeScript LSP status details in the TopBar, including server path, workspace, opened document count, change count, diagnostics count, last error, and recent per-file diagnostics summaries.
+- Added TypeScript LSP status details in the TopBar, including server path/source, workspace, install command, indexing mode, detected config files, opened document count, change count, diagnostics count, last error, and recent per-file diagnostics summaries.
 - Routed Monaco Quick Fix/code actions through an explicit apply command that logs success/failure, syncs editor store state, and triggers LSP `didChange` so Problems and markers refresh after fixes.
 - Enabled JavaScript semantic diagnostics in Monaco TS worker defaults instead of syntax-only JavaScript validation.
 - Added frontend Vitest coverage for Windows/file-URI path normalization and terminal output problem parsing.
@@ -365,7 +365,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - TypeScript/JavaScript now use Monaco TS worker semantic completion/hover/diagnostics for open models.
    - TypeScript LSP-backed hover, completion, definition, document symbols, rename, code actions, diagnostics, and status snapshots are wired.
    - Code actions now log apply success/failure and trigger LSP diagnostics refresh after edits.
-   - Workspace-wide LSP indexing still needs runtime validation.
+   - Workspace indexing/install UX is wired through TopBar probe details; large-workspace runtime validation still remains.
    - No LLM inline completion request path yet.
 
 12. **Large frontend bundle**
@@ -529,7 +529,7 @@ target\release\agent_cli --help
 1. Runtime-verify LLM provider profiles in `npm run tauri -- dev`, including legacy config migration, profile create/edit/delete/default, Chat profile selection, and per-run context mode.
 2. Add better SSH/passphrase UX for Git remote operations.
 3. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
-4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and workspace indexing behavior.
+4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and large-workspace indexing behavior.
 5. Add Rust/Python LSP adapters after TypeScript runtime validation.
 6. Add stricter validation to the structured Agent protocol.
 7. Persist Agent action logs with prompt/context/diff provenance.
@@ -538,4 +538,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; LLM API keys and HTTPS Git remote tokens can use OS credential storage, while SSH/passphrase UX and merge editor controls remain next.*
+*Last updated: 2026-05-16 - Phase 7 in progress; TypeScript LSP install/indexing UX is wired, while large-workspace LSP validation, SSH/passphrase UX, and merge editor controls remain next.*
