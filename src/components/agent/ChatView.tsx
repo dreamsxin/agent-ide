@@ -1,7 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
-import { withIdeRuntimeContext } from "../../utils/agentRuntimeContext";
+import { useProblemStore } from "../../stores/useProblemStore";
+import { useTaskStore } from "../../stores/useTaskStore";
+import { useLogStore } from "../../stores/useLogStore";
+import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
 import ReactMarkdown from "react-markdown";
 import type { AgentState, ContextCompressionMode } from "../../types/agent";
 
@@ -113,11 +116,46 @@ function MessageBubble({
   );
 }
 
+function ContextToggle({
+  label,
+  detail,
+  checked,
+  onChange,
+}: {
+  label: string;
+  detail: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex min-w-0 items-center gap-2 rounded border border-surface-border/60 px-2 py-1 text-surface-text">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-3 w-3 flex-shrink-0 accent-accent-blue"
+      />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="max-w-[82px] truncate text-[10px] text-surface-muted">{detail}</span>
+    </label>
+  );
+}
+
 export default function ChatView() {
   const messages = useAgentStore((s) => s.messages);
   const addMessage = useAgentStore((s) => s.addMessage);
   const updateMessage = useAgentStore((s) => s.updateMessage);
   const [input, setInput] = useState("");
+  const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
+  const [contextOptions, setContextOptions] = useState({
+    activeFile: true,
+    selection: true,
+    openFiles: true,
+    problems: true,
+    failedTask: true,
+    terminalOutput: true,
+    logs: true,
+  });
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const agentState = useAgentStore((s) => s.state);
@@ -135,8 +173,13 @@ export default function ChatView() {
   const setChatContextCompression = useAgentStore((s) => s.setChatContextCompression);
 
   const activeFile = useEditorStore((s) => s.activeFile);
+  const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
   const selectedText = useEditorStore((s) => s.selectedText);
+  const problems = useProblemStore((s) => s.problems);
+  const taskRuns = useTaskStore((s) => s.taskRuns);
+  const terminalOutput = useTaskStore((s) => s.terminalOutput);
+  const logs = useLogStore((s) => s.logs);
 
   const isActing =
     agentState !== "idle" &&
@@ -149,6 +192,18 @@ export default function ChatView() {
   const selectedProfileId = chatProfileId ?? activeProfileId;
   const selectedContextMode = chatContextCompression ?? contextCompression;
   const selectedProfile = llmProfiles.find((profile) => profile.id === selectedProfileId);
+  const failedTaskCount = Object.values(taskRuns).filter((task) => task.status === "failed").length;
+  const terminalSessionCount = Object.values(terminalOutput).filter((output) => output.trim()).length;
+  const warningLogCount = logs.filter((log) => log.level === "error" || log.level === "warn").length;
+  const selectedContextItems = [
+    contextOptions.activeFile && activeFile ? "active file" : null,
+    contextOptions.selection && selectedText ? "selection" : null,
+    contextOptions.openFiles && openFiles.length > 0 ? `${openFiles.length} open file${openFiles.length === 1 ? "" : "s"}` : null,
+    contextOptions.problems && problems.length > 0 ? `${problems.length} problem${problems.length === 1 ? "" : "s"}` : null,
+    contextOptions.failedTask && failedTaskCount > 0 ? `${failedTaskCount} failed run${failedTaskCount === 1 ? "" : "s"}` : null,
+    contextOptions.terminalOutput && terminalSessionCount > 0 ? `${terminalSessionCount} terminal${terminalSessionCount === 1 ? "" : "s"}` : null,
+    contextOptions.logs && warningLogCount > 0 ? `${warningLogCount} warning/error log${warningLogCount === 1 ? "" : "s"}` : null,
+  ].filter(Boolean);
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
@@ -187,11 +242,12 @@ export default function ChatView() {
 
   const buildContext = useCallback(() => {
     return {
-      activeFile: activeFile ?? undefined,
-      activeFileContent: activeFile ? fileContents[activeFile] : undefined,
-      selection: selectedText ?? undefined,
+      activeFile: contextOptions.activeFile ? activeFile ?? undefined : undefined,
+      activeFileContent: contextOptions.activeFile && activeFile ? fileContents[activeFile] : undefined,
+      selection: contextOptions.selection ? selectedText ?? undefined : undefined,
+      contextFiles: contextOptions.openFiles ? openFiles.map((file) => file.path) : [],
     };
-  }, [activeFile, fileContents, selectedText]);
+  }, [activeFile, fileContents, selectedText, openFiles, contextOptions]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || isActing) return;
@@ -206,13 +262,19 @@ export default function ChatView() {
     setInput("");
 
     const ctx = buildContext();
+    const runtimeContextOptions: IdeRuntimeContextOptions = {
+      includeFailedTask: contextOptions.failedTask,
+      includeProblems: contextOptions.problems,
+      includeTerminalOutput: contextOptions.terminalOutput,
+      includeLogs: contextOptions.logs,
+    };
     await sendPrompt({
-      prompt: withIdeRuntimeContext(content),
+      prompt: withIdeRuntimeContext(content, runtimeContextOptions),
       profileId: selectedProfileId || undefined,
       contextCompression: selectedContextMode,
       ...ctx,
     });
-  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage]);
+  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -297,6 +359,65 @@ export default function ChatView() {
             tokens
           </div>
         )}
+        <div className="mb-1.5 rounded border border-surface-border bg-surface-base/60">
+          <button
+            type="button"
+            onClick={() => setContextPreviewOpen((open) => !open)}
+            className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2 py-1 text-left text-[11px] text-surface-muted hover:bg-surface-border/20"
+            title="Preview and choose what the Agent receives as context"
+          >
+            <span className="truncate">
+              Context: {selectedContextItems.length > 0 ? selectedContextItems.join(", ") : "none selected"}
+            </span>
+            <span>{contextPreviewOpen ? "Hide" : "Edit"}</span>
+          </button>
+          {contextPreviewOpen && (
+            <div className="grid grid-cols-2 gap-1 border-t border-surface-border p-2 text-[11px]">
+              <ContextToggle
+                label="Active file"
+                detail={activeFile ? activeFile.split(/[/\\]/).pop() ?? activeFile : "none"}
+                checked={contextOptions.activeFile}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, activeFile: checked }))}
+              />
+              <ContextToggle
+                label="Selection"
+                detail={selectedText ? `${selectedText.length} chars` : "none"}
+                checked={contextOptions.selection}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, selection: checked }))}
+              />
+              <ContextToggle
+                label="Open files"
+                detail={`${openFiles.length}`}
+                checked={contextOptions.openFiles}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, openFiles: checked }))}
+              />
+              <ContextToggle
+                label="Problems"
+                detail={`${problems.length}`}
+                checked={contextOptions.problems}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, problems: checked }))}
+              />
+              <ContextToggle
+                label="Failed run"
+                detail={`${failedTaskCount}`}
+                checked={contextOptions.failedTask}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, failedTask: checked }))}
+              />
+              <ContextToggle
+                label="Terminal"
+                detail={`${terminalSessionCount}`}
+                checked={contextOptions.terminalOutput}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, terminalOutput: checked }))}
+              />
+              <ContextToggle
+                label="Logs"
+                detail={`${warningLogCount}`}
+                checked={contextOptions.logs}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, logs: checked }))}
+              />
+            </div>
+          )}
+        </div>
 
         {/* 输入 + 按钮 */}
         <div className="flex gap-2">

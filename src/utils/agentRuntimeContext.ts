@@ -3,8 +3,22 @@ import { useProblemStore, type ProblemEntry } from "../stores/useProblemStore";
 import { useTaskStore, type ProjectTaskRunState } from "../stores/useTaskStore";
 import type { LogEntry } from "../types/project";
 
-export function withIdeRuntimeContext(prompt: string) {
-  const ideRuntimeContext = buildIdeRuntimeContext();
+export interface IdeRuntimeContextOptions {
+  includeFailedTask?: boolean;
+  includeProblems?: boolean;
+  includeTerminalOutput?: boolean;
+  includeLogs?: boolean;
+}
+
+const DEFAULT_RUNTIME_CONTEXT_OPTIONS: Required<IdeRuntimeContextOptions> = {
+  includeFailedTask: true,
+  includeProblems: true,
+  includeTerminalOutput: true,
+  includeLogs: true,
+};
+
+export function withIdeRuntimeContext(prompt: string, options?: IdeRuntimeContextOptions) {
+  const ideRuntimeContext = buildIdeRuntimeContext(options);
   return ideRuntimeContext
     ? `${prompt}\n\n=== IDE Runtime Context ===\n${ideRuntimeContext}`
     : prompt;
@@ -38,7 +52,8 @@ export function buildTaskFailureFixPrompt(task: ProjectTaskRunState) {
   ].join("\n");
 }
 
-export function buildIdeRuntimeContext() {
+export function buildIdeRuntimeContext(options?: IdeRuntimeContextOptions) {
+  const resolvedOptions = { ...DEFAULT_RUNTIME_CONTEXT_OPTIONS, ...options };
   const taskState = useTaskStore.getState();
   const problems = useProblemStore.getState().problems;
   const logs = useLogStore.getState().logs;
@@ -48,11 +63,11 @@ export function buildIdeRuntimeContext() {
     .sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt))[0];
 
   const sections: string[] = [];
-  if (latestFailedTask) {
+  if (resolvedOptions.includeFailedTask && latestFailedTask) {
     sections.push(formatFailedTask(latestFailedTask));
   }
 
-  if (problems.length > 0) {
+  if (resolvedOptions.includeProblems && problems.length > 0) {
     sections.push(
       [
         "Current Problems:",
@@ -63,14 +78,16 @@ export function buildIdeRuntimeContext() {
     );
   }
 
-  const terminalOutput = Object.entries(taskState.terminalOutput)
+  const terminalOutput = resolvedOptions.includeTerminalOutput
+    ? Object.entries(taskState.terminalOutput)
     .sort(([a], [b]) => (a === "main" ? -1 : b === "main" ? 1 : a.localeCompare(b)))
     .map(([id, output]) => {
       const trimmed = output.trim();
       return trimmed ? `Terminal ${id}:\n${tail(trimmed, 2000)}` : "";
     })
     .filter(Boolean)
-    .join("\n\n");
+    .join("\n\n")
+    : "";
   if (terminalOutput) {
     sections.push(`Recent Terminal Output:\n${tail(terminalOutput, 4000)}`);
   }
@@ -78,7 +95,7 @@ export function buildIdeRuntimeContext() {
   const relevantLogs = logs
     .filter((log) => log.level === "error" || log.level === "warn")
     .slice(-8);
-  if (relevantLogs.length > 0) {
+  if (resolvedOptions.includeLogs && relevantLogs.length > 0) {
     sections.push(
       [
         "Recent Error/Warning Logs:",
