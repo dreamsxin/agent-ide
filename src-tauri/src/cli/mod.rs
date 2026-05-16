@@ -7,6 +7,7 @@ use crate::services::context::{
 };
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::llm_profiles;
+use crate::services::problem_parser::ProblemEntry;
 use crate::services::project_tasks::{self, RunProjectTaskResult};
 use crate::services::{context::AgentContext, workspace};
 use chrono::Utc;
@@ -239,6 +240,7 @@ struct CliSummary {
     diffs: Vec<FileDiff>,
     apply_result: Option<ApplyDiffsResult>,
     commands: Vec<RunProjectTaskResult>,
+    problems: Vec<ProblemEntry>,
     errors: Vec<String>,
 }
 
@@ -441,6 +443,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         diffs: Vec::new(),
         apply_result: None,
         commands: Vec::new(),
+        problems: Vec::new(),
         errors,
     };
 
@@ -494,6 +497,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         diffs: Vec::new(),
         apply_result: None,
         commands: Vec::new(),
+        problems: Vec::new(),
         errors: Vec::new(),
     };
     emit_summary(&mut output, &summary)?;
@@ -601,6 +605,7 @@ async fn run_agent_command(
             diffs: Vec::new(),
             apply_result: None,
             commands: Vec::new(),
+            problems: Vec::new(),
             errors: Vec::new(),
         };
         output.event(CliEvent::RunFinished {
@@ -644,6 +649,10 @@ async fn run_agent_command(
     };
 
     let command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+    let command_problems = command_results
+        .iter()
+        .flat_map(|result| result.problems.clone())
+        .collect::<Vec<_>>();
     let checks_failed = command_results
         .iter()
         .any(|result| result.exit_code.unwrap_or(-1) != 0);
@@ -714,6 +723,7 @@ async fn run_agent_command(
         diffs: diffs.clone(),
         apply_result,
         commands: command_results,
+        problems: command_problems,
         errors,
     };
     emit_summary(&mut output, &summary)?;
@@ -907,6 +917,9 @@ fn write_artifacts(
     if !summary.commands.is_empty() {
         write_json(artifact_dir.join("commands.json"), &summary.commands)?;
     }
+    if !summary.problems.is_empty() {
+        write_json(artifact_dir.join("problems.json"), &summary.problems)?;
+    }
     Ok(())
 }
 
@@ -948,6 +961,7 @@ fn error_summary(
         diffs: Vec::new(),
         apply_result: None,
         commands: Vec::new(),
+        problems: Vec::new(),
         errors: vec![error],
     }
 }

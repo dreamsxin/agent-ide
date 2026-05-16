@@ -140,6 +140,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Started CLI Phase 1 with `clap` parsing, `doctor/context estimate/plan/run` command shape, text/json/ndjson output modes, run ids, artifact directories, stable exit codes, prompt-file/stdin support, and parser-focused tests.
 - Extracted LLM provider profile and credential handling into `services/llm_profiles.rs` so IDE commands and CLI can share one backend implementation; CLI now supports `--profile`.
 - Extracted project task discovery and non-interactive command execution into `services/project_tasks.rs`; CLI can run shared check commands with `--run-command` and records results in artifacts.
+- Added shared backend command-output problem parsing in `services/problem_parser.rs`; project command results and CLI artifacts now include parsed Problems.
 
 Important distinction:
 
@@ -408,7 +409,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `agent_cli` supports single-prompt planning, step execution, preview output, optional all-diff apply, provider flags/env vars, workspace selection, and shared workspace-boundary checks.
    - CLI Phase 1 now adds `doctor`, `context estimate`, `plan`, and `run` command shape, plus JSON/NDJSON output, artifacts, run ids, prompt-file/stdin input, and stable exit codes.
    - CLI now has first-pass reuse of UI provider profiles and OS credential-store references via `--profile`.
-   - CLI now uses the shared project command runner for `--run-command`, but failed command output is not yet parsed into backend Problems or fed into an automated repair loop.
+   - CLI now uses the shared project command runner for `--run-command` and records parsed backend Problems, but failed command output is not yet fed into an automated repair loop.
    - It lacks interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery.
    - Keep treating it as a headless Agent runner and backend smoke surface until those workflows are implemented.
    - Target design now calls for subcommands, JSON/NDJSON output, stable exit codes, run artifacts, permission policy, shared profiles/context, interactive review, and bounded autonomous repair loops.
@@ -619,8 +620,8 @@ target\release\agent_cli --help
 5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
 7. Improve Agent CLI mode with shared provider profiles, credential-store lookup, context-mode/source flags, machine-readable JSON output, interactive per-hunk review, and CLI smoke tests.
-8. Continue shared backend refactor by moving problem parsing and Agent run artifacts behind reusable services used by both Tauri commands and CLI; feed failed `--run-command` output into CLI repair context.
+8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI; feed failed `--run-command` Problems into CLI repair context.
 
 ---
 
-*Last updated: 2026-05-16 - IDE and CLI now share LLM profile/credential and project command runner services; CLI supports `--profile` and `--run-command`.*
+*Last updated: 2026-05-16 - IDE and CLI now share LLM profiles, project command runner, and backend problem parsing services; CLI records `--run-command` Problems.*

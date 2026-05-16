@@ -1,3 +1,4 @@
+use crate::services::problem_parser::{parse_terminal_problems, ProblemEntry};
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,8 @@ pub struct RunProjectTaskResult {
     pub duration_ms: u128,
     pub stdout: String,
     pub stderr: String,
+    #[serde(default)]
+    pub problems: Vec<ProblemEntry>,
 }
 
 pub fn discover_project_tasks(path: Option<&str>) -> Result<Vec<ProjectTask>, String> {
@@ -75,12 +78,22 @@ pub async fn run_project_command(
         }
         .map_err(|e| format!("Run task command: {}", e))?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let combined = [stdout.as_str(), stderr.as_str()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let problems = parse_terminal_problems(&combined, "task");
+
         Ok(RunProjectTaskResult {
             command,
             exit_code: output.status.code(),
             duration_ms: start.elapsed().as_millis(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            stdout,
+            stderr,
+            problems,
         })
     })
     .await
@@ -103,8 +116,8 @@ fn discover_package_scripts(root: &Path) -> Result<Vec<ProjectTask>, String> {
         return Ok(Vec::new());
     }
 
-    let content = std::fs::read_to_string(&package_path)
-        .map_err(|e| format!("Read package.json: {}", e))?;
+    let content =
+        std::fs::read_to_string(&package_path).map_err(|e| format!("Read package.json: {}", e))?;
     let parsed: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("Parse package.json: {}", e))?;
 
@@ -298,9 +311,29 @@ mod tests {
             "printf hello-task".to_string()
         };
 
-        let result = run_project_command(command, env.root.clone()).await.unwrap();
+        let result = run_project_command(command, env.root.clone())
+            .await
+            .unwrap();
 
         assert_eq!(result.exit_code, Some(0));
         assert!(result.stdout.contains("hello-task"));
+    }
+
+    #[tokio::test]
+    async fn run_project_command_parses_problem_output() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        let command = if cfg!(windows) {
+            "echo src\\main.rs:12:4: error: expected expression".to_string()
+        } else {
+            "printf 'src/main.rs:12:4: error: expected expression'".to_string()
+        };
+
+        let result = run_project_command(command, env.root.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(result.problems.len(), 1);
+        assert_eq!(result.problems[0].file, "src/main.rs");
     }
 }

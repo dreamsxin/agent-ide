@@ -198,10 +198,12 @@ Each run writes artifacts by default:
   changes.json
   apply-result.json
   commands.json
+  problems.json
 ```
 
 `changes.json` and `apply-result.json` are only written when that data exists.
 `commands.json` is written when one or more `--run-command` checks are executed.
+`problems.json` is written when command output can be parsed into file/line/column Problems.
 
 ## Command Checks
 
@@ -215,7 +217,7 @@ target\release\agent_cli run `
   "Fix failing tests"
 ```
 
-The check results are included in `summary.json` and `commands.json`. A non-zero check exit code returns CLI exit code `4`. This is not yet a full automated repair loop; feeding failed command output back into the Agent is the next step.
+The check results are included in `summary.json` and `commands.json`; parsed file/line/column failures are included in `summary.json` and `problems.json`. A non-zero check exit code returns CLI exit code `4`. This is not yet a full automated repair loop; feeding failed command output back into the Agent is the next step.
 
 ## Exit Codes
 
@@ -247,6 +249,7 @@ Implemented:
 - run-id and artifact directory output.
 - stable exit-code contract.
 - shared backend command runner checks through `--run-command`.
+- shared backend terminal/test problem parsing for command output.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 

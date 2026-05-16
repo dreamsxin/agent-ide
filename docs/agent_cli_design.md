@@ -486,7 +486,8 @@ Current status:
 
 - Shared project task discovery and non-interactive command execution live in `services/project_tasks.rs`.
 - CLI can execute checks with `--run-command` and writes command results to artifacts.
-- Parsing command output into Problems and looping repair context are still pending.
+- Shared command-output problem parsing lives in `services/problem_parser.rs`.
+- Looping failed command Problems back into repair context is still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 
