@@ -250,7 +250,21 @@ struct CliSummary {
     apply_result: Option<ApplyDiffsResult>,
     commands: Vec<RunProjectTaskResult>,
     problems: Vec<ProblemEntry>,
+    repair_chain: Vec<RepairIterationRecord>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairIterationRecord {
+    iteration: u8,
+    prompt: String,
+    failed_commands_before: Vec<RunProjectTaskResult>,
+    problems_before: Vec<ProblemEntry>,
+    diffs: Vec<FileDiff>,
+    apply_result: ApplyDiffsResult,
+    commands_after: Vec<RunProjectTaskResult>,
+    checks_failed_after: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,6 +477,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         apply_result: None,
         commands: Vec::new(),
         problems: Vec::new(),
+        repair_chain: Vec::new(),
         errors,
     };
 
@@ -517,6 +532,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         apply_result: None,
         commands: Vec::new(),
         problems: Vec::new(),
+        repair_chain: Vec::new(),
         errors: Vec::new(),
     };
     emit_summary(&mut output, &summary)?;
@@ -626,6 +642,7 @@ async fn run_agent_command(
             apply_result: None,
             commands: Vec::new(),
             problems: Vec::new(),
+            repair_chain: Vec::new(),
             errors: Vec::new(),
         };
         output.event(CliEvent::RunFinished {
@@ -676,10 +693,12 @@ async fn run_agent_command(
     let mut checks_failed = command_results
         .iter()
         .any(|result| result.exit_code.unwrap_or(-1) != 0);
+    let mut repair_chain = Vec::new();
 
     if args.apply && checks_failed && args.max_iterations > 0 {
         for iteration in 1..=args.max_iterations {
             let command_problems = collect_command_problems(&command_results);
+            let failed_commands_before = failed_command_results(&command_results);
             output.event(CliEvent::RepairIterationStarted {
                 iteration,
                 max_iterations: args.max_iterations,
@@ -715,12 +734,22 @@ async fn run_agent_command(
                 applied_count: repair_apply.applied.len(),
                 failed_count: repair_apply.failed.len(),
             });
-            diffs.extend(repair_diffs);
+            diffs.extend(repair_diffs.clone());
             apply_results.push(repair_apply.clone());
             command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
             checks_failed = command_results
                 .iter()
                 .any(|result| result.exit_code.unwrap_or(-1) != 0);
+            repair_chain.push(RepairIterationRecord {
+                iteration,
+                prompt: repair_prompt,
+                failed_commands_before,
+                problems_before: command_problems,
+                diffs: repair_diffs,
+                apply_result: repair_apply.clone(),
+                commands_after: command_results.clone(),
+                checks_failed_after: checks_failed,
+            });
             output.event(CliEvent::RepairIterationFinished {
                 iteration,
                 diff_count: diffs.len(),
@@ -801,6 +830,7 @@ async fn run_agent_command(
         apply_result,
         commands: command_results,
         problems: command_problems,
+        repair_chain,
         errors,
     };
     emit_summary(&mut output, &summary)?;
@@ -973,6 +1003,12 @@ fn write_artifacts(
     if !summary.problems.is_empty() {
         write_json(artifact_dir.join("problems.json"), &summary.problems)?;
     }
+    if !summary.repair_chain.is_empty() {
+        write_json(
+            artifact_dir.join("repair-chain.json"),
+            &summary.repair_chain,
+        )?;
+    }
     Ok(())
 }
 
@@ -1015,6 +1051,7 @@ fn error_summary(
         apply_result: None,
         commands: Vec::new(),
         problems: Vec::new(),
+        repair_chain: Vec::new(),
         errors: vec![error],
     }
 }
@@ -1044,6 +1081,14 @@ fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec<Pro
     command_results
         .iter()
         .flat_map(|result| result.problems.clone())
+        .collect()
+}
+
+fn failed_command_results(command_results: &[RunProjectTaskResult]) -> Vec<RunProjectTaskResult> {
+    command_results
+        .iter()
+        .filter(|result| result.exit_code.unwrap_or(-1) != 0)
+        .cloned()
         .collect()
 }
 
@@ -1468,6 +1513,33 @@ mod tests {
         ));
         assert!(!is_command_allowed("npm test", &["cargo *".to_string()]));
         assert!(is_command_allowed("npm run test", &["*".to_string()]));
+    }
+
+    #[test]
+    fn failed_command_results_keeps_only_non_zero_checks() {
+        let results = vec![
+            RunProjectTaskResult {
+                command: "npm test".to_string(),
+                exit_code: Some(1),
+                duration_ms: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                problems: Vec::new(),
+            },
+            RunProjectTaskResult {
+                command: "npm run lint".to_string(),
+                exit_code: Some(0),
+                duration_ms: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                problems: Vec::new(),
+            },
+        ];
+
+        let failed = failed_command_results(&results);
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].command, "npm test");
     }
 
     #[test]

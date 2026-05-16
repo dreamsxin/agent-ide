@@ -287,6 +287,7 @@ changes.patch
 apply-result.json
 commands.json
 problems.json
+repair-chain.json
 action-log.json
 ```
 
@@ -490,7 +491,8 @@ Current status:
 - Shared Agent single-step runtime helpers live in `services/agent_runtime.rs`, including step-context enrichment and diff provenance used by both CLI execution and IDE single-step/regenerate flows.
 - `--max-iterations` provides a first bounded repair loop after `--apply` and failed `--run-command` checks: failed command output and parsed Problems are injected into a repair prompt, new diffs are applied, and checks rerun.
 - `--allow-run` is required when `--max-iterations` is enabled. Exact commands, prefix patterns such as `cargo *`, and trusted wildcard `*` are supported.
-- Timeout policy, broader permission policy, and richer failure-chain artifacts are still pending.
+- `repair-chain.json` records each bounded repair iteration as failure context -> repair prompt -> generated diffs -> apply result -> rerun result.
+- Timeout policy, broader permission policy, and compact chain summaries are still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 

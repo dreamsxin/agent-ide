@@ -199,11 +199,13 @@ Each run writes artifacts by default:
   apply-result.json
   commands.json
   problems.json
+  repair-chain.json
 ```
 
 `changes.json` and `apply-result.json` are only written when that data exists.
 `commands.json` is written when one or more `--run-command` checks are executed.
 `problems.json` is written when command output can be parsed into file/line/column Problems.
+`repair-chain.json` is written when bounded repair iterations run.
 
 ## Command Checks
 
@@ -233,6 +235,8 @@ target\release\agent_cli run `
 ```
 
 When checks fail after an applied change, the CLI builds a repair prompt from the failed command output and parsed Problems, generates another diff, applies it, and reruns the checks until they pass or the iteration budget is exhausted. Repair mode requires each check command to be authorized with `--allow-run`. Use an exact command, a prefix pattern such as `cargo *`, or `*` for all commands in trusted workspaces.
+
+Each repair iteration is recorded in `repair-chain.json` with the failed commands before repair, parsed Problems, generated diffs, apply result, rerun command results, and final failed/pass state for that iteration.
 
 ## Exit Codes
 
@@ -267,6 +271,7 @@ Implemented:
 - shared backend terminal/test problem parsing for command output.
 - bounded repair iterations with `--max-iterations` after applied command-check failures.
 - repair-loop command authorization through `--allow-run`.
+- repair-chain artifacts that link failures, generated repair diffs, apply results, and rerun results.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 
