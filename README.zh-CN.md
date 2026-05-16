@@ -130,6 +130,7 @@ src-tauri/
 
 docs/
   agent_ide_design.md      当前详细设计
+  agent_cli_manual.md      CLI 模式使用说明和限制
   agent_ide_plan.md        原始技术计划
   agent_ide_ui_design.md   产品 UI 目标设计
 ```
@@ -236,13 +237,17 @@ $env:LLM_MODEL = "..."
 
 ## CLI
 
-Rust 侧包含一个预览/应用模式的 CLI：
+Rust 侧包含一个 headless 预览/应用模式的 CLI：
 
 ```powershell
 cd src-tauri
 cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
+
+CLI 模式适合脚本化的一次性 Agent 运行和后端 smoke check，但它还不是完整的命令行 IDE 替代方案。它目前没有桌面 IDE 中的可视化 Agent Plan 控制、Problems/Terminal/Git 闭环、LSP 能力、Run History 或 per-hunk review UI。
+
+使用方式、安全注意事项和当前完成度见 [docs/agent_cli_manual.md](docs/agent_cli_manual.md)。
 
 ## Git 注意事项
 

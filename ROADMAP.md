@@ -135,6 +135,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added Agent plan step reorder controls and backend step-order persistence.
 - Added pipeline `pauseBefore` controls so users can configure stage approval points before the Agent continues.
 - Added paused pipeline snapshots and a Continue action so users can approve a paused stage and continue the backend pipeline from that stage.
+- Added `docs/agent_cli_manual.md` and clarified that CLI mode is currently a headless preview/apply Agent runner, not a complete command-line IDE replacement.
 
 Important distinction:
 
@@ -399,6 +400,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Rust diff apply, workspace boundaries, pipeline helpers, and pending diff summaries have tests.
    - Need more tests for Agent state transitions and frontend store behavior.
 
+14. **CLI mode is useful but not feature-complete**
+   - `agent_cli` supports single-prompt planning, step execution, preview output, optional all-diff apply, provider flags/env vars, workspace selection, and shared workspace-boundary checks.
+   - It does not yet reuse UI provider profiles or OS credential-store references.
+   - It lacks interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery.
+   - Keep treating it as a headless Agent runner and backend smoke surface until those workflows are implemented.
+
 ---
 
 ## Roadmap
@@ -604,7 +611,8 @@ target\release\agent_cli --help
 4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
 5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
+7. Improve Agent CLI mode with shared provider profiles, credential-store lookup, context-mode/source flags, machine-readable JSON output, interactive per-hunk review, and CLI smoke tests.
 
 ---
 
-*Last updated: 2026-05-16 - Agent control loop continued: paused pipeline snapshots and Continue-after-pause are wired.*
+*Last updated: 2026-05-16 - Agent CLI mode documented and scoped as a headless preview/apply runner, with IDE-completeness gaps tracked.*
