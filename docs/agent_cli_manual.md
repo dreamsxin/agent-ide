@@ -58,6 +58,7 @@ Options:
   --endpoint <URL>
   --api-key <KEY>
   --model <NAME>
+  --profile <ID>
   --workspace <DIR>
   --apply
   --context-mode <full|focused|compact>
@@ -95,7 +96,16 @@ cd D:\work\my-project
 D:\work\agent-ide\src-tauri\target\release\agent_cli "Explain the project structure"
 ```
 
-The CLI currently reads `LLM_ENDPOINT`, `LLM_API_KEY`, and `LLM_MODEL`. It does not yet read desktop UI provider profiles or OS credential-store references.
+The CLI can use the same desktop provider profiles and OS credential-store references:
+
+```powershell
+target\release\agent_cli run `
+  --profile default `
+  --workspace D:\work\my-project `
+  "Explain the project structure"
+```
+
+It also supports direct config through `--endpoint`, `--api-key`, `--model`, or environment variables `LLM_ENDPOINT`, `LLM_API_KEY`, and `LLM_MODEL`.
 
 For compatibility, the older no-subcommand style still works and is normalized to `run`:
 
@@ -232,7 +242,6 @@ Missing for daily IDE replacement:
 - No visual Diff tab, per-hunk review, stale diff guidance, or regenerate-against-current-file UI.
 - No context preview, source toggles, pin files, or provider-profile budget display.
 - No persisted Agent task recovery, action-log view, or frontend/backend run-id reconciliation.
-- No OS credential-store integration for CLI provider profiles.
 
 ## Recommended Next CLI Work
 

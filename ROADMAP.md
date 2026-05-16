@@ -138,6 +138,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added `docs/agent_cli_manual.md` and clarified that CLI mode is currently a headless preview/apply Agent runner, not a complete command-line IDE replacement.
 - Added `docs/agent_cli_design.md` to plan CLI mode as a stable automation surface for CI, scripts, external IDE tasks, and bounded fully autonomous repair loops.
 - Started CLI Phase 1 with `clap` parsing, `doctor/context estimate/plan/run` command shape, text/json/ndjson output modes, run ids, artifact directories, stable exit codes, prompt-file/stdin support, and parser-focused tests.
+- Extracted LLM provider profile and credential handling into `services/llm_profiles.rs` so IDE commands and CLI can share one backend implementation; CLI now supports `--profile`.
 
 Important distinction:
 
@@ -405,7 +406,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
 14. **CLI mode is useful but not feature-complete**
    - `agent_cli` supports single-prompt planning, step execution, preview output, optional all-diff apply, provider flags/env vars, workspace selection, and shared workspace-boundary checks.
    - CLI Phase 1 now adds `doctor`, `context estimate`, `plan`, and `run` command shape, plus JSON/NDJSON output, artifacts, run ids, prompt-file/stdin input, and stable exit codes.
-   - It does not yet reuse UI provider profiles or OS credential-store references.
+   - CLI now has first-pass reuse of UI provider profiles and OS credential-store references via `--profile`.
    - It lacks interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery.
    - Keep treating it as a headless Agent runner and backend smoke surface until those workflows are implemented.
    - Target design now calls for subcommands, JSON/NDJSON output, stable exit codes, run artifacts, permission policy, shared profiles/context, interactive review, and bounded autonomous repair loops.
@@ -616,8 +617,8 @@ target\release\agent_cli --help
 5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
 7. Improve Agent CLI mode with shared provider profiles, credential-store lookup, context-mode/source flags, machine-readable JSON output, interactive per-hunk review, and CLI smoke tests.
-8. Continue CLI Phase 1/2: add `--profile` backed by shared provider profile loading and OS credential-store lookup, plus smoke tests that assert artifact contents and process exit codes.
+8. Continue shared backend refactor by moving command runner/problem parsing and Agent run artifacts behind reusable services used by both Tauri commands and CLI; add smoke tests that assert artifact contents and process exit codes.
 
 ---
 
-*Last updated: 2026-05-16 - CLI Phase 1 started with clap command parsing, machine-readable output, run artifacts, prompt input modes, and stable exit codes.*
+*Last updated: 2026-05-16 - IDE and CLI now share first-pass LLM profile/credential backend service; CLI supports `--profile`.*

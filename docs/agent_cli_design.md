@@ -428,7 +428,7 @@ Deliverables:
 - Replace manual argument parsing with a real parser such as `clap`. **Current: done.**
 - Add subcommands: `doctor`, `context estimate`, `plan`, `run`. **Current: first pass done.**
 - Add `--profile`, `--context-mode`, `--include`, `--prompt-file`, `--stdin`.
-- Add `--context-mode`, `--include`, `--prompt-file`, `--stdin`. **Current: done for CLI-local context sources; profile is still pending.**
+- Add `--profile`, `--context-mode`, `--include`, `--prompt-file`, `--stdin`. **Current: done for first-pass shared provider profile loading and CLI-local context sources.**
 - Add `--output text|json|ndjson`. **Current: done.**
 - Add stable exit codes. **Current: done.**
 - Add run-id and artifact directory. **Current: done.**
@@ -443,8 +443,8 @@ Acceptance:
 
 Deliverables:
 
-- Move LLM profile loading into reusable service code.
-- Load API keys from OS credential store when `--profile` is used.
+- Move LLM profile loading into reusable service code. **Current: first pass done.**
+- Load API keys from OS credential store when `--profile` is used. **Current: first pass done.**
 - Use the same backend context section builder as Chat Context Preview.
 - Support context include/exclude flags and budget reporting.
 

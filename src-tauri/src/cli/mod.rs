@@ -6,6 +6,7 @@ use crate::services::context::{
     ContextBuildOptions, ContextCompressionMode, ContextEstimateResponse, ContextSourceOptions,
 };
 use crate::services::llm_client::{LlmClient, LlmConfig};
+use crate::services::llm_profiles;
 use crate::services::{context::AgentContext, workspace};
 use chrono::Utc;
 use clap::error::ErrorKind;
@@ -105,6 +106,9 @@ struct ContextEstimateArgs {
 #[derive(Args, Debug, Clone)]
 struct RunArgs {
     #[arg(long)]
+    profile: Option<String>,
+
+    #[arg(long)]
     endpoint: Option<String>,
 
     #[arg(long)]
@@ -155,6 +159,7 @@ impl Default for RunArgs {
             endpoint: None,
             api_key: None,
             model: None,
+            profile: None,
             workspace: None,
             apply: false,
             context_mode: ContextModeArg::Focused,
@@ -907,6 +912,23 @@ fn error_summary(
 }
 
 fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
+    if let Some(profile_id) = args.profile.as_deref() {
+        let config = llm_profiles::load_llm_config_from_disk().ok_or_else(|| {
+            (
+                ExitCode::InvalidInput,
+                "No LLM profile config found. Configure profiles in the IDE or use --endpoint/--api-key/--model.".to_string(),
+            )
+        })?;
+        let llm_config =
+            llm_profiles::resolve_llm_config(&config, Some(profile_id)).map_err(|err| {
+                (
+                    ExitCode::InvalidInput,
+                    format!("Failed to load LLM profile '{}': {}", profile_id, err),
+                )
+            })?;
+        return Ok(LlmClient::new(llm_config));
+    }
+
     let endpoint = args
         .endpoint
         .clone()
