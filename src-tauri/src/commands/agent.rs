@@ -328,6 +328,10 @@ pub struct AgentStatus {
     pub state: String,
     pub mode: String,
     pub context_files: Vec<String>,
+    #[serde(rename = "currentRunId")]
+    pub current_run_id: Option<String>,
+    #[serde(rename = "lastRunId")]
+    pub last_run_id: Option<String>,
 }
 
 /// Send-prompt request DTO.
@@ -347,6 +351,8 @@ pub struct SendPromptRequest {
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
     pub context_sources: Option<ContextSourceOptions>,
+    #[serde(rename = "runId")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,6 +394,8 @@ pub struct RunAgentStepRequest {
     pub regenerated_from_diff_id: Option<String>,
     #[serde(rename = "regeneratedFromHunkIndex")]
     pub regenerated_from_hunk_index: Option<usize>,
+    #[serde(rename = "runId")]
+    pub run_id: Option<String>,
 }
 
 /// Get the current Agent state.
@@ -400,6 +408,8 @@ pub async fn get_agent_state(
         state: orch.state_mgr.state.to_string(),
         mode: orch.mode.to_string(),
         context_files: Vec::new(),
+        current_run_id: orch.current_run_id.clone(),
+        last_run_id: orch.last_run_id.clone(),
     })
 }
 
@@ -457,6 +467,7 @@ pub async fn send_agent_prompt(
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
+    orch.begin_run(request.run_id.clone());
     match orch
         .run(
             request.prompt,
@@ -471,16 +482,27 @@ pub async fn send_agent_prompt(
         )
         .await
     {
-        Ok(()) => {}
+        Ok(()) => {
+            orch.finish_run();
+        }
         Err(err) if is_cancelled_error(&err) => {
+            orch.finish_run();
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
                 "agent-state-changed",
-                serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+                serde_json::json!({
+                    "state": orch.state_mgr.state.to_string(),
+                    "mode": orch.mode.to_string(),
+                    "currentRunId": orch.current_run_id,
+                    "lastRunId": orch.last_run_id,
+                }),
             );
             return Ok("Agent task cancelled".to_string());
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            orch.finish_run();
+            return Err(err);
+        }
     }
 
     Ok("Agent task completed".to_string())
@@ -491,6 +513,7 @@ pub async fn send_agent_prompt(
 pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<String, String> {
     agent_state.cancel_flag.store(true, Ordering::SeqCst);
     let mut orch = agent_state.orchestrator.lock().await;
+    orch.finish_run();
     orch.state_mgr.set(AgentState::Idle);
     orch.steps.clear();
     orch.diffs.clear();
@@ -589,6 +612,7 @@ pub async fn run_agent_step(
 
     {
         let mut orch = agent_state.orchestrator.lock().await;
+        orch.begin_run(request.run_id.clone());
         upsert_step_status(
             &mut orch.steps,
             &step,
@@ -649,9 +673,15 @@ pub async fn run_agent_step(
                 serde_json::to_value(&orch.diffs).unwrap_or_default(),
             );
             orch.state_mgr.set(AgentState::WaitingUser);
+            orch.finish_run();
             let _ = app_handle.emit(
                 "agent-state-changed",
-                serde_json::json!({ "state": orch.state_mgr.state.to_string(), "mode": orch.mode.to_string() }),
+                serde_json::json!({
+                    "state": orch.state_mgr.state.to_string(),
+                    "mode": orch.mode.to_string(),
+                    "currentRunId": orch.current_run_id,
+                    "lastRunId": orch.last_run_id,
+                }),
             );
             orch.emit_review_action_log(
                 &app_handle,
@@ -680,6 +710,7 @@ pub async fn run_agent_step(
             Ok("Agent step completed".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
+            orch.finish_run();
             upsert_step_status(
                 &mut orch.steps,
                 &step,
@@ -689,11 +720,17 @@ pub async fn run_agent_step(
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
                 "agent-state-changed",
-                serde_json::json!({ "state": orch.state_mgr.state.to_string(), "mode": orch.mode.to_string() }),
+                serde_json::json!({
+                    "state": orch.state_mgr.state.to_string(),
+                    "mode": orch.mode.to_string(),
+                    "currentRunId": orch.current_run_id,
+                    "lastRunId": orch.last_run_id,
+                }),
             );
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
+            orch.finish_run();
             upsert_step_status(&mut orch.steps, &step, "error", &format!("Error: {}", err));
             let _ = app_handle.emit(
                 "agent-step-update",
@@ -708,7 +745,12 @@ pub async fn run_agent_step(
             orch.state_mgr.set(AgentState::Error(err.clone()));
             let _ = app_handle.emit(
                 "agent-state-changed",
-                serde_json::json!({ "state": orch.state_mgr.state.to_string(), "mode": orch.mode.to_string() }),
+                serde_json::json!({
+                    "state": orch.state_mgr.state.to_string(),
+                    "mode": orch.mode.to_string(),
+                    "currentRunId": orch.current_run_id,
+                    "lastRunId": orch.last_run_id,
+                }),
             );
             orch.emit_review_action_log(
                 &app_handle,

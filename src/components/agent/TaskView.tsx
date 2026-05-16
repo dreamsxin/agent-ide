@@ -74,6 +74,13 @@ export default function TaskView() {
               <div className="mt-0.5 truncate font-mono text-[10px]">
                 {(agentRunId ?? restoredSession.runId) || "no-run-id"} · {formatRestoreTime(restoredSession.restoredAt)}
               </div>
+              <div className={`mt-0.5 text-[10px] ${restoredSession.backendMatched ? "text-diff-add" : "text-diff-modify"}`}>
+                {restoredSession.backendMatched === null
+                  ? "Checking backend run..."
+                  : restoredSession.backendMatched
+                  ? "Backend run matched"
+                  : "Frontend recovered only"}
+              </div>
               <div className="mt-0.5">
                 Review diffs or run a step to continue.
               </div>

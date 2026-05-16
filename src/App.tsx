@@ -111,6 +111,7 @@ export default function App() {
         useLogStore.getState().restoreLogs(saved);
         useAgentStore.getState().restoreAgentSession(saved);
         useAgentStore.getState().restoreDiffs(saved);
+        void useAgentStore.getState().reconcileBackendRun();
         void useEditorStore.getState().restoreEditorSession(saved);
       } else {
         console.log("[App] No saved workspace found, starting empty");

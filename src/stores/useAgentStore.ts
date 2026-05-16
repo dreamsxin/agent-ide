@@ -62,6 +62,7 @@ interface AgentStore {
   setDiffs: (diffs: DiffEntry[]) => void;
   restoreDiffs: (workspacePath?: string) => void;
   restoreAgentSession: (workspacePath?: string) => void;
+  reconcileBackendRun: () => Promise<void>;
   clearAgentSession: () => void;
   setPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
@@ -157,7 +158,16 @@ interface AgentRestoredSession {
   runId: string | null;
   restoredAt: number;
   interrupted: boolean;
+  backendMatched: boolean | null;
   updatedAt?: number;
+}
+
+interface AgentStatusResponse {
+  state: AgentState;
+  mode: AgentMode;
+  context_files: string[];
+  currentRunId?: string | null;
+  lastRunId?: string | null;
 }
 
 const DEFAULT_PIPELINE: PipelineStage[] = [
@@ -246,6 +256,30 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (!restored) return;
     set(restored);
   },
+  reconcileBackendRun: async () => {
+    const restored = get().restoredSession;
+    if (!restored || !isTauriRuntime()) return;
+    try {
+      const status = await invoke<AgentStatusResponse>("get_agent_state");
+      const matched = Boolean(
+        restored.runId &&
+        (status.currentRunId === restored.runId || status.lastRunId === restored.runId)
+      );
+      set((state) => ({
+        restoredSession: state.restoredSession
+          ? { ...state.restoredSession, backendMatched: matched }
+          : null,
+      }));
+      persistAgentSession(get());
+    } catch (err) {
+      console.warn("[AgentStore] get_agent_state reconciliation failed:", err);
+      set((state) => ({
+        restoredSession: state.restoredSession
+          ? { ...state.restoredSession, backendMatched: false }
+          : null,
+      }));
+    }
+  },
   clearAgentSession: () => {
     clearPersistedAgentSession();
     set({
@@ -330,12 +364,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {
+    const runId = makeAgentRunId("chat");
     set({
       error: null,
       lastApplyResult: null,
       streamContent: "",
       isStreaming: true,
-      agentRunId: makeAgentRunId("chat"),
+      agentRunId: runId,
       restoredSession: null,
     });
     persistAgentSession(get());
@@ -353,6 +388,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           profileId: params.profileId ?? get().chatProfileId,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
+          runId,
         },
       });
     } catch (err: unknown) {
@@ -602,12 +638,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   runAgentStep: async (params) => {
+    const runId = makeAgentRunId("step");
     set({
       error: null,
       lastApplyResult: null,
       streamContent: "",
       isStreaming: true,
-      agentRunId: makeAgentRunId("step"),
+      agentRunId: runId,
       restoredSession: null,
     });
     persistAgentSession(get());
@@ -628,6 +665,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           extraPrompt: params.extraPrompt ?? null,
           regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
           regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,
+          runId,
         },
       });
     } catch (err: unknown) {
@@ -952,6 +990,7 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
         runId: parsed.runId ?? null,
         restoredAt: Date.now(),
         interrupted,
+        backendMatched: null,
         updatedAt: parsed.updatedAt,
       },
       streamContent: "",

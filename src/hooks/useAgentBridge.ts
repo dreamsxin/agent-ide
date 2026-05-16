@@ -9,6 +9,8 @@ import { isTauriRuntime } from "../utils/tauri";
 interface StateChangedPayload {
   state: string;
   mode?: string;
+  currentRunId?: string | null;
+  lastRunId?: string | null;
 }
 
 /**

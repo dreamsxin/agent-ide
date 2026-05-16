@@ -39,6 +39,8 @@ pub struct AgentOrchestrator {
     pub mode: AgentMode,
     pub steps: Vec<TaskStep>,
     pub diffs: Vec<crate::agent::state_machine::FileDiff>,
+    pub current_run_id: Option<String>,
+    pub last_run_id: Option<String>,
 }
 
 impl AgentOrchestrator {
@@ -48,7 +50,18 @@ impl AgentOrchestrator {
             mode: AgentMode::Suggest,
             steps: Vec::new(),
             diffs: Vec::new(),
+            current_run_id: None,
+            last_run_id: None,
         }
+    }
+
+    pub fn begin_run(&mut self, run_id: Option<String>) {
+        self.current_run_id = run_id.clone();
+        self.last_run_id = run_id;
+    }
+
+    pub fn finish_run(&mut self) {
+        self.current_run_id = None;
     }
 
     /// Run the full Agent flow:
@@ -719,6 +732,21 @@ mod tests {
         let provenance = diffs[0].provenance.as_ref().expect("provenance");
         assert_eq!(provenance.source_role.as_deref(), Some("coder"));
         assert_eq!(provenance.source_stage.as_deref(), Some("Implement"));
+    }
+
+    #[test]
+    fn run_id_tracks_current_and_last_run() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        orchestrator.begin_run(Some("run-1".to_string()));
+
+        assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
+        assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
+
+        orchestrator.finish_run();
+
+        assert_eq!(orchestrator.current_run_id, None);
+        assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
     }
 
     #[test]
