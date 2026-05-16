@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
 
 function HunkBlock({
@@ -10,6 +11,7 @@ function HunkBlock({
   onApply,
   onReject,
   onRegenerate,
+  findings,
 }: {
   hunk: DiffHunk;
   index: number;
@@ -17,11 +19,12 @@ function HunkBlock({
   onApply: () => void;
   onReject: () => void;
   onRegenerate: () => void;
+  findings: ProblemEntry[];
 }) {
   const hasOriginal = hunk.original && hunk.original.trim().length > 0;
   const hasUpdated = hunk.updated && hunk.updated.trim().length > 0;
   const hunkStatus = hunk.status ?? "pending";
-  const canAct = (diffStatus === "pending" || diffStatus === "failed") && hunkStatus !== "applied" && hunkStatus !== "rejected";
+  const canAct = isReviewableDiffStatus(diffStatus) && hunkStatus !== "applied" && hunkStatus !== "rejected";
 
   const header = (
     <div className="flex items-center justify-between gap-2 border-b border-surface-border bg-surface-panel/70 px-2 py-1">
@@ -52,6 +55,29 @@ function HunkBlock({
           )}
         </span>
       )}
+      {findings.length > 0 && (
+        <span className="rounded border border-accent-blue/30 bg-accent-blue/10 px-1.5 py-0.5 text-[10px] text-accent-blue">
+          {findings.length} finding{findings.length === 1 ? "" : "s"}
+        </span>
+      )}
+    </div>
+  );
+
+  const findingPanel = findings.length > 0 && (
+    <div className="border-b border-accent-blue/20 bg-accent-blue/5 px-2 py-1 font-sans text-[11px] leading-snug text-surface-text">
+      {findings.slice(0, 3).map((finding) => (
+        <div key={finding.id} className="flex gap-1">
+          <span className={problemSeverityClass(finding.severity)}>
+            {finding.severity}
+          </span>
+          <span className="min-w-0 flex-1 truncate">
+            {finding.source}: {finding.message}
+          </span>
+        </div>
+      ))}
+      {findings.length > 3 && (
+        <div className="text-surface-muted">+{findings.length - 3} more</div>
+      )}
     </div>
   );
 
@@ -60,6 +86,7 @@ function HunkBlock({
     return (
       <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
         {header}
+        {findingPanel}
         <div className="border-b border-diff-add/20 bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
           + New file
         </div>
@@ -79,6 +106,7 @@ function HunkBlock({
     return (
       <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
         {header}
+        {findingPanel}
         <div className="grid grid-cols-2 border-b border-surface-border">
           <div className="bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
             - Original
@@ -111,6 +139,7 @@ function HunkBlock({
   return (
     <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
       {header}
+      {findingPanel}
       {lines.map((line, i) => {
         let bg = "";
         if (line.startsWith("+")) bg = "bg-diff-add/15";
@@ -137,6 +166,7 @@ export default function DiffView() {
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
   const rejectDiffHunk = useAgentStore((s) => s.rejectDiffHunk);
   const regenerateDiff = useAgentStore((s) => s.regenerateDiff);
+  const problems = useProblemStore((s) => s.problems);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
@@ -233,15 +263,21 @@ export default function DiffView() {
 
       <div className="flex-1 space-y-2 overflow-auto">
         {diffs.length > 0 ? (
-          diffs.map((diff) => (
-            <div
-              key={diff.id}
-              className="overflow-hidden rounded-lg border border-surface-border bg-surface-base"
-            >
+          diffs.map((diff) => {
+            const counts = getHunkStatusCounts(diff.hunks);
+            const fileFindings = problems.filter((problem) => problemMatchesFile(problem, diff.file));
+            return (
+              <div
+                key={diff.id}
+                className="overflow-hidden rounded-lg border border-surface-border bg-surface-base"
+              >
               <div className="border-b border-surface-border bg-surface-panel px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="flex-1 truncate text-xs font-medium text-surface-text">
                     {diff.file}
+                  </span>
+                  <span className={diffStatusClass(diff.status)}>
+                    {diffStatusLabel(diff.status)}
                   </span>
                   <span className="mr-1 text-[10px] text-diff-add">
                     +{diff.hunks.reduce((sum, h) => sum + h.newLines, 0)}
@@ -285,6 +321,11 @@ export default function DiffView() {
                     )}
                   </div>
                 )}
+                {diff.status === "partial" && (
+                  <div className="mt-1 text-[10px] text-surface-muted">
+                    Hunks: {counts.pending} pending, {counts.applied} applied, {counts.rejected} rejected, {counts.failed} failed
+                  </div>
+                )}
                 {diff.status === "pending" && (
                   <div className="mt-2 flex gap-2">
                     <button
@@ -320,6 +361,7 @@ export default function DiffView() {
                     hunk={hunk}
                     index={i}
                     diffStatus={diff.status}
+                    findings={fileFindings.filter((problem) => problemMatchesHunk(problem, hunk))}
                     onApply={() => void applyDiffHunk(diff.id, i)}
                     onReject={() => void rejectDiffHunk(diff.id, i)}
                     onRegenerate={() => void handleRegenerateDiff(diff, i)}
@@ -353,7 +395,8 @@ export default function DiffView() {
                 </div>
               )}
             </div>
-          ))
+            );
+          })
         ) : (
           <div className="py-10 text-center text-xs text-surface-muted">
             <div>No pending changes</div>
@@ -370,4 +413,59 @@ export default function DiffView() {
 function isHashMismatch(message?: string) {
   if (!message) return false;
   return message.includes("baseHash") || message.includes("File changed since diff was generated");
+}
+
+function isReviewableDiffStatus(status: DiffEntry["status"]) {
+  return status === "pending" || status === "partial" || status === "failed";
+}
+
+function getHunkStatusCounts(hunks: DiffHunk[]) {
+  return hunks.reduce(
+    (counts, hunk) => {
+      const status = hunk.status ?? "pending";
+      counts[status] += 1;
+      return counts;
+    },
+    { pending: 0, applied: 0, rejected: 0, failed: 0 } as Record<NonNullable<DiffHunk["status"]>, number>
+  );
+}
+
+function diffStatusLabel(status: DiffEntry["status"]) {
+  if (status === "partial") return "Partial";
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function diffStatusClass(status: DiffEntry["status"]) {
+  const base = "rounded border px-1.5 py-0.5 text-[10px]";
+  if (status === "applied") return `${base} border-diff-add/40 bg-diff-add/10 text-diff-add`;
+  if (status === "rejected" || status === "failed") {
+    return `${base} border-diff-remove/40 bg-diff-remove/10 text-diff-remove`;
+  }
+  if (status === "partial") return `${base} border-accent-blue/40 bg-accent-blue/10 text-accent-blue`;
+  return `${base} border-surface-border bg-surface-base text-surface-muted`;
+}
+
+function problemSeverityClass(severity: ProblemEntry["severity"]) {
+  if (severity === "error") return "shrink-0 font-semibold text-diff-remove";
+  if (severity === "warning") return "shrink-0 font-semibold text-yellow-400";
+  return "shrink-0 font-semibold text-accent-blue";
+}
+
+function problemMatchesFile(problem: ProblemEntry, file: string) {
+  return normalizeProblemPath(problem.file) === normalizeProblemPath(file);
+}
+
+function problemMatchesHunk(problem: ProblemEntry, hunk: DiffHunk) {
+  if (!problem.line || problem.line < 1) return true;
+  const start = hunk.newStart || hunk.oldStart || 1;
+  const lineCount = Math.max(hunk.newLines, hunk.oldLines, 1);
+  return problem.line >= start && problem.line <= start + lineCount - 1;
+}
+
+function normalizeProblemPath(path: string) {
+  return decodeURIComponent(path)
+    .replace(/^file:\/+/i, "")
+    .replace(/\\/g, "/")
+    .replace(/^\/([a-zA-Z]:\/)/, "$1")
+    .toLowerCase();
 }

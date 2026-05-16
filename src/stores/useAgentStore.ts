@@ -928,11 +928,17 @@ function applyProfilesResponse(
 }
 
 function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
-  if (hunks.every((hunk) => hunk.status === "applied" || hunk.status === "rejected")) {
+  if (hunks.length > 0 && hunks.every((hunk) => hunk.status === "applied")) {
     return "applied";
+  }
+  if (hunks.length > 0 && hunks.every((hunk) => hunk.status === "rejected")) {
+    return "rejected";
   }
   if (hunks.some((hunk) => hunk.status === "failed")) {
     return "failed";
+  }
+  if (hunks.some((hunk) => hunk.status === "applied" || hunk.status === "rejected")) {
+    return "partial";
   }
   return "pending";
 }

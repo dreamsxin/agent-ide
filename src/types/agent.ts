@@ -48,7 +48,7 @@ export interface DiffEntry {
   baseHash?: string | null;
   provenance?: DiffProvenance | null;
   hunks: DiffHunk[];
-  status: "pending" | "applied" | "rejected" | "failed";
+  status: "pending" | "partial" | "applied" | "rejected" | "failed";
   applyError?: string;
 }
 

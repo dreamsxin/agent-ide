@@ -438,13 +438,13 @@ Planned interaction TODO:
 Current priority after reassessment:
 
 1. Runtime validation in `npm run tauri -- dev` for Terminal sessions, Commands/Run History, Problems markers, LSP diagnostics, Git remote/conflict flows, and Agent repair loops.
-2. Desktop Agent interaction polish: reviewer findings bound to hunks, clearer partial hunk states, and workflow input/output provenance in the UI.
+2. Desktop Agent interaction polish: reviewer/Problem findings now bind into matching diff hunks, partial hunk review state is explicit, and workflow input/output provenance still needs richer stage-level UI.
 3. IDE semantic reliability: large TypeScript/Go workspace indexing validation and next language adapters only after runtime behavior is stable.
 4. Frontend/Tauri smoke tests that exercise daily IDE workflows end to end.
 
 1. Agent workflow visualization
    - Show current pipeline phase, input sources, output state, retry/skip controls, and stage-level provenance.
-   - Bind Reviewer findings to specific files/hunks where possible.
+   - Bind Reviewer findings to specific files/hunks where possible. First pass: same-file Problems/Agent findings are displayed on matching diff hunks.
 2. Interactive Agent plan
    - Let users edit, reorder, skip, and run individual plan steps.
    - Add step scope controls: selection, active file, selected files, workspace.
@@ -631,15 +631,16 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
+1. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
 2. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
-3. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
-4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
-5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
-6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
-7. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
-8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
+3. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
+4. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
+5. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
+6. Expand Agent workflow UI with stage input/output source panels, reviewer finding provenance, and explicit per-stage approve/skip controls.
+7. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
+8. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
+9. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
 
 ---
 
-*Last updated: 2026-05-16 - IDE and CLI now share LLM profiles, project command runner, and backend problem parsing services; CLI records `--run-command` Problems.*
+*Last updated: 2026-05-16 - Diff review now preserves partial hunk state and shows same-file Problems/Agent findings inside matching hunks; smoke checklist now includes the full Terminal/Commands/Problems/LSP/Git/Agent repair loop and large TypeScript/Go workspace indexing validation.*

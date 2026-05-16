@@ -37,6 +37,7 @@ Implemented core capabilities:
 - Quick Fix/code action application feedback through Logs, with editor state sync and diagnostics refresh after fixes.
 - Problems integration for static diagnostics and terminal/test failures, including severity-colored editor line decorations, minimap markers, and runtime failure markers for file/line/column locations.
 - Command runner history for build/test/lint/check commands with exit code, duration, output details, Problems parsing, and failed-run Agent repair context.
+- Diff review keeps partially reviewed files in a visible `Partial` state and shows same-file Problems/Agent findings inside matching hunks.
 - Explorer quality-of-life actions including reveal in file explorer, VS Code-style copy/paste file, copy absolute file path, and copy relative file path.
 
 Important remaining gaps:
@@ -46,6 +47,7 @@ Important remaining gaps:
 - Agent change protocol still needs stricter schema validation and richer provenance.
 - LLM credential storage needs real-runtime validation across Windows Credential Manager, macOS Keychain, and Linux secret service.
 - Terminal still needs deeper interactive runtime testing across panel hide/show, workspace switching, and long-running processes.
+- The full Terminal / Commands / Problems / LSP / Git / Agent repair loop still needs repeated real-runtime smoke records on representative workspaces.
 - Frontend test coverage and Tauri smoke tests are still thin.
 
 See [ROADMAP.md](ROADMAP.md) for the implementation source of truth, [docs/agent_ide_design.md](docs/agent_ide_design.md) for detailed design, and [docs/smoke_test.md](docs/smoke_test.md) for the real-runtime validation checklist.

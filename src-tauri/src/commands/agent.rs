@@ -463,12 +463,18 @@ pub async fn run_agent_step(
                     "Step completed with {} pending diff{}",
                     orch.diffs
                         .iter()
-                        .filter(|diff| diff.status == "pending")
+                        .filter(|diff| matches!(
+                            diff.status.as_str(),
+                            "pending" | "partial" | "failed"
+                        ))
                         .count(),
                     if orch
                         .diffs
                         .iter()
-                        .filter(|diff| diff.status == "pending")
+                        .filter(|diff| matches!(
+                            diff.status.as_str(),
+                            "pending" | "partial" | "failed"
+                        ))
                         .count()
                         == 1
                     {
@@ -727,7 +733,7 @@ pub async fn apply_diff_hunk(
         return Err(format!("Diff not found: {}", diff_id));
     };
 
-    if diff.status != "pending" && diff.status != "failed" {
+    if diff.status != "pending" && diff.status != "partial" && diff.status != "failed" {
         return Err(format!(
             "Diff {} cannot apply hunks while status is {}",
             diff_id, diff.status
@@ -883,7 +889,7 @@ pub async fn reject_diff_hunk(
         return Err(format!("Diff not found: {}", diff_id));
     };
 
-    if diff.status != "pending" && diff.status != "failed" {
+    if diff.status != "pending" && diff.status != "partial" && diff.status != "failed" {
         return Err(format!(
             "Diff {} cannot reject hunks while status is {}",
             diff_id, diff.status
@@ -951,16 +957,28 @@ fn format_diff_list_details(diffs: &[FileDiff]) -> String {
 }
 
 fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> String {
-    if hunks
-        .iter()
-        .all(|hunk| matches!(hunk.status.as_deref(), Some("applied") | Some("rejected")))
+    if !hunks.is_empty()
+        && hunks
+            .iter()
+            .all(|hunk| matches!(hunk.status.as_deref(), Some("applied")))
     {
         "applied".to_string()
+    } else if !hunks.is_empty()
+        && hunks
+            .iter()
+            .all(|hunk| matches!(hunk.status.as_deref(), Some("rejected")))
+    {
+        "rejected".to_string()
     } else if hunks
         .iter()
         .any(|hunk| matches!(hunk.status.as_deref(), Some("failed")))
     {
         "failed".to_string()
+    } else if hunks
+        .iter()
+        .any(|hunk| matches!(hunk.status.as_deref(), Some("applied") | Some("rejected")))
+    {
+        "partial".to_string()
     } else {
         "pending".to_string()
     }
@@ -970,7 +988,7 @@ fn set_review_state_after_single_diff(orch: &mut AgentOrchestrator) {
     if orch
         .diffs
         .iter()
-        .any(|diff| diff.status == "pending" || diff.status == "failed")
+        .any(|diff| diff.status == "pending" || diff.status == "partial" || diff.status == "failed")
     {
         orch.state_mgr.set(AgentState::WaitingUser);
     } else {
@@ -1034,6 +1052,43 @@ fn upsert_step_status(steps: &mut Vec<TaskStep>, step: &TaskStep, status: &str, 
 #[cfg(test)]
 mod llm_profile_tests {
     use super::*;
+
+    fn test_hunk(status: Option<&str>) -> crate::agent::state_machine::DiffHunk {
+        crate::agent::state_machine::DiffHunk {
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            content: "line".to_string(),
+            original: "line".to_string(),
+            updated: "line".to_string(),
+            status: status.map(|value| value.to_string()),
+        }
+    }
+
+    #[test]
+    fn hunk_status_rollup_keeps_partial_reviewable() {
+        assert_eq!(
+            status_from_hunks(&[test_hunk(Some("applied")), test_hunk(None)]),
+            "partial"
+        );
+        assert_eq!(
+            status_from_hunks(&[test_hunk(Some("applied")), test_hunk(Some("rejected"))]),
+            "partial"
+        );
+        assert_eq!(
+            status_from_hunks(&[test_hunk(Some("rejected")), test_hunk(Some("rejected"))]),
+            "rejected"
+        );
+        assert_eq!(
+            status_from_hunks(&[test_hunk(Some("applied")), test_hunk(Some("applied"))]),
+            "applied"
+        );
+        assert_eq!(
+            status_from_hunks(&[test_hunk(Some("failed")), test_hunk(None)]),
+            "failed"
+        );
+    }
 
     #[test]
     fn step_prompt_includes_scope_and_mode() {

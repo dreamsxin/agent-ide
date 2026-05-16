@@ -515,7 +515,7 @@ impl AgentOrchestrator {
     fn pending_diff_count(&self) -> usize {
         self.diffs
             .iter()
-            .filter(|diff| diff.status == "pending")
+            .filter(|diff| is_reviewable_diff_status(&diff.status))
             .count()
     }
 
@@ -523,26 +523,28 @@ impl AgentOrchestrator {
         let pending: Vec<_> = self
             .diffs
             .iter()
-            .filter(|diff| diff.status == "pending")
+            .filter(|diff| is_reviewable_diff_status(&diff.status))
             .collect();
 
         if pending.is_empty() {
-            return "No pending diffs.".to_string();
+            return "No reviewable diffs.".to_string();
         }
 
         let mut lines = Vec::new();
-        lines.push(format!("Pending diffs: {}", pending.len()));
+        lines.push(format!("Reviewable diffs: {}", pending.len()));
         for diff in pending {
             lines.push(format!(
-                "- {}: {} hunk{}",
+                "- {} [{}]: {} hunk{}",
                 diff.file,
+                diff.status,
                 diff.hunks.len(),
                 if diff.hunks.len() == 1 { "" } else { "s" }
             ));
             for (index, hunk) in diff.hunks.iter().enumerate() {
                 lines.push(format!(
-                    "  Hunk {}: -{} lines, +{} lines",
+                    "  Hunk {} [{}]: -{} lines, +{} lines",
                     index + 1,
+                    hunk.status.as_deref().unwrap_or("pending"),
                     hunk.old_lines,
                     hunk.new_lines
                 ));
@@ -611,6 +613,10 @@ impl AgentOrchestrator {
             }
         }
     }
+}
+
+fn is_reviewable_diff_status(status: &str) -> bool {
+    matches!(status, "pending" | "partial" | "failed")
 }
 
 fn summarize_text(text: &str, max_chars: usize) -> String {
@@ -774,10 +780,14 @@ mod tests {
     }
 
     #[test]
-    fn summarize_pending_diffs_includes_actual_pending_diff_context() {
+    fn summarize_pending_diffs_includes_actual_reviewable_diff_context() {
         let mut orchestrator = AgentOrchestrator::new();
         orchestrator.diffs = vec![
             make_diff("src/app.ts", "const oldValue = 1;", "const newValue = 2;"),
+            FileDiff {
+                status: "partial".to_string(),
+                ..make_diff("src/partial.ts", "partial(false)", "partial(true)")
+            },
             FileDiff {
                 status: "applied".to_string(),
                 ..make_diff("src/done.ts", "done()", "done(true)")
@@ -786,8 +796,9 @@ mod tests {
 
         let summary = orchestrator.summarize_pending_diffs();
 
-        assert!(summary.contains("Pending diffs: 1"));
+        assert!(summary.contains("Reviewable diffs: 2"));
         assert!(summary.contains("src/app.ts"));
+        assert!(summary.contains("src/partial.ts [partial]"));
         assert!(summary.contains("Original excerpt: const oldValue = 1;"));
         assert!(summary.contains("Updated excerpt: const newValue = 2;"));
         assert!(!summary.contains("src/done.ts"));

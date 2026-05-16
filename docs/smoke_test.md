@@ -198,6 +198,8 @@ Expected:
 - Pipeline stages and action logs are visible.
 - Reviewer receives actual pending diff summaries.
 - Per-hunk and per-file apply/reject state is clear.
+- Applying or rejecting only part of a diff leaves the file card in `Partial` state and shows pending/applied/rejected/failed hunk counts.
+- Problems or Agent findings on the same file/line are shown inside the matching hunk when reviewing a diff.
 - Stale `baseHash` diffs are rejected with actionable guidance.
 
 Automated coverage:
@@ -205,7 +207,31 @@ Automated coverage:
 - Rust tests cover context compression, pending diff summaries, diff application failures, base hash validation, and hunk operations.
 - Full Agent repair flow requires real runtime and LLM configuration.
 
-## 10. LLM Profiles and Budget Metadata
+## 10. End-to-End Daily IDE Loop
+
+Manual check:
+
+1. Open a Git workspace with TypeScript/JavaScript and package scripts.
+2. Open a source file and confirm LSP status is ready.
+3. Introduce a TypeScript error and confirm Problems plus editor markers update.
+4. Run `npm test` or the project test command from TopBar/Commands.
+5. Confirm the run appears in Run History with exit code, duration, and output.
+6. Click `Fix with Agent` from the failed run or Problem.
+7. Review the Agent plan, pipeline, action logs, proposed diff, hunk findings, and partial hunk state.
+8. Apply one hunk, reject another, then commit through Git UI.
+
+Expected:
+
+- Terminal/Commands/Problems/LSP/Git/Agent repair loop can be completed without leaving the app.
+- Failures remain traceable from Run History or Problems into Agent prompt context and proposed diffs.
+- Git status updates after Agent edits and after partial hunk application.
+- Any manual failure is recorded with commit hash, workspace path, and reproduction steps.
+
+Automated coverage:
+
+- This full loop still needs Playwright/Tauri-driver coverage. Until then, it is a required manual smoke for changes touching any involved panel.
+
+## 11. LLM Profiles and Budget Metadata
 
 Manual check:
 
@@ -229,7 +255,28 @@ Automated coverage:
 - Rust tests cover legacy config migration, API key masking, and profile serialization without plaintext API keys.
 - Max context and reserved output fields are used for estimated context trimming. Max output is mapped into OpenAI-compatible chat request bodies and should be runtime-verified per provider endpoint.
 
-## 11. Release Smoke Notes
+## 12. Large Workspace LSP Indexing
+
+Manual check:
+
+1. Open a TypeScript/JavaScript workspace with at least hundreds of files and a real `tsconfig.json` or `jsconfig.json`.
+2. Open files across multiple folders and watch the TopBar TS status details.
+3. Open a Go workspace with `go.mod` or `go.work` and at least several packages.
+4. Open files from different packages and watch the TopBar Go status details.
+
+Expected:
+
+- Status details show workspace root, detected config files, indexing mode, opened document count, change count, diagnostics count, and last error.
+- Diagnostics refresh after edits without freezing the UI.
+- Missing `typescript-language-server` or `gopls` shows install guidance instead of a silent unavailable state.
+- Large workspace behavior is recorded in the release smoke notes, including server versions.
+
+Automated coverage:
+
+- Rust tests cover indexing-state detection and path/URI handling.
+- Performance and UI responsiveness require real runtime validation on representative workspaces.
+
+## 13. Release Smoke Notes
 
 Record each manual smoke run with:
 
@@ -242,4 +289,4 @@ Record each manual smoke run with:
 
 Recommended first target:
 
-- Complete sections 2 through 6 before expanding Rust/Python LSP adapters.
+- Complete sections 2 through 9 before expanding Rust/Python LSP adapters.
