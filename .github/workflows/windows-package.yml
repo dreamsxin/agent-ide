@@ -1,0 +1,44 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package-windows:
+    name: Build Windows installers
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Windows installers
+        shell: powershell
+        run: .\scripts\package-windows.ps1 -CleanOutput -SkipDependencyNote
+
+      - name: Upload Windows package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-ide-windows-${{ github.ref_name }}
+          path: release/windows/**
+          if-no-files-found: error

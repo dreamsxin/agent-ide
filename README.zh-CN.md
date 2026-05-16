@@ -109,6 +109,33 @@ cargo test
 
 如果改动涉及 LSP、Problems、Terminal、Git 或 Agent diff application，还需要按 [docs/smoke_test.md](docs/smoke_test.md) 执行真实 Tauri runtime 回归。
 
+## Windows 打包
+
+生成 Windows 安装包：
+
+```powershell
+npm run package:windows
+```
+
+脚本会依次执行前端 build/tests、`cargo check`、`cargo test` 和 `tauri build --bundles nsis,msi`，然后把安装包复制到 `release/windows/<version>/`，并生成 `SHA256SUMS.txt` 和 `manifest.json`。
+
+如果本地已经跑过检查，只想快速验证打包：
+
+```powershell
+npm run package:windows:fast
+```
+
+只生成某一种安装包格式：
+
+```powershell
+npm run package:windows:nsis
+npm run package:windows:msi
+```
+
+第一次 Windows bundle 可能需要通过 Tauri 下载 NSIS、`nsis_tauri_utils.dll` 和/或 WiX 工具链。如果本地下载工具时超时，可以在工具缓存完成后重跑命令，或者运行 `Windows Package` GitHub Actions workflow；该 workflow 会在 `windows-latest` 上构建并上传 artifacts。
+
+生成的 release artifacts 已加入 `.gitignore`，不会进入 Git。
+
 ## 项目结构
 
 ```text

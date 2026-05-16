@@ -110,6 +110,33 @@ Known build note: Vite currently warns about a large chunk because Monaco, Markd
 
 For changes to LSP, Problems, Terminal, Git, or Agent diff application, also run the real Tauri runtime checklist in [docs/smoke_test.md](docs/smoke_test.md).
 
+## Windows Packaging
+
+Build a Windows installer package:
+
+```powershell
+npm run package:windows
+```
+
+The script runs frontend build/tests, `cargo check`, `cargo test`, and `tauri build --bundles nsis,msi`, then copies installers to `release/windows/<version>/` with `SHA256SUMS.txt` and `manifest.json`.
+
+For a local packaging smoke after checks have already passed:
+
+```powershell
+npm run package:windows:fast
+```
+
+To build one installer format:
+
+```powershell
+npm run package:windows:nsis
+npm run package:windows:msi
+```
+
+The first Windows bundle may download NSIS, `nsis_tauri_utils.dll`, and/or WiX tooling through Tauri. If local bundling times out while downloading those tools, rerun the command after the tool cache is populated or run the `Windows Package` GitHub Actions workflow, which builds on `windows-latest` and uploads the generated artifacts.
+
+Generated release artifacts are intentionally ignored by Git.
+
 ## Project Structure
 
 ```text
