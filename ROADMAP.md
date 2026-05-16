@@ -136,6 +136,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added pipeline `pauseBefore` controls so users can configure stage approval points before the Agent continues.
 - Added paused pipeline snapshots and a Continue action so users can approve a paused stage and continue the backend pipeline from that stage.
 - Added `docs/agent_cli_manual.md` and clarified that CLI mode is currently a headless preview/apply Agent runner, not a complete command-line IDE replacement.
+- Added `docs/agent_cli_design.md` to plan CLI mode as a stable automation surface for CI, scripts, external IDE tasks, and bounded fully autonomous repair loops.
 
 Important distinction:
 
@@ -405,6 +406,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - It does not yet reuse UI provider profiles or OS credential-store references.
    - It lacks interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery.
    - Keep treating it as a headless Agent runner and backend smoke surface until those workflows are implemented.
+   - Target design now calls for subcommands, JSON/NDJSON output, stable exit codes, run artifacts, permission policy, shared profiles/context, interactive review, and bounded autonomous repair loops.
 
 ---
 
@@ -612,7 +614,8 @@ target\release\agent_cli --help
 5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
 7. Improve Agent CLI mode with shared provider profiles, credential-store lookup, context-mode/source flags, machine-readable JSON output, interactive per-hunk review, and CLI smoke tests.
+8. Start CLI Phase 1: replace manual args with `clap`, add `doctor/context/plan/run` command shape, `--output text|json|ndjson`, run artifacts, and stable exit codes while preserving current invocation compatibility.
 
 ---
 
-*Last updated: 2026-05-16 - Agent CLI mode documented and scoped as a headless preview/apply runner, with IDE-completeness gaps tracked.*
+*Last updated: 2026-05-16 - Agent CLI automation design added, covering toolchain integration, JSON/NDJSON contracts, artifacts, exit codes, permissions, and autonomous repair phases.*

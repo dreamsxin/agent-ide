@@ -4,6 +4,8 @@ The `agent_cli` binary is a headless Agent runner built from the Rust backend. I
 
 It is not currently a full command-line version of Agent IDE. The desktop app remains the complete daily-IDE workflow because it owns visual plan control, Problems, Terminal sessions, Git review, LSP operations, run history, and interactive diff review.
 
+For the target CLI architecture that can integrate with external toolchains and fully automated workflows, see [agent_cli_design.md](agent_cli_design.md).
+
 ## Build and Help
 
 ```powershell
@@ -130,6 +132,8 @@ Missing for daily IDE replacement:
 - No OS credential-store integration for CLI provider profiles.
 
 ## Recommended Next CLI Work
+
+The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_design.md). The short version:
 
 1. Add a real `--profile <name>` path that reads the same provider profile metadata as the desktop app, including OS credential-store references.
 2. Add `--context-mode full|focused|compact` and `--include git-diff,project-tree,problems` flags using the same context section builder as the UI.
