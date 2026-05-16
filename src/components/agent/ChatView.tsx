@@ -155,6 +155,8 @@ export default function ChatView() {
     failedTask: true,
     terminalOutput: true,
     logs: true,
+    gitDiff: true,
+    projectTree: true,
   });
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -203,7 +205,21 @@ export default function ChatView() {
     contextOptions.failedTask && failedTaskCount > 0 ? `${failedTaskCount} failed run${failedTaskCount === 1 ? "" : "s"}` : null,
     contextOptions.terminalOutput && terminalSessionCount > 0 ? `${terminalSessionCount} terminal${terminalSessionCount === 1 ? "" : "s"}` : null,
     contextOptions.logs && warningLogCount > 0 ? `${warningLogCount} warning/error log${warningLogCount === 1 ? "" : "s"}` : null,
+    contextOptions.gitDiff ? "git diff" : null,
+    contextOptions.projectTree ? "project tree" : null,
   ].filter(Boolean);
+  const estimatedSelectedChars =
+    (contextOptions.activeFile && activeFile ? fileContents[activeFile]?.length ?? 0 : 0) +
+    (contextOptions.selection ? selectedText?.length ?? 0 : 0) +
+    (contextOptions.terminalOutput
+      ? Object.values(terminalOutput).reduce((sum, output) => sum + Math.min(output.length, 4000), 0)
+      : 0) +
+    (contextOptions.problems ? problems.length * 240 : 0) +
+    (contextOptions.failedTask ? failedTaskCount * 1200 : 0) +
+    (contextOptions.logs ? warningLogCount * 320 : 0) +
+    (contextOptions.gitDiff ? 12000 : 0) +
+    (contextOptions.projectTree ? 6000 : 0);
+  const estimatedSelectedTokens = Math.ceil(estimatedSelectedChars / 4);
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
@@ -272,6 +288,10 @@ export default function ChatView() {
       prompt: withIdeRuntimeContext(content, runtimeContextOptions),
       profileId: selectedProfileId || undefined,
       contextCompression: selectedContextMode,
+      contextSources: {
+        includeGitDiff: contextOptions.gitDiff,
+        includeProjectTree: contextOptions.projectTree,
+      },
       ...ctx,
     });
   }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions]);
@@ -356,7 +376,10 @@ export default function ChatView() {
             <span className="font-mono text-surface-text">
               {selectedProfile.effectiveInputTokens.toLocaleString()}
             </span>{" "}
-            tokens
+            tokens · selected context approx{" "}
+            <span className="font-mono text-surface-text">
+              {estimatedSelectedTokens.toLocaleString()}
+            </span>
           </div>
         )}
         <div className="mb-1.5 rounded border border-surface-border bg-surface-base/60">
@@ -414,6 +437,18 @@ export default function ChatView() {
                 detail={`${warningLogCount}`}
                 checked={contextOptions.logs}
                 onChange={(checked) => setContextOptions((prev) => ({ ...prev, logs: checked }))}
+              />
+              <ContextToggle
+                label="Git diff"
+                detail="workspace"
+                checked={contextOptions.gitDiff}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, gitDiff: checked }))}
+              />
+              <ContextToggle
+                label="Project tree"
+                detail="summary"
+                checked={contextOptions.projectTree}
+                onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectTree: checked }))}
               />
             </div>
           )}

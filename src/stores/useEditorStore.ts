@@ -290,6 +290,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   // ====== 工作目录 ======
 
   setWorkspacePath: (path) => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("agent-ide-workspace-path", path);
+    }
     set((prev) => ({
       workspacePath: path,
       explorerKey: prev.explorerKey + 1,  // 触发 Explorer 刷新

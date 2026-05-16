@@ -78,6 +78,10 @@ interface AgentStore {
     selection?: string;
     profileId?: string;
     contextCompression?: ContextCompressionMode;
+    contextSources?: {
+      includeProjectTree?: boolean;
+      includeGitDiff?: boolean;
+    };
   }) => Promise<void>;
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
@@ -231,6 +235,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           selection: params.selection ?? null,
           profileId: params.profileId ?? get().chatProfileId,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
+          contextSources: params.contextSources ?? null,
         },
       });
     } catch (err: unknown) {

@@ -2,7 +2,9 @@ use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
 use crate::agent::state_machine::{AgentMode, AgentState, ApplyDiffsResult, FileDiff, TaskStep};
-use crate::services::context::{AgentContext, ContextBudget, ContextCompressionMode};
+use crate::services::context::{
+    AgentContext, ContextBudget, ContextCompressionMode, ContextSourceOptions,
+};
 use crate::services::credentials;
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::workspace;
@@ -329,6 +331,8 @@ pub struct SendPromptRequest {
     pub profile_id: Option<String>,
     #[serde(rename = "contextCompression")]
     pub context_compression: Option<String>,
+    #[serde(default, rename = "contextSources")]
+    pub context_sources: Option<ContextSourceOptions>,
 }
 
 /// Get the current Agent state.
@@ -363,7 +367,12 @@ pub async fn send_agent_prompt(
         git_diff: None,
         project_tree: None,
     };
-    context.enrich_from_workspace();
+    context.enrich_from_workspace_with_sources(
+        &request.context_sources.unwrap_or_else(|| ContextSourceOptions {
+            include_project_tree: true,
+            include_git_diff: true,
+        }),
+    );
 
     // The async mutex can be held safely while the orchestrator runs.
     let compression = match request.context_compression.as_deref() {

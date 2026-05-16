@@ -10,6 +10,7 @@ import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { useLayoutStore } from "./stores/useLayoutStore";
 import { useEditorStore } from "./stores/useEditorStore";
+import { useLogStore } from "./stores/useLogStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import useShortcuts from "./hooks/useShortcuts";
 import { isTauriRuntime } from "./utils/tauri";
@@ -93,6 +94,7 @@ export default function App() {
         console.log("[App] Restoring workspace:", saved);
         useLayoutStore.getState().setWorkspacePath(saved);
         useEditorStore.getState().setWorkspacePath(saved);
+        useLogStore.getState().restoreLogs(saved);
         void useEditorStore.getState().restoreEditorSession(saved);
       } else {
         console.log("[App] No saved workspace found, starting empty");

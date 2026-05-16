@@ -29,6 +29,14 @@ impl ContextBuildOptions {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ContextSourceOptions {
+    #[serde(default, rename = "includeProjectTree")]
+    pub include_project_tree: bool,
+    #[serde(default, rename = "includeGitDiff")]
+    pub include_git_diff: bool,
+}
+
 impl Default for ContextCompressionMode {
     fn default() -> Self {
         Self::Focused
@@ -83,10 +91,17 @@ impl AgentContext {
     }
 
     pub fn enrich_from_workspace(&mut self) {
-        if self.project_tree.is_none() {
+        self.enrich_from_workspace_with_sources(&ContextSourceOptions {
+            include_project_tree: true,
+            include_git_diff: true,
+        });
+    }
+
+    pub fn enrich_from_workspace_with_sources(&mut self, sources: &ContextSourceOptions) {
+        if sources.include_project_tree && self.project_tree.is_none() {
             self.project_tree = build_project_tree_summary(160, 4).ok();
         }
-        if self.git_diff.is_none() {
+        if sources.include_git_diff && self.git_diff.is_none() {
             self.git_diff = build_git_diff_summary(24_000).ok();
         }
     }
@@ -430,6 +445,30 @@ mod tests {
 
         assert!(prompt.contains("Git diff summary: 1 file(s), +1 -1 lines"));
         assert!(!prompt.contains("diff --git"));
+    }
+
+    #[test]
+    fn context_source_options_can_disable_workspace_enrichment() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let temp = std::env::temp_dir().join(format!(
+            "agent-ide-context-source-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_var("AGENT_IDE_CONFIG_DIR", temp.join("config"));
+        crate::services::workspace::save_workspace_path(temp.to_string_lossy().as_ref()).unwrap();
+
+        let mut ctx = sample_context("const a = 1;");
+        ctx.project_tree = None;
+        ctx.git_diff = None;
+        ctx.enrich_from_workspace_with_sources(&ContextSourceOptions {
+            include_project_tree: false,
+            include_git_diff: false,
+        });
+
+        assert!(ctx.project_tree.is_none());
+        assert!(ctx.git_diff.is_none());
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

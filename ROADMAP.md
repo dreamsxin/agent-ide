@@ -121,6 +121,8 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added stricter structured Agent change protocol validation and first-class diff provenance metadata, including protocol, operation, schema version, change index, and rationale.
 - Wired Agent pipeline role/stage metadata into generated diff provenance so proposed changes can be traced back to the stage that produced them.
 - Added a first-pass Chat context preview with per-run source toggles for active file, selection, open files, Problems, failed runs, terminal output, and warning/error logs.
+- Extended Chat context controls to include git diff and project tree toggles, passed those source choices through IPC, and made backend workspace enrichment respect them.
+- Persisted frontend Logs/action-log entries per workspace in local storage and restore them when the workspace is reopened.
 
 Important distinction:
 
@@ -427,6 +429,7 @@ Planned interaction TODO:
 Current first implementation:
 
 - Chat now exposes a compact context preview and lets users include/exclude active file, selection, open files, Problems, failed run, terminal output, and warning/error logs per Agent run.
+- Git diff and project tree are also per-run context toggles, with a rough selected-context token estimate shown beside the model budget.
 
 ---
 
@@ -575,16 +578,16 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Extend Chat context preview with git diff/project tree toggles and estimated token impact per source.
-2. Persist Agent action logs with prompt, context budget, selected context files, pending diff provenance, and apply/reject decisions.
-3. Add interactive Agent plan controls: edit step, skip step, run only this step, regenerate step.
-4. Add regenerate-against-current-file for stale or failed diff hunks.
-5. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
-6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
-7. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
-8. Improve Git SSH/passphrase UX and remote-operation recovery flows.
+1. Persist apply/reject decisions and pending diff metadata alongside Agent action logs.
+2. Persist selected context source flags per workspace and include them in prompt action-log entries.
+3. Add per-source token estimates that use actual backend context section sizes instead of frontend heuristics.
+4. Add interactive Agent plan controls: edit step, skip step, run only this step, regenerate step.
+5. Add regenerate-against-current-file for stale or failed diff hunks.
+6. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
+7. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
+8. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
 9. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
 
 ---
 
-*Last updated: 2026-05-16 - Agent-first interaction TODO added. First execution item implemented: Chat context preview and per-run source toggles.*
+*Last updated: 2026-05-16 - Continued TODO execution: backend-controlled context source toggles and workspace-scoped log persistence are implemented.*
