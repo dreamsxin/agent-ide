@@ -66,6 +66,16 @@ export default function PipelineEditor() {
     [stages]
   );
 
+  const togglePauseBefore = useCallback(
+    (index: number) => {
+      const next = [...stages];
+      next[index] = { ...next[index], pauseBefore: !next[index].pauseBefore };
+      setStages(next);
+      setSaved(false);
+    },
+    [stages]
+  );
+
   const removeStage = useCallback(
     (index: number) => {
       if (stages.length <= 1) return;
@@ -78,7 +88,7 @@ export default function PipelineEditor() {
   const addStage = useCallback(() => {
     setStages([
       ...stages,
-      { role: "coder" as AgentRole, name: "New Stage", status: "pending" as const },
+      { role: "coder" as AgentRole, name: "New Stage", status: "pending" as const, pauseBefore: false },
     ]);
     setSaved(false);
   }, [stages]);
@@ -139,6 +149,16 @@ export default function PipelineEditor() {
                 onChange={(e) => changeName(i, e.target.value)}
                 className="w-20 px-1.5 py-1 rounded bg-surface-panel border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
               />
+
+              <label className="flex items-center gap-1 text-[10px] text-surface-muted">
+                <input
+                  type="checkbox"
+                  checked={Boolean(stage.pauseBefore)}
+                  onChange={() => togglePauseBefore(i)}
+                  className="h-3 w-3 accent-accent-blue"
+                />
+                Pause
+              </label>
 
               {/* 操作 */}
               <div className="flex gap-0.5 flex-shrink-0">

@@ -547,6 +547,36 @@ pub async fn update_agent_step(
 }
 
 #[tauri::command]
+pub async fn update_agent_steps(
+    steps: Vec<TaskStep>,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Vec<TaskStep>, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    orch.steps = steps.clone();
+    let _ = app_handle.emit(
+        "agent-plan-ready",
+        serde_json::to_value(&steps).unwrap_or_default(),
+    );
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "plan_update",
+        "Updated Agent plan step order",
+        &format!(
+            "Steps:\n{}",
+            steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| format!("{}. {}", index + 1, step.title))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    );
+    Ok(steps)
+}
+
+#[tauri::command]
 pub async fn skip_agent_step(
     step_id: String,
     app_handle: AppHandle,

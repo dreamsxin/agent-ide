@@ -166,6 +166,25 @@ impl AgentOrchestrator {
         let mut stage_outputs: Vec<String> = vec![format!("Planner:\n{}", _full_response)];
         for stage_index in 0..pipeline.len() {
             let stage = pipeline[stage_index].clone();
+            if stage.pause_before {
+                mark_pipeline_stage(&mut pipeline, stage_index, "paused");
+                self.emit_pipeline(&app, &pipeline);
+                self.emit_action_log(
+                    &app,
+                    "info",
+                    "stage_paused",
+                    Some(stage.role.to_string()),
+                    Some(&stage.name),
+                    &format!("Paused before {}", stage.name),
+                    "Pipeline paused before this stage by user configuration. Disable pause before this stage and rerun or continue with single-step controls.",
+                    Some(context_summary.clone()),
+                    Some(self.summarize_pending_diffs()),
+                );
+                self.state_mgr
+                    .set(crate::agent::state_machine::AgentState::WaitingUser);
+                self.emit_state(&app);
+                return Ok(());
+            }
             mark_pipeline_stage(&mut pipeline, stage_index, "active");
             self.emit_pipeline(&app, &pipeline);
             self.emit_action_log(

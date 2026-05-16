@@ -101,6 +101,7 @@ interface AgentStore {
   rejectDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry | null>;
   estimateContext: (params: AgentContextParams) => Promise<ContextEstimateResponse | null>;
   updateAgentStep: (step: Step) => Promise<Step | null>;
+  updateAgentSteps: (steps: Step[]) => Promise<Step[]>;
   skipAgentStep: (stepId: string) => Promise<Step | null>;
   runAgentStep: (params: AgentStepRunParams) => Promise<void>;
   regenerateDiff: (params: RegenerateDiffParams) => Promise<void>;
@@ -619,6 +620,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch (err: unknown) {
       console.warn("[AgentStore] update_agent_step failed:", err);
       return null;
+    }
+  },
+
+  updateAgentSteps: async (steps) => {
+    try {
+      if (!isTauriRuntime()) {
+        set({ steps });
+        persistAgentSession({ ...get(), steps });
+        return steps;
+      }
+      const updated = await invoke<Step[]>("update_agent_steps", { steps });
+      set({ steps: updated });
+      persistAgentSession({ ...get(), steps: updated });
+      return updated;
+    } catch (err: unknown) {
+      console.warn("[AgentStore] update_agent_steps failed:", err);
+      set({ steps });
+      persistAgentSession({ ...get(), steps });
+      return steps;
     }
   },
 

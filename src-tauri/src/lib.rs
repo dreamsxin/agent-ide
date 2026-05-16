@@ -48,6 +48,7 @@ pub fn run() {
             commands::agent::send_agent_prompt,
             commands::agent::stop_agent,
             commands::agent::update_agent_step,
+            commands::agent::update_agent_steps,
             commands::agent::skip_agent_step,
             commands::agent::run_agent_step,
             commands::agent::set_agent_mode,

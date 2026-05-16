@@ -24,6 +24,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
             active: "bg-accent-blue animate-pulse",
             completed: "bg-accent-green",
             failed: "bg-diff-remove",
+            paused: "bg-diff-modify",
           };
 
           const statusText: Record<string, string> = {
@@ -31,6 +32,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
             active: "◉",
             completed: "●",
             failed: "✕",
+            paused: "Ⅱ",
           };
 
           return (
@@ -64,6 +66,8 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
                           ? "text-accent-green"
                           : stage.status === "failed"
                             ? "text-diff-remove"
+                            : stage.status === "paused"
+                              ? "text-diff-modify"
                             : "text-surface-muted"
                     }`}
                   >
@@ -75,6 +79,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
                 </div>
                 <div className="text-[10px] text-surface-muted capitalize">
                   {stage.role}
+                  {stage.pauseBefore ? " · pauses before run" : ""}
                 </div>
               </div>
             </div>

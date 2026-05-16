@@ -66,6 +66,8 @@ pub struct PipelineStage {
     pub role: AgentRole,
     pub name: String,
     pub status: String,
+    #[serde(rename = "pauseBefore", default)]
+    pub pause_before: bool,
 }
 
 impl PipelineStage {
@@ -74,6 +76,7 @@ impl PipelineStage {
             role,
             name: name.to_string(),
             status: "pending".to_string(),
+            pause_before: false,
         }
     }
 }
@@ -85,6 +88,7 @@ pub fn reset_pipeline_status(stages: &[PipelineStage]) -> Vec<PipelineStage> {
             role: stage.role,
             name: stage.name.clone(),
             status: "pending".to_string(),
+            pause_before: stage.pause_before,
         })
         .collect()
 }
@@ -113,12 +117,14 @@ mod tests {
         let mut stages = default_pipeline();
         stages[0].status = "completed".to_string();
         stages[1].status = "active".to_string();
+        stages[2].pause_before = true;
 
         let reset = reset_pipeline_status(&stages);
 
         assert_eq!(reset.len(), stages.len());
         assert_eq!(reset[0].role, AgentRole::Architect);
         assert_eq!(reset[0].name, "Design");
+        assert!(reset[2].pause_before);
         assert!(reset.iter().all(|stage| stage.status == "pending"));
     }
 

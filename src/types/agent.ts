@@ -20,13 +20,14 @@ export type StepExecutionMode = "analyze" | "diff" | "test" | "fix";
 export type AgentRole = "architect" | "coder" | "tester" | "reviewer";
 
 /** Pipeline 阶段状态 */
-export type PipelineStageStatus = "pending" | "active" | "completed" | "failed";
+export type PipelineStageStatus = "pending" | "active" | "completed" | "failed" | "paused";
 
 /** Pipeline 阶段 */
 export interface PipelineStage {
   role: AgentRole;
   name: string;
   status: PipelineStageStatus;
+  pauseBefore?: boolean;
 }
 
 /** 单个步骤 */

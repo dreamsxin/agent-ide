@@ -21,6 +21,7 @@ export default function TaskView() {
   const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
   const contextCompression = useAgentStore((s) => s.contextCompression);
   const updateAgentStep = useAgentStore((s) => s.updateAgentStep);
+  const updateAgentSteps = useAgentStore((s) => s.updateAgentSteps);
   const skipAgentStep = useAgentStore((s) => s.skipAgentStep);
   const runAgentStep = useAgentStore((s) => s.runAgentStep);
   const clearAgentSession = useAgentStore((s) => s.clearAgentSession);
@@ -34,6 +35,14 @@ export default function TaskView() {
 
   const updateStepField = async (step: Step, updates: Partial<Step>) => {
     await updateAgentStep({ ...step, ...updates });
+  };
+
+  const moveStep = async (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= steps.length) return;
+    const next = [...steps];
+    [next[index], next[target]] = [next[target], next[index]];
+    await updateAgentSteps(next);
   };
 
   const runStep = async (step: Step, moreContext = false) => {
@@ -97,7 +106,7 @@ export default function TaskView() {
 
       {/* 步骤列表 */}
       {steps.length > 0 ? (
-        steps.map((step) => {
+        steps.map((step, index) => {
           const config = statusConfig[step.status];
           return (
             <div
@@ -149,6 +158,20 @@ export default function TaskView() {
                 </select>
               </div>
               <div className="flex flex-wrap gap-1">
+                <button
+                  disabled={index === 0 || step.status === "doing"}
+                  onClick={() => void moveStep(index, -1)}
+                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Up
+                </button>
+                <button
+                  disabled={index === steps.length - 1 || step.status === "doing"}
+                  onClick={() => void moveStep(index, 1)}
+                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Down
+                </button>
                 <button
                   disabled={!canRun || step.status === "doing"}
                   onClick={() => void runStep(step)}
