@@ -130,6 +130,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added regenerate-against-current-file actions for failed/stale Agent diffs and hunks, preserving the original failed diff while adding provenance on regenerated changes.
 - Added a first-pass Command Palette with searchable workspace, panel, Agent mode, project command, theme, and focus-mode commands, reachable from `Ctrl+Shift+P` and the TopBar.
 - Persisted Agent task session state per workspace, including current task, editable plan steps, pipeline stage state, mode, and interrupted state recovery after reload.
+- Added frontend Agent run ids and restored-session metadata so recovered plans show whether they were interrupted and which run they came from.
 
 Important distinction:
 
@@ -441,6 +442,7 @@ Current first implementation:
 - Failed/stale Agent diffs and hunks can be regenerated against the current file while preserving the original failed review item.
 - Command Palette now provides a unified searchable entry for workspace open, panel navigation, Agent mode changes, project commands, focus mode, and theme toggling.
 - Agent task state now restores after reload for current task, steps, pipeline, and waiting-review state. In-flight stages are downgraded to a recoverable waiting state so users can review diffs or rerun a step.
+- Restored Agent tasks now show run id, restore time, and interrupted-vs-restored status in the Tasks tab.
 
 ---
 
@@ -593,9 +595,9 @@ target\release\agent_cli --help
 2. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
 3. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
 4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
-5. Expand Agent plan controls with reorder, pause-before-stage approval, backend run-id reconciliation, and full in-flight task resume.
+5. Expand Agent plan controls with reorder, pause-before-stage approval, backend run-id reconciliation, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
 
 ---
 
-*Last updated: 2026-05-16 - Agent state restoration continued: Agent task, plan steps, pipeline state, and waiting-review recovery now persist per workspace.*
+*Last updated: 2026-05-16 - Agent state restoration continued: restored Agent sessions now carry run ids, interrupted-state metadata, and clearer Tasks UI recovery guidance.*

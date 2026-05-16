@@ -14,6 +14,8 @@ export default function TaskView() {
   const steps = useAgentStore((s) => s.steps);
   const agentState = useAgentStore((s) => s.state);
   const currentTask = useAgentStore((s) => s.currentTask);
+  const agentRunId = useAgentStore((s) => s.agentRunId);
+  const restoredSession = useAgentStore((s) => s.restoredSession);
   const chatProfileId = useAgentStore((s) => s.chatProfileId);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
@@ -60,12 +62,22 @@ export default function TaskView() {
         <span className="text-xs font-semibold text-surface-text">{title}</span>
         <span className="text-[10px] text-surface-muted capitalize">{agentState}</span>
       </div>
-      {steps.length > 0 && agentState === "waiting_user" && (
+      {steps.length > 0 && restoredSession && (
         <div className="rounded border border-diff-modify/30 bg-diff-modify/10 px-2 py-1.5 text-[11px] text-surface-muted">
-          <div className="flex items-center justify-between gap-2">
-            <span className="min-w-0 flex-1">
-              Restored task state. Review diffs or run a step to continue.
-            </span>
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="text-surface-text">
+                {restoredSession.interrupted
+                  ? "Restored interrupted Agent task."
+                  : "Restored Agent task state."}
+              </div>
+              <div className="mt-0.5 truncate font-mono text-[10px]">
+                {(agentRunId ?? restoredSession.runId) || "no-run-id"} · {formatRestoreTime(restoredSession.restoredAt)}
+              </div>
+              <div className="mt-0.5">
+                Review diffs or run a step to continue.
+              </div>
+            </div>
             <button
               onClick={clearAgentSession}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] hover:bg-surface-border/30"
@@ -182,4 +194,10 @@ export default function TaskView() {
       )}
     </div>
   );
+}
+
+function formatRestoreTime(value: number) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "restored";
+  return date.toLocaleTimeString();
 }

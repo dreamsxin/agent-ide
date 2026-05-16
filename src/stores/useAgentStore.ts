@@ -31,6 +31,8 @@ interface AgentStore {
   lastApplyResult: ApplyDiffsResult | null;
   streamContent: string;
   isStreaming: boolean;
+  agentRunId: string | null;
+  restoredSession: AgentRestoredSession | null;
 
   // ====== Chat 消息 ======
   messages: ChatMessage[];
@@ -151,6 +153,13 @@ interface RegenerateDiffParams extends AgentContextParams {
   currentFileContent?: string;
 }
 
+interface AgentRestoredSession {
+  runId: string | null;
+  restoredAt: number;
+  interrupted: boolean;
+  updatedAt?: number;
+}
+
 const DEFAULT_PIPELINE: PipelineStage[] = [
   { role: "architect", name: "Design", status: "pending" },
   { role: "coder", name: "Implement", status: "pending" },
@@ -170,6 +179,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   lastApplyResult: null,
   streamContent: "",
   isStreaming: false,
+  agentRunId: null,
+  restoredSession: null,
   messages: [
     {
       id: "welcome",
@@ -246,6 +257,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       error: null,
       streamContent: "",
       isStreaming: false,
+      agentRunId: null,
+      restoredSession: null,
     });
   },
   addDiff: (diff) =>
@@ -310,12 +323,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       lastApplyResult: null,
       streamContent: "",
       isStreaming: false,
+      agentRunId: null,
+      restoredSession: null,
     });
   },
 
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {
-    set({ error: null, lastApplyResult: null, streamContent: "", isStreaming: true });
+    set({
+      error: null,
+      lastApplyResult: null,
+      streamContent: "",
+      isStreaming: true,
+      agentRunId: makeAgentRunId("chat"),
+      restoredSession: null,
+    });
+    persistAgentSession(get());
     try {
       if (!isTauriRuntime()) {
         throw new Error("Agent backend is available in the Tauri app runtime.");
@@ -347,12 +370,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   stopAgent: async () => {
     try {
       if (!isTauriRuntime()) {
-        set({ state: "idle", steps: [], diffs: [] });
+        set({ state: "idle", steps: [], diffs: [], agentRunId: null, restoredSession: null });
         persistAgentSession(get());
         return;
       }
       await invoke("stop_agent");
-      set({ state: "idle", steps: [], diffs: [] });
+      set({ state: "idle", steps: [], diffs: [], agentRunId: null, restoredSession: null });
       persistAgentSession(get());
     } catch (err: unknown) {
       console.warn("[AgentStore] stop_agent failed:", err);
@@ -579,7 +602,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   runAgentStep: async (params) => {
-    set({ error: null, lastApplyResult: null, streamContent: "", isStreaming: true });
+    set({
+      error: null,
+      lastApplyResult: null,
+      streamContent: "",
+      isStreaming: true,
+      agentRunId: makeAgentRunId("step"),
+      restoredSession: null,
+    });
+    persistAgentSession(get());
     try {
       if (!isTauriRuntime()) {
         throw new Error("Agent backend is available in the Tauri app runtime.");
@@ -831,6 +862,7 @@ const AGENT_SESSION_STORAGE_KEY = "agent-ide-agent-session";
 
 interface PersistedAgentSession {
   workspacePath: string;
+  runId: string | null;
   state: AgentState;
   mode: AgentMode;
   currentTask: Task | null;
@@ -867,7 +899,7 @@ function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] 
   }
 }
 
-function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "currentTask" | "tasks" | "steps" | "pipeline" | "error">) {
+function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "currentTask" | "tasks" | "steps" | "pipeline" | "error" | "agentRunId">) {
   if (typeof window === "undefined") return;
   const workspacePath = currentWorkspacePath();
   const hasSessionData = state.steps.length > 0 || state.pipeline.some((stage) => stage.status !== "pending") || state.currentTask !== null;
@@ -877,6 +909,7 @@ function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "current
   }
   const payload: PersistedAgentSession = {
     workspacePath,
+    runId: state.agentRunId,
     state: normalizeRestoredAgentState(state.state),
     mode: state.mode,
     currentTask: state.currentTask,
@@ -905,6 +938,7 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
     if (steps.length === 0 && pipeline.every((stage) => stage.status === "pending") && !parsed.currentTask) {
       return null;
     }
+    const interrupted = isInFlightState(parsed.state);
     return {
       state: normalizeRestoredAgentState(parsed.state),
       mode: parsed.mode ?? "suggest",
@@ -913,6 +947,13 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
       steps: steps.map(normalizeRestoredStep),
       pipeline: pipeline.map(normalizeRestoredPipelineStage),
       error: parsed.error ?? null,
+      agentRunId: parsed.runId ?? null,
+      restoredSession: {
+        runId: parsed.runId ?? null,
+        restoredAt: Date.now(),
+        interrupted,
+        updatedAt: parsed.updatedAt,
+      },
       streamContent: "",
       isStreaming: false,
     };
@@ -933,6 +974,10 @@ function normalizeRestoredAgentState(state?: AgentState): AgentState {
   return state ?? "idle";
 }
 
+function isInFlightState(state?: AgentState): boolean {
+  return state === "thinking" || state === "planning" || state === "acting" || state === "reviewing";
+}
+
 function normalizeRestoredStep(step: Step): Step {
   if (step.status === "doing") {
     return {
@@ -951,6 +996,10 @@ function normalizeRestoredPipelineStage(stage: PipelineStage): PipelineStage {
 function windowQueuePersist(callback: () => void) {
   if (typeof window === "undefined") return;
   window.queueMicrotask(callback);
+}
+
+function makeAgentRunId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function currentWorkspacePath() {
