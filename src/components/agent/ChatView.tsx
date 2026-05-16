@@ -8,6 +8,32 @@ import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../util
 import ReactMarkdown from "react-markdown";
 import type { AgentState, ContextCompressionMode } from "../../types/agent";
 
+type ChatContextOptions = {
+  activeFile: boolean;
+  selection: boolean;
+  openFiles: boolean;
+  problems: boolean;
+  failedTask: boolean;
+  terminalOutput: boolean;
+  logs: boolean;
+  gitDiff: boolean;
+  projectTree: boolean;
+};
+
+const DEFAULT_CONTEXT_OPTIONS: ChatContextOptions = {
+  activeFile: true,
+  selection: true,
+  openFiles: true,
+  problems: true,
+  failedTask: true,
+  terminalOutput: true,
+  logs: true,
+  gitDiff: true,
+  projectTree: true,
+};
+
+const CONTEXT_OPTIONS_KEY = "agent-ide-chat-context-options";
+
 /** 自动闭合未关闭的代码块，防止整个后缀被渲染为代码 */
 function sanitizeMarkdown(raw: string): string {
   const lines = raw.split('\n');
@@ -147,17 +173,7 @@ export default function ChatView() {
   const updateMessage = useAgentStore((s) => s.updateMessage);
   const [input, setInput] = useState("");
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
-  const [contextOptions, setContextOptions] = useState({
-    activeFile: true,
-    selection: true,
-    openFiles: true,
-    problems: true,
-    failedTask: true,
-    terminalOutput: true,
-    logs: true,
-    gitDiff: true,
-    projectTree: true,
-  });
+  const [contextOptions, setContextOptions] = useState<ChatContextOptions>(() => loadContextOptions());
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const agentState = useAgentStore((s) => s.state);
@@ -182,6 +198,10 @@ export default function ChatView() {
   const taskRuns = useTaskStore((s) => s.taskRuns);
   const terminalOutput = useTaskStore((s) => s.terminalOutput);
   const logs = useLogStore((s) => s.logs);
+
+  useEffect(() => {
+    persistContextOptions(contextOptions);
+  }, [contextOptions]);
 
   const isActing =
     agentState !== "idle" &&
@@ -524,4 +544,35 @@ export default function ChatView() {
       </div>
     </div>
   );
+}
+
+function loadContextOptions(): ChatContextOptions {
+  if (typeof window === "undefined") return DEFAULT_CONTEXT_OPTIONS;
+  try {
+    const workspacePath = localStorage.getItem("agent-ide-workspace-path") ?? "";
+    const raw = localStorage.getItem(CONTEXT_OPTIONS_KEY);
+    if (!raw) return DEFAULT_CONTEXT_OPTIONS;
+    const parsed = JSON.parse(raw) as { workspacePath?: string; options?: Partial<ChatContextOptions> };
+    if (parsed.workspacePath && workspacePath && parsed.workspacePath !== workspacePath) {
+      return DEFAULT_CONTEXT_OPTIONS;
+    }
+    return { ...DEFAULT_CONTEXT_OPTIONS, ...(parsed.options ?? {}) };
+  } catch {
+    return DEFAULT_CONTEXT_OPTIONS;
+  }
+}
+
+function persistContextOptions(options: ChatContextOptions) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(
+      CONTEXT_OPTIONS_KEY,
+      JSON.stringify({
+        workspacePath: localStorage.getItem("agent-ide-workspace-path") ?? "",
+        options,
+      })
+    );
+  } catch {
+    // Ignore persistence failures.
+  }
 }

@@ -5,7 +5,7 @@ use crate::agent::planner;
 use crate::agent::state_machine::{AgentMode, AgentStateManager, DiffProvenance, TaskStep};
 use crate::services::context::{
     estimated_input_tokens_from_budget, AgentContext, ContextBudget, ContextBuildOptions,
-    ContextCompressionMode,
+    ContextCompressionMode, ContextSourceOptions,
 };
 use crate::services::llm_client::LlmClient;
 use serde::Serialize;
@@ -59,6 +59,7 @@ impl AgentOrchestrator {
         context: AgentContext,
         context_compression: ContextCompressionMode,
         context_budget: Option<ContextBudget>,
+        context_sources: ContextSourceOptions,
         pipeline: Vec<PipelineStage>,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
@@ -92,8 +93,11 @@ impl AgentOrchestrator {
             None,
             "Agent prompt received",
             &format!(
-                "Prompt:\n{}\n\nContext mode: {}\n{}",
-                prompt, context_compression, budget_summary
+                "Prompt:\n{}\n\nContext mode: {}\n{}\n{}",
+                prompt,
+                context_compression,
+                budget_summary,
+                format_context_sources(&context_sources)
             ),
             Some(context_summary.clone()),
             None,
@@ -404,6 +408,27 @@ impl AgentOrchestrator {
         let _ = app.emit("agent-action-log", entry);
     }
 
+    pub fn emit_review_action_log(
+        &self,
+        app: &AppHandle,
+        level: &str,
+        phase: &str,
+        summary: &str,
+        details: &str,
+    ) {
+        self.emit_action_log(
+            app,
+            level,
+            phase,
+            None,
+            Some("Diff Review"),
+            summary,
+            details,
+            None,
+            Some(self.summarize_pending_diffs()),
+        );
+    }
+
     fn pending_diff_count(&self) -> usize {
         self.diffs
             .iter()
@@ -535,6 +560,13 @@ fn format_context_budget_summary(
         raw_chars,
         final_chars,
         final_chars < raw_chars
+    )
+}
+
+fn format_context_sources(sources: &ContextSourceOptions) -> String {
+    format!(
+        "Context sources: projectTree={}, gitDiff={}",
+        sources.include_project_tree, sources.include_git_diff
     )
 }
 
@@ -683,5 +715,15 @@ mod tests {
         let provenance = diffs[0].provenance.as_ref().expect("provenance");
         assert_eq!(provenance.source_role.as_deref(), Some("coder"));
         assert_eq!(provenance.source_stage.as_deref(), Some("Implement"));
+    }
+
+    #[test]
+    fn format_context_sources_records_workspace_source_flags() {
+        let summary = format_context_sources(&crate::services::context::ContextSourceOptions {
+            include_project_tree: true,
+            include_git_diff: false,
+        });
+
+        assert_eq!(summary, "Context sources: projectTree=true, gitDiff=false");
     }
 }

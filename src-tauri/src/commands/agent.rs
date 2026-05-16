@@ -367,12 +367,11 @@ pub async fn send_agent_prompt(
         git_diff: None,
         project_tree: None,
     };
-    context.enrich_from_workspace_with_sources(
-        &request.context_sources.unwrap_or_else(|| ContextSourceOptions {
+    let context_sources = request.context_sources.unwrap_or_else(|| ContextSourceOptions {
             include_project_tree: true,
             include_git_diff: true,
-        }),
-    );
+    });
+    context.enrich_from_workspace_with_sources(&context_sources);
 
     // The async mutex can be held safely while the orchestrator runs.
     let compression = match request.context_compression.as_deref() {
@@ -397,6 +396,7 @@ pub async fn send_agent_prompt(
             context,
             compression,
             context_budget,
+            context_sources,
             pipeline,
             cancel_flag,
             &llm,
@@ -478,6 +478,17 @@ pub async fn apply_diffs(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
     );
+    orch.emit_review_action_log(
+        &app_handle,
+        if failed.is_empty() { "success" } else { "warn" },
+        "diff_apply",
+        &format!(
+            "Apply all diffs: {} applied, {} failed",
+            applied.len(),
+            failed.len()
+        ),
+        &format_apply_result_details(&result),
+    );
 
     Ok(result)
 }
@@ -524,6 +535,18 @@ pub async fn apply_diff(
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+    orch.emit_review_action_log(
+        &app_handle,
+        if failed.is_empty() { "success" } else { "warn" },
+        "diff_apply",
+        &format!(
+            "Apply diff {}: {} applied, {} failed",
+            diff_id,
+            result.applied.len(),
+            failed.len()
+        ),
+        &format_apply_result_details(&result),
     );
 
     Ok(result)
@@ -594,6 +617,19 @@ pub async fn apply_diff_hunk(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
     );
+    orch.emit_review_action_log(
+        &app_handle,
+        if failed.is_empty() { "success" } else { "warn" },
+        "diff_apply",
+        &format!(
+            "Apply hunk {} in diff {}: {} applied, {} failed",
+            hunk_index + 1,
+            diff_id,
+            result.applied.len(),
+            failed.len()
+        ),
+        &format_apply_result_details(&result),
+    );
 
     Ok(result)
 }
@@ -624,6 +660,13 @@ pub async fn reject_diffs(
         .filter(|d| d.status == "rejected")
         .cloned()
         .collect();
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "diff_reject",
+        &format!("Rejected {} diff{}", rejected.len(), if rejected.len() == 1 { "" } else { "s" }),
+        &format_diff_list_details(&rejected),
+    );
 
     Ok(rejected)
 }
@@ -654,6 +697,13 @@ pub async fn reject_diff(
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "diff_reject",
+        &format!("Rejected diff {}", diff_id),
+        &format_diff_list_details(std::slice::from_ref(&rejected)),
     );
 
     Ok(rejected)
@@ -691,8 +741,52 @@ pub async fn reject_diff_hunk(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
     );
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "diff_reject",
+        &format!("Rejected hunk {} in diff {}", hunk_index + 1, diff_id),
+        &format_diff_list_details(std::slice::from_ref(&updated)),
+    );
 
     Ok(updated)
+}
+
+fn format_apply_result_details(result: &ApplyDiffsResult) -> String {
+    let mut lines = Vec::new();
+    for diff in &result.applied {
+        lines.push(format!("Applied: {} ({})", diff.file, diff.id));
+    }
+    for failure in &result.failed {
+        lines.push(format!(
+            "Failed: {} ({}) - {}",
+            failure.file, failure.diff_id, failure.message
+        ));
+    }
+    if lines.is_empty() {
+        "No matching pending diffs were changed.".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn format_diff_list_details(diffs: &[FileDiff]) -> String {
+    if diffs.is_empty() {
+        return "No diffs.".to_string();
+    }
+    diffs
+        .iter()
+        .map(|diff| {
+            format!(
+                "{} ({}) - {} hunk{}",
+                diff.file,
+                diff.id,
+                diff.hunks.len(),
+                if diff.hunks.len() == 1 { "" } else { "s" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> String {
