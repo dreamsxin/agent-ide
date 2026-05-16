@@ -91,6 +91,18 @@ function fileEntryToNode(entry: FileEntry): TreeNodeData {
   };
 }
 
+function workspaceRootNode(workspacePath: string): TreeNodeData {
+  return {
+    id: workspacePath,
+    name: basename(workspacePath) || "Workspace",
+    path: workspacePath,
+    isDir: true,
+    size: 0,
+    childrenLoaded: true,
+    children: [],
+  };
+}
+
 // ====== 树节点渲染 ======
 function TreeNode({
   node,
@@ -320,7 +332,14 @@ export default function Explorer() {
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, node?: TreeNodeData | null) => {
       if (!node) {
-        closeContextMenu();
+        if (!workspacePath) {
+          closeContextMenu();
+          return;
+        }
+        node = workspaceRootNode(workspacePath);
+        e.preventDefault();
+      }
+      if (!node) {
         return;
       }
       const margin = 8;
@@ -441,7 +460,7 @@ export default function Explorer() {
       showToast(`Copied to Explorer clipboard: ${node.name}`);
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, workspacePath]
   );
 
   const handlePaste = useCallback(
@@ -558,7 +577,13 @@ export default function Explorer() {
       </div>
 
       {/* 树 */}
-      <div className="flex-1 overflow-hidden">
+      <div
+        className="flex-1 overflow-hidden"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          handleContextMenu(event, null);
+        }}
+      >
         {loading && (
           <div className="p-2 text-xs text-surface-muted">Loading files...</div>
         )}
@@ -593,7 +618,7 @@ export default function Explorer() {
             }}
             onContextMenu={(e) => {
               e.preventDefault();
-              closeContextMenu();
+              handleContextMenu(e, null);
             }}
           >
             {(props: NodeRendererProps<TreeNodeData>) => (
