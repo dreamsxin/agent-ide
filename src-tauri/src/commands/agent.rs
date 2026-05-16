@@ -1,9 +1,8 @@
 use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
-use crate::agent::state_machine::{
-    AgentMode, AgentState, ApplyDiffsResult, DiffProvenance, FileDiff, TaskStep,
-};
+use crate::agent::state_machine::{AgentMode, AgentState, ApplyDiffsResult, FileDiff, TaskStep};
+use crate::services::agent_runtime;
 use crate::services::context::{
     AgentContext, ContextBudget, ContextBuildOptions, ContextCompressionMode,
     ContextEstimateResponse, ContextSourceOptions,
@@ -370,7 +369,8 @@ pub async fn run_agent_step(
         context_budget,
     ));
     let mut step = request.step;
-    let step_prompt = format_step_prompt(&step, request.extra_prompt.as_deref());
+    let step_prompt =
+        agent_runtime::format_single_step_prompt(&step, request.extra_prompt.as_deref());
 
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
@@ -429,7 +429,7 @@ pub async fn run_agent_step(
             upsert_step(&mut orch.steps, step.clone());
 
             let mut diffs = crate::agent::executor::parse_diffs(&response);
-            attach_step_provenance(
+            agent_runtime::attach_step_provenance(
                 &mut diffs,
                 &step,
                 request.regenerated_from_diff_id.as_deref(),
@@ -1016,27 +1016,6 @@ fn resolve_context_compression(
     }
 }
 
-fn format_step_prompt(step: &TaskStep, extra_prompt: Option<&str>) -> String {
-    let mut lines = vec![
-        format!("Run this Agent plan step only: {}", step.title),
-        format!("Step type: {}", step.step_type),
-        format!("Scope: {}", step.scope.as_deref().unwrap_or("workspace")),
-        format!(
-            "Execution mode: {}",
-            step.execution_mode.as_deref().unwrap_or("diff")
-        ),
-    ];
-    if let Some(extra_prompt) = extra_prompt.filter(|value| !value.trim().is_empty()) {
-        lines.push("Additional instruction:".to_string());
-        lines.push(extra_prompt.to_string());
-    }
-    lines.push(
-        "Return reviewable Agent IDE diffs when code changes are needed. Do not run unrelated plan steps."
-            .to_string(),
-    );
-    lines.join("\n")
-}
-
 fn upsert_step(steps: &mut Vec<TaskStep>, step: TaskStep) {
     if let Some(existing) = steps.iter_mut().find(|item| item.id == step.id) {
         *existing = step;
@@ -1050,31 +1029,6 @@ fn upsert_step_status(steps: &mut Vec<TaskStep>, step: &TaskStep, status: &str, 
     updated.status = status.to_string();
     updated.logs.push(log.to_string());
     upsert_step(steps, updated);
-}
-
-fn attach_step_provenance(
-    diffs: &mut [FileDiff],
-    step: &TaskStep,
-    regenerated_from_diff_id: Option<&str>,
-    regenerated_from_hunk_index: Option<usize>,
-) {
-    for diff in diffs {
-        let provenance = diff.provenance.get_or_insert_with(|| DiffProvenance {
-            protocol: "unknown".to_string(),
-            operation: "unknown".to_string(),
-            rationale: None,
-            schema_version: None,
-            change_index: None,
-            source_role: None,
-            source_stage: None,
-            regenerated_from_diff_id: None,
-            regenerated_from_hunk_index: None,
-        });
-        provenance.source_role = Some("agent-step".to_string());
-        provenance.source_stage = Some(step.title.clone());
-        provenance.regenerated_from_diff_id = regenerated_from_diff_id.map(str::to_string);
-        provenance.regenerated_from_hunk_index = regenerated_from_hunk_index;
-    }
 }
 
 #[cfg(test)]
@@ -1093,7 +1047,7 @@ mod llm_profile_tests {
             execution_mode: Some("fix".to_string()),
         };
 
-        let prompt = format_step_prompt(&step, Some("Use more context"));
+        let prompt = agent_runtime::format_single_step_prompt(&step, Some("Use more context"));
 
         assert!(prompt.contains("Fix parser"));
         assert!(prompt.contains("Scope: active_file"));
@@ -1121,7 +1075,7 @@ mod llm_profile_tests {
             status: "pending".to_string(),
         }];
 
-        attach_step_provenance(&mut diffs, &step, Some("d1"), Some(2));
+        agent_runtime::attach_step_provenance(&mut diffs, &step, Some("d1"), Some(2));
 
         let provenance = diffs[0].provenance.as_ref().expect("provenance");
         assert_eq!(provenance.source_role.as_deref(), Some("agent-step"));

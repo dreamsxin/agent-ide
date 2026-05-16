@@ -1,7 +1,7 @@
 use crate::agent::diff_apply::apply_pending_diffs;
-use crate::agent::executor;
 use crate::agent::planner;
 use crate::agent::state_machine::{ApplyDiffsResult, FileDiff, TaskStep};
+use crate::services::agent_runtime;
 use crate::services::context::{
     ContextBuildOptions, ContextCompressionMode, ContextEstimateResponse, ContextSourceOptions,
 };
@@ -14,6 +14,7 @@ use chrono::Utc;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -746,97 +747,73 @@ async fn execute_steps(
     output: &mut CliOutput,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<Vec<FileDiff>, (ExitCode, String)> {
-    let mut all_diffs = Vec::new();
+    let output_mode = output.mode;
+    let deferred_events = RefCell::new(Vec::<CliEvent>::new());
+    let results = agent_runtime::execute_agent_steps(
+        llm,
+        prompt,
+        context_text,
+        workspace_path,
+        steps,
+        cancel_flag,
+        |index, total, step| {
+            if output_mode == OutputMode::Text {
+                println!("--- Step {}/{}: {} ---", index + 1, total, step.title);
+            }
+            emit_or_defer_event(
+                output_mode,
+                &mut deferred_events.borrow_mut(),
+                CliEvent::StepStarted {
+                    step_id: step.id.clone(),
+                    title: step.title.clone(),
+                },
+            );
+        },
+        |step, response, diffs| {
+            if output_mode == OutputMode::Text {
+                println!();
+            }
+            emit_or_defer_event(
+                output_mode,
+                &mut deferred_events.borrow_mut(),
+                CliEvent::StepFinished {
+                    step_id: step.id.clone(),
+                    response_chars: response.chars().count(),
+                    diff_count: diffs.len(),
+                },
+            );
+        },
+        |_| token_sender_for_mode(output_mode),
+    )
+    .await
+    .map_err(|err| (ExitCode::ProviderFailed, err))?;
+    output.events.extend(deferred_events.into_inner());
 
-    for (index, step) in steps.iter().enumerate() {
-        output.text(format!(
-            "--- Step {}/{}: {} ---",
-            index + 1,
-            steps.len(),
-            step.title
-        ));
-        output.event(CliEvent::StepStarted {
-            step_id: step.id.clone(),
-            title: step.title.clone(),
-        });
-
-        let step_context = build_step_context(prompt, step, context_text, workspace_path);
-        let tx = output.token_sender();
-        let response =
-            executor::execute_step(llm, &step.title, &step_context, cancel_flag.clone(), tx)
-                .await
-                .map_err(|err| (ExitCode::ProviderFailed, err))?;
-        output.text("");
-        let diffs = executor::parse_diffs(&response);
-        output.event(CliEvent::StepFinished {
-            step_id: step.id.clone(),
-            response_chars: response.chars().count(),
-            diff_count: diffs.len(),
-        });
-        all_diffs.extend(diffs);
-    }
-
-    Ok(all_diffs)
+    Ok(results
+        .into_iter()
+        .flat_map(|result| result.diffs)
+        .collect::<Vec<_>>())
 }
 
-fn build_step_context(
-    prompt: &str,
-    step: &TaskStep,
-    context_text: &str,
-    workspace_path: &Path,
-) -> String {
-    let mut step_ctx = format!(
-        "Task: {}\nStep: {}\nType: {}\nContext:\n{}",
-        prompt, step.title, step.step_type, context_text
-    );
-
-    let mut paths_to_try: Vec<PathBuf> = Vec::new();
-    for word in step.title.split_whitespace() {
-        let w = word.trim_matches(|c: char| {
-            !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '-' && c != '_'
-        });
-        if w.contains('.') && w.len() > 3 {
-            paths_to_try.push(workspace_path.join(w));
-            paths_to_try.push(PathBuf::from(w));
+fn emit_or_defer_event(mode: OutputMode, events: &mut Vec<CliEvent>, event: CliEvent) {
+    if mode == OutputMode::Ndjson {
+        if let Ok(line) = serde_json::to_string(&event) {
+            println!("{}", line);
         }
     }
+    events.push(event);
+}
 
-    if paths_to_try.is_empty() {
-        let exts = ["js", "ts", "jsx", "tsx", "py", "rs", "go", "java"];
-        if let Ok(entries) = fs::read_dir(workspace_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if exts.contains(&ext) {
-                        paths_to_try.push(path);
-                    }
-                }
+fn token_sender_for_mode(mode: OutputMode) -> mpsc::Sender<String> {
+    let (tx, mut rx) = mpsc::channel::<String>(128);
+    tokio::spawn(async move {
+        while let Some(token) = rx.recv().await {
+            if mode == OutputMode::Text {
+                print!("{}", token);
             }
         }
-    }
-
-    let mut found_names: Vec<String> = Vec::new();
-    for path in &paths_to_try {
-        if path.exists() && path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !found_names.contains(&name.to_string()) {
-                    if let Ok(file_content) = fs::read_to_string(path) {
-                        step_ctx.push_str(&format!(
-                            "\n\n--- File: {} ---\n```\n{}\n```",
-                            name, file_content
-                        ));
-                        found_names.push(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    if !found_names.is_empty() {
-        step_ctx.push_str("\n\n(File contents above are current - base your diff on them)");
-    }
-
-    step_ctx
+    });
+    tx
 }
 
 fn emit_summary(output: &mut CliOutput, summary: &CliSummary) -> Result<(), (ExitCode, String)> {

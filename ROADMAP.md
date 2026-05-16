@@ -141,6 +141,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Extracted LLM provider profile and credential handling into `services/llm_profiles.rs` so IDE commands and CLI can share one backend implementation; CLI now supports `--profile`.
 - Extracted project task discovery and non-interactive command execution into `services/project_tasks.rs`; CLI can run shared check commands with `--run-command` and records results in artifacts.
 - Added shared backend command-output problem parsing in `services/problem_parser.rs`; project command results and CLI artifacts now include parsed Problems.
+- Extracted shared Agent single-step runtime helpers into `services/agent_runtime.rs`; CLI step execution and IDE single-step/regenerate flows now share step context enrichment and diff provenance attachment.
 
 Important distinction:
 

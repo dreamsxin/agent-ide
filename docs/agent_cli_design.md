@@ -487,6 +487,7 @@ Current status:
 - Shared project task discovery and non-interactive command execution live in `services/project_tasks.rs`.
 - CLI can execute checks with `--run-command` and writes command results to artifacts.
 - Shared command-output problem parsing lives in `services/problem_parser.rs`.
+- Shared Agent single-step runtime helpers live in `services/agent_runtime.rs`, including step-context enrichment and diff provenance used by both CLI execution and IDE single-step/regenerate flows.
 - Looping failed command Problems back into repair context is still pending.
 
 ### Phase CLI-5: Toolchain Packaging
