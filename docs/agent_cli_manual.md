@@ -254,6 +254,8 @@ Each repair iteration is recorded in `repair-chain.json` with the failed command
 
 ## Completeness as an Agent IDE CLI
 
+CLI mode is now scoped as a **headless automation runner**, not a full terminal IDE replacement. It is suitable for scripts, CI-style checks, external toolchain integration, and bounded repair attempts. Interactive IDE workflows remain in the desktop UI.
+
 Implemented:
 
 - Single-prompt Agent execution.
@@ -275,7 +277,7 @@ Implemented:
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 
-Missing for daily IDE replacement:
+Intentionally outside the current CLI scope:
 
 - No interactive Agent Plan editing, reorder, skip, pause-before-stage, or continue controls.
 - No Problems panel, diagnostics bridge, terminal failure parsing, or Fix with Agent loop.
@@ -288,14 +290,12 @@ Missing for daily IDE replacement:
 
 ## Recommended Next CLI Work
 
-The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_design.md). The short version:
+The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_design.md). The CLI surface can now be treated as Phase 1-4 first-pass complete. Further work should focus on hardening the automation contract rather than adding desktop-IDE features:
 
-1. Add a real `--profile <name>` path that reads the same provider profile metadata as the desktop app, including OS credential-store references.
-2. Add `--context-mode full|focused|compact` and `--include git-diff,project-tree,problems` flags using the same context section builder as the UI.
-3. Add a machine-readable `--json` output mode for plans, steps, diffs, failures, and applied files.
-4. Add `--review` or `--interactive` mode for per-file and per-hunk apply/reject in the terminal.
-5. Expand permission policy beyond command checks to file create/delete, Git mutations, timeouts, and max diff size.
-6. Add smoke tests that run `agent_cli --help`, preview mode with a mocked LLM response, and apply mode against a temporary workspace.
+1. Add timeout, max-output, and max-diff-size limits for repair loops.
+2. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and repair-chain artifacts.
+3. Add compact repair-chain summaries for CI logs while keeping full artifacts on disk.
+4. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
 
 ## Safety Notes
 

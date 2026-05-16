@@ -251,7 +251,26 @@ struct CliSummary {
     commands: Vec<RunProjectTaskResult>,
     problems: Vec<ProblemEntry>,
     repair_chain: Vec<RepairIterationRecord>,
+    capabilities: Option<CliCapabilities>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliCapabilities {
+    stable_contract: bool,
+    subcommands: Vec<String>,
+    output_modes: Vec<String>,
+    context_modes: Vec<String>,
+    artifacts: Vec<String>,
+    supports_profiles: bool,
+    supports_context_estimate: bool,
+    supports_run_command_checks: bool,
+    supports_bounded_repair: bool,
+    supports_run_allow_list: bool,
+    supports_interactive_review: bool,
+    supports_git_mutation: bool,
+    scope: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,6 +497,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         commands: Vec::new(),
         problems: Vec::new(),
         repair_chain: Vec::new(),
+        capabilities: Some(cli_capabilities()),
         errors,
     };
 
@@ -533,6 +553,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         commands: Vec::new(),
         problems: Vec::new(),
         repair_chain: Vec::new(),
+        capabilities: None,
         errors: Vec::new(),
     };
     emit_summary(&mut output, &summary)?;
@@ -643,6 +664,7 @@ async fn run_agent_command(
             commands: Vec::new(),
             problems: Vec::new(),
             repair_chain: Vec::new(),
+            capabilities: None,
             errors: Vec::new(),
         };
         output.event(CliEvent::RunFinished {
@@ -831,6 +853,7 @@ async fn run_agent_command(
         commands: command_results,
         problems: command_problems,
         repair_chain,
+        capabilities: None,
         errors,
     };
     emit_summary(&mut output, &summary)?;
@@ -1052,7 +1075,48 @@ fn error_summary(
         commands: Vec::new(),
         problems: Vec::new(),
         repair_chain: Vec::new(),
+        capabilities: None,
         errors: vec![error],
+    }
+}
+
+fn cli_capabilities() -> CliCapabilities {
+    CliCapabilities {
+        stable_contract: true,
+        subcommands: vec![
+            "doctor".to_string(),
+            "context estimate".to_string(),
+            "plan".to_string(),
+            "run".to_string(),
+        ],
+        output_modes: vec!["text".to_string(), "json".to_string(), "ndjson".to_string()],
+        context_modes: vec![
+            "full".to_string(),
+            "focused".to_string(),
+            "compact".to_string(),
+        ],
+        artifacts: vec![
+            "summary.json".to_string(),
+            "events.json".to_string(),
+            "events.ndjson".to_string(),
+            "prompt.txt".to_string(),
+            "context.json".to_string(),
+            "context.txt".to_string(),
+            "plan.json".to_string(),
+            "changes.json".to_string(),
+            "apply-result.json".to_string(),
+            "commands.json".to_string(),
+            "problems.json".to_string(),
+            "repair-chain.json".to_string(),
+        ],
+        supports_profiles: true,
+        supports_context_estimate: true,
+        supports_run_command_checks: true,
+        supports_bounded_repair: true,
+        supports_run_allow_list: true,
+        supports_interactive_review: false,
+        supports_git_mutation: false,
+        scope: "headless automation runner; not a full command-line IDE".to_string(),
     }
 }
 
@@ -1600,5 +1664,18 @@ mod tests {
         assert_eq!(ExitCode::ChangesProposed.as_u8(), 3);
         assert_eq!(ExitCode::ApplyFailed.as_u8(), 5);
         assert_eq!(ExitCode::ProviderFailed.as_u8(), 6);
+    }
+
+    #[test]
+    fn cli_capabilities_describe_closed_headless_scope() {
+        let capabilities = cli_capabilities();
+
+        assert!(capabilities.stable_contract);
+        assert!(capabilities.subcommands.contains(&"run".to_string()));
+        assert!(capabilities.supports_profiles);
+        assert!(capabilities.supports_bounded_repair);
+        assert!(!capabilities.supports_interactive_review);
+        assert!(!capabilities.supports_git_mutation);
+        assert!(capabilities.scope.contains("headless automation"));
     }
 }

@@ -409,14 +409,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Rust diff apply, workspace boundaries, pipeline helpers, and pending diff summaries have tests.
    - Need more tests for Agent state transitions and frontend store behavior.
 
-14. **CLI mode is useful but not feature-complete**
-   - `agent_cli` supports single-prompt planning, step execution, preview output, optional all-diff apply, provider flags/env vars, workspace selection, and shared workspace-boundary checks.
-   - CLI Phase 1 now adds `doctor`, `context estimate`, `plan`, and `run` command shape, plus JSON/NDJSON output, artifacts, run ids, prompt-file/stdin input, and stable exit codes.
-   - CLI now has first-pass reuse of UI provider profiles and OS credential-store references via `--profile`.
-   - CLI now uses the shared project command runner for `--run-command`, records parsed backend Problems, can feed failed command output into bounded repair iterations with `--max-iterations` guarded by `--allow-run`, and writes `repair-chain.json` for iteration traceability.
-   - It lacks interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery.
-   - Keep treating it as a headless Agent runner and backend smoke surface until those workflows are implemented.
-   - Target design now calls for subcommands, JSON/NDJSON output, stable exit codes, run artifacts, permission policy, shared profiles/context, interactive review, and bounded autonomous repair loops.
+14. **CLI mode is first-pass complete for headless automation**
+   - `agent_cli` is scoped as a headless automation runner, not a full terminal IDE replacement.
+   - It supports `doctor`, `context estimate`, `plan`, and `run`, plus text/JSON/NDJSON output, artifacts, run ids, prompt-file/stdin input, stable exit codes, profile lookup, and shared workspace-boundary checks.
+   - It uses the shared project command runner for `--run-command`, records parsed backend Problems, can feed failed command output into bounded repair iterations with `--max-iterations` guarded by `--allow-run`, and writes `repair-chain.json` for iteration traceability.
+   - `doctor --output json` exposes a machine-readable capability contract for external tools.
+   - Interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery remain desktop IDE workflows unless a separate terminal UI is intentionally planned.
+   - Next CLI work should harden the automation contract with timeouts, size limits, compact summaries, and smoke tests rather than adding broad IDE UI features.
 
 ---
 
@@ -623,8 +622,8 @@ target\release\agent_cli --help
 4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
 5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
-7. Improve Agent CLI mode with shared provider profiles, credential-store lookup, context-mode/source flags, machine-readable JSON output, interactive per-hunk review, and CLI smoke tests.
-8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI; add timeouts, compact repair summaries, and broader permission policy for CLI repair loops.
+7. Harden Agent CLI automation with timeout, max-output, max-diff-size, compact repair summaries, and smoke tests for `doctor --output json`, preview, apply, and repair-chain artifacts.
+8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
 
 ---
 

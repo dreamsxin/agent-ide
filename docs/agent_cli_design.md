@@ -513,12 +513,13 @@ Acceptance:
 
 ## 11. Recommended Next Coding Task
 
-Start with **Phase CLI-1**:
+CLI Phase 1-4 are now first-pass complete for the intended scope: a headless automation runner that can plan, generate diffs, optionally apply them, run checks, parse Problems, perform bounded repair iterations, and write machine-readable artifacts.
 
-1. Introduce `clap` argument parsing.
-2. Add `run` as the default-compatible subcommand while keeping old flags working.
-3. Add `--output text|json|ndjson`.
-4. Add run artifacts and stable exit codes.
-5. Add tests around CLI argument parsing and output schema.
+Do not keep expanding this into a second interactive IDE by default. Interactive plan editing, per-hunk review, Git workflows, terminal sessions, LSP views, and Problems UI should remain desktop features unless there is a separate product decision to build a full terminal UI.
 
-This gives external tools a stable contract first. Full automation should come after the CLI can be called safely and parsed reliably.
+Recommended next hardening tasks:
+
+1. Add timeout, max-output, and max-diff-size policy to bounded repair loops.
+2. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and `repair-chain.json`.
+3. Add compact CI summaries while preserving full artifacts.
+4. Keep `doctor --output json` as the machine-readable capability contract for external tools.
