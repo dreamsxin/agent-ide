@@ -415,8 +415,9 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - It uses the shared project command runner for `--run-command`, records parsed backend Problems, can feed failed command output into bounded repair iterations with `--max-iterations` guarded by `--allow-run`, and writes `repair-chain.json` for iteration traceability.
    - `doctor --output json` exposes a machine-readable capability contract for external tools.
    - CLI automation runs now support `--timeout-seconds`, `--max-output-bytes`, `--max-diff-files`, and compact text summaries with command/problem/repair counts.
+   - CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json` using a mock provider.
    - Interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery remain desktop IDE workflows unless a separate terminal UI is intentionally planned.
-   - Next CLI work should add smoke tests and compact repair-chain summaries rather than adding broad IDE UI features.
+   - Next CLI work should add compact repair-chain summaries rather than broad IDE UI features.
 
 ---
 
@@ -623,7 +624,7 @@ target\release\agent_cli --help
 4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
 5. Expand Agent plan controls with persisted backend run snapshots, explicit per-stage approve/skip controls, and full provider/transport-aware in-flight task resume.
 6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
-7. Harden Agent CLI automation with smoke tests for `doctor --output json`, preview, apply, and repair-chain artifacts, plus compact repair summaries.
+7. Harden Agent CLI automation with compact repair-chain summaries and broader permission policy only if CLI scope is intentionally widened.
 8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
 
 ---

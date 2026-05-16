@@ -72,6 +72,9 @@ struct DoctorArgs {
 
     #[arg(long, value_enum, default_value = "text")]
     output: OutputMode,
+
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -471,7 +474,10 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
     let mut output = CliOutput::new(args.output);
     let run_id = make_run_id(args.workspace.as_deref());
     let workspace_path = resolve_workspace(args.workspace.as_deref())?;
-    let artifact_dir = default_artifact_dir(&workspace_path, &run_id);
+    let artifact_dir = args
+        .artifact_dir
+        .clone()
+        .unwrap_or_else(|| default_artifact_dir(&workspace_path, &run_id));
     let workspace_display = workspace_path.to_string_lossy().to_string();
     let mut errors = Vec::new();
 
@@ -1586,6 +1592,54 @@ fn default_artifact_dir(workspace_path: &Path, run_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn cli_smoke_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct SmokeWorkspace {
+        root: PathBuf,
+        artifacts: PathBuf,
+    }
+
+    impl SmokeWorkspace {
+        fn new(name: &str, content: &str) -> Self {
+            let id = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("agent-cli-smoke-{name}-{id}"));
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("smoke.txt"), content).unwrap();
+            let repo = git2::Repository::init(&root).unwrap();
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Agent CLI Smoke").unwrap();
+            config
+                .set_str("user.email", "agent-cli-smoke@example.test")
+                .unwrap();
+            let artifacts = root.join("artifacts");
+            Self { root, artifacts }
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.root.join(name)
+        }
+    }
+
+    impl Drop for SmokeWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn set_mock_llm_env() {
+        std::env::set_var("LLM_ENDPOINT", "mock://cli-smoke");
+        std::env::set_var("LLM_API_KEY", "sk-smoke");
+        std::env::set_var("LLM_MODEL", "mock-model");
+    }
 
     #[test]
     fn legacy_prompt_args_parse_as_run_command() {
@@ -1833,5 +1887,166 @@ mod tests {
         assert!(!capabilities.supports_interactive_review);
         assert!(!capabilities.supports_git_mutation);
         assert!(capabilities.scope.contains("headless automation"));
+    }
+
+    #[tokio::test]
+    async fn smoke_doctor_json_writes_capabilities() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("doctor", "initial");
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "doctor".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(exit, ExitCode::Success);
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["command"], "doctor");
+        assert_eq!(summary["capabilities"]["stableContract"], true);
+        assert_eq!(summary["capabilities"]["supportsBoundedRepair"], true);
+    }
+
+    #[tokio::test]
+    async fn smoke_preview_writes_changes_without_applying() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("preview", "initial");
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--endpoint".to_string(),
+            "mock://cli-smoke".to_string(),
+            "--api-key".to_string(),
+            "sk-smoke".to_string(),
+            "--model".to_string(),
+            "mock-model".to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(exit, ExitCode::ChangesProposed);
+        assert_eq!(
+            fs::read_to_string(workspace.path("smoke.txt")).unwrap(),
+            "initial"
+        );
+        assert!(workspace.artifacts.join("changes.json").exists());
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["status"], "changes_proposed");
+    }
+
+    #[tokio::test]
+    async fn smoke_apply_writes_apply_result_and_updates_file() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("apply", "initial");
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--endpoint".to_string(),
+            "mock://cli-smoke".to_string(),
+            "--api-key".to_string(),
+            "sk-smoke".to_string(),
+            "--model".to_string(),
+            "mock-model".to_string(),
+            "--apply".to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(exit, ExitCode::Success);
+        assert_eq!(
+            fs::read_to_string(workspace.path("smoke.txt")).unwrap(),
+            "changed"
+        );
+        assert!(workspace.artifacts.join("apply-result.json").exists());
+    }
+
+    #[tokio::test]
+    async fn smoke_repair_chain_artifact_links_failure_and_rerun() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("repair", "initial");
+        let check_command = if cfg!(windows) {
+            "findstr fixed smoke.txt"
+        } else {
+            "grep fixed smoke.txt"
+        };
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--endpoint".to_string(),
+            "mock://cli-smoke".to_string(),
+            "--api-key".to_string(),
+            "sk-smoke".to_string(),
+            "--model".to_string(),
+            "mock-model".to_string(),
+            "--apply".to_string(),
+            "--run-command".to_string(),
+            check_command.to_string(),
+            "--allow-run".to_string(),
+            check_command.to_string(),
+            "--max-iterations".to_string(),
+            "1".to_string(),
+            "Update smoke file and repair checks".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(exit, ExitCode::Success);
+        assert_eq!(
+            fs::read_to_string(workspace.path("smoke.txt")).unwrap(),
+            "fixed"
+        );
+        let chain_path = workspace.artifacts.join("repair-chain.json");
+        assert!(chain_path.exists());
+        let chain: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(chain_path).unwrap()).unwrap();
+        assert_eq!(chain.as_array().unwrap().len(), 1);
+        assert_eq!(chain[0]["checksFailedAfter"], false);
+        assert!(chain[0]["failedCommandsBefore"].as_array().unwrap().len() >= 1);
     }
 }

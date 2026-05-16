@@ -494,7 +494,8 @@ Current status:
 - `repair-chain.json` records each bounded repair iteration as failure context -> repair prompt -> generated diffs -> apply result -> rerun result.
 - `--timeout-seconds`, `--max-output-bytes`, and `--max-diff-files` provide first-pass automation limits.
 - Compact text summaries include command/problem/repair counts for CI logs.
-- Broader permission policy and dedicated CLI smoke tests are still pending.
+- CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json` using a mock provider.
+- Broader permission policy and compact repair-chain summaries are still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 
@@ -521,6 +522,5 @@ Do not keep expanding this into a second interactive IDE by default. Interactive
 
 Recommended next hardening tasks:
 
-1. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and `repair-chain.json`.
-2. Add compact repair-chain summaries while preserving full artifacts.
-3. Keep `doctor --output json` as the machine-readable capability contract for external tools.
+1. Add compact repair-chain summaries while preserving full artifacts.
+2. Keep `doctor --output json` as the machine-readable capability contract for external tools.

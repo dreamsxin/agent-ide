@@ -46,6 +46,10 @@ impl LlmClient {
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
     ) -> Result<String, String> {
+        if self.config.endpoint.starts_with("mock://") {
+            return stream_mock_chat(messages, cancel_flag, tx).await;
+        }
+
         let url = format!("{}/chat/completions", self.config.endpoint);
         let body = build_chat_request(&self.config, messages);
 
@@ -152,6 +156,51 @@ impl LlmClient {
 
         Ok(full_response)
     }
+}
+
+async fn stream_mock_chat(
+    messages: Vec<ChatMessage>,
+    cancel_flag: Arc<AtomicBool>,
+    tx: mpsc::Sender<String>,
+) -> Result<String, String> {
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Err("Agent task cancelled".to_string());
+    }
+    let system = messages
+        .iter()
+        .find(|message| message.role == "system")
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+    let user = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+    let response = if system.contains("software engineering planner") {
+        r#"```plan
+[STEP] title="Update smoke.txt" type="edit"
+```"#
+            .to_string()
+    } else if user.contains("Repair iteration") {
+        mock_diff_response("changed", "fixed")
+    } else {
+        mock_diff_response("initial", "changed")
+    };
+    let _ = tx.send(response.clone()).await;
+    Ok(response)
+}
+
+fn mock_diff_response(original: &str, updated: &str) -> String {
+    [
+        "```diff:smoke.txt",
+        "<<<<<<< ORIGINAL",
+        original,
+        "=======",
+        updated,
+        ">>>>>>> UPDATED",
+        "```",
+    ]
+    .join("\n")
 }
 
 async fn wait_for_cancel(cancel_flag: Arc<AtomicBool>) {

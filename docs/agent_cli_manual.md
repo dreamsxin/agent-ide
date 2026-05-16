@@ -285,6 +285,7 @@ Implemented:
 - repair-chain artifacts that link failures, generated repair diffs, apply results, and rerun results.
 - timeout, command-output, and generated-diff file-count limits for automation runs.
 - compact text summaries with command/problem/repair counts for CI logs.
+- smoke coverage for `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json`.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 
@@ -303,9 +304,8 @@ Intentionally outside the current CLI scope:
 
 The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_design.md). The CLI surface can now be treated as Phase 1-4 first-pass complete. Further work should focus on hardening the automation contract rather than adding desktop-IDE features:
 
-1. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and repair-chain artifacts.
-2. Add compact repair-chain summaries for CI logs while keeping full artifacts on disk.
-3. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
+1. Add compact repair-chain summaries for CI logs while keeping full artifacts on disk.
+2. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
 
 ## Safety Notes
 
