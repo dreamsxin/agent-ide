@@ -57,6 +57,7 @@ interface AgentStore {
   setSteps: (steps: Step[]) => void;
   updateStep: (stepId: string, updates: Partial<Step>) => void;
   setDiffs: (diffs: DiffEntry[]) => void;
+  restoreDiffs: (workspacePath?: string) => void;
   setPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
   markDiffApplied: (diffId: string) => void;
@@ -167,20 +168,33 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         st.id === stepId ? { ...st, ...updates } : st
       ),
     })),
-  setDiffs: (diffs) => set({ diffs, lastApplyResult: null }),
-  addDiff: (diff) => set((s) => ({ diffs: [...s.diffs, diff] })),
+  setDiffs: (diffs) => {
+    persistDiffs(diffs);
+    set({ diffs, lastApplyResult: null });
+  },
+  restoreDiffs: (workspacePath) => set({ diffs: loadDiffs(workspacePath), lastApplyResult: null }),
+  addDiff: (diff) =>
+    set((s) => {
+      const diffs = [...s.diffs, diff];
+      persistDiffs(diffs);
+      return { diffs };
+    }),
   markDiffApplied: (diffId) =>
-    set((s) => ({
-      diffs: s.diffs.map((d) =>
+    set((s) => {
+      const diffs = s.diffs.map((d) =>
         d.id === diffId ? { ...d, status: "applied" as const, applyError: undefined } : d
-      ),
-    })),
+      );
+      persistDiffs(diffs);
+      return { diffs };
+    }),
   markDiffRejected: (diffId) =>
-    set((s) => ({
-      diffs: s.diffs.map((d) =>
+    set((s) => {
+      const diffs = s.diffs.map((d) =>
         d.id === diffId ? { ...d, status: "rejected" as const, applyError: undefined } : d
-      ),
-    })),
+      );
+      persistDiffs(diffs);
+      return { diffs };
+    }),
   setError: (error) => set({ error, state: error ? "error" : "idle" }),
   clearApplyResult: () => set({ lastApplyResult: null }),
   appendStreamContent: (token) =>
@@ -281,12 +295,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) return [];
       const result = await invoke<ApplyDiffsResult>("apply_diffs");
-      set((s) => ({
-        lastApplyResult: result,
-        error: result.failed.length > 0
-          ? `Failed to apply ${result.failed.length} diff${result.failed.length === 1 ? "" : "s"}.`
-          : null,
-        diffs: s.diffs.map((d) => {
+      set((s) => {
+        const diffs = s.diffs.map((d) => {
           if (result.applied.some((a) => a.id === d.id)) {
             return { ...d, status: "applied" as const, applyError: undefined };
           }
@@ -295,8 +305,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             return { ...d, status: "failed" as const, applyError: failure.message };
           }
           return d;
-        }),
-      }));
+        });
+        persistDiffs(diffs);
+        return {
+          lastApplyResult: result,
+          error: result.failed.length > 0
+            ? `Failed to apply ${result.failed.length} diff${result.failed.length === 1 ? "" : "s"}.`
+            : null,
+          diffs,
+        };
+      });
       return result.applied;
     } catch (err: unknown) {
       console.warn("[AgentStore] apply_diffs failed:", err);
@@ -308,10 +326,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) return [];
       const result = await invoke<ApplyDiffsResult>("apply_diff", { diffId });
-      set((s) => ({
-        lastApplyResult: result,
-        error: result.failed.length > 0 ? "Failed to apply diff." : null,
-        diffs: s.diffs.map((d) => {
+      set((s) => {
+        const diffs = s.diffs.map((d) => {
           if (result.applied.some((a) => a.id === d.id)) {
             return { ...d, status: "applied" as const, applyError: undefined };
           }
@@ -320,8 +336,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             return { ...d, status: "failed" as const, applyError: failure.message };
           }
           return d;
-        }),
-      }));
+        });
+        persistDiffs(diffs);
+        return {
+          lastApplyResult: result,
+          error: result.failed.length > 0 ? "Failed to apply diff." : null,
+          diffs,
+        };
+      });
       return result.applied;
     } catch (err: unknown) {
       console.warn("[AgentStore] apply_diff failed:", err);
@@ -333,10 +355,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) return [];
       const result = await invoke<ApplyDiffsResult>("apply_diff_hunk", { diffId, hunkIndex });
-      set((s) => ({
-        lastApplyResult: result,
-        error: result.failed.length > 0 ? "Failed to apply hunk." : null,
-        diffs: s.diffs.map((d) => {
+      set((s) => {
+        const diffs = s.diffs.map((d) => {
           if (d.id !== diffId) return d;
           const failed = result.failed.find((failure) => failure.diffId === d.id);
           const applied = result.applied.some((item) => item.id === d.id);
@@ -355,8 +375,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             status: nextDiffStatus(hunks),
             applyError: failed?.message,
           };
-        }),
-      }));
+        });
+        persistDiffs(diffs);
+        return {
+          lastApplyResult: result,
+          error: result.failed.length > 0 ? "Failed to apply hunk." : null,
+          diffs,
+        };
+      });
       return result.applied;
     } catch (err: unknown) {
       console.warn("[AgentStore] apply_diff_hunk failed:", err);
@@ -368,14 +394,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) return [];
       const rejected = await invoke<DiffEntry[]>("reject_diffs");
-      set((s) => ({
-        lastApplyResult: null,
-        diffs: s.diffs.map((d) =>
+      set((s) => {
+        const diffs = s.diffs.map((d) =>
           rejected.some((r) => r.id === d.id)
             ? { ...d, status: "rejected" as const, applyError: undefined }
             : d
-        ),
-      }));
+        );
+        persistDiffs(diffs);
+        return { lastApplyResult: null, diffs };
+      });
       return rejected;
     } catch (err: unknown) {
       console.warn("[AgentStore] reject_diffs failed:", err);
@@ -387,14 +414,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) return null;
       const rejected = await invoke<DiffEntry>("reject_diff", { diffId });
-      set((s) => ({
-        lastApplyResult: null,
-        diffs: s.diffs.map((d) =>
+      set((s) => {
+        const diffs = s.diffs.map((d) =>
           d.id === rejected.id
             ? { ...d, status: "rejected" as const, applyError: undefined }
             : d
-        ),
-      }));
+        );
+        persistDiffs(diffs);
+        return { lastApplyResult: null, diffs };
+      });
       return rejected;
     } catch (err: unknown) {
       console.warn("[AgentStore] reject_diff failed:", err);
@@ -406,10 +434,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) return null;
       const rejected = await invoke<DiffEntry>("reject_diff_hunk", { diffId, hunkIndex });
-      set((s) => ({
-        lastApplyResult: null,
-        diffs: s.diffs.map((d) => (d.id === rejected.id ? rejected : d)),
-      }));
+      set((s) => {
+        const diffs = s.diffs.map((d) => (d.id === rejected.id ? rejected : d));
+        persistDiffs(diffs);
+        return { lastApplyResult: null, diffs };
+      });
       return rejected;
     } catch (err: unknown) {
       console.warn("[AgentStore] reject_diff_hunk failed:", err);
@@ -584,4 +613,40 @@ function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
     return "failed";
   }
   return "pending";
+}
+
+const AGENT_DIFFS_STORAGE_KEY = "agent-ide-agent-diffs";
+
+function persistDiffs(diffs: DiffEntry[]) {
+  if (typeof window === "undefined") return;
+  const workspacePath = currentWorkspacePath();
+  const payload = {
+    workspacePath,
+    diffs: diffs.slice(-200),
+  };
+  localStorage.setItem(AGENT_DIFFS_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(AGENT_DIFFS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as { workspacePath?: string; diffs?: DiffEntry[] };
+    if (!Array.isArray(parsed.diffs)) return [];
+    if (expectedWorkspacePath && parsed.workspacePath && parsed.workspacePath !== expectedWorkspacePath) {
+      return [];
+    }
+    return parsed.diffs.slice(-200);
+  } catch {
+    return [];
+  }
+}
+
+function currentWorkspacePath() {
+  try {
+    return localStorage.getItem("agent-ide-workspace-path") ?? "";
+  } catch {
+    return "";
+  }
 }
