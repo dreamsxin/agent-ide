@@ -58,6 +58,7 @@ export default function GitPanel() {
   const [remoteBranch, setRemoteBranch] = useState("");
   const [credentialUsername, setCredentialUsername] = useState("");
   const [credentialPassword, setCredentialPassword] = useState("");
+  const [rememberCredentials, setRememberCredentials] = useState(false);
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -84,6 +85,7 @@ export default function GitPanel() {
       ? {
           username: credentialUsername.trim(),
           password: credentialPassword,
+          save: rememberCredentials,
         }
       : null;
 
@@ -232,9 +234,12 @@ export default function GitPanel() {
         });
         await fetchStatus(projectPath);
         clearDiff();
+        if (rememberCredentials) {
+          setCredentialPassword("");
+        }
       }
     },
-    [addLog, clearDiff, credentials, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote]
+    [addLog, clearDiff, credentials, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote, rememberCredentials]
   );
 
   const handleResolveConflict = useCallback(
@@ -446,6 +451,15 @@ export default function GitPanel() {
               className="min-w-0 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
             />
           </div>
+          <label className="mt-1 flex items-center gap-1.5 text-[10px] text-surface-muted">
+            <input
+              type="checkbox"
+              checked={rememberCredentials}
+              onChange={(event) => setRememberCredentials(event.target.checked)}
+              className="h-3 w-3 accent-accent-blue"
+            />
+            Remember HTTPS credential in OS store
+          </label>
           <div className="mt-2 flex gap-1">
             <input
               value={branchName}

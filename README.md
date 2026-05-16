@@ -17,7 +17,7 @@ Implemented core capabilities:
 - Tauri desktop shell with React/Vite frontend and Rust backend.
 - Monaco-based editor, file tabs, file tree, Git panel, terminal panel, logs, and Agent panel.
 - Workspace-scoped filesystem operations with path boundary checks.
-- Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push commands through `git2`, with staged/worktree/all diff modes and multi-select batch actions in Source Control.
+- Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push commands through `git2`, with staged/worktree/all diff modes, multi-select batch actions, and optional OS-stored HTTPS remote credentials in Source Control.
 - PTY terminal backend using `portable-pty` and xterm.js frontend integration.
 - OpenAI-compatible streaming LLM client.
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
@@ -40,7 +40,7 @@ Implemented core capabilities:
 
 Important remaining gaps:
 
-- Git workflow still needs persistent credential storage, better SSH/passphrase UX, and richer merge editor controls.
+- Git workflow still needs better SSH/passphrase UX and richer merge editor controls.
 - LSP support still needs workspace-wide indexing validation, install/configuration UX, and broader language coverage beyond TypeScript/JavaScript.
 - Agent change protocol still needs stricter schema validation and richer provenance.
 - LLM credential storage needs real-runtime validation across Windows Credential Manager, macOS Keychain, and Linux secret service.

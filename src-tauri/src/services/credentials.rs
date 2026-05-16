@@ -1,8 +1,13 @@
 const SERVICE_NAME: &str = "agent-ide";
 const LLM_PREFIX: &str = "llm-profile";
+const GIT_PREFIX: &str = "git-remote";
 
 pub fn llm_credential_ref(profile_id: &str) -> String {
     format!("{}:{}", LLM_PREFIX, profile_id)
+}
+
+pub fn git_credential_ref(remote_url: &str) -> String {
+    format!("{}:{}", GIT_PREFIX, remote_url)
 }
 
 pub fn store_secret(credential_ref: &str, secret: &str) -> Result<(), String> {

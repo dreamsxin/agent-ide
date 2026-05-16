@@ -159,8 +159,9 @@ Manual check:
 3. Test staged/worktree/all diff modes.
 4. Multi-select files and stage/unstage.
 5. Create or checkout a branch.
-6. Run fetch/pull/push if remote credentials are available.
-7. Open a conflict workspace and test accept current/incoming/both.
+6. Run fetch/pull/push with one-shot HTTPS credentials.
+7. Repeat with `Remember HTTPS credential in OS store` enabled, then run a remote action without re-entering the token.
+8. Open a conflict workspace and test accept current/incoming/both.
 
 Expected:
 
@@ -168,12 +169,13 @@ Expected:
 - Staged and worktree diffs show the correct content.
 - Multi-select batch actions update status without losing selection unexpectedly.
 - Remote operations surface credential errors clearly.
+- Remembered HTTPS credentials are reused from the OS credential store.
 - Conflict files are listed and resolution actions update the file.
 
 Automated coverage:
 
 - Rust tests cover Git status, staged/worktree diff, branch checkout, remote branch tracking, conflict detection, conflict resolution, and workspace boundaries.
-- Credential UX and full remote interaction require manual validation.
+- SSH/passphrase UX and full remote interaction require manual validation.
 
 ## 9. Agent Repair Loop
 

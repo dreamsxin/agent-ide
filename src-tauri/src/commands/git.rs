@@ -1,4 +1,4 @@
-use crate::services::workspace;
+use crate::services::{credentials, workspace};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +22,8 @@ pub struct GitBranch {
 pub struct GitCredentials {
     pub username: Option<String>,
     pub password: Option<String>,
+    #[serde(default)]
+    pub save: bool,
 }
 
 /// Git 状态汇总
@@ -210,7 +212,7 @@ pub fn git_fetch(path: String, remote: Option<String>, credentials: Option<GitCr
     let mut remote = repo
         .find_remote(&remote_name)
         .map_err(|e| format!("Remote {}: {}", remote_name, e))?;
-    let mut options = remote_callbacks(&repo, credentials)?;
+    let mut options = remote_callbacks(&repo, credentials, Some(remote.url().unwrap_or_default().to_string()))?;
     remote
         .fetch(&[] as &[&str], Some(&mut options), None)
         .map_err(|e| format!("Fetch {}: {}", remote_name, e))
@@ -271,7 +273,7 @@ pub fn git_push(path: String, remote: Option<String>, credentials: Option<GitCre
         .map_err(|e| format!("Remote {}: {}", remote_name, e))?;
     let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
     let mut options = git2::PushOptions::new();
-    let callbacks = git_remote_callbacks(&repo, credentials)?;
+    let callbacks = git_remote_callbacks(&repo, credentials, Some(remote.url().unwrap_or_default().to_string()))?;
     options.remote_callbacks(callbacks);
     remote
         .push(&[refspec.as_str()], Some(&mut options))
@@ -653,15 +655,17 @@ fn has_uncommitted_changes(repo: &git2::Repository) -> Result<bool, String> {
 fn remote_callbacks(
     repo: &git2::Repository,
     credentials: Option<GitCredentials>,
+    remote_url: Option<String>,
 ) -> Result<git2::FetchOptions<'static>, String> {
     let mut options = git2::FetchOptions::new();
-    options.remote_callbacks(git_remote_callbacks(repo, credentials)?);
+    options.remote_callbacks(git_remote_callbacks(repo, credentials, remote_url)?);
     Ok(options)
 }
 
 fn git_remote_callbacks(
     repo: &git2::Repository,
     credentials: Option<GitCredentials>,
+    remote_url: Option<String>,
 ) -> Result<git2::RemoteCallbacks<'static>, String> {
     let mut callbacks = git2::RemoteCallbacks::new();
     let config = repo.config().map_err(|e| format!("Git config: {}", e))?;
@@ -672,13 +676,17 @@ fn git_remote_callbacks(
             }
         }
         if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
-            if let Some(credentials) = credentials.as_ref() {
-                if let (Some(username), Some(password)) = (
-                    credentials.username.as_deref().filter(|value| !value.trim().is_empty()),
-                    credentials.password.as_deref().filter(|value| !value.trim().is_empty()),
-                ) {
+            let remote_url = remote_url.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(url);
+            if let Some(git_credentials) = credentials.as_ref() {
+                if let Some((username, password)) = username_password_from_request(git_credentials) {
+                    if git_credentials.save {
+                        let _ = store_git_credentials(remote_url, username, password);
+                    }
                     return git2::Cred::userpass_plaintext(username, password);
                 }
+            }
+            if let Some((username, password)) = read_stored_git_credentials(remote_url, username_from_url) {
+                return git2::Cred::userpass_plaintext(&username, &password);
             }
             if let (Ok(username), Ok(password)) = (
                 std::env::var("GIT_USERNAME"),
@@ -690,6 +698,44 @@ fn git_remote_callbacks(
         git2::Cred::credential_helper(&config, url, username_from_url)
     });
     Ok(callbacks)
+}
+
+fn username_password_from_request(credentials: &GitCredentials) -> Option<(&str, &str)> {
+    let username = credentials
+        .username
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())?;
+    let password = credentials
+        .password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())?;
+    Some((username, password))
+}
+
+fn store_git_credentials(remote_url: &str, username: &str, password: &str) -> Result<(), String> {
+    credentials::store_secret(&credentials::git_credential_ref(remote_url), &serialize_git_credentials(username, password))
+}
+
+fn read_stored_git_credentials(remote_url: &str, username_from_url: Option<&str>) -> Option<(String, String)> {
+    let stored = credentials::read_secret(&credentials::git_credential_ref(remote_url)).ok()?;
+    parse_git_credentials_secret(&stored, username_from_url)
+}
+
+fn serialize_git_credentials(username: &str, password: &str) -> String {
+    format!("{}\n{}", username, password)
+}
+
+fn parse_git_credentials_secret(stored: &str, username_from_url: Option<&str>) -> Option<(String, String)> {
+    let (username, password) = stored.split_once('\n')?;
+    let username = if username.trim().is_empty() {
+        username_from_url.unwrap_or("").to_string()
+    } else {
+        username.to_string()
+    };
+    if username.trim().is_empty() || password.trim().is_empty() {
+        return None;
+    }
+    Some((username, password.to_string()))
 }
 
 fn find_index_conflict(
@@ -852,6 +898,24 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.path == "staged.txt" && entry.status == "added" && entry.staged));
+    }
+
+    #[test]
+    fn git_credential_secret_round_trips_username_and_password() {
+        let secret = serialize_git_credentials("alice", "token-123");
+
+        let parsed = parse_git_credentials_secret(&secret, None).unwrap();
+
+        assert_eq!(parsed, ("alice".to_string(), "token-123".to_string()));
+    }
+
+    #[test]
+    fn git_credential_secret_can_use_url_username() {
+        let secret = serialize_git_credentials("", "token-123");
+
+        let parsed = parse_git_credentials_secret(&secret, Some("git")).unwrap();
+
+        assert_eq!(parsed, ("git".to_string(), "token-123".to_string()));
     }
 
     #[test]

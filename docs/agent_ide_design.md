@@ -354,15 +354,15 @@ Git commands resolve paths through the workspace service and then use `git2`:
 - `git_discard_files(path, files)`
 - `git_commit(path, message)`
 - `git_checkout_branch(path, branch, create)`
-- `git_fetch(path, remote?)`
-- `git_pull(path, remote?)`
-- `git_push(path, remote?)`
+- `git_fetch(path, remote?, credentials?)`
+- `git_pull(path, remote?, credentials?)`
+- `git_push(path, remote?, credentials?)`
 
-Current Git scope covers status, staged/worktree/all diff views, file and multi-file stage/unstage/discard, commit, local branch checkout/create, remote branch checkout/tracking, fetch, fast-forward-only pull, push, upstream/ahead/behind display, one-shot credential inputs for remote actions, conflict file detection, and basic conflict resolution controls.
+Current Git scope covers status, staged/worktree/all diff views, file and multi-file stage/unstage/discard, commit, local branch checkout/create, remote branch checkout/tracking, fetch, fast-forward-only pull, push, upstream/ahead/behind display, one-shot credential inputs for remote actions, optional OS-stored HTTPS remote credentials, conflict file detection, and basic conflict resolution controls.
 
 Remaining Git roadmap work:
 
-- Persistent credential storage and better HTTPS/SSH/passphrase failure recovery.
+- Better SSH/passphrase failure recovery.
 - Rich merge editor UI for conflict blocks.
 - Safer destructive-action UX for discard/revert/reset workflows.
 

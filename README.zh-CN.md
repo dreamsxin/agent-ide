@@ -15,7 +15,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - Tauri 桌面壳，React/Vite 前端，Rust 后端。
 - Monaco 编辑器、文件标签、文件树、Git 面板、Terminal 面板、Logs 面板和 Agent 面板。
 - 工作区范围内的文件系统操作，并带路径边界检查。
-- 基于 `git2` 的 Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push 命令，Source Control 支持 staged/worktree/all diff 和多选批量操作。
+- 基于 `git2` 的 Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push 命令，Source Control 支持 staged/worktree/all diff、多选批量操作和可选的 OS-stored HTTPS remote credentials。
 - 基于 `portable-pty` 的 PTY 后端和 xterm.js 前端终端。
 - OpenAI 兼容的流式 LLM 客户端。
 - 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
@@ -39,7 +39,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 
 重要缺口：
 
-- Git 工作流还缺持久化 credential storage、更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
+- Git 工作流还缺更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
 - LSP 仍需要工作区级索引验证、安装/配置 UX，并扩展到 TypeScript/JavaScript 之外的语言。
 - Agent change protocol 还需要更严格的 schema 校验和更完整的 provenance。
 - LLM credential storage 还需要在 Windows Credential Manager、macOS Keychain 和 Linux secret service 上做真实运行时验证。

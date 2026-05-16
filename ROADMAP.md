@@ -104,6 +104,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Normalized Windows verbatim `\\?\D:\...` workspace paths across workspace resolution and Git repo path handling so Git status/diff no longer misreports active workspaces as outside the workspace.
 - Added Git branch checkout/create, Fetch/Pull/Push actions, upstream/ahead/behind display, and conflict file detection in Source Control.
 - Added one-shot Git credential inputs for remote actions, remote branch checkout/tracking, and conflict resolution controls for accept current, accept incoming, accept both, and conflict diff navigation.
+- Added optional OS credential storage for HTTPS Git remote username/token inputs used by fetch, pull, and push.
 - Added TypeScript LSP status details in the TopBar, including server path, workspace, opened document count, change count, diagnostics count, last error, and recent per-file diagnostics summaries.
 - Routed Monaco Quick Fix/code actions through an explicit apply command that logs success/failure, syncs editor store state, and triggers LSP `didChange` so Problems and markers refresh after fixes.
 - Enabled JavaScript semantic diagnostics in Monaco TS worker defaults instead of syntax-only JavaScript validation.
@@ -331,8 +332,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - File-level stage, unstage, discard, diff, and commit are wired.
    - Staged-vs-worktree/all diff views and multi-select batch actions are wired.
    - Branch checkout/create, fetch, fast-forward-only pull, push, and conflict file detection are wired.
-   - One-shot credential input, remote branch checkout/tracking, and basic conflict resolution controls are wired.
-   - Needs persistent credential storage, better SSH/passphrase UX, richer merge editor UI, and safer destructive-action UX.
+   - Optional OS-stored HTTPS credentials, remote branch checkout/tracking, and basic conflict resolution controls are wired.
+   - Needs better SSH/passphrase UX, richer merge editor UI, and safer destructive-action UX.
 
 7. **Workspace boundary coverage needs continued review**
    - FS, Agent diff paths, Git entry points, terminal cwd, task cwd, and Agent CLI are now guarded or aligned.
@@ -526,7 +527,7 @@ target\release\agent_cli --help
 ## Next Immediate Tasks
 
 1. Runtime-verify LLM provider profiles in `npm run tauri -- dev`, including legacy config migration, profile create/edit/delete/default, Chat profile selection, and per-run context mode.
-2. Add persistent credential storage and better SSH/passphrase UX for Git remote operations.
+2. Add better SSH/passphrase UX for Git remote operations.
 3. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
 4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and workspace indexing behavior.
 5. Add Rust/Python LSP adapters after TypeScript runtime validation.
@@ -537,4 +538,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; LLM API keys now use OS credential storage, while Git credential UX and cross-OS credential validation remain next.*
+*Last updated: 2026-05-16 - Phase 7 in progress; LLM API keys and HTTPS Git remote tokens can use OS credential storage, while SSH/passphrase UX and merge editor controls remain next.*

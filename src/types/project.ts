@@ -33,6 +33,7 @@ export interface GitBranch {
 export interface GitCredentials {
   username: string;
   password: string;
+  save?: boolean;
 }
 
 /** Git diff view mode */
