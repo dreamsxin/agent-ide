@@ -200,12 +200,13 @@ Each run writes artifacts by default:
   commands.json
   problems.json
   repair-chain.json
+  repair-summary.json
 ```
 
 `changes.json` and `apply-result.json` are only written when that data exists.
 `commands.json` is written when one or more `--run-command` checks are executed.
 `problems.json` is written when command output can be parsed into file/line/column Problems.
-`repair-chain.json` is written when bounded repair iterations run.
+`repair-chain.json` and `repair-summary.json` are written when bounded repair iterations run.
 
 ## Command Checks
 
@@ -239,7 +240,7 @@ target\release\agent_cli run `
 
 When checks fail after an applied change, the CLI builds a repair prompt from the failed command output and parsed Problems, generates another diff, applies it, and reruns the checks until they pass or the iteration budget is exhausted. Repair mode requires each check command to be authorized with `--allow-run`. Use an exact command, a prefix pattern such as `cargo *`, or `*` for all commands in trusted workspaces.
 
-Each repair iteration is recorded in `repair-chain.json` with the failed commands before repair, parsed Problems, generated diffs, apply result, rerun command results, and final failed/pass state for that iteration.
+Each repair iteration is recorded in `repair-chain.json` with the failed commands before repair, parsed Problems, generated diffs, apply result, rerun command results, and final failed/pass state for that iteration. `repair-summary.json` keeps the same chain compact for CI dashboards and logs.
 
 Hardening flags:
 
@@ -284,7 +285,7 @@ Implemented:
 - repair-loop command authorization through `--allow-run`.
 - repair-chain artifacts that link failures, generated repair diffs, apply results, and rerun results.
 - timeout, command-output, and generated-diff file-count limits for automation runs.
-- compact text summaries with command/problem/repair counts for CI logs.
+- compact text and JSON summaries with command/problem/repair counts for CI logs.
 - smoke coverage for `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json`.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
@@ -304,8 +305,7 @@ Intentionally outside the current CLI scope:
 
 The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_design.md). The CLI surface can now be treated as Phase 1-4 first-pass complete. Further work should focus on hardening the automation contract rather than adding desktop-IDE features:
 
-1. Add compact repair-chain summaries for CI logs while keeping full artifacts on disk.
-2. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
+1. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
 
 ## Safety Notes
 

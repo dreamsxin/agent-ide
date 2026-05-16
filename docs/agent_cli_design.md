@@ -288,6 +288,7 @@ apply-result.json
 commands.json
 problems.json
 repair-chain.json
+repair-summary.json
 action-log.json
 ```
 
@@ -493,9 +494,9 @@ Current status:
 - `--allow-run` is required when `--max-iterations` is enabled. Exact commands, prefix patterns such as `cargo *`, and trusted wildcard `*` are supported.
 - `repair-chain.json` records each bounded repair iteration as failure context -> repair prompt -> generated diffs -> apply result -> rerun result.
 - `--timeout-seconds`, `--max-output-bytes`, and `--max-diff-files` provide first-pass automation limits.
-- Compact text summaries include command/problem/repair counts for CI logs.
+- Compact text summaries and `repair-summary.json` include command/problem/repair counts for CI logs.
 - CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json` using a mock provider.
-- Broader permission policy and compact repair-chain summaries are still pending.
+- Broader permission policy is still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 
@@ -522,5 +523,5 @@ Do not keep expanding this into a second interactive IDE by default. Interactive
 
 Recommended next hardening tasks:
 
-1. Add compact repair-chain summaries while preserving full artifacts.
-2. Keep `doctor --output json` as the machine-readable capability contract for external tools.
+1. Keep `doctor --output json` as the machine-readable capability contract for external tools.
+2. Expand permission policy only if the CLI scope is intentionally widened.

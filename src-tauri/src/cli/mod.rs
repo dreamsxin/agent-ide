@@ -267,6 +267,7 @@ struct CliSummary {
     commands: Vec<RunProjectTaskResult>,
     problems: Vec<ProblemEntry>,
     repair_chain: Vec<RepairIterationRecord>,
+    repair_summary: Vec<RepairIterationSummary>,
     capabilities: Option<CliCapabilities>,
     errors: Vec<String>,
 }
@@ -303,6 +304,20 @@ struct RepairIterationRecord {
     diffs: Vec<FileDiff>,
     apply_result: ApplyDiffsResult,
     commands_after: Vec<RunProjectTaskResult>,
+    checks_failed_after: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairIterationSummary {
+    iteration: u8,
+    failed_commands_before: usize,
+    problem_count_before: usize,
+    diff_count: usize,
+    applied_count: usize,
+    apply_failed_count: usize,
+    rerun_commands: usize,
+    rerun_failed_commands: usize,
     checks_failed_after: bool,
 }
 
@@ -520,6 +535,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         commands: Vec::new(),
         problems: Vec::new(),
         repair_chain: Vec::new(),
+        repair_summary: Vec::new(),
         capabilities: Some(cli_capabilities()),
         errors,
     };
@@ -576,6 +592,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         commands: Vec::new(),
         problems: Vec::new(),
         repair_chain: Vec::new(),
+        repair_summary: Vec::new(),
         capabilities: None,
         errors: Vec::new(),
     };
@@ -687,6 +704,7 @@ async fn run_agent_command(
             commands: Vec::new(),
             problems: Vec::new(),
             repair_chain: Vec::new(),
+            repair_summary: Vec::new(),
             capabilities: None,
             errors: Vec::new(),
         };
@@ -881,6 +899,7 @@ async fn run_agent_command(
         apply_result,
         commands: command_results,
         problems: command_problems,
+        repair_summary: repair_chain_summary(&repair_chain),
         repair_chain,
         capabilities: None,
         errors,
@@ -1022,11 +1041,16 @@ fn print_text_summary(summary: &CliSummary) {
         println!("Error:    {}", error);
     }
     if !summary.repair_chain.is_empty() {
-        for iteration in &summary.repair_chain {
+        for iteration in &summary.repair_summary {
             println!(
-                "Repair #{}: {} diff file(s), checks_failed_after={}",
+                "Repair #{}: before_failed={}, problems={}, diffs={}, applied={}, apply_failed={}, rerun_failed={}, checks_failed_after={}",
                 iteration.iteration,
-                iteration.diffs.len(),
+                iteration.failed_commands_before,
+                iteration.problem_count_before,
+                iteration.diff_count,
+                iteration.applied_count,
+                iteration.apply_failed_count,
+                iteration.rerun_failed_commands,
                 iteration.checks_failed_after
             );
         }
@@ -1085,6 +1109,10 @@ fn write_artifacts(
             artifact_dir.join("repair-chain.json"),
             &summary.repair_chain,
         )?;
+        write_json(
+            artifact_dir.join("repair-summary.json"),
+            &summary.repair_summary,
+        )?;
     }
     Ok(())
 }
@@ -1129,6 +1157,7 @@ fn error_summary(
         commands: Vec::new(),
         problems: Vec::new(),
         repair_chain: Vec::new(),
+        repair_summary: Vec::new(),
         capabilities: None,
         errors: vec![error],
     }
@@ -1176,6 +1205,27 @@ fn cli_capabilities() -> CliCapabilities {
         supports_git_mutation: false,
         scope: "headless automation runner; not a full command-line IDE".to_string(),
     }
+}
+
+fn repair_chain_summary(chain: &[RepairIterationRecord]) -> Vec<RepairIterationSummary> {
+    chain
+        .iter()
+        .map(|iteration| RepairIterationSummary {
+            iteration: iteration.iteration,
+            failed_commands_before: iteration.failed_commands_before.len(),
+            problem_count_before: iteration.problems_before.len(),
+            diff_count: iteration.diffs.len(),
+            applied_count: iteration.apply_result.applied.len(),
+            apply_failed_count: iteration.apply_result.failed.len(),
+            rerun_commands: iteration.commands_after.len(),
+            rerun_failed_commands: iteration
+                .commands_after
+                .iter()
+                .filter(|command| command.exit_code.unwrap_or(-1) != 0)
+                .count(),
+            checks_failed_after: iteration.checks_failed_after,
+        })
+        .collect()
 }
 
 async fn run_cli_checks(
@@ -2048,5 +2098,16 @@ mod tests {
         assert_eq!(chain.as_array().unwrap().len(), 1);
         assert_eq!(chain[0]["checksFailedAfter"], false);
         assert!(chain[0]["failedCommandsBefore"].as_array().unwrap().len() >= 1);
+        let summary_path = workspace.artifacts.join("repair-summary.json");
+        assert!(summary_path.exists());
+        let repair_summary: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(summary_path).unwrap()).unwrap();
+        assert_eq!(repair_summary[0]["diffCount"], 1);
+        assert_eq!(repair_summary[0]["rerunFailedCommands"], 0);
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["repairSummary"][0]["checksFailedAfter"], false);
     }
 }
