@@ -197,7 +197,30 @@ Automated coverage:
 - Rust tests cover context compression, pending diff summaries, diff application failures, base hash validation, and hunk operations.
 - Full Agent repair flow requires real runtime and LLM configuration.
 
-## 10. Release Smoke Notes
+## 10. LLM Profiles and Budget Metadata
+
+Manual check:
+
+1. Open Agent Settings.
+2. Create a new provider profile with endpoint, model, API key, max context, reserved output, and max output tokens.
+3. Save it and set it as default.
+4. Switch to Chat and select the profile.
+5. Change the context compression mode for the next run.
+
+Expected:
+
+- Settings persists multiple profiles without requiring the API key again when editing an existing profile.
+- Chat lists all configured profiles and shows the selected profile/model.
+- Chat displays an estimated input budget when max context metadata is present.
+- `focused`, `compact`, and `full` are shown as compression modes, not fixed context sizes.
+- Existing legacy single-provider config is migrated into a default profile.
+
+Automated coverage:
+
+- Rust tests cover legacy config migration and API key masking.
+- Budget fields are currently metadata only. Actual budget-aware context trimming is pending.
+
+## 11. Release Smoke Notes
 
 Record each manual smoke run with:
 

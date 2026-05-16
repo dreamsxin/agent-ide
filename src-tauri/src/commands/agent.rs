@@ -26,6 +26,12 @@ pub struct LlmProfile {
     pub endpoint: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default, rename = "maxContextTokens")]
+    pub max_context_tokens: Option<u32>,
+    #[serde(default, rename = "reservedOutputTokens")]
+    pub reserved_output_tokens: Option<u32>,
+    #[serde(default, rename = "maxOutputTokens")]
+    pub max_output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +49,14 @@ pub struct LlmProfileResponse {
     pub endpoint: String,
     pub api_key_masked: String,
     pub model: String,
+    #[serde(rename = "maxContextTokens")]
+    pub max_context_tokens: Option<u32>,
+    #[serde(rename = "reservedOutputTokens")]
+    pub reserved_output_tokens: Option<u32>,
+    #[serde(rename = "maxOutputTokens")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(rename = "effectiveInputTokens")]
+    pub effective_input_tokens: Option<u32>,
 }
 
 impl LlmProfile {
@@ -62,7 +76,17 @@ impl LlmProfile {
             endpoint: self.endpoint.clone(),
             api_key_masked: mask_api_key(&self.api_key),
             model: self.model.clone(),
+            max_context_tokens: self.max_context_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
+            max_output_tokens: self.max_output_tokens,
+            effective_input_tokens: self.effective_input_tokens(),
         }
+    }
+
+    fn effective_input_tokens(&self) -> Option<u32> {
+        let max_context = self.max_context_tokens?;
+        let reserved = self.reserved_output_tokens.or(self.max_output_tokens).unwrap_or(4096);
+        Some(max_context.saturating_sub(reserved).saturating_sub(512))
     }
 }
 
@@ -119,6 +143,9 @@ fn parse_llm_profiles_config(parsed: serde_json::Value) -> Option<LlmProfilesCon
             endpoint: parsed.get("endpoint")?.as_str()?.to_string(),
             api_key: parsed.get("api_key")?.as_str()?.to_string(),
             model: parsed.get("model")?.as_str()?.to_string(),
+            max_context_tokens: None,
+            reserved_output_tokens: None,
+            max_output_tokens: None,
         }],
         active_profile_id: DEFAULT_PROFILE_ID.to_string(),
         context_compression,
@@ -153,6 +180,9 @@ impl AgentGlobalState {
                     endpoint,
                     api_key,
                     model,
+                    max_context_tokens: None,
+                    reserved_output_tokens: None,
+                    max_output_tokens: None,
                 }],
                 active_profile_id: DEFAULT_PROFILE_ID.to_string(),
                 context_compression: mode,
@@ -669,9 +699,13 @@ mod llm_profile_tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "sk-1234567890".to_string(),
             model: "gpt-4o".to_string(),
+            max_context_tokens: Some(128000),
+            reserved_output_tokens: Some(4096),
+            max_output_tokens: Some(4096),
         };
 
         assert_eq!(profile.to_response().api_key_masked, "sk-1****7890");
+        assert_eq!(profile.to_response().effective_input_tokens, Some(123392));
     }
 }
 
@@ -708,6 +742,9 @@ pub async fn update_llm_config(
         endpoint,
         api_key,
         model,
+        max_context_tokens: None,
+        reserved_output_tokens: None,
+        max_output_tokens: None,
     };
     let compression = agent_state
         .context_compression
@@ -770,6 +807,12 @@ pub struct SaveLlmProfileRequest {
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
     pub model: String,
+    #[serde(rename = "maxContextTokens")]
+    pub max_context_tokens: Option<u32>,
+    #[serde(rename = "reservedOutputTokens")]
+    pub reserved_output_tokens: Option<u32>,
+    #[serde(rename = "maxOutputTokens")]
+    pub max_output_tokens: Option<u32>,
     #[serde(rename = "setActive")]
     pub set_active: Option<bool>,
 }
@@ -814,6 +857,9 @@ pub async fn save_llm_profile(
         endpoint: request.endpoint.trim().to_string(),
         api_key,
         model: request.model.trim().to_string(),
+        max_context_tokens: request.max_context_tokens,
+        reserved_output_tokens: request.reserved_output_tokens,
+        max_output_tokens: request.max_output_tokens,
     };
     upsert_profile(&mut config.profiles, profile);
     if request.set_active.unwrap_or(true) {

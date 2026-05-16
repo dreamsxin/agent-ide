@@ -23,6 +23,7 @@ Implemented core capabilities:
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
 - Agent context compression modes: `full`, `focused`, `compact`.
 - Multiple LLM provider profiles, with Chat-level provider/model and context compression mode selection.
+- Provider profiles can store model budget metadata such as max context, reserved output, and max output tokens; Chat displays the estimated input budget for the selected profile.
 - Agent context enrichment with project tree summary and Git working-tree diff.
 - Structured action log events shown in the Logs panel.
 - Diff review and apply flow with structured apply failures.

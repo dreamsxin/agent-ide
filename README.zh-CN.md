@@ -21,6 +21,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
 - Agent 上下文压缩模式：`full`、`focused`、`compact`。
 - 支持多个 LLM provider profile，Chat 中可以选择本次使用的 provider/model 和上下文压缩模式。
+- Provider profile 可配置模型预算元数据，例如 max context、reserved output 和 max output tokens；Chat 会显示所选 profile 的估算输入预算。
 - Agent 上下文增强：项目树摘要和 Git working-tree diff。
 - Logs 面板中可查看结构化 Agent action log。
 - Diff 审查和应用流程，支持结构化失败信息。

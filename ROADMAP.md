@@ -111,6 +111,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Routed build/test/lint/check-style project commands through the non-interactive command runner so Test also records exit code, duration, output, Problems, Logs, and failed-run Agent repair context.
 - Added `docs/smoke_test.md` as the real Tauri runtime regression checklist for LSP, Problems, Quick Fix, Commands/Run History, Terminal, Git, and Agent repair loops.
 - Added LLM provider profiles with backward-compatible legacy config migration, Settings profile management, Chat-level profile selection, and per-run context compression mode selection.
+- Added per-profile model budget metadata for max context tokens, reserved output tokens, and max output tokens, with Chat showing an estimated effective input budget.
 
 Important distinction:
 
@@ -528,8 +529,8 @@ target\release\agent_cli --help
 6. Add stricter validation to the structured Agent protocol.
 7. Persist Agent action logs with prompt/context/diff provenance.
 8. Move LLM API key storage to a safer credential path.
-9. Add explicit context budget controls separate from compression mode, such as token/byte presets or per-provider budget defaults.
+9. Wire profile budget metadata into Agent context building with clearly labeled estimated token/character budgeting, then map max output tokens into provider request bodies where supported.
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; multi-provider LLM profiles and Chat-level profile/context-mode selection implemented; explicit context budget controls remain separate future work.*
+*Last updated: 2026-05-16 - Phase 7 in progress; per-profile model budget metadata is configurable and visible in Chat; actual budget-aware context trimming remains next.*

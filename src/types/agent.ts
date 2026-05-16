@@ -130,6 +130,10 @@ export interface LlmProfile {
   endpoint: string;
   api_key_masked: string;
   model: string;
+  maxContextTokens?: number;
+  reservedOutputTokens?: number;
+  maxOutputTokens?: number;
+  effectiveInputTokens?: number;
 }
 
 export interface LlmProfilesResponse {
@@ -145,6 +149,9 @@ export interface SaveLlmProfileRequest {
   endpoint: string;
   apiKey?: string;
   model: string;
+  maxContextTokens?: number;
+  reservedOutputTokens?: number;
+  maxOutputTokens?: number;
   setActive?: boolean;
 }
 

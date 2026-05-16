@@ -148,6 +148,7 @@ export default function ChatView() {
   const isSending = isActing;
   const selectedProfileId = chatProfileId ?? activeProfileId;
   const selectedContextMode = chatContextCompression ?? contextCompression;
+  const selectedProfile = llmProfiles.find((profile) => profile.id === selectedProfileId);
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
@@ -287,6 +288,15 @@ export default function ChatView() {
             <option value="full">Mode: Full</option>
           </select>
         </div>
+        {selectedProfile?.effectiveInputTokens !== undefined && (
+          <div className="mb-1.5 px-0.5 text-[10px] text-surface-muted">
+            Estimated input budget:{" "}
+            <span className="font-mono text-surface-text">
+              {selectedProfile.effectiveInputTokens.toLocaleString()}
+            </span>{" "}
+            tokens
+          </div>
+        )}
 
         {/* 输入 + 按钮 */}
         <div className="flex gap-2">

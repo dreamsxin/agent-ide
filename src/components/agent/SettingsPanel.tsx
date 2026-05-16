@@ -74,6 +74,9 @@ export default function SettingsPanel() {
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
+  const [maxContextTokens, setMaxContextTokens] = useState("");
+  const [reservedOutputTokens, setReservedOutputTokens] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
@@ -92,6 +95,9 @@ export default function SettingsPanel() {
         setProvider(active.provider);
         setEndpoint(active.endpoint);
         setModel(active.model);
+        setMaxContextTokens(numberToInput(active.maxContextTokens));
+        setReservedOutputTokens(numberToInput(active.reservedOutputTokens));
+        setMaxOutputTokens(numberToInput(active.maxOutputTokens));
       } else {
         setEndpoint(llmEndpoint);
         setModel(llmModel);
@@ -137,6 +143,9 @@ export default function SettingsPanel() {
         endpoint: endpoint.trim(),
         apiKey: apiKey.trim() || undefined,
         model: model.trim(),
+        maxContextTokens: inputToNumber(maxContextTokens),
+        reservedOutputTokens: inputToNumber(reservedOutputTokens),
+        maxOutputTokens: inputToNumber(maxOutputTokens),
         setActive: true,
       });
       setMessage({ type: "ok", text: "Saved successfully" });
@@ -146,7 +155,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, endpoint, model, profileId, profileName, provider, saveLlmProfile]);
+  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -163,6 +172,9 @@ export default function SettingsPanel() {
           endpoint: endpoint.trim(),
           apiKey: apiKey.trim(),
           model: model.trim(),
+          maxContextTokens: inputToNumber(maxContextTokens),
+          reservedOutputTokens: inputToNumber(reservedOutputTokens),
+          maxOutputTokens: inputToNumber(maxOutputTokens),
           setActive: true,
         });
         setApiKey(""); // 保存后清空输入框
@@ -179,7 +191,7 @@ export default function SettingsPanel() {
     } finally {
       setTesting(false);
     }
-  }, [apiKey, endpoint, llmConfigured, model, profileId, profileName, provider, saveLlmProfile, testLlmConnection]);
+  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection]);
 
   const handleProfileSelect = useCallback((id: string) => {
     const profile = llmProfiles.find((item) => item.id === id);
@@ -189,6 +201,9 @@ export default function SettingsPanel() {
     setProvider(profile.provider);
     setEndpoint(profile.endpoint);
     setModel(profile.model);
+    setMaxContextTokens(numberToInput(profile.maxContextTokens));
+    setReservedOutputTokens(numberToInput(profile.reservedOutputTokens));
+    setMaxOutputTokens(numberToInput(profile.maxOutputTokens));
     setApiKey("");
   }, [llmProfiles]);
 
@@ -199,6 +214,9 @@ export default function SettingsPanel() {
     setProvider(preset.id);
     setEndpoint(preset.defaultEndpoint);
     setModel(preset.defaultModel);
+    setMaxContextTokens("");
+    setReservedOutputTokens("");
+    setMaxOutputTokens("");
     setApiKey("");
   }, []);
 
@@ -358,6 +376,39 @@ export default function SettingsPanel() {
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
 
+      <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">
+          Context Budget Estimate
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <BudgetInput
+            label="Max context"
+            value={maxContextTokens}
+            onChange={setMaxContextTokens}
+            placeholder="128000"
+          />
+          <BudgetInput
+            label="Reserved output"
+            value={reservedOutputTokens}
+            onChange={setReservedOutputTokens}
+            placeholder="4096"
+          />
+          <BudgetInput
+            label="Max output"
+            value={maxOutputTokens}
+            onChange={setMaxOutputTokens}
+            placeholder="4096"
+          />
+        </div>
+        <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
+          Effective input estimate:{" "}
+          <span className="font-mono text-surface-text">
+            {formatTokenBudget(estimateInputTokens(maxContextTokens, reservedOutputTokens, maxOutputTokens))}
+          </span>
+          . This is model metadata for budgeting; current context modes still control compression strategy.
+        </div>
+      </div>
+
       {/* Save */}
       <button
         onClick={handleSave}
@@ -417,4 +468,51 @@ export default function SettingsPanel() {
       </div>
     </div>
   );
+}
+
+function BudgetInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <label className="min-w-0">
+      <span className="mb-1 block truncate text-[10px] text-surface-muted">{label}</span>
+      <input
+        type="number"
+        min={0}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+      />
+    </label>
+  );
+}
+
+function inputToNumber(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+}
+
+function numberToInput(value?: number) {
+  return value ? String(value) : "";
+}
+
+function estimateInputTokens(maxContext: string, reservedOutput: string, maxOutput: string) {
+  const context = inputToNumber(maxContext);
+  if (!context) return undefined;
+  const reserved = inputToNumber(reservedOutput) ?? inputToNumber(maxOutput) ?? 4096;
+  return Math.max(0, context - reserved - 512);
+}
+
+function formatTokenBudget(value?: number) {
+  if (value === undefined) return "not set";
+  return value.toLocaleString();
 }
