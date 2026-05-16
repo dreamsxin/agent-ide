@@ -10,47 +10,16 @@ Agent IDE is not intended to be a chat-only coding tool. The product direction i
 
 ## Current Status
 
-Current phase: **Phase 7/8 in progress - daily IDE replacement hardening**.
+Phase 7 is feature-complete. Phase 8 is focused on daily IDE replacement hardening.
 
-Implemented core capabilities:
+Capability snapshot:
 
-- Tauri desktop shell with React/Vite frontend and Rust backend.
-- Monaco-based editor, file tabs, file tree, Git panel, terminal panel, logs, and Agent panel.
-- Workspace-scoped filesystem operations with path boundary checks.
-- Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push commands through `git2`, with staged/worktree/all diff modes, multi-select batch actions, and optional OS-stored HTTPS remote credentials in Source Control.
-- PTY terminal backend using `portable-pty` and xterm.js frontend integration.
-- OpenAI-compatible streaming LLM client.
-- Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
-- Agent context compression modes: `full`, `focused`, `compact`, `budgeted`.
-- Multiple LLM provider profiles, with Chat-level provider/model and context compression mode selection.
-- LLM API keys are stored through the OS credential store; local JSON profile config keeps only credential references.
-- Provider profiles can store model budget metadata such as max context, reserved output, and max output tokens; Chat displays the estimated input budget for the selected profile.
-- Agent context building uses the selected profile's max context and reserved output metadata for estimated budget-aware trimming.
-- OpenAI-compatible requests use the selected profile's max output token limit when configured.
-- Agent context enrichment with project tree summary and Git working-tree diff.
-- Structured action log events shown in the Logs panel.
-- Diff review and apply flow with structured apply failures.
-- Compatible structured `agent-changes` JSON protocol plus legacy diff/new-file block parsing.
-- TypeScript/JavaScript semantic bridge with Monaco fallback plus `typescript-language-server` support for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
-- Go LSP first pass with `gopls` detection, Go file activation, install guidance, module/workspace indexing status, and shared LSP operations.
-- TopBar language-server status details with server/workspace information, install guidance, workspace indexing mode, config-file detection, and recent diagnostics summaries.
-- Quick Fix/code action application feedback through Logs, with editor state sync and diagnostics refresh after fixes.
-- Problems integration for static diagnostics and terminal/test failures, including severity-colored editor line decorations, minimap markers, and runtime failure markers for file/line/column locations.
-- Command runner history for build/test/lint/check commands with exit code, duration, output details, Problems parsing, and failed-run Agent repair context.
-- Diff review keeps partially reviewed files in a visible `Partial` state and shows same-file Problems/Agent findings inside matching hunks.
-- Explorer quality-of-life actions including reveal in file explorer, VS Code-style copy/paste file, copy absolute file path, and copy relative file path.
+- Desktop IDE shell: Monaco editor, Explorer, Git, Terminal, Problems, Logs, Commands, and Agent panels.
+- Agent loop: role pipeline, editable plan, context preview/budgeting, structured action logs, `agent-changes` protocol, and diff review/apply/regenerate.
+- Semantic/runtime loop: TypeScript/JavaScript and Go LSP first pass, diagnostics to Problems/editor markers, project command run history, and terminal failure context for Agent repair.
+- Automation/release: headless `agent_cli` first pass and Windows packaging workflow.
 
-Important remaining gaps:
-
-- Git workflow still needs better SSH/passphrase UX and richer merge editor controls.
-- LSP support still needs real-runtime validation on larger TypeScript and Go workspaces, plus Rust/Python adapters.
-- Agent change protocol still needs stricter schema validation and richer provenance.
-- LLM credential storage needs real-runtime validation across Windows Credential Manager, macOS Keychain, and Linux secret service.
-- Terminal still needs deeper interactive runtime testing across panel hide/show, workspace switching, and long-running processes.
-- The full Terminal / Commands / Problems / LSP / Git / Agent repair loop still needs repeated real-runtime smoke records on representative workspaces.
-- Frontend test coverage and Tauri smoke tests are still thin.
-
-See [ROADMAP.md](ROADMAP.md) for the implementation source of truth, [docs/agent_ide_design.md](docs/agent_ide_design.md) for detailed design, and [docs/smoke_test.md](docs/smoke_test.md) for the real-runtime validation checklist.
+The detailed implementation state, remaining gaps, and next tasks live in [ROADMAP.md](ROADMAP.md). Design and protocol docs: [docs/agent_ide_design.md](docs/agent_ide_design.md), [docs/agent_changes_schema.md](docs/agent_changes_schema.md), and [docs/smoke_test.md](docs/smoke_test.md).
 
 ## Runtime Modes
 

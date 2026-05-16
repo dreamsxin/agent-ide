@@ -655,4 +655,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 is feature-complete: budgeted context mode, versioned agent-changes schema docs, validation diagnostics in action logs, and hunk-level provenance/finding metadata are wired. Phase 8 runtime smoke remains next.*
+*Last updated: 2026-05-16 - README status was condensed to a capability snapshot; ROADMAP remains the detailed project-state source of truth. Phase 7 is feature-complete, Windows packaging automation is wired, and Phase 8 runtime smoke remains next.*

@@ -8,48 +8,16 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 
 ## 当前状态
 
-当前阶段：**Phase 7/8 in progress - daily IDE replacement hardening**。
+Phase 7 已完成功能收口。Phase 8 正在推进“可稳定替代 IDE 日常使用”的运行时打磨。
 
-已实现的核心能力：
+能力快照：
 
-- Tauri 桌面壳，React/Vite 前端，Rust 后端。
-- Monaco 编辑器、文件标签、文件树、Git 面板、Terminal 面板、Logs 面板和 Agent 面板。
-- 工作区范围内的文件系统操作，并带路径边界检查。
-- 基于 `git2` 的 Git status/diff/stage/unstage/discard/commit/branch/fetch/pull/push 命令，Source Control 支持 staged/worktree/all diff、多选批量操作和可选的 OS-stored HTTPS remote credentials。
-- 基于 `portable-pty` 的 PTY 后端和 xterm.js 前端终端。
-- OpenAI 兼容的流式 LLM 客户端。
-- 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
-- Agent 上下文压缩模式：`full`、`focused`、`compact`、`budgeted`。
-- 支持多个 LLM provider profile，Chat 中可以选择本次使用的 provider/model 和上下文压缩模式。
-- LLM API key 通过系统 credential store 保存；本地 JSON profile 配置只保留 credential 引用。
-- Provider profile 可配置模型预算元数据，例如 max context、reserved output 和 max output tokens；Chat 会显示所选 profile 的估算输入预算。
-- Agent context builder 会使用所选 profile 的 max context 和 reserved output 元数据进行估算式预算裁剪。
-- OpenAI 兼容请求会在配置后使用所选 profile 的 max output token 限制。
-- Agent 上下文增强：项目树摘要和 Git working-tree diff。
-- Logs 面板中可查看结构化 Agent action log。
-- Diff 审查和应用流程，支持结构化失败信息。
-- 兼容式 `agent-changes` JSON 协议，同时保留旧的 diff/new-file 代码块解析。
-- Agent diff 支持可选 `baseHash`，用于拒绝基于过期文件内容的编辑。
-- TypeScript/JavaScript 语义能力桥接：保留 Monaco fallback，并支持 `typescript-language-server` 的 hover、completion、definition、document symbols、rename、code actions 和 diagnostics。
-- Go LSP 第一版：支持 `gopls` 检测、Go 文件激活、安装指引、module/workspace indexing 状态和共享 LSP 操作。
-- TopBar 可查看 language server 状态详情，包括 server/workspace 信息、安装指引、workspace indexing 模式、配置文件检测和最近 diagnostics 摘要。
-- Quick Fix/code action 应用会写入 Logs，并在应用后同步编辑器状态、触发 diagnostics 刷新。
-- Problems 已接入静态 diagnostics 与 terminal/test 失败；所有问题会按严重级别显示编辑器整行高亮、minimap 标记，带文件/行/列的运行时错误会同步为编辑器 marker。
-- build/test/lint/check 命令会进入 command runner history，记录 exit code、耗时、输出详情、Problems 解析和失败后 Agent 修复上下文。
-- Diff review 会把部分已处理的文件保持为可见的 `Partial` 状态，并在匹配的 hunk 内显示同文件 Problems/Agent findings。
-- Explorer 增强常用右键操作：Reveal In File Explorer、VS Code 式 Copy/Paste File、Copy File Path、Copy Relative File Path。
+- 桌面 IDE 壳：Monaco 编辑器、Explorer、Git、Terminal、Problems、Logs、Commands 和 Agent 面板。
+- Agent 闭环：角色流水线、可编辑 Plan、上下文预览/预算、结构化 action log、`agent-changes` 协议、Diff 审查/应用/重新生成。
+- 语义与运行闭环：TypeScript/JavaScript 和 Go LSP 第一版、diagnostics 到 Problems/editor markers、项目命令 Run History、terminal failure 上下文进入 Agent repair。
+- 自动化与发布：headless `agent_cli` 第一版和 Windows packaging workflow。
 
-重要缺口：
-
-- Git 工作流还缺更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
-- LSP 仍需要在更大的 TypeScript 和 Go workspace 中验证，并继续增加 Rust/Python adapters。
-- Agent change protocol 还需要更严格的 schema 校验和更完整的 provenance。
-- LLM credential storage 还需要在 Windows Credential Manager、macOS Keychain 和 Linux secret service 上做真实运行时验证。
-- Terminal 还需要在真实 Tauri runtime 中针对面板隐藏/显示、工作区切换和长运行进程做更多交互测试。
-- Terminal / Commands / Problems / LSP / Git / Agent repair loop 仍需要在代表性 workspace 中持续记录真实运行时 smoke 结果。
-- 前端测试和 Tauri smoke tests 仍然不足。
-
-实现状态以 [ROADMAP.md](ROADMAP.md) 为准，详细设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)，真实运行时回归清单见 [docs/smoke_test.md](docs/smoke_test.md)。
+详细实现状态、缺口和下一步任务以 [ROADMAP.md](ROADMAP.md) 为准。设计和协议文档见 [docs/agent_ide_design.md](docs/agent_ide_design.md)、[docs/agent_changes_schema.md](docs/agent_changes_schema.md) 和 [docs/smoke_test.md](docs/smoke_test.md)。
 
 ## 运行模式
 
