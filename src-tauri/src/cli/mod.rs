@@ -7,6 +7,7 @@ use crate::services::context::{
 };
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::llm_profiles;
+use crate::services::project_tasks::{self, RunProjectTaskResult};
 use crate::services::{context::AgentContext, workspace};
 use chrono::Utc;
 use clap::error::ErrorKind;
@@ -143,6 +144,9 @@ struct RunArgs {
 
     #[arg(long)]
     stdin: bool,
+
+    #[arg(long = "run-command")]
+    run_commands: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -169,6 +173,7 @@ impl Default for RunArgs {
             run_id: None,
             prompt_file: None,
             stdin: false,
+            run_commands: Vec::new(),
         }
     }
 }
@@ -214,6 +219,7 @@ enum CliStatus {
     ApplyFailed,
     ProviderFailed,
     PreconditionFailed,
+    ChecksFailed,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +238,7 @@ struct CliSummary {
     plan: Vec<TaskStep>,
     diffs: Vec<FileDiff>,
     apply_result: Option<ApplyDiffsResult>,
+    commands: Vec<RunProjectTaskResult>,
     errors: Vec<String>,
 }
 
@@ -265,6 +272,11 @@ enum CliEvent {
     ApplyFinished {
         applied_count: usize,
         failed_count: usize,
+    },
+    CommandFinished {
+        command: String,
+        exit_code: Option<i32>,
+        duration_ms: u128,
     },
     RunFinished {
         status: CliStatus,
@@ -428,6 +440,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         plan: Vec::new(),
         diffs: Vec::new(),
         apply_result: None,
+        commands: Vec::new(),
         errors,
     };
 
@@ -480,6 +493,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         plan: Vec::new(),
         diffs: Vec::new(),
         apply_result: None,
+        commands: Vec::new(),
         errors: Vec::new(),
     };
     emit_summary(&mut output, &summary)?;
@@ -586,6 +600,7 @@ async fn run_agent_command(
             plan: steps,
             diffs: Vec::new(),
             apply_result: None,
+            commands: Vec::new(),
             errors: Vec::new(),
         };
         output.event(CliEvent::RunFinished {
@@ -628,7 +643,14 @@ async fn run_agent_command(
         None
     };
 
-    let exit = if let Some(result) = &apply_result {
+    let command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+    let checks_failed = command_results
+        .iter()
+        .any(|result| result.exit_code.unwrap_or(-1) != 0);
+
+    let exit = if checks_failed {
+        ExitCode::ChecksFailed
+    } else if let Some(result) = &apply_result {
         if result.failed.is_empty() {
             ExitCode::Success
         } else {
@@ -643,6 +665,7 @@ async fn run_agent_command(
         ExitCode::Success if args.apply => CliStatus::Applied,
         ExitCode::Success => CliStatus::Ok,
         ExitCode::ChangesProposed => CliStatus::ChangesProposed,
+        ExitCode::ChecksFailed => CliStatus::ChecksFailed,
         ExitCode::ApplyFailed => CliStatus::ApplyFailed,
         _ => CliStatus::Ok,
     };
@@ -652,7 +675,7 @@ async fn run_agent_command(
         exit_code: exit.as_u8(),
     });
 
-    let errors = apply_result
+    let errors: Vec<String> = apply_result
         .as_ref()
         .map(|result| {
             result
@@ -662,6 +685,19 @@ async fn run_agent_command(
                 .collect()
         })
         .unwrap_or_default();
+    let mut errors = errors;
+    for result in &command_results {
+        if result.exit_code.unwrap_or(-1) != 0 {
+            errors.push(format!(
+                "Command failed (exit {}): {}",
+                result
+                    .exit_code
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                result.command
+            ));
+        }
+    }
 
     let summary = CliSummary {
         schema_version: 1,
@@ -677,6 +713,7 @@ async fn run_agent_command(
         plan: steps,
         diffs: diffs.clone(),
         apply_result,
+        commands: command_results,
         errors,
     };
     emit_summary(&mut output, &summary)?;
@@ -867,6 +904,9 @@ fn write_artifacts(
     if let Some(result) = &summary.apply_result {
         write_json(artifact_dir.join("apply-result.json"), result)?;
     }
+    if !summary.commands.is_empty() {
+        write_json(artifact_dir.join("commands.json"), &summary.commands)?;
+    }
     Ok(())
 }
 
@@ -907,8 +947,30 @@ fn error_summary(
         plan: Vec::new(),
         diffs: Vec::new(),
         apply_result: None,
+        commands: Vec::new(),
         errors: vec![error],
     }
+}
+
+async fn run_cli_checks(
+    args: &RunArgs,
+    workspace_path: &Path,
+    output: &mut CliOutput,
+) -> Result<Vec<RunProjectTaskResult>, (ExitCode, String)> {
+    let mut results = Vec::new();
+    for command in &args.run_commands {
+        let result =
+            project_tasks::run_project_command(command.clone(), workspace_path.to_path_buf())
+                .await
+                .map_err(|err| (ExitCode::InternalError, err))?;
+        output.event(CliEvent::CommandFinished {
+            command: result.command.clone(),
+            exit_code: result.exit_code,
+            duration_ms: result.duration_ms,
+        });
+        results.push(result);
+    }
+    Ok(results)
 }
 
 fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
@@ -1126,6 +1188,27 @@ mod tests {
             Some(CliCommand::Run(args)) => {
                 assert_eq!(args.run.output, OutputMode::Json);
                 assert_eq!(args.run.context_mode, ContextModeArg::Compact);
+                assert_eq!(args.prompt, vec!["fix tests".to_string()]);
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_parse_run_command_checks() {
+        let cli = Cli::try_parse_from([
+            "agent-cli",
+            "run",
+            "--run-command",
+            "npm test",
+            "--run-command",
+            "cargo test",
+            "fix tests",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Run(args)) => {
+                assert_eq!(args.run.run_commands, vec!["npm test", "cargo test"]);
                 assert_eq!(args.prompt, vec!["fix tests".to_string()]);
             }
             _ => panic!("expected run command"),

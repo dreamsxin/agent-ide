@@ -68,6 +68,7 @@ Options:
   --run-id <ID>
   --prompt-file <FILE>
   --stdin
+  --run-command <COMMAND>
 ```
 
 ## Configuration
@@ -196,9 +197,25 @@ Each run writes artifacts by default:
   plan.json
   changes.json
   apply-result.json
+  commands.json
 ```
 
 `changes.json` and `apply-result.json` are only written when that data exists.
+`commands.json` is written when one or more `--run-command` checks are executed.
+
+## Command Checks
+
+CLI mode can run one or more non-interactive checks after an Agent run by using the shared backend project command runner:
+
+```powershell
+target\release\agent_cli run `
+  --profile default `
+  --workspace D:\work\my-project `
+  --run-command "npm test" `
+  "Fix failing tests"
+```
+
+The check results are included in `summary.json` and `commands.json`. A non-zero check exit code returns CLI exit code `4`. This is not yet a full automated repair loop; feeding failed command output back into the Agent is the next step.
 
 ## Exit Codes
 
@@ -229,6 +246,7 @@ Implemented:
 - `--output text|json|ndjson`.
 - run-id and artifact directory output.
 - stable exit-code contract.
+- shared backend command runner checks through `--run-command`.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 

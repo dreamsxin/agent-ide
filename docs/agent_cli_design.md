@@ -427,8 +427,8 @@ Deliverables:
 
 - Replace manual argument parsing with a real parser such as `clap`. **Current: done.**
 - Add subcommands: `doctor`, `context estimate`, `plan`, `run`. **Current: first pass done.**
-- Add `--profile`, `--context-mode`, `--include`, `--prompt-file`, `--stdin`.
 - Add `--profile`, `--context-mode`, `--include`, `--prompt-file`, `--stdin`. **Current: done for first-pass shared provider profile loading and CLI-local context sources.**
+- Add `--run-command` check execution through the shared project command runner. **Current: first pass done.**
 - Add `--output text|json|ndjson`. **Current: done.**
 - Add stable exit codes. **Current: done.**
 - Add run-id and artifact directory. **Current: done.**
@@ -471,7 +471,7 @@ Acceptance:
 
 Deliverables:
 
-- Add `--run <COMMAND>` checks.
+- Add `--run <COMMAND>` checks. **Current: first pass implemented as `--run-command`.**
 - Parse command output into Problems.
 - Feed failed checks back into Agent repair context.
 - Add `--max-iterations`.
@@ -481,6 +481,12 @@ Acceptance:
 
 - `agent-ide run --auto --apply --run "npm test" --max-iterations 3` can iterate until tests pass or budget is exhausted.
 - Artifacts show failure -> diff -> apply -> rerun chain.
+
+Current status:
+
+- Shared project task discovery and non-interactive command execution live in `services/project_tasks.rs`.
+- CLI can execute checks with `--run-command` and writes command results to artifacts.
+- Parsing command output into Problems and looping repair context are still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 
