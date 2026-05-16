@@ -1,5 +1,5 @@
-use serde::Serialize;
 use crate::services::workspace;
+use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -138,8 +138,7 @@ pub fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if let Some(parent) = new_resolved.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
     }
-    fs::rename(&old_resolved, &new_resolved)
-        .map_err(|e| format!("Failed to rename: {}", e))
+    fs::rename(&old_resolved, &new_resolved).map_err(|e| format!("Failed to rename: {}", e))
 }
 
 /// Open the system file manager at the selected file or directory.
@@ -212,7 +211,7 @@ pub struct FileMetadata {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
-    pub modified: u64,  // UNIX timestamp (seconds)
+    pub modified: u64, // UNIX timestamp (seconds)
     pub readonly: bool,
 }
 
@@ -224,7 +223,8 @@ pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
     if !p.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
-    let metadata = fs::metadata(&resolved).map_err(|e| format!("Failed to read metadata: {}", e))?;
+    let metadata =
+        fs::metadata(&resolved).map_err(|e| format!("Failed to read metadata: {}", e))?;
     let modified = metadata
         .modified()
         .ok()
@@ -233,7 +233,8 @@ pub fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
         .unwrap_or(0);
     let readonly = metadata.permissions().readonly();
     Ok(FileMetadata {
-        name: p.file_name()
+        name: p
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.clone()),
         path: resolved.to_string_lossy().to_string(),
@@ -295,7 +296,11 @@ pub struct SearchResult {
 }
 
 #[tauri::command]
-pub fn search_files(root: String, pattern: String, max_depth: Option<u32>) -> Result<Vec<SearchResult>, String> {
+pub fn search_files(
+    root: String,
+    pattern: String,
+    max_depth: Option<u32>,
+) -> Result<Vec<SearchResult>, String> {
     let root_resolved = workspace::resolve_existing(&root)?;
     let root_path = root_resolved.as_path();
     if !root_path.is_dir() {
@@ -305,7 +310,8 @@ pub fn search_files(root: String, pattern: String, max_depth: Option<u32>) -> Re
     let mut results = Vec::new();
     search_recursive(root_path, &pattern, 0, max_depth, &mut results)?;
     results.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir)
+        b.is_dir
+            .cmp(&a.is_dir)
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(results)
@@ -326,7 +332,9 @@ fn search_recursive(
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let metadata = entry.metadata().map_err(|e| format!("Failed to get metadata: {}", e))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to get metadata: {}", e))?;
 
         // Simple glob match
         if glob_match(&name, pattern) {
@@ -401,10 +409,7 @@ pub fn watch_start(
     .map_err(|e| format!("Failed to create watcher: {}", e))?;
 
     watcher
-        .configure(
-            Config::default()
-                .with_poll_interval(Duration::from_secs(2)),
-        )
+        .configure(Config::default().with_poll_interval(Duration::from_secs(2)))
         .map_err(|e| format!("Failed to configure watcher: {}", e))?;
 
     let cwd = workspace::workspace_root()?;
@@ -414,7 +419,10 @@ pub fn watch_start(
 
     // 存储 watcher（保持存活）
     {
-        let mut w = state.watcher.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+        let mut w = state
+            .watcher
+            .lock()
+            .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
         *w = Some(watcher);
     }
 
@@ -425,10 +433,7 @@ pub fn watch_start(
             match event_res {
                 Ok(event) => {
                     // 忽略纯 Access 事件，减少噪声
-                    if matches!(
-                        event.kind,
-                        EventKind::Access(_)
-                    ) {
+                    if matches!(event.kind, EventKind::Access(_)) {
                         continue;
                     }
                     let paths: Vec<String> = event
@@ -459,9 +464,15 @@ pub fn watch_start(
 /// 停止文件监听
 #[tauri::command]
 pub fn watch_stop(state: tauri::State<'_, FileWatcherState>) -> Result<(), String> {
-    let mut w = state.watcher.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    let mut w = state
+        .watcher
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *w = None; // drop watcher → stops the thread
-    let mut r = state.running.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+    let mut r = state
+        .running
+        .lock()
+        .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
     *r = false;
     Ok(())
 }

@@ -1,6 +1,6 @@
-pub mod fs;
 pub mod agent;
-pub mod terminal;
+pub mod fs;
 pub mod git;
-pub mod tasks;
 pub mod lsp;
+pub mod tasks;
+pub mod terminal;

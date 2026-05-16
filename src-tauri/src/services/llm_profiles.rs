@@ -289,7 +289,10 @@ pub fn resolve_llm_config(
     profile.to_config()
 }
 
-pub fn context_budget(config: &LlmProfilesConfig, profile_id: Option<&str>) -> Option<ContextBudget> {
+pub fn context_budget(
+    config: &LlmProfilesConfig,
+    profile_id: Option<&str>,
+) -> Option<ContextBudget> {
     let selected_id = profile_id.unwrap_or(&config.active_profile_id);
     let profile = config
         .profiles
@@ -416,7 +419,11 @@ pub fn delete_profile(
     if config.profiles.len() <= 1 {
         return Err("At least one LLM profile is required".to_string());
     }
-    if let Some(profile) = config.profiles.iter().find(|profile| profile.id == profile_id) {
+    if let Some(profile) = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+    {
         if let Some(credential_ref) = profile.credential_ref.as_ref() {
             let _ = credentials::delete_secret(credential_ref);
         }

@@ -488,7 +488,8 @@ Current status:
 - CLI can execute checks with `--run-command` and writes command results to artifacts.
 - Shared command-output problem parsing lives in `services/problem_parser.rs`.
 - Shared Agent single-step runtime helpers live in `services/agent_runtime.rs`, including step-context enrichment and diff provenance used by both CLI execution and IDE single-step/regenerate flows.
-- Looping failed command Problems back into repair context is still pending.
+- `--max-iterations` provides a first bounded repair loop after `--apply` and failed `--run-command` checks: failed command output and parsed Problems are injected into a repair prompt, new diffs are applied, and checks rerun.
+- Command allow-list policy, timeout policy, and richer failure-chain artifacts are still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 

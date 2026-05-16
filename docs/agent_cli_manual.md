@@ -217,7 +217,21 @@ target\release\agent_cli run `
   "Fix failing tests"
 ```
 
-The check results are included in `summary.json` and `commands.json`; parsed file/line/column failures are included in `summary.json` and `problems.json`. A non-zero check exit code returns CLI exit code `4`. This is not yet a full automated repair loop; feeding failed command output back into the Agent is the next step.
+The check results are included in `summary.json` and `commands.json`; parsed file/line/column failures are included in `summary.json` and `problems.json`. A non-zero check exit code returns CLI exit code `4`.
+
+For bounded repair, combine `--apply`, `--run-command`, and `--max-iterations`:
+
+```powershell
+target\release\agent_cli run `
+  --profile default `
+  --workspace D:\work\my-project `
+  --apply `
+  --run-command "npm test" `
+  --max-iterations 2 `
+  "Fix failing tests"
+```
+
+When checks fail after an applied change, the CLI builds a repair prompt from the failed command output and parsed Problems, generates another diff, applies it, and reruns the checks until they pass or the iteration budget is exhausted. Command allow-list policy is still pending, so use this only with trusted commands.
 
 ## Exit Codes
 
@@ -227,7 +241,7 @@ The check results are included in `summary.json` and `commands.json`; parsed fil
 | 1 | Internal error. |
 | 2 | Invalid arguments or missing configuration. |
 | 3 | Preview succeeded and changes were proposed but not applied. |
-| 4 | Checks failed. Reserved for future automated repair loops. |
+| 4 | Checks failed after configured command checks or after repair iterations are exhausted. |
 | 5 | Diff apply failed. |
 | 6 | Provider or LLM request failed. |
 | 7 | Workspace or precondition failed. |
@@ -250,6 +264,7 @@ Implemented:
 - stable exit-code contract.
 - shared backend command runner checks through `--run-command`.
 - shared backend terminal/test problem parsing for command output.
+- bounded repair iterations with `--max-iterations` after applied command-check failures.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 
@@ -272,7 +287,7 @@ The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_d
 2. Add `--context-mode full|focused|compact` and `--include git-diff,project-tree,problems` flags using the same context section builder as the UI.
 3. Add a machine-readable `--json` output mode for plans, steps, diffs, failures, and applied files.
 4. Add `--review` or `--interactive` mode for per-file and per-hunk apply/reject in the terminal.
-5. Add `--run test|build|lint` integration so command failures can feed the same Agent repair context used by the desktop IDE.
+5. Add command allow-list and permission policy around repair loops.
 6. Add smoke tests that run `agent_cli --help`, preview mode with a mocked LLM response, and apply mode against a temporary workspace.
 
 ## Safety Notes

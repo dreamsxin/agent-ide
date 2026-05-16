@@ -149,6 +149,9 @@ struct RunArgs {
 
     #[arg(long = "run-command")]
     run_commands: Vec<String>,
+
+    #[arg(long, default_value_t = 0)]
+    max_iterations: u8,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -176,6 +179,7 @@ impl Default for RunArgs {
             prompt_file: None,
             stdin: false,
             run_commands: Vec::new(),
+            max_iterations: 0,
         }
     }
 }
@@ -280,6 +284,16 @@ enum CliEvent {
         command: String,
         exit_code: Option<i32>,
         duration_ms: u128,
+    },
+    RepairIterationStarted {
+        iteration: u8,
+        max_iterations: u8,
+        problem_count: usize,
+    },
+    RepairIterationFinished {
+        iteration: u8,
+        diff_count: usize,
+        checks_failed: bool,
     },
     RunFinished {
         status: CliStatus,
@@ -624,7 +638,7 @@ async fn run_agent_command(
         return Ok(ExitCode::Success);
     }
 
-    let diffs = execute_steps(
+    let mut diffs = execute_steps(
         &llm,
         &prompt,
         &context_text,
@@ -648,16 +662,73 @@ async fn run_agent_command(
     } else {
         None
     };
+    let mut apply_results = Vec::new();
+    if let Some(result) = apply_result.clone() {
+        apply_results.push(result);
+    }
 
-    let command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
-    let command_problems = command_results
-        .iter()
-        .flat_map(|result| result.problems.clone())
-        .collect::<Vec<_>>();
-    let checks_failed = command_results
+    let mut command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+    let mut checks_failed = command_results
         .iter()
         .any(|result| result.exit_code.unwrap_or(-1) != 0);
 
+    if args.apply && checks_failed && args.max_iterations > 0 {
+        for iteration in 1..=args.max_iterations {
+            let command_problems = collect_command_problems(&command_results);
+            output.event(CliEvent::RepairIterationStarted {
+                iteration,
+                max_iterations: args.max_iterations,
+                problem_count: command_problems.len(),
+            });
+            output.text(format!(
+                "--- Repair iteration {}/{} ---",
+                iteration, args.max_iterations
+            ));
+            let repair_prompt =
+                build_repair_prompt(&prompt, iteration, &command_results, &command_problems);
+            let repair_steps = vec![TaskStep {
+                id: format!("repair-{}-{}", iteration, Uuid::new_v4()),
+                title: format!("Repair failed checks iteration {}", iteration),
+                step_type: "edit".to_string(),
+                status: "todo".to_string(),
+                logs: Vec::new(),
+                scope: Some("workspace".to_string()),
+                execution_mode: Some("fix".to_string()),
+            }];
+            let repair_diffs = execute_steps(
+                &llm,
+                &repair_prompt,
+                &context_text,
+                &workspace_path,
+                &repair_steps,
+                &mut output,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await?;
+            let repair_apply = apply_pending_diffs(&repair_diffs);
+            output.event(CliEvent::ApplyFinished {
+                applied_count: repair_apply.applied.len(),
+                failed_count: repair_apply.failed.len(),
+            });
+            diffs.extend(repair_diffs);
+            apply_results.push(repair_apply.clone());
+            command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+            checks_failed = command_results
+                .iter()
+                .any(|result| result.exit_code.unwrap_or(-1) != 0);
+            output.event(CliEvent::RepairIterationFinished {
+                iteration,
+                diff_count: diffs.len(),
+                checks_failed,
+            });
+            if !repair_apply.failed.is_empty() || !checks_failed {
+                break;
+            }
+        }
+    }
+
+    let command_problems = collect_command_problems(&command_results);
+    let apply_result = merge_apply_results(apply_results);
     let exit = if checks_failed {
         ExitCode::ChecksFailed
     } else if let Some(result) = &apply_result {
@@ -964,6 +1035,105 @@ async fn run_cli_checks(
     Ok(results)
 }
 
+fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec<ProblemEntry> {
+    command_results
+        .iter()
+        .flat_map(|result| result.problems.clone())
+        .collect()
+}
+
+fn merge_apply_results(results: Vec<ApplyDiffsResult>) -> Option<ApplyDiffsResult> {
+    if results.is_empty() {
+        return None;
+    }
+    let mut merged = ApplyDiffsResult {
+        applied: Vec::new(),
+        failed: Vec::new(),
+    };
+    for result in results {
+        merged.applied.extend(result.applied);
+        merged.failed.extend(result.failed);
+    }
+    Some(merged)
+}
+
+fn build_repair_prompt(
+    original_prompt: &str,
+    iteration: u8,
+    command_results: &[RunProjectTaskResult],
+    problems: &[ProblemEntry],
+) -> String {
+    let mut lines = vec![
+        format!(
+            "Repair iteration {} for the original Agent IDE CLI task.",
+            iteration
+        ),
+        "Original task:".to_string(),
+        original_prompt.to_string(),
+        String::new(),
+        "Checks failed after applying the generated changes. Fix only the failures below."
+            .to_string(),
+        "Return reviewable Agent IDE diffs only.".to_string(),
+        String::new(),
+        "Parsed Problems:".to_string(),
+    ];
+
+    if problems.is_empty() {
+        lines.push("(none parsed)".to_string());
+    } else {
+        for problem in problems.iter().take(40) {
+            lines.push(format!(
+                "- {}:{}:{} [{}] {}: {}",
+                problem.file,
+                problem.line,
+                problem.column,
+                problem.severity,
+                problem.source,
+                problem.message
+            ));
+        }
+        if problems.len() > 40 {
+            lines.push(format!(
+                "... {} more problem(s) omitted",
+                problems.len() - 40
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Failed command output:".to_string());
+    for result in command_results
+        .iter()
+        .filter(|result| result.exit_code.unwrap_or(-1) != 0)
+    {
+        let output = [result.stdout.as_str(), result.stderr.as_str()]
+            .into_iter()
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        lines.push(format!(
+            "\n$ {} (exit {})\n```text\n{}\n```",
+            result.command,
+            result
+                .exit_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            truncate_for_prompt(&output, 16_000)
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
+    if value.len() <= max_chars {
+        return value.to_string();
+    }
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push_str("\n... truncated ...");
+    truncated
+}
+
 fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
     if let Some(profile_id) = args.profile.as_deref() {
         let config = llm_profiles::load_llm_config_from_disk().ok_or_else(|| {
@@ -1194,16 +1364,48 @@ mod tests {
             "npm test",
             "--run-command",
             "cargo test",
+            "--max-iterations",
+            "2",
             "fix tests",
         ])
         .unwrap();
         match cli.command {
             Some(CliCommand::Run(args)) => {
                 assert_eq!(args.run.run_commands, vec!["npm test", "cargo test"]);
+                assert_eq!(args.run.max_iterations, 2);
                 assert_eq!(args.prompt, vec!["fix tests".to_string()]);
             }
             _ => panic!("expected run command"),
         }
+    }
+
+    #[test]
+    fn repair_prompt_includes_problems_and_failed_output() {
+        let problems = vec![ProblemEntry {
+            id: "p1".to_string(),
+            file: "src/app.ts".to_string(),
+            line: 10,
+            column: 5,
+            severity: "error".to_string(),
+            source: "typescript".to_string(),
+            message: "Cannot find name value".to_string(),
+        }];
+        let commands = vec![RunProjectTaskResult {
+            command: "npm test".to_string(),
+            exit_code: Some(1),
+            duration_ms: 42,
+            stdout: "test failed".to_string(),
+            stderr: "src/app.ts:10:5 Cannot find name value".to_string(),
+            problems: problems.clone(),
+        }];
+
+        let prompt = build_repair_prompt("Fix tests", 1, &commands, &problems);
+
+        assert!(prompt.contains("Original task:"));
+        assert!(prompt.contains("Fix tests"));
+        assert!(prompt.contains("src/app.ts:10:5"));
+        assert!(prompt.contains("$ npm test (exit 1)"));
+        assert!(prompt.contains("test failed"));
     }
 
     #[test]

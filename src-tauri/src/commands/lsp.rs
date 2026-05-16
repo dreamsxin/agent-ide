@@ -106,7 +106,10 @@ pub struct LspStatusSnapshot {
 }
 
 #[tauri::command]
-pub fn lsp_probe(workspace_path: Option<String>, language_id: Option<String>) -> Result<LspStatusSnapshot, String> {
+pub fn lsp_probe(
+    workspace_path: Option<String>,
+    language_id: Option<String>,
+) -> Result<LspStatusSnapshot, String> {
     let root = match workspace_path {
         Some(path) if !path.trim().is_empty() => workspace::resolve_existing(&path)?,
         _ => workspace::workspace_root()?,
@@ -115,16 +118,23 @@ pub fn lsp_probe(workspace_path: Option<String>, language_id: Option<String>) ->
     let spec = lsp_spec(language_id.as_deref().unwrap_or("typescript"))?;
     let executable = find_language_server(&root, &spec);
     let workspace_config_files = detect_lsp_workspace_config_files(&root, &spec);
-    let (indexing_status, indexing_message) = infer_indexing_state(&root, &workspace_config_files, &spec);
+    let (indexing_status, indexing_message) =
+        infer_indexing_state(&root, &workspace_config_files, &spec);
     let install_command = spec.install_command.to_string();
-    let status = if executable.is_some() { "available" } else { "unavailable" };
+    let status = if executable.is_some() {
+        "available"
+    } else {
+        "unavailable"
+    };
     let message = if executable.is_some() {
-        format!("{} executable was found but is not initialized.", spec.display_name)
+        format!(
+            "{} executable was found but is not initialized.",
+            spec.display_name
+        )
     } else {
         format!(
             "{} was not found. Install with: {}",
-            spec.server_name,
-            install_command
+            spec.server_name, install_command
         )
     };
 
@@ -134,8 +144,12 @@ pub fn lsp_probe(workspace_path: Option<String>, language_id: Option<String>) ->
         workspace_root: Some(root.to_string_lossy().to_string()),
         language_id: spec.language_id.to_string(),
         language_name: spec.display_name.to_string(),
-        server_path: executable.as_ref().map(|path| path.to_string_lossy().to_string()),
-        server_source: executable.as_ref().map(|path| classify_lsp_server_source(&root, path, &spec)),
+        server_path: executable
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        server_source: executable
+            .as_ref()
+            .map(|path| classify_lsp_server_source(&root, path, &spec)),
         install_command,
         workspace_config_files,
         indexing_status,
@@ -251,14 +265,13 @@ pub fn lsp_initialize(
     let executable = find_language_server(&root, &spec).ok_or_else(|| {
         format!(
             "Start {} failed: {} was not found. Install with: {}",
-            spec.display_name,
-            spec.server_name,
-            install_command
+            spec.display_name, spec.server_name, install_command
         )
     })?;
     let server_source = classify_lsp_server_source(&root, &executable, &spec);
     let workspace_config_files = detect_lsp_workspace_config_files(&root, &spec);
-    let (indexing_status, indexing_message) = infer_indexing_state(&root, &workspace_config_files, &spec);
+    let (indexing_status, indexing_message) =
+        infer_indexing_state(&root, &workspace_config_files, &spec);
     let mut child = Command::new(&executable)
         .arg("--stdio")
         .current_dir(&root)
@@ -527,7 +540,8 @@ pub fn lsp_status(manager: tauri::State<'_, LspManager>) -> Result<LspStatusSnap
             language_name: "Language Server".to_string(),
             server_path: None,
             server_source: None,
-            install_command: "Open a TypeScript/JavaScript or Go file to see install guidance.".to_string(),
+            install_command: "Open a TypeScript/JavaScript or Go file to see install guidance."
+                .to_string(),
             workspace_config_files: Vec::new(),
             indexing_status: "unavailable".to_string(),
             indexing_message: "Start a language server to validate workspace indexing.".to_string(),
@@ -588,8 +602,13 @@ fn notify(manager: &LspManager, method: &str, params: Value) -> Result<(), Strin
 
 fn write_message(stdin: &mut ChildStdin, message: &Value) -> Result<(), String> {
     let body = serde_json::to_string(message).map_err(|e| e.to_string())?;
-    write!(stdin, "Content-Length: {}\r\n\r\n{}", body.as_bytes().len(), body)
-        .map_err(|e| format!("Write LSP message: {}", e))?;
+    write!(
+        stdin,
+        "Content-Length: {}\r\n\r\n{}",
+        body.as_bytes().len(),
+        body
+    )
+    .map_err(|e| format!("Write LSP message: {}", e))?;
     stdin.flush().map_err(|e| format!("Flush LSP: {}", e))
 }
 
@@ -600,23 +619,33 @@ fn read_lsp_output(app: AppHandle, state: Arc<LspInner>, stdout: std::process::C
             Ok(Some(message)) => message,
             Ok(None) => {
                 set_server_error(&state, "TypeScript LSP stdout closed.");
-                let _ = app.emit("lsp-status", LspStatusEvent {
-                    status: "error".to_string(),
-                    message: "TypeScript LSP stdout closed.".to_string(),
-                });
+                let _ = app.emit(
+                    "lsp-status",
+                    LspStatusEvent {
+                        status: "error".to_string(),
+                        message: "TypeScript LSP stdout closed.".to_string(),
+                    },
+                );
                 break;
             }
             Err(error) => {
                 set_server_error(&state, &error);
-                let _ = app.emit("lsp-status", LspStatusEvent {
-                    status: "error".to_string(),
-                    message: error,
-                });
+                let _ = app.emit(
+                    "lsp-status",
+                    LspStatusEvent {
+                        status: "error".to_string(),
+                        message: error,
+                    },
+                );
                 break;
             }
         };
         let method = message.get("method").and_then(Value::as_str);
-        if let Some(id) = message.get("id").and_then(Value::as_u64).filter(|_| method.is_none()) {
+        if let Some(id) = message
+            .get("id")
+            .and_then(Value::as_u64)
+            .filter(|_| method.is_none())
+        {
             if let Ok(mut guard) = state.server.lock() {
                 if let Some(server) = guard.as_mut() {
                     if let Some(tx) = server.pending.remove(&id) {
@@ -634,7 +663,9 @@ fn read_lsp_output(app: AppHandle, state: Arc<LspInner>, stdout: std::process::C
             if let Some(params) = message.get("params") {
                 let diagnostics = parse_diagnostics(params);
                 update_server_stats_inner(&state, |server| {
-                    server.diagnostics_count = server.diagnostics_count.saturating_add(diagnostics.diagnostics.len());
+                    server.diagnostics_count = server
+                        .diagnostics_count
+                        .saturating_add(diagnostics.diagnostics.len());
                 });
                 let _ = app.emit("lsp-diagnostics", diagnostics);
             }
@@ -710,7 +741,10 @@ fn lsp_configuration_response(params: Option<&Value>) -> Value {
         items
             .iter()
             .map(|item| {
-                let section = item.get("section").and_then(Value::as_str).unwrap_or_default();
+                let section = item
+                    .get("section")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 match section {
                     "typescript" => json!({
                         "format": { "enable": true },
@@ -787,11 +821,16 @@ fn lsp_spec(language_id: &str) -> Result<LspSpec, String> {
             install_command: "go install golang.org/x/tools/gopls@latest",
             workspace_markers: &["go.work", "go.mod"],
         }),
-        other => Err(format!("No language server configured for language: {}", other)),
+        other => Err(format!(
+            "No language server configured for language: {}",
+            other
+        )),
     }
 }
 
-fn read_message(reader: &mut BufReader<std::process::ChildStdout>) -> Result<Option<Value>, String> {
+fn read_message(
+    reader: &mut BufReader<std::process::ChildStdout>,
+) -> Result<Option<Value>, String> {
     let mut header = Vec::new();
     let mut buf = [0u8; 1];
     while !header.ends_with(b"\r\n\r\n") {
@@ -839,7 +878,10 @@ fn parse_diagnostics(params: &Value) -> LspDiagnosticsEvent {
                         }
                         .to_string(),
                         message: item.get("message")?.as_str()?.to_string(),
-                        source: item.get("source").and_then(Value::as_str).map(str::to_string),
+                        source: item
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect()
@@ -911,7 +953,10 @@ fn parse_completion_items(value: &Value) -> Vec<LspCompletionItem> {
                     Some(LspCompletionItem {
                         label: item.get("label")?.as_str()?.to_string(),
                         kind: item.get("kind").and_then(Value::as_u64),
-                        detail: item.get("detail").and_then(Value::as_str).map(str::to_string),
+                        detail: item
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                         documentation: item.get("documentation").and_then(markup_to_string),
                         insert_text: item
                             .get("insertText")
@@ -923,8 +968,14 @@ fn parse_completion_items(value: &Value) -> Vec<LspCompletionItem> {
                                     .and_then(Value::as_str)
                                     .map(str::to_string)
                             }),
-                        sort_text: item.get("sortText").and_then(Value::as_str).map(str::to_string),
-                        filter_text: item.get("filterText").and_then(Value::as_str).map(str::to_string),
+                        sort_text: item
+                            .get("sortText")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        filter_text: item
+                            .get("filterText")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect()
@@ -1025,10 +1076,12 @@ fn parse_workspace_edit(value: &Value) -> Option<LspWorkspaceEdit> {
 }
 
 fn markup_to_string(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| value.get("value").and_then(Value::as_str).map(str::to_string))
+    value.as_str().map(str::to_string).or_else(|| {
+        value
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 fn parse_location(value: &Value) -> Option<LspLocation> {
@@ -1084,15 +1137,9 @@ fn encode_uri_path(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b'/'
-            | b':' => encoded.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                encoded.push(byte as char)
+            }
             _ => encoded.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -1124,7 +1171,12 @@ impl Drop for LspServer {
 
 fn find_language_server(workspace_root: &Path, spec: &LspSpec) -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    candidates.push(workspace_root.join("node_modules").join(".bin").join(platform_server_binary_name(spec)));
+    candidates.push(
+        workspace_root
+            .join("node_modules")
+            .join(".bin")
+            .join(platform_server_binary_name(spec)),
+    );
 
     if cfg!(windows) {
         if let Ok(appdata) = std::env::var("APPDATA") {
@@ -1177,11 +1229,18 @@ fn detect_lsp_workspace_config_files(workspace_root: &Path, spec: &LspSpec) -> V
         .collect()
 }
 
-fn infer_indexing_state(workspace_root: &Path, config_files: &[String], spec: &LspSpec) -> (String, String) {
+fn infer_indexing_state(
+    workspace_root: &Path,
+    config_files: &[String],
+    spec: &LspSpec,
+) -> (String, String) {
     if spec.language_id == "go" {
         return infer_go_indexing_state(workspace_root, config_files);
     }
-    if config_files.iter().any(|file| file == "tsconfig.json" || file == "jsconfig.json") {
+    if config_files
+        .iter()
+        .any(|file| file == "tsconfig.json" || file == "jsconfig.json")
+    {
         return (
             "configured".to_string(),
             "Workspace has tsconfig/jsconfig; TypeScript server can index project references and compiler options.".to_string(),
@@ -1239,7 +1298,11 @@ fn has_files_with_extensions(workspace_root: &Path, extensions: &[&str]) -> bool
             .path()
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| extensions.iter().any(|candidate| candidate.eq_ignore_ascii_case(ext)))
+            .map(|ext| {
+                extensions
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+            })
             .unwrap_or(false)
     })
 }

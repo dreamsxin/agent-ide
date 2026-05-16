@@ -175,11 +175,16 @@ pub fn git_checkout_remote_branch(
         .map_err(|e| format!("Remote branch commit: {}", e))?;
     let local_name = local_branch
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| remote_branch.rsplit('/').next().unwrap_or(remote_branch).to_string());
+        .unwrap_or_else(|| {
+            remote_branch
+                .rsplit('/')
+                .next()
+                .unwrap_or(remote_branch)
+                .to_string()
+        });
     let local_name = validate_branch_name(&local_name)?;
 
-    repo
-        .branch(&local_name, &commit, false)
+    repo.branch(&local_name, &commit, false)
         .map_err(|e| format!("Create tracking branch {}: {}", local_name, e))?;
     let remote_name = remote_branch.split('/').next().unwrap_or("origin");
     let remote_short = remote_branch
@@ -205,21 +210,33 @@ pub fn git_checkout_remote_branch(
 }
 
 #[tauri::command]
-pub fn git_fetch(path: String, remote: Option<String>, credentials: Option<GitCredentials>) -> Result<(), String> {
+pub fn git_fetch(
+    path: String,
+    remote: Option<String>,
+    credentials: Option<GitCredentials>,
+) -> Result<(), String> {
     let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
     let remote_name = remote.unwrap_or_else(|| "origin".to_string());
     let mut remote = repo
         .find_remote(&remote_name)
         .map_err(|e| format!("Remote {}: {}", remote_name, e))?;
-    let mut options = remote_callbacks(&repo, credentials, Some(remote.url().unwrap_or_default().to_string()))?;
+    let mut options = remote_callbacks(
+        &repo,
+        credentials,
+        Some(remote.url().unwrap_or_default().to_string()),
+    )?;
     remote
         .fetch(&[] as &[&str], Some(&mut options), None)
         .map_err(|e| format!("Fetch {}: {}", remote_name, e))
 }
 
 #[tauri::command]
-pub fn git_pull(path: String, remote: Option<String>, credentials: Option<GitCredentials>) -> Result<(), String> {
+pub fn git_pull(
+    path: String,
+    remote: Option<String>,
+    credentials: Option<GitCredentials>,
+) -> Result<(), String> {
     let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
     let current_branch = current_branch_name(&repo)?;
@@ -263,7 +280,11 @@ pub fn git_pull(path: String, remote: Option<String>, credentials: Option<GitCre
 }
 
 #[tauri::command]
-pub fn git_push(path: String, remote: Option<String>, credentials: Option<GitCredentials>) -> Result<(), String> {
+pub fn git_push(
+    path: String,
+    remote: Option<String>,
+    credentials: Option<GitCredentials>,
+) -> Result<(), String> {
     let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
     let branch = current_branch_name(&repo)?;
@@ -273,7 +294,11 @@ pub fn git_push(path: String, remote: Option<String>, credentials: Option<GitCre
         .map_err(|e| format!("Remote {}: {}", remote_name, e))?;
     let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
     let mut options = git2::PushOptions::new();
-    let callbacks = git_remote_callbacks(&repo, credentials, Some(remote.url().unwrap_or_default().to_string()))?;
+    let callbacks = git_remote_callbacks(
+        &repo,
+        credentials,
+        Some(remote.url().unwrap_or_default().to_string()),
+    )?;
     options.remote_callbacks(callbacks);
     remote
         .push(&[refspec.as_str()], Some(&mut options))
@@ -304,7 +329,11 @@ pub fn git_resolve_conflict(path: String, file: String, resolution: String) -> R
         "both" => format!(
             "{}{}{}",
             ours_content,
-            if ours_content.ends_with('\n') { "" } else { "\n" },
+            if ours_content.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            },
             theirs_content
         ),
         other => return Err(format!("Unsupported conflict resolution: {}", other)),
@@ -338,7 +367,11 @@ impl GitDiffKind {
 
 /// 获取文件 diff
 #[tauri::command]
-pub fn git_diff(path: String, file: Option<String>, kind: Option<String>) -> Result<String, String> {
+pub fn git_diff(
+    path: String,
+    file: Option<String>,
+    kind: Option<String>,
+) -> Result<String, String> {
     let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
     let diff_kind = GitDiffKind::parse(kind)?;
@@ -347,7 +380,9 @@ pub fn git_diff(path: String, file: Option<String>, kind: Option<String>) -> Res
     let tree = head.peel_to_tree().map_err(|e| format!("Tree: {}", e))?;
 
     let mut diff_opts = git2::DiffOptions::new();
-    diff_opts.include_untracked(true).recurse_untracked_dirs(true);
+    diff_opts
+        .include_untracked(true)
+        .recurse_untracked_dirs(true);
     if let Some(ref f) = file {
         let relative = repo_relative_path(&repo, f, true)?;
         diff_opts.pathspec(relative);
@@ -356,7 +391,9 @@ pub fn git_diff(path: String, file: Option<String>, kind: Option<String>) -> Res
     let index = repo.index().map_err(|e| format!("Index: {}", e))?;
     let diff = match diff_kind {
         GitDiffKind::Worktree => repo.diff_index_to_workdir(Some(&index), Some(&mut diff_opts)),
-        GitDiffKind::Staged => repo.diff_tree_to_index(Some(&tree), Some(&index), Some(&mut diff_opts)),
+        GitDiffKind::Staged => {
+            repo.diff_tree_to_index(Some(&tree), Some(&index), Some(&mut diff_opts))
+        }
         GitDiffKind::All => repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut diff_opts)),
     }
     .map_err(|e| format!("Diff: {}", e))?;
@@ -588,14 +625,15 @@ fn current_upstream_name(repo: &git2::Repository) -> Result<Option<String>, Stri
         .find_branch(&branch_name, git2::BranchType::Local)
         .map_err(|e| format!("Branch {}: {}", branch_name, e))?;
     match branch.upstream() {
-        Ok(upstream) => Ok(upstream
-            .get()
-            .name()
-            .map(|name| name.to_string())),
+        Ok(upstream) => Ok(upstream.get().name().map(|name| name.to_string())),
         Err(_) => {
             let config = repo.config().map_err(|e| format!("Git config: {}", e))?;
-            let remote = config.get_string(&format!("branch.{}.remote", branch_name)).ok();
-            let merge = config.get_string(&format!("branch.{}.merge", branch_name)).ok();
+            let remote = config
+                .get_string(&format!("branch.{}.remote", branch_name))
+                .ok();
+            let merge = config
+                .get_string(&format!("branch.{}.merge", branch_name))
+                .ok();
             Ok(match (remote, merge) {
                 (Some(remote), Some(merge)) => merge
                     .strip_prefix("refs/heads/")
@@ -676,22 +714,27 @@ fn git_remote_callbacks(
             }
         }
         if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
-            let remote_url = remote_url.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(url);
+            let remote_url = remote_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(url);
             if let Some(git_credentials) = credentials.as_ref() {
-                if let Some((username, password)) = username_password_from_request(git_credentials) {
+                if let Some((username, password)) = username_password_from_request(git_credentials)
+                {
                     if git_credentials.save {
                         let _ = store_git_credentials(remote_url, username, password);
                     }
                     return git2::Cred::userpass_plaintext(username, password);
                 }
             }
-            if let Some((username, password)) = read_stored_git_credentials(remote_url, username_from_url) {
+            if let Some((username, password)) =
+                read_stored_git_credentials(remote_url, username_from_url)
+            {
                 return git2::Cred::userpass_plaintext(&username, &password);
             }
-            if let (Ok(username), Ok(password)) = (
-                std::env::var("GIT_USERNAME"),
-                std::env::var("GIT_PASSWORD"),
-            ) {
+            if let (Ok(username), Ok(password)) =
+                (std::env::var("GIT_USERNAME"), std::env::var("GIT_PASSWORD"))
+            {
                 return git2::Cred::userpass_plaintext(&username, &password);
             }
         }
@@ -713,10 +756,16 @@ fn username_password_from_request(credentials: &GitCredentials) -> Option<(&str,
 }
 
 fn store_git_credentials(remote_url: &str, username: &str, password: &str) -> Result<(), String> {
-    credentials::store_secret(&credentials::git_credential_ref(remote_url), &serialize_git_credentials(username, password))
+    credentials::store_secret(
+        &credentials::git_credential_ref(remote_url),
+        &serialize_git_credentials(username, password),
+    )
 }
 
-fn read_stored_git_credentials(remote_url: &str, username_from_url: Option<&str>) -> Option<(String, String)> {
+fn read_stored_git_credentials(
+    remote_url: &str,
+    username_from_url: Option<&str>,
+) -> Option<(String, String)> {
     let stored = credentials::read_secret(&credentials::git_credential_ref(remote_url)).ok()?;
     parse_git_credentials_secret(&stored, username_from_url)
 }
@@ -725,7 +774,10 @@ fn serialize_git_credentials(username: &str, password: &str) -> String {
     format!("{}\n{}", username, password)
 }
 
-fn parse_git_credentials_secret(stored: &str, username_from_url: Option<&str>) -> Option<(String, String)> {
+fn parse_git_credentials_secret(
+    stored: &str,
+    username_from_url: Option<&str>,
+) -> Option<(String, String)> {
     let (username, password) = stored.split_once('\n')?;
     let username = if username.trim().is_empty() {
         username_from_url.unwrap_or("").to_string()
@@ -760,7 +812,9 @@ fn find_index_conflict(
 }
 
 fn blob_text(repo: &git2::Repository, oid: git2::Oid) -> Result<String, String> {
-    let blob = repo.find_blob(oid).map_err(|e| format!("Find blob: {}", e))?;
+    let blob = repo
+        .find_blob(oid)
+        .map_err(|e| format!("Find blob: {}", e))?;
     Ok(String::from_utf8_lossy(blob.content()).to_string())
 }
 
@@ -893,7 +947,9 @@ mod tests {
         assert!(status
             .entries
             .iter()
-            .any(|entry| entry.path == "untracked.txt" && entry.status == "untracked" && !entry.staged));
+            .any(|entry| entry.path == "untracked.txt"
+                && entry.status == "untracked"
+                && !entry.staged));
         assert!(status
             .entries
             .iter()
@@ -1077,8 +1133,13 @@ mod tests {
         let env = TestRepo::new();
         let repo = git2::Repository::open(&env.root).unwrap();
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.reference("refs/remotes/origin/feature", head.id(), true, "test remote")
-            .unwrap();
+        repo.reference(
+            "refs/remotes/origin/feature",
+            head.id(),
+            true,
+            "test remote",
+        )
+        .unwrap();
 
         git_checkout_remote_branch(
             env.root.to_string_lossy().to_string(),
@@ -1089,7 +1150,10 @@ mod tests {
         let status = git_status(env.root.to_string_lossy().to_string()).unwrap();
 
         assert_eq!(status.branch, "feature");
-        assert_eq!(status.upstream.as_deref(), Some("refs/remotes/origin/feature"));
+        assert_eq!(
+            status.upstream.as_deref(),
+            Some("refs/remotes/origin/feature")
+        );
     }
 
     #[test]
