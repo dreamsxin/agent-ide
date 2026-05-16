@@ -68,6 +68,8 @@ export interface LspStatusSnapshot {
   status: string;
   message: string;
   workspaceRoot?: string;
+  languageId: string;
+  languageName: string;
   serverPath?: string;
   serverSource?: string;
   installCommand: string;
@@ -81,22 +83,23 @@ export interface LspStatusSnapshot {
 }
 
 export function isLspLanguage(languageId: string) {
-  return ["typescript", "javascript"].includes(languageId);
+  return ["typescript", "javascript", "go"].includes(languageId);
 }
 
 export function toLspLanguageId(languageId: string) {
   if (languageId === "typescript") return "typescript";
   if (languageId === "javascript") return "javascript";
+  if (languageId === "go") return "go";
   return languageId;
 }
 
-export async function initializeLsp(workspacePath: string | null): Promise<{ ready: boolean; message?: string }> {
-  if (!isTauriRuntime()) return { ready: false, message: "TypeScript LSP is available in the Tauri app runtime." };
+export async function initializeLsp(workspacePath: string | null, languageId = "typescript"): Promise<{ ready: boolean; message?: string }> {
+  if (!isTauriRuntime()) return { ready: false, message: "Language server support is available in the Tauri app runtime." };
   try {
-    await invoke("lsp_initialize", { workspacePath });
+    await invoke("lsp_initialize", { workspacePath, languageId });
     return { ready: true };
   } catch (error) {
-    console.warn("TypeScript LSP unavailable:", error);
+    console.warn("Language server unavailable:", error);
     return { ready: false, message: String(error) };
   }
 }
@@ -111,12 +114,12 @@ export async function getLspStatus() {
   }
 }
 
-export async function probeLsp(workspacePath: string | null) {
+export async function probeLsp(workspacePath: string | null, languageId = "typescript") {
   if (!isTauriRuntime()) return null;
   try {
-    return await invoke<LspStatusSnapshot>("lsp_probe", { workspacePath });
+    return await invoke<LspStatusSnapshot>("lsp_probe", { workspacePath, languageId });
   } catch (error) {
-    console.warn("Probe TypeScript LSP failed:", error);
+    console.warn("Probe language server failed:", error);
     return null;
   }
 }

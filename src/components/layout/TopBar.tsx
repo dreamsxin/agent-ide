@@ -30,6 +30,9 @@ export default function TopBar() {
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const setWorkspacePath = useLayoutStore((s) => s.setWorkspacePath);
+  const activeFile = useEditorStore((s) => s.activeFile);
+  const openFiles = useEditorStore((s) => s.openFiles);
+  const activeTab = openFiles.find((file) => file.path === activeFile) ?? null;
   const lspStatus = useLspStore((s) => s.status);
   const lspMessage = useLspStore((s) => s.message);
   const diagnosticSummaries = useLspStore((s) => s.diagnosticSummaries);
@@ -72,14 +75,15 @@ export default function TopBar() {
 
   const handleLspStatusClick = useCallback(async () => {
     setLspDetailsOpen((value) => !value);
-    const snapshot = (await getLspStatus()) ?? (await probeLsp(workspacePath || null));
+    const languageId = activeTab?.language ?? languageFromPath(activeTab?.path ?? "");
+    const snapshot = (await getLspStatus()) ?? (await probeLsp(workspacePath || null, languageId));
     if (snapshot?.status === "unavailable") {
-      const probe = await probeLsp(workspacePath || null);
+      const probe = await probeLsp(workspacePath || null, languageId);
       setLspDetails(probe ?? snapshot);
       return;
     }
     setLspDetails(snapshot);
-  }, [workspacePath]);
+  }, [activeTab, workspacePath]);
 
   // 窗口控制
   const handleMinimize = () => {
@@ -155,12 +159,12 @@ export default function TopBar() {
           className={`rounded border px-1.5 py-0.5 text-[10px] ${lspStatusClass(lspStatus)}`}
           title={lspMessage}
         >
-          TS {lspStatus}
+          {lspBadgeLabel(lspDetails?.languageId ?? activeTab?.language ?? languageFromPath(activeTab?.path ?? ""))} {lspStatus}
         </button>
         {lspDetailsOpen && (
           <div className="absolute top-10 left-1/2 z-50 w-[360px] -translate-x-1/2 rounded border border-surface-border bg-surface-panel p-3 text-[11px] text-surface-text shadow-xl">
             <div className="mb-2 flex items-center justify-between">
-              <span className="font-semibold">TypeScript LSP</span>
+              <span className="font-semibold">{lspDetails?.languageName ?? "Language Server"}</span>
               <button
                 type="button"
                 onClick={() => setLspDetailsOpen(false)}
@@ -192,7 +196,7 @@ export default function TopBar() {
               <div className="mt-2 rounded border border-diff-modify/30 bg-diff-modify/10 p-2">
                 <div className="mb-1 text-[10px] uppercase text-surface-muted">Install</div>
                 <code className="block select-text break-all font-mono text-[10px] text-surface-text">
-                  {lspDetails?.installCommand ?? "npm install -D typescript typescript-language-server"}
+                  {lspDetails?.installCommand ?? installCommandForLanguage(activeTab?.language ?? languageFromPath(activeTab?.path ?? ""))}
                 </code>
               </div>
             )}
@@ -409,4 +413,22 @@ function lspStatusClass(status: string) {
     default:
       return "border-surface-border bg-surface-base text-surface-muted";
   }
+}
+
+function languageFromPath(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (ext === "go") return "go";
+  if (ext === "ts" || ext === "tsx") return "typescript";
+  if (ext === "js" || ext === "jsx") return "javascript";
+  return "typescript";
+}
+
+function lspBadgeLabel(languageId: string) {
+  if (languageId === "go") return "Go";
+  return "TS";
+}
+
+function installCommandForLanguage(languageId: string) {
+  if (languageId === "go") return "go install golang.org/x/tools/gopls@latest";
+  return "npm install -D typescript typescript-language-server";
 }

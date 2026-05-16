@@ -31,7 +31,8 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - 兼容式 `agent-changes` JSON 协议，同时保留旧的 diff/new-file 代码块解析。
 - Agent diff 支持可选 `baseHash`，用于拒绝基于过期文件内容的编辑。
 - TypeScript/JavaScript 语义能力桥接：保留 Monaco fallback，并支持 `typescript-language-server` 的 hover、completion、definition、document symbols、rename、code actions 和 diagnostics。
-- TopBar 可查看 TypeScript LSP 状态详情，包括 server/workspace 信息、安装指引、workspace indexing 模式、配置文件检测和最近 diagnostics 摘要。
+- Go LSP 第一版：支持 `gopls` 检测、Go 文件激活、安装指引、module/workspace indexing 状态和共享 LSP 操作。
+- TopBar 可查看 language server 状态详情，包括 server/workspace 信息、安装指引、workspace indexing 模式、配置文件检测和最近 diagnostics 摘要。
 - Quick Fix/code action 应用会写入 Logs，并在应用后同步编辑器状态、触发 diagnostics 刷新。
 - Problems 已接入静态 diagnostics 与 terminal/test 失败；所有问题会按严重级别显示编辑器整行高亮、minimap 标记，带文件/行/列的运行时错误会同步为编辑器 marker。
 - build/test/lint/check 命令会进入 command runner history，记录 exit code、耗时、输出详情、Problems 解析和失败后 Agent 修复上下文。
@@ -40,7 +41,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 重要缺口：
 
 - Git 工作流还缺更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
-- LSP 仍需要扩展到 TypeScript/JavaScript 之外的语言，并在更大的真实 workspace 中验证。
+- LSP 仍需要在更大的 TypeScript 和 Go workspace 中验证，并继续增加 Rust/Python adapters。
 - Agent change protocol 还需要更严格的 schema 校验和更完整的 provenance。
 - LLM credential storage 还需要在 Windows Credential Manager、macOS Keychain 和 Linux secret service 上做真实运行时验证。
 - Terminal 还需要在真实 Tauri runtime 中针对面板隐藏/显示、工作区切换和长运行进程做更多交互测试。

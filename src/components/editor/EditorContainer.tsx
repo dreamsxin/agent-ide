@@ -381,12 +381,18 @@ export default function EditorContainer() {
 
   useEffect(() => {
     let cancelled = false;
+    const languageId = activeTab ? activeTab.language || detectLanguage(activeTab.path) : "typescript";
+    if (!isLspLanguage(languageId)) {
+      setLspReady(false);
+      setLspStatus("idle", "Open a TypeScript/JavaScript or Go file to start a language server.");
+      return;
+    }
     lspOpenedFilesRef.current.clear();
     lspFileVersionsRef.current.clear();
     setLspReady(false);
     setLspStatus("checking");
 
-    void initializeLsp(workspacePath || null).then(({ ready, message }) => {
+    void initializeLsp(workspacePath || null, languageId).then(({ ready, message }) => {
       if (cancelled) return;
       setLspReady(ready);
       setLspStatus(ready ? "ready" : "unavailable", message);
@@ -395,7 +401,7 @@ export default function EditorContainer() {
     return () => {
       cancelled = true;
     };
-  }, [setLspStatus, workspacePath]);
+  }, [activeTab, setLspStatus, workspacePath]);
 
   useEffect(() => {
     if (!lspReady || !activeFile || !activeTab) return;

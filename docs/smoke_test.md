@@ -37,19 +37,24 @@ Expected:
 - Tauri-only panels are enabled in desktop runtime.
 - `npm run dev` remains browser preview only and does not expose backend-only features.
 
-## 3. TypeScript LSP Status
+## 3. Language Server Status
 
 Manual check:
 
 1. Open a workspace that contains `package.json`.
 2. Open a `.ts`, `.tsx`, `.js`, or `.jsx` file.
 3. Click the `TS ready/unavailable/error` status in the TopBar.
+4. Open a Go workspace with `go.mod` or `go.work`, then open a `.go` file.
+5. Click the `Go ready/unavailable/error` status in the TopBar.
 
 Expected:
 
 - Status becomes `ready` when `typescript-language-server` is available.
+- Go status becomes `ready` when `gopls` is available.
 - Details show server path, workspace root, opened documents, changes, diagnostics count, and last error when present.
-- Details show server source, install command, detected `tsconfig.json`/`jsconfig.json`/`package.json`, and indexing mode.
+- Details show server source, install command, detected config files, and indexing mode.
+- Missing TypeScript server shows `npm install -D typescript typescript-language-server`.
+- Missing Go server shows `go install golang.org/x/tools/gopls@latest`.
 - Recent diagnostics show per-file `error/warning/info` counts after diagnostics are published.
 - If the server is unavailable, the status explains how to install it.
 

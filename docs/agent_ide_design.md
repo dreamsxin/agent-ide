@@ -327,14 +327,15 @@ The editor has three marker bridges:
 
 Paths are normalized before tab matching, marker matching, and problem navigation. This avoids duplicate tabs and broken paths such as URL-encoded Windows drive paths.
 
-### 4.6.2 TypeScript/JavaScript Semantic Bridge
+### 4.6.2 Language Server Semantic Bridge
 
-Current TypeScript/JavaScript semantic support uses two layers:
+Current semantic support uses two layers:
 
 - Monaco TypeScript/JavaScript worker fallback for open-file syntax and semantic diagnostics.
 - Optional `typescript-language-server` backend for hover, completion, definition, document symbols, rename, code actions, and diagnostics.
+- Optional `gopls` backend for Go hover, completion, definition, document symbols, rename, code actions, and diagnostics.
 
-The Rust backend searches for `typescript-language-server` in workspace `node_modules/.bin`, `%APPDATA%\npm` on Windows, and `PATH`. TopBar shows `TS checking`, `TS ready`, or `TS unavailable`; the details popover includes startup errors, install command, server source, detected `tsconfig.json`/`jsconfig.json`/`package.json`, and the inferred indexing mode.
+The Rust backend chooses a language server from the active file language. TypeScript/JavaScript use `typescript-language-server`; Go uses `gopls`. TopBar shows `TS checking/ready/unavailable` or `Go checking/ready/unavailable`; the details popover includes startup errors, install command, server source, detected config files, and inferred indexing mode.
 
 Remaining semantic work:
 

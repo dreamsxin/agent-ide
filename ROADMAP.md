@@ -106,6 +106,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added one-shot Git credential inputs for remote actions, remote branch checkout/tracking, and conflict resolution controls for accept current, accept incoming, accept both, and conflict diff navigation.
 - Added optional OS credential storage for HTTPS Git remote username/token inputs used by fetch, pull, and push.
 - Added TypeScript LSP status details in the TopBar, including server path/source, workspace, install command, indexing mode, detected config files, opened document count, change count, diagnostics count, last error, and recent per-file diagnostics summaries.
+- Added Go LSP first pass using `gopls`, with active Go-file startup, install guidance, go.mod/go.work indexing detection, and shared LSP operations.
 - Routed Monaco Quick Fix/code actions through an explicit apply command that logs success/failure, syncs editor store state, and triggers LSP `didChange` so Problems and markers refresh after fixes.
 - Enabled JavaScript semantic diagnostics in Monaco TS worker defaults instead of syntax-only JavaScript validation.
 - Added frontend Vitest coverage for Windows/file-URI path normalization and terminal output problem parsing.
@@ -151,7 +152,7 @@ Known local worktree note:
 - `src/components/editor/DiagnosticsBridge.tsx`: syncs Monaco diagnostics into Problems.
 - `src/components/editor/ProblemsMarkerBridge.tsx`: mirrors runtime/test/Agent/system Problems into Monaco markers and active-line decorations.
 - `src/utils/codeCompletion.ts`: local completion candidate extraction for Monaco suggestions.
-- `src/utils/lspClient.ts`: frontend bridge for TypeScript LSP hover, completion, definition, symbols, rename, code actions, diagnostics, and status snapshots.
+- `src/utils/lspClient.ts`: frontend bridge for TypeScript/JavaScript and Go LSP hover, completion, definition, symbols, rename, code actions, diagnostics, and status snapshots.
 - `src/components/panels/`: Explorer, Git panel, terminal, logs.
 - `src/components/panels/ProblemsPanel.tsx`: unified Problems view for diagnostics, test failures, and Agent findings.
 - `src/components/panels/TasksPanel.tsx`: project command list for discovered build/test/lint/run/debug commands.
@@ -364,6 +365,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Monaco now has stable local keyword/symbol/snippet/path suggestions for non-TS languages.
    - TypeScript/JavaScript now use Monaco TS worker semantic completion/hover/diagnostics for open models.
    - TypeScript LSP-backed hover, completion, definition, document symbols, rename, code actions, diagnostics, and status snapshots are wired.
+   - Go LSP first pass is wired through `gopls` detection/startup, shared operations, and Go module/workspace indexing status.
    - Code actions now log apply success/failure and trigger LSP diagnostics refresh after edits.
    - Workspace indexing/install UX is wired through TopBar probe details; large-workspace runtime validation still remains.
    - No LLM inline completion request path yet.
@@ -530,7 +532,7 @@ target\release\agent_cli --help
 2. Add better SSH/passphrase UX for Git remote operations.
 3. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
 4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and large-workspace indexing behavior.
-5. Add Rust/Python LSP adapters after TypeScript runtime validation.
+5. Add Rust/Python LSP adapters after TypeScript and Go runtime validation.
 6. Add stricter validation to the structured Agent protocol.
 7. Persist Agent action logs with prompt/context/diff provenance.
 8. Runtime-validate OS credential storage for LLM profiles and add recovery UX for inaccessible/missing credentials.
@@ -538,4 +540,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; TypeScript LSP install/indexing UX is wired, while large-workspace LSP validation, SSH/passphrase UX, and merge editor controls remain next.*
+*Last updated: 2026-05-16 - Phase 7 in progress; Go LSP/gopls first pass is wired alongside TypeScript, while large-workspace validation, SSH/passphrase UX, and merge editor controls remain next.*
