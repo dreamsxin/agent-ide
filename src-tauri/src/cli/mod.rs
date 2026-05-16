@@ -150,6 +150,9 @@ struct RunArgs {
     #[arg(long = "run-command")]
     run_commands: Vec<String>,
 
+    #[arg(long = "allow-run")]
+    allow_run: Vec<String>,
+
     #[arg(long, default_value_t = 0)]
     max_iterations: u8,
 }
@@ -179,6 +182,7 @@ impl Default for RunArgs {
             prompt_file: None,
             stdin: false,
             run_commands: Vec::new(),
+            allow_run: Vec::new(),
             max_iterations: 0,
         }
     }
@@ -537,6 +541,7 @@ async fn run_agent_command(
         .clone()
         .unwrap_or_else(|| default_artifact_dir(&workspace_path, &run_id));
     let prompt = read_prompt(&args, positional_prompt)?;
+    validate_repair_permissions(&args)?;
     let llm = build_llm_client(&args)?;
     let mut context = build_workspace_context(&workspace_path, &args.include);
     context.enrich_from_workspace_with_sources(&source_options(&args.include));
@@ -1218,6 +1223,60 @@ fn read_prompt(
     }
 }
 
+fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)> {
+    if args.max_iterations == 0 {
+        return Ok(());
+    }
+    if !args.apply {
+        return Err((
+            ExitCode::InvalidInput,
+            "--max-iterations requires --apply so generated repair diffs can be tested."
+                .to_string(),
+        ));
+    }
+    if args.run_commands.is_empty() {
+        return Err((
+            ExitCode::InvalidInput,
+            "--max-iterations requires at least one --run-command check.".to_string(),
+        ));
+    }
+
+    let unauthorized = args
+        .run_commands
+        .iter()
+        .filter(|command| !is_command_allowed(command, &args.allow_run))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unauthorized.is_empty() {
+        return Err((
+            ExitCode::InvalidInput,
+            format!(
+                "--max-iterations requires explicit --allow-run for command(s): {}",
+                unauthorized.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn is_command_allowed(command: &str, allow_run: &[String]) -> bool {
+    let command = normalize_command_pattern(command);
+    allow_run.iter().any(|pattern| {
+        let pattern = normalize_command_pattern(pattern);
+        if pattern == "*" {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return command.starts_with(prefix.trim_end());
+        }
+        command == pattern
+    })
+}
+
+fn normalize_command_pattern(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf, (ExitCode, String)> {
     let candidate = match path {
         Some(path) => path.to_path_buf(),
@@ -1364,19 +1423,51 @@ mod tests {
             "npm test",
             "--run-command",
             "cargo test",
+            "--allow-run",
+            "npm test",
+            "--allow-run",
+            "cargo *",
             "--max-iterations",
             "2",
+            "--apply",
             "fix tests",
         ])
         .unwrap();
         match cli.command {
             Some(CliCommand::Run(args)) => {
                 assert_eq!(args.run.run_commands, vec!["npm test", "cargo test"]);
+                assert_eq!(args.run.allow_run, vec!["npm test", "cargo *"]);
                 assert_eq!(args.run.max_iterations, 2);
+                assert!(args.run.apply);
                 assert_eq!(args.prompt, vec!["fix tests".to_string()]);
             }
             _ => panic!("expected run command"),
         }
+    }
+
+    #[test]
+    fn repair_permissions_require_allow_run() {
+        let mut args = RunArgs {
+            apply: true,
+            max_iterations: 1,
+            run_commands: vec!["npm test".to_string()],
+            ..RunArgs::default()
+        };
+
+        assert!(validate_repair_permissions(&args).is_err());
+
+        args.allow_run = vec!["npm test".to_string()];
+        assert!(validate_repair_permissions(&args).is_ok());
+    }
+
+    #[test]
+    fn repair_permissions_support_prefix_wildcard() {
+        assert!(is_command_allowed(
+            "cargo test --all",
+            &["cargo *".to_string()]
+        ));
+        assert!(!is_command_allowed("npm test", &["cargo *".to_string()]));
+        assert!(is_command_allowed("npm run test", &["*".to_string()]));
     }
 
     #[test]

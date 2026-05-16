@@ -475,7 +475,7 @@ Deliverables:
 - Parse command output into Problems.
 - Feed failed checks back into Agent repair context.
 - Add `--max-iterations`.
-- Add command allow-list policy.
+- Add command allow-list policy. **Current: first pass implemented as `--allow-run` for repair loops.**
 
 Acceptance:
 
@@ -489,7 +489,8 @@ Current status:
 - Shared command-output problem parsing lives in `services/problem_parser.rs`.
 - Shared Agent single-step runtime helpers live in `services/agent_runtime.rs`, including step-context enrichment and diff provenance used by both CLI execution and IDE single-step/regenerate flows.
 - `--max-iterations` provides a first bounded repair loop after `--apply` and failed `--run-command` checks: failed command output and parsed Problems are injected into a repair prompt, new diffs are applied, and checks rerun.
-- Command allow-list policy, timeout policy, and richer failure-chain artifacts are still pending.
+- `--allow-run` is required when `--max-iterations` is enabled. Exact commands, prefix patterns such as `cargo *`, and trusted wildcard `*` are supported.
+- Timeout policy, broader permission policy, and richer failure-chain artifacts are still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 
