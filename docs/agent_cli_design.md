@@ -425,13 +425,14 @@ agent-ide run `
 
 Deliverables:
 
-- Replace manual argument parsing with a real parser such as `clap`.
-- Add subcommands: `doctor`, `context estimate`, `plan`, `run`.
+- Replace manual argument parsing with a real parser such as `clap`. **Current: done.**
+- Add subcommands: `doctor`, `context estimate`, `plan`, `run`. **Current: first pass done.**
 - Add `--profile`, `--context-mode`, `--include`, `--prompt-file`, `--stdin`.
-- Add `--output text|json|ndjson`.
-- Add stable exit codes.
-- Add run-id and artifact directory.
-- Add tests for help output, invalid args, exit-code mapping, and JSON serialization.
+- Add `--context-mode`, `--include`, `--prompt-file`, `--stdin`. **Current: done for CLI-local context sources; profile is still pending.**
+- Add `--output text|json|ndjson`. **Current: done.**
+- Add stable exit codes. **Current: done.**
+- Add run-id and artifact directory. **Current: done.**
+- Add tests for help output, invalid args, exit-code mapping, and JSON serialization. **Current: parser and exit-code tests are in place; more smoke tests are still needed.**
 
 Acceptance:
 

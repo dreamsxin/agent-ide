@@ -5,6 +5,7 @@ use commands::terminal::TerminalManager;
 use tauri::Manager;
 
 pub mod agent;
+pub mod cli;
 mod commands;
 pub mod services;
 
