@@ -492,7 +492,9 @@ Current status:
 - `--max-iterations` provides a first bounded repair loop after `--apply` and failed `--run-command` checks: failed command output and parsed Problems are injected into a repair prompt, new diffs are applied, and checks rerun.
 - `--allow-run` is required when `--max-iterations` is enabled. Exact commands, prefix patterns such as `cargo *`, and trusted wildcard `*` are supported.
 - `repair-chain.json` records each bounded repair iteration as failure context -> repair prompt -> generated diffs -> apply result -> rerun result.
-- Timeout policy, broader permission policy, and compact chain summaries are still pending.
+- `--timeout-seconds`, `--max-output-bytes`, and `--max-diff-files` provide first-pass automation limits.
+- Compact text summaries include command/problem/repair counts for CI logs.
+- Broader permission policy and dedicated CLI smoke tests are still pending.
 
 ### Phase CLI-5: Toolchain Packaging
 
@@ -519,7 +521,6 @@ Do not keep expanding this into a second interactive IDE by default. Interactive
 
 Recommended next hardening tasks:
 
-1. Add timeout, max-output, and max-diff-size policy to bounded repair loops.
-2. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and `repair-chain.json`.
-3. Add compact CI summaries while preserving full artifacts.
-4. Keep `doctor --output json` as the machine-readable capability contract for external tools.
+1. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and `repair-chain.json`.
+2. Add compact repair-chain summaries while preserving full artifacts.
+3. Keep `doctor --output json` as the machine-readable capability contract for external tools.

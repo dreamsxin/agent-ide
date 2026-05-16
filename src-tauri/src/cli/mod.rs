@@ -20,6 +20,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +156,15 @@ struct RunArgs {
 
     #[arg(long, default_value_t = 0)]
     max_iterations: u8,
+
+    #[arg(long)]
+    timeout_seconds: Option<u64>,
+
+    #[arg(long)]
+    max_output_bytes: Option<usize>,
+
+    #[arg(long)]
+    max_diff_files: Option<usize>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -184,6 +194,9 @@ impl Default for RunArgs {
             run_commands: Vec::new(),
             allow_run: Vec::new(),
             max_iterations: 0,
+            timeout_seconds: None,
+            max_output_bytes: None,
+            max_diff_files: None,
         }
     }
 }
@@ -268,6 +281,10 @@ struct CliCapabilities {
     supports_run_command_checks: bool,
     supports_bounded_repair: bool,
     supports_run_allow_list: bool,
+    supports_timeout_policy: bool,
+    supports_output_limit: bool,
+    supports_diff_file_limit: bool,
+    supports_compact_ci_summary: bool,
     supports_interactive_review: bool,
     supports_git_mutation: bool,
     scope: String,
@@ -690,8 +707,10 @@ async fn run_agent_command(
         &steps,
         &mut output,
         cancel_flag,
+        args.timeout_seconds,
     )
     .await?;
+    validate_diff_limit(&diffs, args.max_diff_files)?;
     output.event(CliEvent::DiffsReady {
         diff_count: diffs.len(),
     });
@@ -712,6 +731,7 @@ async fn run_agent_command(
     }
 
     let mut command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+    trim_command_outputs(&mut command_results, args.max_output_bytes);
     let mut checks_failed = command_results
         .iter()
         .any(|result| result.exit_code.unwrap_or(-1) != 0);
@@ -749,8 +769,10 @@ async fn run_agent_command(
                 &repair_steps,
                 &mut output,
                 Arc::new(AtomicBool::new(false)),
+                args.timeout_seconds,
             )
             .await?;
+            validate_diff_limit(&repair_diffs, args.max_diff_files)?;
             let repair_apply = apply_pending_diffs(&repair_diffs);
             output.event(CliEvent::ApplyFinished {
                 applied_count: repair_apply.applied.len(),
@@ -759,6 +781,7 @@ async fn run_agent_command(
             diffs.extend(repair_diffs.clone());
             apply_results.push(repair_apply.clone());
             command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+            trim_command_outputs(&mut command_results, args.max_output_bytes);
             checks_failed = command_results
                 .iter()
                 .any(|result| result.exit_code.unwrap_or(-1) != 0);
@@ -875,10 +898,11 @@ async fn execute_steps(
     steps: &[TaskStep],
     output: &mut CliOutput,
     cancel_flag: Arc<AtomicBool>,
+    timeout_seconds: Option<u64>,
 ) -> Result<Vec<FileDiff>, (ExitCode, String)> {
     let output_mode = output.mode;
     let deferred_events = RefCell::new(Vec::<CliEvent>::new());
-    let results = agent_runtime::execute_agent_steps(
+    let execution = agent_runtime::execute_agent_steps(
         llm,
         prompt,
         context_text,
@@ -913,8 +937,19 @@ async fn execute_steps(
             );
         },
         |_| token_sender_for_mode(output_mode),
-    )
-    .await
+    );
+    let results = if let Some(seconds) = timeout_seconds {
+        timeout(Duration::from_secs(seconds), execution)
+            .await
+            .map_err(|_| {
+                (
+                    ExitCode::ProviderFailed,
+                    format!("Agent execution timed out after {} second(s).", seconds),
+                )
+            })?
+    } else {
+        execution.await
+    }
     .map_err(|err| (ExitCode::ProviderFailed, err))?;
     output.events.extend(deferred_events.into_inner());
 
@@ -967,6 +1002,9 @@ fn print_text_summary(summary: &CliSummary) {
     println!("Artifacts:{}", summary.artifact_dir);
     println!("Plan:     {} step(s)", summary.plan.len());
     println!("Diffs:    {} file(s)", summary.diffs.len());
+    println!("Commands: {} run(s)", summary.commands.len());
+    println!("Problems: {} item(s)", summary.problems.len());
+    println!("Repair:   {} iteration(s)", summary.repair_chain.len());
     if let Some(result) = &summary.apply_result {
         println!(
             "Apply:    {} applied, {} failed",
@@ -976,6 +1014,16 @@ fn print_text_summary(summary: &CliSummary) {
     }
     for error in &summary.errors {
         println!("Error:    {}", error);
+    }
+    if !summary.repair_chain.is_empty() {
+        for iteration in &summary.repair_chain {
+            println!(
+                "Repair #{}: {} diff file(s), checks_failed_after={}",
+                iteration.iteration,
+                iteration.diffs.len(),
+                iteration.checks_failed_after
+            );
+        }
     }
     println!("====================");
 }
@@ -1114,6 +1162,10 @@ fn cli_capabilities() -> CliCapabilities {
         supports_run_command_checks: true,
         supports_bounded_repair: true,
         supports_run_allow_list: true,
+        supports_timeout_policy: true,
+        supports_output_limit: true,
+        supports_diff_file_limit: true,
+        supports_compact_ci_summary: true,
         supports_interactive_review: false,
         supports_git_mutation: false,
         scope: "headless automation runner; not a full command-line IDE".to_string(),
@@ -1127,10 +1179,20 @@ async fn run_cli_checks(
 ) -> Result<Vec<RunProjectTaskResult>, (ExitCode, String)> {
     let mut results = Vec::new();
     for command in &args.run_commands {
-        let result =
-            project_tasks::run_project_command(command.clone(), workspace_path.to_path_buf())
+        let run = project_tasks::run_project_command(command.clone(), workspace_path.to_path_buf());
+        let result = if let Some(seconds) = args.timeout_seconds {
+            timeout(Duration::from_secs(seconds), run)
                 .await
-                .map_err(|err| (ExitCode::InternalError, err))?;
+                .map_err(|_| {
+                    (
+                        ExitCode::ChecksFailed,
+                        format!("Command timed out after {} second(s): {}", seconds, command),
+                    )
+                })?
+        } else {
+            run.await
+        }
+        .map_err(|err| (ExitCode::InternalError, err))?;
         output.event(CliEvent::CommandFinished {
             command: result.command.clone(),
             exit_code: result.exit_code,
@@ -1139,6 +1201,53 @@ async fn run_cli_checks(
         results.push(result);
     }
     Ok(results)
+}
+
+fn validate_diff_limit(
+    diffs: &[FileDiff],
+    max_diff_files: Option<usize>,
+) -> Result<(), (ExitCode, String)> {
+    let Some(limit) = max_diff_files else {
+        return Ok(());
+    };
+    if diffs.len() > limit {
+        return Err((
+            ExitCode::PreconditionFailed,
+            format!(
+                "Generated {} diff file(s), exceeding --max-diff-files {}.",
+                diffs.len(),
+                limit
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn trim_command_outputs(results: &mut [RunProjectTaskResult], max_output_bytes: Option<usize>) {
+    let Some(limit) = max_output_bytes else {
+        return;
+    };
+    for result in results {
+        result.stdout = trim_text_bytes(&result.stdout, limit);
+        result.stderr = trim_text_bytes(&result.stderr, limit);
+    }
+}
+
+fn trim_text_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = 0usize;
+    for (index, _) in value.char_indices() {
+        if index > max_bytes {
+            break;
+        }
+        end = index;
+    }
+    if end == 0 {
+        return "... output truncated ...".to_string();
+    }
+    format!("{}\n... output truncated ...", &value[..end])
 }
 
 fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec<ProblemEntry> {
@@ -1538,6 +1647,12 @@ mod tests {
             "cargo *",
             "--max-iterations",
             "2",
+            "--timeout-seconds",
+            "30",
+            "--max-output-bytes",
+            "1024",
+            "--max-diff-files",
+            "5",
             "--apply",
             "fix tests",
         ])
@@ -1547,6 +1662,9 @@ mod tests {
                 assert_eq!(args.run.run_commands, vec!["npm test", "cargo test"]);
                 assert_eq!(args.run.allow_run, vec!["npm test", "cargo *"]);
                 assert_eq!(args.run.max_iterations, 2);
+                assert_eq!(args.run.timeout_seconds, Some(30));
+                assert_eq!(args.run.max_output_bytes, Some(1024));
+                assert_eq!(args.run.max_diff_files, Some(5));
                 assert!(args.run.apply);
                 assert_eq!(args.prompt, vec!["fix tests".to_string()]);
             }
@@ -1604,6 +1722,40 @@ mod tests {
 
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].command, "npm test");
+    }
+
+    #[test]
+    fn trim_text_bytes_preserves_utf8_boundary() {
+        let trimmed = trim_text_bytes("abcd你好", 5);
+
+        assert!(trimmed.starts_with("abcd"));
+        assert!(trimmed.contains("output truncated"));
+        assert!(std::str::from_utf8(trimmed.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn validate_diff_limit_rejects_too_many_files() {
+        let diffs = vec![
+            FileDiff {
+                id: "d1".to_string(),
+                file: "a.ts".to_string(),
+                base_hash: None,
+                provenance: None,
+                hunks: Vec::new(),
+                status: "pending".to_string(),
+            },
+            FileDiff {
+                id: "d2".to_string(),
+                file: "b.ts".to_string(),
+                base_hash: None,
+                provenance: None,
+                hunks: Vec::new(),
+                status: "pending".to_string(),
+            },
+        ];
+
+        assert!(validate_diff_limit(&diffs, Some(1)).is_err());
+        assert!(validate_diff_limit(&diffs, Some(2)).is_ok());
     }
 
     #[test]
@@ -1674,6 +1826,10 @@ mod tests {
         assert!(capabilities.subcommands.contains(&"run".to_string()));
         assert!(capabilities.supports_profiles);
         assert!(capabilities.supports_bounded_repair);
+        assert!(capabilities.supports_timeout_policy);
+        assert!(capabilities.supports_output_limit);
+        assert!(capabilities.supports_diff_file_limit);
+        assert!(capabilities.supports_compact_ci_summary);
         assert!(!capabilities.supports_interactive_review);
         assert!(!capabilities.supports_git_mutation);
         assert!(capabilities.scope.contains("headless automation"));

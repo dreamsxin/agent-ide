@@ -231,12 +231,21 @@ target\release\agent_cli run `
   --run-command "npm test" `
   --allow-run "npm test" `
   --max-iterations 2 `
+  --timeout-seconds 120 `
+  --max-output-bytes 60000 `
+  --max-diff-files 20 `
   "Fix failing tests"
 ```
 
 When checks fail after an applied change, the CLI builds a repair prompt from the failed command output and parsed Problems, generates another diff, applies it, and reruns the checks until they pass or the iteration budget is exhausted. Repair mode requires each check command to be authorized with `--allow-run`. Use an exact command, a prefix pattern such as `cargo *`, or `*` for all commands in trusted workspaces.
 
 Each repair iteration is recorded in `repair-chain.json` with the failed commands before repair, parsed Problems, generated diffs, apply result, rerun command results, and final failed/pass state for that iteration.
+
+Hardening flags:
+
+- `--timeout-seconds <N>` bounds Agent execution and command checks.
+- `--max-output-bytes <N>` trims command stdout/stderr in artifacts after Problems are parsed.
+- `--max-diff-files <N>` rejects generated changes that touch too many files.
 
 ## Exit Codes
 
@@ -274,6 +283,8 @@ Implemented:
 - bounded repair iterations with `--max-iterations` after applied command-check failures.
 - repair-loop command authorization through `--allow-run`.
 - repair-chain artifacts that link failures, generated repair diffs, apply results, and rerun results.
+- timeout, command-output, and generated-diff file-count limits for automation runs.
+- compact text summaries with command/problem/repair counts for CI logs.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 
@@ -292,10 +303,9 @@ Intentionally outside the current CLI scope:
 
 The detailed implementation plan is tracked in [agent_cli_design.md](agent_cli_design.md). The CLI surface can now be treated as Phase 1-4 first-pass complete. Further work should focus on hardening the automation contract rather than adding desktop-IDE features:
 
-1. Add timeout, max-output, and max-diff-size limits for repair loops.
-2. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and repair-chain artifacts.
-3. Add compact repair-chain summaries for CI logs while keeping full artifacts on disk.
-4. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
+1. Add CLI smoke tests around `doctor --output json`, preview mode, apply mode, and repair-chain artifacts.
+2. Add compact repair-chain summaries for CI logs while keeping full artifacts on disk.
+3. Expand permission policy beyond command checks to file create/delete and Git mutations only if the CLI scope is intentionally widened.
 
 ## Safety Notes
 
