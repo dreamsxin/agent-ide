@@ -335,16 +335,32 @@ export default function DiffView() {
                           .join(" / ")}
                       </span>
                     )}
-                    {diff.provenance.rationale && (
-                      <span className="min-w-0 flex-1 truncate">
-                        {diff.provenance.rationale}
+                  {diff.provenance.rationale && (
+                    <span className="min-w-0 flex-1 truncate">
+                      {diff.provenance.rationale}
+                    </span>
+                  )}
+                    {diff.provenance.regeneratedFromDiffId && (
+                      <span
+                        className="rounded border border-diff-modify/40 bg-diff-modify/10 px-1 py-0.5 text-diff-modify"
+                        title={
+                          diff.provenance.regeneratedFromHunkIndex != null
+                            ? `Regenerated from ${diff.provenance.regeneratedFromDiffId}, hunk ${diff.provenance.regeneratedFromHunkIndex}`
+                            : `Regenerated from ${diff.provenance.regeneratedFromDiffId}`
+                        }
+                      >
+                        regenerated
                       </span>
                     )}
                   </div>
                 )}
-                {diff.status === "partial" && (
-                  <div className="mt-1 text-[10px] text-surface-muted">
-                    Hunks: {counts.pending} pending, {counts.applied} applied, {counts.rejected} rejected, {counts.failed} failed
+                {(diff.status === "partial" || hasReviewedHunks(counts)) && (
+                  <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
+                    <span className="text-surface-muted">Hunks:</span>
+                    <HunkCount label="pending" count={counts.pending} className="border-surface-border text-surface-muted" />
+                    <HunkCount label="applied" count={counts.applied} className="border-diff-add/40 text-diff-add" />
+                    <HunkCount label="rejected" count={counts.rejected} className="border-diff-remove/40 text-diff-remove" />
+                    <HunkCount label="failed" count={counts.failed} className="border-diff-remove/40 bg-diff-remove/10 text-diff-remove" />
                   </div>
                 )}
                 {diff.status === "pending" && (
@@ -436,6 +452,14 @@ function isHashMismatch(message?: string) {
   return message.includes("baseHash") || message.includes("File changed since diff was generated");
 }
 
+function HunkCount({ label, count, className }: { label: string; count: number; className: string }) {
+  return (
+    <span className={`rounded border px-1 py-0.5 ${className}`}>
+      {count} {label}
+    </span>
+  );
+}
+
 function isReviewableDiffStatus(status: DiffEntry["status"]) {
   return status === "pending" || status === "partial" || status === "failed";
 }
@@ -449,6 +473,10 @@ function getHunkStatusCounts(hunks: DiffHunk[]) {
     },
     { pending: 0, applied: 0, rejected: 0, failed: 0 } as Record<NonNullable<DiffHunk["status"]>, number>
   );
+}
+
+function hasReviewedHunks(counts: Record<NonNullable<DiffHunk["status"]>, number>) {
+  return counts.applied > 0 || counts.rejected > 0 || counts.failed > 0;
 }
 
 function diffStatusLabel(status: DiffEntry["status"]) {

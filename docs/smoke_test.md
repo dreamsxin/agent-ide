@@ -290,3 +290,45 @@ Record each manual smoke run with:
 Recommended first target:
 
 - Complete sections 2 through 9 before expanding Rust/Python LSP adapters.
+
+### Smoke Run Template
+
+Copy this block into the release notes section for each real-runtime validation pass:
+
+```text
+Date:
+Commit:
+OS / shell:
+Workspace:
+Node / npm:
+Rust:
+typescript-language-server:
+gopls:
+
+Checklist result:
+- Runtime mode:
+- Language server status:
+- Diagnostics -> Problems -> editor markers:
+- Quick Fix / code actions:
+- Commands / Run History / Problems:
+- Terminal runtime:
+- Git workflow:
+- Agent repair loop:
+- End-to-end daily IDE loop:
+- Large workspace LSP indexing:
+
+Blocking daily-IDE issues:
+- None / list reproduction steps
+
+Follow-up fixes:
+- None / link issue or commit
+```
+
+## 14. Current Phase 8 Baseline
+
+Status as of 2026-05-16:
+
+- Automated CLI smoke coverage exists for `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json`.
+- Frontend unit coverage exists for file URI/path normalization, terminal failure parsing, problem store behavior, and LSP diagnostics bridging.
+- Rust unit coverage exists for Git conflict/status operations, LSP path/indexing helpers, Agent context/diff behavior, and CLI repair artifacts.
+- Full Tauri desktop runtime smoke remains required before calling Phase 8 complete, especially for PTY lifecycle, Monaco marker rendering, real LSP server behavior, OS credential storage, and remote Git operations.

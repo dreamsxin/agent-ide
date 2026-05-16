@@ -152,6 +152,8 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added first-pass CLI bounded repair iterations with `--max-iterations`, feeding failed `--run-command` output and parsed Problems back into an Agent repair prompt after applied changes.
 - Added first-pass CLI repair-loop command authorization with `--allow-run`, including exact, prefix wildcard, and trusted all-command patterns.
 - Added `repair-chain.json` artifacts for CLI repair loops, linking failed commands, parsed Problems, generated repair diffs, apply results, and rerun results.
+- Added Pipeline stage source/output visualization from Agent action logs and clearer Diff hunk review/regeneration status in the desktop UI.
+- Added a reusable Phase 8 real-runtime smoke run template and baseline notes to `docs/smoke_test.md`.
 
 Important distinction:
 
@@ -655,4 +657,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - README status was condensed to a capability snapshot; ROADMAP remains the detailed project-state source of truth. Phase 7 is feature-complete, Windows packaging automation is wired, and Phase 8 runtime smoke remains next.*
+*Last updated: 2026-05-16 - Phase 8 desktop polish continued: Pipeline stage source/output summaries and clearer Diff hunk/regeneration status are wired, and the real-runtime smoke template is documented. Full Tauri runtime smoke remains next.*
