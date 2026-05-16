@@ -8,7 +8,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 
 ## 当前状态
 
-当前阶段：**Phase 7 - Agent execution quality and auditability**。
+当前阶段：**Phase 7/8 in progress - daily IDE replacement hardening**。
 
 已实现的核心能力：
 

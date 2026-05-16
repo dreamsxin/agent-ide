@@ -10,7 +10,7 @@ Agent IDE is not intended to be a chat-only coding tool. The product direction i
 
 ## Current Status
 
-Current phase: **Phase 7 - Agent execution quality and auditability**.
+Current phase: **Phase 7/8 in progress - daily IDE replacement hardening**.
 
 Implemented core capabilities:
 
