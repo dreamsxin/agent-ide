@@ -41,6 +41,17 @@ pub struct AgentOrchestrator {
     pub diffs: Vec<crate::agent::state_machine::FileDiff>,
     pub current_run_id: Option<String>,
     pub last_run_id: Option<String>,
+    pub paused_run: Option<PausedPipelineRun>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PausedPipelineRun {
+    pub prompt: String,
+    pub context: String,
+    pub context_summary: String,
+    pub stage_outputs: Vec<String>,
+    pub pipeline: Vec<PipelineStage>,
+    pub stage_index: usize,
 }
 
 impl AgentOrchestrator {
@@ -52,6 +63,7 @@ impl AgentOrchestrator {
             diffs: Vec::new(),
             current_run_id: None,
             last_run_id: None,
+            paused_run: None,
         }
     }
 
@@ -115,7 +127,7 @@ impl AgentOrchestrator {
             Some(context_summary.clone()),
             None,
         );
-        let mut pipeline = if pipeline.is_empty() {
+        let pipeline = if pipeline.is_empty() {
             reset_pipeline_status(&crate::agent::multi_agent::default_pipeline())
         } else {
             reset_pipeline_status(&pipeline)
@@ -163,11 +175,50 @@ impl AgentOrchestrator {
         );
 
         // 4. Execute the configured role pipeline.
-        let mut stage_outputs: Vec<String> = vec![format!("Planner:\n{}", _full_response)];
-        for stage_index in 0..pipeline.len() {
+        let stage_outputs: Vec<String> = vec![format!("Planner:\n{}", _full_response)];
+        self.continue_pipeline_from(
+            prompt,
+            ctx_str,
+            context_summary,
+            pipeline,
+            stage_outputs,
+            0,
+            false,
+            cancel_flag,
+            llm,
+            app,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn continue_pipeline_from(
+        &mut self,
+        prompt: String,
+        ctx_str: String,
+        context_summary: String,
+        mut pipeline: Vec<PipelineStage>,
+        mut stage_outputs: Vec<String>,
+        start_index: usize,
+        ignore_pause_once: bool,
+        cancel_flag: Arc<AtomicBool>,
+        llm: &LlmClient,
+        app: AppHandle,
+    ) -> Result<(), String> {
+        use crate::agent::state_machine::AgentEvent;
+
+        for stage_index in start_index..pipeline.len() {
             let stage = pipeline[stage_index].clone();
-            if stage.pause_before {
+            if stage.pause_before && !(ignore_pause_once && stage_index == start_index) {
                 mark_pipeline_stage(&mut pipeline, stage_index, "paused");
+                self.paused_run = Some(PausedPipelineRun {
+                    prompt: prompt.clone(),
+                    context: ctx_str.clone(),
+                    context_summary: context_summary.clone(),
+                    stage_outputs: stage_outputs.clone(),
+                    pipeline: pipeline.clone(),
+                    stage_index,
+                });
                 self.emit_pipeline(&app, &pipeline);
                 self.emit_action_log(
                     &app,
@@ -766,6 +817,26 @@ mod tests {
 
         assert_eq!(orchestrator.current_run_id, None);
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn paused_pipeline_snapshot_can_be_stored_for_resume() {
+        let mut orchestrator = AgentOrchestrator::new();
+        let pipeline = crate::agent::multi_agent::default_pipeline();
+
+        orchestrator.paused_run = Some(PausedPipelineRun {
+            prompt: "Fix issue".to_string(),
+            context: "context".to_string(),
+            context_summary: "summary".to_string(),
+            stage_outputs: vec!["Planner output".to_string()],
+            pipeline: pipeline.clone(),
+            stage_index: 1,
+        });
+
+        let paused = orchestrator.paused_run.as_ref().expect("paused run");
+        assert_eq!(paused.stage_index, 1);
+        assert_eq!(paused.pipeline.len(), pipeline.len());
+        assert_eq!(paused.stage_outputs[0], "Planner output");
     }
 
     #[test]

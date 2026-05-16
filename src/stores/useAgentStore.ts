@@ -104,6 +104,7 @@ interface AgentStore {
   updateAgentSteps: (steps: Step[]) => Promise<Step[]>;
   skipAgentStep: (stepId: string) => Promise<Step | null>;
   runAgentStep: (params: AgentStepRunParams) => Promise<void>;
+  continueAgentPipeline: () => Promise<void>;
   regenerateDiff: (params: RegenerateDiffParams) => Promise<void>;
 
   // ====== 模型配置 ======
@@ -697,6 +698,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
     } finally {
       set({ isStreaming: false });
+    }
+  },
+
+  continueAgentPipeline: async () => {
+    set({ error: null, streamContent: "", isStreaming: true, restoredSession: null });
+    persistAgentSession(get());
+    try {
+      if (!isTauriRuntime()) {
+        throw new Error("Agent backend is available in the Tauri app runtime.");
+      }
+      await invoke("continue_agent_pipeline");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "Agent task cancelled") {
+        set({ error: null, state: "idle" });
+      } else {
+        set({ error: msg, state: "error" });
+      }
+    } finally {
+      set({ isStreaming: false });
+      persistAgentSession(get());
     }
   },
 

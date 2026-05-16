@@ -7,12 +7,24 @@ interface TaskPipelineProps {
 
 export default function TaskPipeline({ stages }: TaskPipelineProps) {
   const storePipeline = useAgentStore((s) => s.pipeline);
+  const continueAgentPipeline = useAgentStore((s) => s.continueAgentPipeline);
+  const isStreaming = useAgentStore((s) => s.isStreaming);
   const displayStages = stages ?? storePipeline;
+  const pausedStage = displayStages.find((stage) => stage.status === "paused");
 
   return (
     <div className="p-3 text-xs">
-      <div className="text-surface-muted mb-3 font-semibold tracking-wide">
-        Pipeline
+      <div className="text-surface-muted mb-3 font-semibold tracking-wide flex items-center justify-between gap-2">
+        <span>Pipeline</span>
+        {pausedStage && (
+          <button
+            disabled={isStreaming}
+            onClick={() => void continueAgentPipeline()}
+            className="rounded border border-accent-blue/40 bg-accent-blue/10 px-2 py-0.5 text-[10px] font-normal text-accent-blue hover:bg-accent-blue/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Continue
+          </button>
+        )}
       </div>
 
       <div className="flex flex-col gap-0">

@@ -794,6 +794,67 @@ pub async fn run_agent_step(
     }
 }
 
+#[tauri::command]
+pub async fn continue_agent_pipeline(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
+    let llm = agent_state.get_llm_client(None)?;
+    agent_state.cancel_flag.store(false, Ordering::SeqCst);
+    let cancel_flag = agent_state.cancel_flag.clone();
+    let mut orch = agent_state.orchestrator.lock().await;
+    let Some(paused) = orch.paused_run.take() else {
+        return Err("No paused Agent pipeline to continue.".to_string());
+    };
+    let run_id = orch.last_run_id.clone();
+    orch.begin_run(run_id);
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "pipeline_continue",
+        "Continuing paused Agent pipeline",
+        &format!("Continuing from stage {}", paused.stage_index + 1),
+    );
+    match orch
+        .continue_pipeline_from(
+            paused.prompt,
+            paused.context,
+            paused.context_summary,
+            paused.pipeline,
+            paused.stage_outputs,
+            paused.stage_index,
+            true,
+            cancel_flag,
+            &llm,
+            app_handle.clone(),
+        )
+        .await
+    {
+        Ok(()) => {
+            orch.finish_run();
+            Ok("Agent pipeline continued".to_string())
+        }
+        Err(err) if is_cancelled_error(&err) => {
+            orch.finish_run();
+            orch.state_mgr.set(AgentState::Idle);
+            let _ = app_handle.emit(
+                "agent-state-changed",
+                serde_json::json!({
+                    "state": orch.state_mgr.state.to_string(),
+                    "mode": orch.mode.to_string(),
+                    "currentRunId": orch.current_run_id,
+                    "lastRunId": orch.last_run_id,
+                }),
+            );
+            Ok("Agent task cancelled".to_string())
+        }
+        Err(err) => {
+            orch.finish_run();
+            Err(err)
+        }
+    }
+}
+
 /// Set the Agent mode.
 #[tauri::command]
 pub async fn set_agent_mode(

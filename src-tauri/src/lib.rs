@@ -51,6 +51,7 @@ pub fn run() {
             commands::agent::update_agent_steps,
             commands::agent::skip_agent_step,
             commands::agent::run_agent_step,
+            commands::agent::continue_agent_pipeline,
             commands::agent::set_agent_mode,
             commands::agent::apply_diffs,
             commands::agent::apply_diff,
