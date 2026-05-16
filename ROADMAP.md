@@ -13,8 +13,9 @@ After any interruption, restore context in this order:
 2. Read `README.md` for setup, runtime modes, and workflow overview.
 3. Read `docs/agent_ide_design.md` for detailed current design.
 4. Read `docs/agent_ide_ui_design.md` for UI design intent.
-5. Check `git status --short` before editing. There may be user changes.
-6. Run verification:
+5. Read `docs/smoke_test.md` before changing LSP, Problems, Terminal, Git, or Agent diff application.
+6. Check `git status --short` before editing. There may be user changes.
+7. Run verification:
 
 ```powershell
 npm run build
@@ -108,6 +109,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Enabled JavaScript semantic diagnostics in Monaco TS worker defaults instead of syntax-only JavaScript validation.
 - Added frontend Vitest coverage for Windows/file-URI path normalization and terminal output problem parsing.
 - Routed build/test/lint/check-style project commands through the non-interactive command runner so Test also records exit code, duration, output, Problems, Logs, and failed-run Agent repair context.
+- Added `docs/smoke_test.md` as the real Tauri runtime regression checklist for LSP, Problems, Quick Fix, Commands/Run History, Terminal, Git, and Agent repair loops.
 
 Important distinction:
 
@@ -170,6 +172,7 @@ Known local worktree note:
 - `src-tauri/src/services/workspace.rs`: config dir, workspace persistence, path resolution and workspace boundary checks.
 - `README.md`: setup, runtime modes, verification, Agent workflow, and current limitations.
 - `README.zh-CN.md`: Chinese setup, workflow, protocol, and project status overview.
+- `docs/smoke_test.md`: manual and automated smoke checklist for daily-IDE replacement workflows.
 
 ---
 
@@ -516,14 +519,19 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add persistent credential storage and better SSH/passphrase UX for Git remote operations.
-2. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
-3. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and workspace indexing behavior.
-4. Add Rust/Python LSP adapters after TypeScript runtime validation.
-5. Add stricter validation to the structured Agent protocol.
-6. Persist Agent action logs with prompt/context/diff provenance.
-7. Move LLM API key storage to a safer credential path.
+1. Add multi-provider LLM profiles:
+   - store multiple providers/configs instead of one global endpoint/model/key
+   - select the active provider/model from Chat
+   - let each chat run choose context size (`focused`, `compact`, `full`) without going through Settings
+   - preserve Settings as provider/profile management
+2. Add persistent credential storage and better SSH/passphrase UX for Git remote operations.
+3. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
+4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and workspace indexing behavior.
+5. Add Rust/Python LSP adapters after TypeScript runtime validation.
+6. Add stricter validation to the structured Agent protocol.
+7. Persist Agent action logs with prompt/context/diff provenance.
+8. Move LLM API key storage to a safer credential path.
 
 ---
 
-*Last updated: 2026-05-15 - Phase 7 in progress; TypeScript LSP status/code-action feedback, JavaScript diagnostics, terminal problem parser smoke tests, and command runner Test history completed.*
+*Last updated: 2026-05-16 - Phase 7 in progress; smoke checklist and Problems/LSP summary tests added; next priority is multi-provider Chat selection and per-run context size.*

@@ -41,7 +41,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - Terminal 还需要在真实 Tauri runtime 中针对面板隐藏/显示、工作区切换和长运行进程做更多交互测试。
 - 前端测试和 Tauri smoke tests 仍然不足。
 
-实现状态以 [ROADMAP.md](ROADMAP.md) 为准，详细设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)。
+实现状态以 [ROADMAP.md](ROADMAP.md) 为准，详细设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)，真实运行时回归清单见 [docs/smoke_test.md](docs/smoke_test.md)。
 
 ## 运行模式
 
@@ -98,6 +98,8 @@ cargo test
 ```
 
 已知情况：Vite 目前会提示前端 chunk 较大，因为 Monaco、Markdown、xterm 和语法高亮工具打在一起。这不是正确性失败，后续需要做 code splitting。
+
+如果改动涉及 LSP、Problems、Terminal、Git 或 Agent diff application，还需要按 [docs/smoke_test.md](docs/smoke_test.md) 执行真实 Tauri runtime 回归。
 
 ## 项目结构
 

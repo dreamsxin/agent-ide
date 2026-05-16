@@ -42,7 +42,7 @@ Important remaining gaps:
 - Terminal still needs deeper interactive runtime testing across panel hide/show, workspace switching, and long-running processes.
 - Frontend test coverage and Tauri smoke tests are still thin.
 
-See [ROADMAP.md](ROADMAP.md) for the implementation source of truth and [docs/agent_ide_design.md](docs/agent_ide_design.md) for detailed design.
+See [ROADMAP.md](ROADMAP.md) for the implementation source of truth, [docs/agent_ide_design.md](docs/agent_ide_design.md) for detailed design, and [docs/smoke_test.md](docs/smoke_test.md) for the real-runtime validation checklist.
 
 ## Runtime Modes
 
@@ -99,6 +99,8 @@ cargo test
 ```
 
 Known build note: Vite currently warns about a large chunk because Monaco, Markdown, xterm, and syntax tooling are bundled together. This is not a correctness failure.
+
+For changes to LSP, Problems, Terminal, Git, or Agent diff application, also run the real Tauri runtime checklist in [docs/smoke_test.md](docs/smoke_test.md).
 
 ## Project Structure
 

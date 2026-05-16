@@ -40,7 +40,7 @@ export function useLspDiagnostics(monaco: typeof import("monaco-editor") | null)
         }))
       );
       replaceProblems("lsp", problems);
-      setDiagnosticSummary(summarizeDiagnostics(event.payload));
+      setDiagnosticSummary(summarizeLspDiagnostics(event.payload));
 
       if (monaco) applyMarkers(monaco, event.payload.file, event.payload.diagnostics);
     });
@@ -75,7 +75,7 @@ export function useLspDiagnostics(monaco: typeof import("monaco-editor") | null)
   }, [monaco]);
 }
 
-function summarizeDiagnostics(event: LspDiagnosticsEvent) {
+export function summarizeLspDiagnostics(event: LspDiagnosticsEvent) {
   return event.diagnostics.reduce(
     (summary, diagnostic) => {
       summary[diagnostic.severity] += 1;
