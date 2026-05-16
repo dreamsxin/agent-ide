@@ -21,6 +21,7 @@ export default function TaskView() {
   const updateAgentStep = useAgentStore((s) => s.updateAgentStep);
   const skipAgentStep = useAgentStore((s) => s.skipAgentStep);
   const runAgentStep = useAgentStore((s) => s.runAgentStep);
+  const clearAgentSession = useAgentStore((s) => s.clearAgentSession);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
@@ -59,6 +60,21 @@ export default function TaskView() {
         <span className="text-xs font-semibold text-surface-text">{title}</span>
         <span className="text-[10px] text-surface-muted capitalize">{agentState}</span>
       </div>
+      {steps.length > 0 && agentState === "waiting_user" && (
+        <div className="rounded border border-diff-modify/30 bg-diff-modify/10 px-2 py-1.5 text-[11px] text-surface-muted">
+          <div className="flex items-center justify-between gap-2">
+            <span className="min-w-0 flex-1">
+              Restored task state. Review diffs or run a step to continue.
+            </span>
+            <button
+              onClick={clearAgentSession}
+              className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] hover:bg-surface-border/30"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 步骤列表 */}
       {steps.length > 0 ? (

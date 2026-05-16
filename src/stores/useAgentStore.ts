@@ -59,6 +59,8 @@ interface AgentStore {
   updateStep: (stepId: string, updates: Partial<Step>) => void;
   setDiffs: (diffs: DiffEntry[]) => void;
   restoreDiffs: (workspacePath?: string) => void;
+  restoreAgentSession: (workspacePath?: string) => void;
+  clearAgentSession: () => void;
   setPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
   markDiffApplied: (diffId: string) => void;
@@ -149,6 +151,13 @@ interface RegenerateDiffParams extends AgentContextParams {
   currentFileContent?: string;
 }
 
+const DEFAULT_PIPELINE: PipelineStage[] = [
+  { role: "architect", name: "Design", status: "pending" },
+  { role: "coder", name: "Implement", status: "pending" },
+  { role: "tester", name: "Test", status: "pending" },
+  { role: "reviewer", name: "Review", status: "pending" },
+];
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
   // ========== 初始值 ==========
   state: "idle",
@@ -170,12 +179,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     },
   ],
   activeRole: "coder",
-  pipeline: [
-    { role: "architect", name: "Design", status: "pending" },
-    { role: "coder", name: "Implement", status: "pending" },
-    { role: "tester", name: "Test", status: "pending" },
-    { role: "reviewer", name: "Review", status: "pending" },
-  ],
+  pipeline: DEFAULT_PIPELINE,
   llmConfigured: false,
   llmEndpoint: "",
   llmModel: "",
@@ -187,24 +191,63 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   chatContextCompression: null,
 
   // ========== 同步 Actions ==========
-  setState: (state) => set({ state }),
-  setMode: (mode) => set({ mode }),
-  setCurrentTask: (currentTask) => set({ currentTask }),
+  setState: (state) => {
+    set({ state });
+    persistAgentSession(get());
+  },
+  setMode: (mode) => {
+    set({ mode });
+    persistAgentSession(get());
+  },
+  setCurrentTask: (currentTask) => {
+    set({ currentTask });
+    persistAgentSession(get());
+  },
   addTask: (task) =>
-    set((s) => ({ tasks: [...s.tasks, task], currentTask: task })),
-  setSteps: (steps) => set({ steps }),
-  setPipeline: (pipeline) => set({ pipeline }),
+    set((s) => {
+      const next = { tasks: [...s.tasks, task], currentTask: task };
+      windowQueuePersist(() => persistAgentSession({ ...get(), ...next }));
+      return next;
+    }),
+  setSteps: (steps) => {
+    set({ steps });
+    persistAgentSession(get());
+  },
+  setPipeline: (pipeline) => {
+    set({ pipeline });
+    persistAgentSession(get());
+  },
   updateStep: (stepId, updates) =>
-    set((s) => ({
-      steps: s.steps.map((st) =>
+    set((s) => {
+      const nextSteps = s.steps.map((st) =>
         st.id === stepId ? { ...st, ...updates } : st
-      ),
-    })),
+      );
+      windowQueuePersist(() => persistAgentSession({ ...get(), steps: nextSteps }));
+      return { steps: nextSteps };
+    }),
   setDiffs: (diffs) => {
     persistDiffs(diffs);
     set({ diffs, lastApplyResult: null });
   },
   restoreDiffs: (workspacePath) => set({ diffs: loadDiffs(workspacePath), lastApplyResult: null }),
+  restoreAgentSession: (workspacePath) => {
+    const restored = loadAgentSession(workspacePath);
+    if (!restored) return;
+    set(restored);
+  },
+  clearAgentSession: () => {
+    clearPersistedAgentSession();
+    set({
+      state: "idle",
+      currentTask: null,
+      tasks: [],
+      steps: [],
+      pipeline: DEFAULT_PIPELINE,
+      error: null,
+      streamContent: "",
+      isStreaming: false,
+    });
+  },
   addDiff: (diff) =>
     set((s) => {
       const diffs = [...s.diffs, diff];
@@ -227,7 +270,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       persistDiffs(diffs);
       return { diffs };
     }),
-  setError: (error) => set({ error, state: error ? "error" : "idle" }),
+  setError: (error) => {
+    set({ error, state: error ? "error" : "idle" });
+    persistAgentSession(get());
+  },
   clearApplyResult: () => set({ lastApplyResult: null }),
   appendStreamContent: (token) =>
     set((s) => ({
@@ -253,7 +299,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         },
       ],
     }),
-  reset: () =>
+  reset: () => {
+    clearPersistedAgentSession();
     set({
       state: "idle",
       currentTask: null,
@@ -263,7 +310,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       lastApplyResult: null,
       streamContent: "",
       isStreaming: false,
-    }),
+    });
+  },
 
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {
@@ -300,10 +348,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       if (!isTauriRuntime()) {
         set({ state: "idle", steps: [], diffs: [] });
+        persistAgentSession(get());
         return;
       }
       await invoke("stop_agent");
       set({ state: "idle", steps: [], diffs: [] });
+      persistAgentSession(get());
     } catch (err: unknown) {
       console.warn("[AgentStore] stop_agent failed:", err);
     }
@@ -777,6 +827,19 @@ function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
 }
 
 const AGENT_DIFFS_STORAGE_KEY = "agent-ide-agent-diffs";
+const AGENT_SESSION_STORAGE_KEY = "agent-ide-agent-session";
+
+interface PersistedAgentSession {
+  workspacePath: string;
+  state: AgentState;
+  mode: AgentMode;
+  currentTask: Task | null;
+  tasks: Task[];
+  steps: Step[];
+  pipeline: PipelineStage[];
+  error: string | null;
+  updatedAt: number;
+}
 
 function persistDiffs(diffs: DiffEntry[]) {
   if (typeof window === "undefined") return;
@@ -802,6 +865,92 @@ function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] 
   } catch {
     return [];
   }
+}
+
+function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "currentTask" | "tasks" | "steps" | "pipeline" | "error">) {
+  if (typeof window === "undefined") return;
+  const workspacePath = currentWorkspacePath();
+  const hasSessionData = state.steps.length > 0 || state.pipeline.some((stage) => stage.status !== "pending") || state.currentTask !== null;
+  if (!workspacePath || !hasSessionData) {
+    clearPersistedAgentSession();
+    return;
+  }
+  const payload: PersistedAgentSession = {
+    workspacePath,
+    state: normalizeRestoredAgentState(state.state),
+    mode: state.mode,
+    currentTask: state.currentTask,
+    tasks: state.tasks.slice(-50),
+    steps: state.steps.slice(-100),
+    pipeline: state.pipeline,
+    error: state.error,
+    updatedAt: Date.now(),
+  };
+  localStorage.setItem(AGENT_SESSION_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Partial<AgentStore> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(AGENT_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedAgentSession>;
+    if (expectedWorkspacePath && parsed.workspacePath && parsed.workspacePath !== expectedWorkspacePath) {
+      return null;
+    }
+    const steps = Array.isArray(parsed.steps) ? parsed.steps : [];
+    const pipeline = Array.isArray(parsed.pipeline) && parsed.pipeline.length > 0
+      ? parsed.pipeline
+      : DEFAULT_PIPELINE;
+    if (steps.length === 0 && pipeline.every((stage) => stage.status === "pending") && !parsed.currentTask) {
+      return null;
+    }
+    return {
+      state: normalizeRestoredAgentState(parsed.state),
+      mode: parsed.mode ?? "suggest",
+      currentTask: parsed.currentTask ?? null,
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      steps: steps.map(normalizeRestoredStep),
+      pipeline: pipeline.map(normalizeRestoredPipelineStage),
+      error: parsed.error ?? null,
+      streamContent: "",
+      isStreaming: false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearPersistedAgentSession() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(AGENT_SESSION_STORAGE_KEY);
+}
+
+function normalizeRestoredAgentState(state?: AgentState): AgentState {
+  if (state === "thinking" || state === "planning" || state === "acting" || state === "reviewing") {
+    return "waiting_user";
+  }
+  return state ?? "idle";
+}
+
+function normalizeRestoredStep(step: Step): Step {
+  if (step.status === "doing") {
+    return {
+      ...step,
+      status: "error",
+      logs: [...(step.logs ?? []), "Interrupted by reload before completion."],
+    };
+  }
+  return { ...step, logs: step.logs ?? [] };
+}
+
+function normalizeRestoredPipelineStage(stage: PipelineStage): PipelineStage {
+  return stage.status === "active" ? { ...stage, status: "failed" } : stage;
+}
+
+function windowQueuePersist(callback: () => void) {
+  if (typeof window === "undefined") return;
+  window.queueMicrotask(callback);
 }
 
 function currentWorkspacePath() {

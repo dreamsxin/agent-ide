@@ -50,7 +50,7 @@ export function useAgentBridge() {
 
           listen<Step>("agent-step-update", (e) => {
             const step = e.payload;
-            updateStep(step.id, { status: step.status, logs: step.logs });
+            updateStep(step.id, step);
           }),
 
           listen<DiffEntry[]>("agent-diff-ready", (e) => {

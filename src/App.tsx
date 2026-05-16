@@ -109,6 +109,7 @@ export default function App() {
         useLayoutStore.getState().setWorkspacePath(saved);
         useEditorStore.getState().setWorkspacePath(saved);
         useLogStore.getState().restoreLogs(saved);
+        useAgentStore.getState().restoreAgentSession(saved);
         useAgentStore.getState().restoreDiffs(saved);
         void useEditorStore.getState().restoreEditorSession(saved);
       } else {
