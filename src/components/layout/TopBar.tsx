@@ -73,6 +73,10 @@ export default function TopBar() {
     window.dispatchEvent(new CustomEvent("toggle-shortcuts-help"));
   }, []);
 
+  const handleCommandPalette = useCallback(() => {
+    window.dispatchEvent(new CustomEvent("toggle-command-palette"));
+  }, []);
+
   const handleLspStatusClick = useCallback(async () => {
     setLspDetailsOpen((value) => !value);
     const languageId = activeTab?.language ?? languageFromPath(activeTab?.path ?? "");
@@ -333,6 +337,15 @@ export default function TopBar() {
           title={`Switch to ${theme === "dark" ? "Light" : "Dark"} Theme`}
         >
           {theme === "dark" ? "☀" : "🌙"}
+        </button>
+
+        {/* 快捷键帮助 */}
+        <button
+          onClick={handleCommandPalette}
+          className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
+          title="Command Palette (Ctrl+Shift+P)"
+        >
+          ⌘
         </button>
 
         {/* 快捷键帮助 */}

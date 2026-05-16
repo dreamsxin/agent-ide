@@ -61,6 +61,8 @@ export default function useShortcuts() {
   /** 定义所有全局快捷键 */
   const shortcuts: Shortcut[] = [
     // Panels
+    { id: "command-palette", keys: "Ctrl+Shift+P", label: "Command Palette", group: "General", scope: "global",
+      handler: () => window.dispatchEvent(new CustomEvent("toggle-command-palette")) },
     { id: "toggle-explorer", keys: "Ctrl+Shift+E", label: "Toggle Explorer", group: "Panels", scope: "global",
       handler: () => toggleLeftPanel() },
     { id: "toggle-agent", keys: "Ctrl+Shift+X", label: "Toggle Agent Panel", group: "Panels", scope: "global",

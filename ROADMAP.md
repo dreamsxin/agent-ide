@@ -128,6 +128,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added backend Agent context section estimates and replaced Chat's rough source estimate with real backend section sizes, budget trimming, and included/excluded source reasons.
 - Added interactive Agent plan controls for editing step title/scope/mode, skipping steps, running one step only, and regenerating a step with broader context.
 - Added regenerate-against-current-file actions for failed/stale Agent diffs and hunks, preserving the original failed diff while adding provenance on regenerated changes.
+- Added a first-pass Command Palette with searchable workspace, panel, Agent mode, project command, theme, and focus-mode commands, reachable from `Ctrl+Shift+P` and the TopBar.
 
 Important distinction:
 
@@ -437,6 +438,7 @@ Current first implementation:
 - Git diff and project tree are also per-run context toggles, with backend section estimates, token budget visibility, and trimmed/excluded source reasons.
 - Agent Tasks can now edit step metadata, skip a step, run only one step, or regenerate a step with broader workspace context.
 - Failed/stale Agent diffs and hunks can be regenerated against the current file while preserving the original failed review item.
+- Command Palette now provides a unified searchable entry for workspace open, panel navigation, Agent mode changes, project commands, focus mode, and theme toggling.
 
 ---
 
@@ -590,7 +592,8 @@ target\release\agent_cli --help
 3. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
 4. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
 5. Expand Agent plan controls with reorder, pause-before-stage approval, and persisted in-flight task recovery.
+6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
 
 ---
 
-*Last updated: 2026-05-16 - Agent interaction loop: backend context section estimates, editable/single-step Agent plans, and failed diff regeneration are wired.*
+*Last updated: 2026-05-16 - Agent interaction loop continued: Command Palette first pass now unifies high-frequency IDE, Agent, and project command entry.*

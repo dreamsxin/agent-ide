@@ -7,6 +7,7 @@ import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
+import CommandPalette, { usePaletteCommands } from "./components/shared/CommandPalette";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { useLayoutStore } from "./stores/useLayoutStore";
 import { useEditorStore } from "./stores/useEditorStore";
@@ -14,6 +15,8 @@ import { useLogStore } from "./stores/useLogStore";
 import { useAgentStore } from "./stores/useAgentStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import useShortcuts from "./hooks/useShortcuts";
+import { useProjectTasks } from "./hooks/useProjectTasks";
+import { useRunProjectTask } from "./hooks/useRunProjectTask";
 import { isTauriRuntime } from "./utils/tauri";
 
 function AnimatedPanel({
@@ -69,6 +72,10 @@ export default function App() {
 
   const { shortcuts } = useShortcuts();
   const [helpVisible, setHelpVisible] = useState(false);
+  const [commandPaletteVisible, setCommandPaletteVisible] = useState(false);
+  const { tasks } = useProjectTasks();
+  const runProjectTask = useRunProjectTask();
+  const paletteCommands = usePaletteCommands(runProjectTask, tasks);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -85,6 +92,12 @@ export default function App() {
     const handler = () => setHelpVisible((v) => !v);
     window.addEventListener("toggle-shortcuts-help", handler);
     return () => window.removeEventListener("toggle-shortcuts-help", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setCommandPaletteVisible((v) => !v);
+    window.addEventListener("toggle-command-palette", handler);
+    return () => window.removeEventListener("toggle-command-palette", handler);
   }, []);
 
   // 启动时恢复上次的工作目录
@@ -150,6 +163,11 @@ export default function App() {
         shortcuts={allShortcuts}
         visible={helpVisible}
         onClose={() => setHelpVisible(false)}
+      />
+      <CommandPalette
+        visible={commandPaletteVisible}
+        commands={paletteCommands}
+        onClose={() => setCommandPaletteVisible(false)}
       />
 
       {/* 自定义标题栏 */}
