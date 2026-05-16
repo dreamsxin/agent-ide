@@ -77,8 +77,26 @@ pub struct FileDiff {
     pub file: String,
     #[serde(rename = "baseHash", default)]
     pub base_hash: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<DiffProvenance>,
     pub hunks: Vec<DiffHunk>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiffProvenance {
+    pub protocol: String,
+    pub operation: String,
+    #[serde(default)]
+    pub rationale: Option<String>,
+    #[serde(rename = "schemaVersion", default)]
+    pub schema_version: Option<u32>,
+    #[serde(rename = "changeIndex", default)]
+    pub change_index: Option<usize>,
+    #[serde(rename = "sourceRole", default)]
+    pub source_role: Option<String>,
+    #[serde(rename = "sourceStage", default)]
+    pub source_stage: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

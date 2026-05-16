@@ -41,9 +41,20 @@ export interface DiffEntry {
   id: string;
   file: string;
   baseHash?: string | null;
+  provenance?: DiffProvenance | null;
   hunks: DiffHunk[];
   status: "pending" | "applied" | "rejected" | "failed";
   applyError?: string;
+}
+
+export interface DiffProvenance {
+  protocol: string;
+  operation: string;
+  rationale?: string | null;
+  schemaVersion?: number | null;
+  changeIndex?: number | null;
+  sourceRole?: string | null;
+  sourceStage?: string | null;
 }
 
 export interface DiffHunk {

@@ -1,7 +1,8 @@
 use crate::agent::multi_agent::AgentRole;
+use crate::agent::state_machine::{DiffProvenance, FileDiff};
 use crate::services::llm_client::{ChatMessage, LlmClient};
 use serde::Deserialize;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::mpsc;
 
 /// 执行步骤的系统提示词
@@ -69,9 +70,7 @@ pub async fn execute_stage(
     tx: mpsc::Sender<String>,
 ) -> Result<String, String> {
     let output_rules = match role {
-        AgentRole::Architect => {
-            "Output a concise implementation plan. Do not output code diffs."
-        }
+        AgentRole::Architect => "Output a concise implementation plan. Do not output code diffs.",
         AgentRole::Coder | AgentRole::Tester => {
             r#"When code changes are needed, prefer this structured Agent IDE protocol:
 
@@ -146,7 +145,7 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
 }
 
 /// 从 LLM 响应中解析 diff 块
-pub fn parse_diffs(response: &str) -> Vec<crate::agent::state_machine::FileDiff> {
+pub fn parse_diffs(response: &str) -> Vec<FileDiff> {
     let mut diffs = Vec::new();
     let lines: Vec<&str> = response.lines().collect();
     let mut i = 0;
@@ -195,7 +194,9 @@ pub fn parse_diffs(response: &str) -> Vec<crate::agent::state_machine::FileDiff>
 /// 检测代码块类型和文件名: 返回 (类型, 文件名)
 fn detect_block_start(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("```")?;
-    if rest.is_empty() { return None; }
+    if rest.is_empty() {
+        return None;
+    }
 
     // ```diff:file
     if let Some(file) = rest.strip_prefix("diff:") {
@@ -227,6 +228,8 @@ fn detect_block_start(line: &str) -> Option<(String, String)> {
 
 #[derive(Debug, Deserialize)]
 struct AgentChangesBlock {
+    #[serde(default)]
+    version: Option<u32>,
     changes: Vec<AgentChange>,
 }
 
@@ -248,21 +251,41 @@ struct AgentChangeHunk {
     updated: String,
 }
 
-fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff> {
+fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
     let Ok(block) = serde_json::from_str::<AgentChangesBlock>(json) else {
         return Vec::new();
     };
 
     let mut diffs = Vec::new();
-    for change in block.changes {
-        match change.change_type.as_str() {
+    for (change_index, change) in block.changes.into_iter().enumerate() {
+        let change_type = change.change_type.trim();
+        let file = change.file.trim();
+        if !is_valid_relative_file_path(file) {
+            continue;
+        }
+        let provenance = DiffProvenance {
+            protocol: "agent-changes".to_string(),
+            operation: normalized_operation(change_type).to_string(),
+            rationale: change
+                .rationale
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            schema_version: block.version,
+            change_index: Some(change_index),
+            source_role: None,
+            source_stage: None,
+        };
+
+        match change_type {
             "create" | "new" => {
                 if let Some(content) = change.content {
-                    if !change.file.trim().is_empty() && !content.trim().is_empty() {
-                        let mut diff = make_new_file_diff(&change.file, &content);
+                    if !content.trim().is_empty() && change.hunks.is_none() {
+                        let mut diff = make_new_file_diff(file, &content);
+                        diff.provenance = Some(provenance);
                         if let Some(rationale) = change.rationale {
                             if let Some(hunk) = diff.hunks.first_mut() {
-                                hunk.content = format!("rationale: {}\n\n{}", rationale, hunk.content);
+                                hunk.content =
+                                    format!("rationale: {}\n\n{}", rationale, hunk.content);
                             }
                         }
                         diffs.push(diff);
@@ -275,7 +298,12 @@ fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff>
                 };
                 let parsed_hunks: Vec<_> = hunks
                     .into_iter()
-                    .filter(|hunk| !hunk.original.trim().is_empty())
+                    .filter(|hunk| {
+                        !hunk.original.trim().is_empty()
+                            && hunk.original != hunk.updated
+                            && !hunk.updated.contains("\u{0000}")
+                            && !hunk.original.contains("\u{0000}")
+                    })
                     .map(|hunk| {
                         let old_count = hunk
                             .original
@@ -302,11 +330,12 @@ fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff>
                     })
                     .collect();
 
-                if !change.file.trim().is_empty() && !parsed_hunks.is_empty() {
-                    diffs.push(crate::agent::state_machine::FileDiff {
+                if !parsed_hunks.is_empty() && change.content.is_none() {
+                    diffs.push(FileDiff {
                         id: uuid::Uuid::new_v4().to_string(),
-                        file: change.file,
+                        file: file.to_string(),
                         base_hash: change.base_hash,
+                        provenance: Some(provenance),
                         hunks: parsed_hunks,
                         status: "pending".to_string(),
                     });
@@ -319,6 +348,33 @@ fn parse_agent_changes(json: &str) -> Vec<crate::agent::state_machine::FileDiff>
     diffs
 }
 
+fn normalized_operation(change_type: &str) -> &'static str {
+    match change_type {
+        "new" => "create",
+        "modify" => "edit",
+        "create" => "create",
+        "edit" => "edit",
+        _ => "unknown",
+    }
+}
+
+fn is_valid_relative_file_path(file: &str) -> bool {
+    if file.is_empty()
+        || file.contains('\0')
+        || file.starts_with('/')
+        || file.starts_with('\\')
+        || file.contains("://")
+        || std::path::Path::new(file).is_absolute()
+    {
+        return false;
+    }
+
+    let normalized = file.replace('\\', "/");
+    !normalized
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
 /// 分割 diff 内容为 ORIGINAL 和 UPDATED 两部分
 fn split_diff_content(lines: &[String]) -> (Vec<String>, Vec<String>) {
     let mut original = Vec::new();
@@ -328,24 +384,56 @@ fn split_diff_content(lines: &[String]) -> (Vec<String>, Vec<String>) {
 
     for line in lines {
         let t = line.trim();
-        if t.starts_with("<<<<<<<") { in_original = true; in_updated = false; continue; }
-        if t.starts_with("=======") { in_original = false; in_updated = true; continue; }
-        if t.starts_with(">>>>>>>") { in_original = false; in_updated = false; continue; }
-        if in_original { original.push(line.clone()); }
-        else if in_updated { updated.push(line.clone()); }
+        if t.starts_with("<<<<<<<") {
+            in_original = true;
+            in_updated = false;
+            continue;
+        }
+        if t.starts_with("=======") {
+            in_original = false;
+            in_updated = true;
+            continue;
+        }
+        if t.starts_with(">>>>>>>") {
+            in_original = false;
+            in_updated = false;
+            continue;
+        }
+        if in_original {
+            original.push(line.clone());
+        } else if in_updated {
+            updated.push(line.clone());
+        }
     }
 
     (original, updated)
 }
 
-fn make_diff(file: &str, content: &str, original: &[String], updated: &[String]) -> crate::agent::state_machine::FileDiff {
-    let old_count = original.iter().filter(|l| !l.trim().is_empty()).count().max(1) as u32;
-    let new_count = updated.iter().filter(|l| !l.trim().is_empty()).count().max(1) as u32;
+fn make_diff(file: &str, content: &str, original: &[String], updated: &[String]) -> FileDiff {
+    let old_count = original
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .count()
+        .max(1) as u32;
+    let new_count = updated
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .count()
+        .max(1) as u32;
 
-    crate::agent::state_machine::FileDiff {
+    FileDiff {
         id: uuid::Uuid::new_v4().to_string(),
         file: file.to_string(),
         base_hash: None,
+        provenance: Some(DiffProvenance {
+            protocol: "legacy-diff-block".to_string(),
+            operation: "edit".to_string(),
+            rationale: None,
+            schema_version: None,
+            change_index: None,
+            source_role: None,
+            source_stage: None,
+        }),
         hunks: vec![crate::agent::state_machine::DiffHunk {
             old_start: 0,
             old_lines: old_count,
@@ -360,12 +448,21 @@ fn make_diff(file: &str, content: &str, original: &[String], updated: &[String])
     }
 }
 
-fn make_new_file_diff(file: &str, content: &str) -> crate::agent::state_machine::FileDiff {
+fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
     let count = content.lines().count().max(1) as u32;
-    crate::agent::state_machine::FileDiff {
+    FileDiff {
         id: uuid::Uuid::new_v4().to_string(),
         file: file.to_string(),
         base_hash: None,
+        provenance: Some(DiffProvenance {
+            protocol: "legacy-new-block".to_string(),
+            operation: "create".to_string(),
+            rationale: None,
+            schema_version: None,
+            change_index: None,
+            source_role: None,
+            source_stage: None,
+        }),
         hunks: vec![crate::agent::state_machine::DiffHunk {
             old_start: 0,
             old_lines: 0,
@@ -388,6 +485,7 @@ mod tests {
     fn parse_diffs_supports_structured_agent_changes() {
         let response = r#"```agent-changes
 {
+  "version": 1,
   "changes": [
     {
       "type": "edit",
@@ -414,9 +512,23 @@ mod tests {
 
         assert_eq!(diffs.len(), 2);
         assert_eq!(diffs[0].file, "src/app.ts");
+        assert_eq!(
+            diffs[0].provenance.as_ref().unwrap().protocol,
+            "agent-changes"
+        );
+        assert_eq!(diffs[0].provenance.as_ref().unwrap().operation, "edit");
+        assert_eq!(
+            diffs[0].provenance.as_ref().unwrap().schema_version,
+            Some(1)
+        );
+        assert_eq!(
+            diffs[0].provenance.as_ref().unwrap().rationale.as_deref(),
+            Some("rename value")
+        );
         assert_eq!(diffs[0].hunks[0].original, "const value = 1;");
         assert_eq!(diffs[0].hunks[0].updated, "const value = 2;");
         assert_eq!(diffs[1].file, "src/new.ts");
+        assert_eq!(diffs[1].provenance.as_ref().unwrap().operation, "create");
         assert_eq!(diffs[1].hunks[0].updated, "export const helper = true;\n");
     }
 
@@ -434,7 +546,48 @@ const value = 2;
 
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].file, "src/app.ts");
+        assert_eq!(
+            diffs[0].provenance.as_ref().unwrap().protocol,
+            "legacy-diff-block"
+        );
         assert_eq!(diffs[0].hunks[0].original, "const value = 1;");
         assert_eq!(diffs[0].hunks[0].updated, "const value = 2;");
+    }
+
+    #[test]
+    fn parse_diffs_rejects_invalid_structured_agent_changes() {
+        let response = r#"```agent-changes
+{
+  "version": 1,
+  "changes": [
+    {
+      "type": "edit",
+      "file": "../outside.ts",
+      "hunks": [
+        { "original": "const value = 1;", "updated": "const value = 2;" }
+      ]
+    },
+    {
+      "type": "edit",
+      "file": "src/same.ts",
+      "hunks": [
+        { "original": "const value = 1;", "updated": "const value = 1;" }
+      ]
+    },
+    {
+      "type": "create",
+      "file": "src/mixed.ts",
+      "content": "export {};",
+      "hunks": [
+        { "original": "old", "updated": "new" }
+      ]
+    }
+  ]
+}
+```"#;
+
+        let diffs = parse_diffs(response);
+
+        assert!(diffs.is_empty());
     }
 }

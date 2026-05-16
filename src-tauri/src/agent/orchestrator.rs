@@ -2,7 +2,7 @@ use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::executor;
 use crate::agent::multi_agent::{mark_pipeline_stage, reset_pipeline_status, PipelineStage};
 use crate::agent::planner;
-use crate::agent::state_machine::{AgentMode, AgentStateManager, TaskStep};
+use crate::agent::state_machine::{AgentMode, AgentStateManager, DiffProvenance, TaskStep};
 use crate::services::context::{
     estimated_input_tokens_from_budget, AgentContext, ContextBudget, ContextBuildOptions,
     ContextCompressionMode,
@@ -93,9 +93,7 @@ impl AgentOrchestrator {
             "Agent prompt received",
             &format!(
                 "Prompt:\n{}\n\nContext mode: {}\n{}",
-                prompt,
-                context_compression,
-                budget_summary
+                prompt, context_compression, budget_summary
             ),
             Some(context_summary.clone()),
             None,
@@ -124,7 +122,11 @@ impl AgentOrchestrator {
             "planner",
             None,
             Some("Planner"),
-            &format!("Planner produced {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }),
+            &format!(
+                "Planner produced {} step{}",
+                steps.len(),
+                if steps.len() == 1 { "" } else { "s" }
+            ),
             &_full_response,
             Some(context_summary.clone()),
             None,
@@ -156,7 +158,11 @@ impl AgentOrchestrator {
                 Some(stage.role.to_string()),
                 Some(&stage.name),
                 &format!("{} stage started", stage.name),
-                &format!("Role: {}\nStage index: {}", stage.role.to_string(), stage_index + 1),
+                &format!(
+                    "Role: {}\nStage index: {}",
+                    stage.role.to_string(),
+                    stage_index + 1
+                ),
                 Some(context_summary.clone()),
                 Some(self.summarize_pending_diffs()),
             );
@@ -195,7 +201,7 @@ impl AgentOrchestrator {
                 cancel_flag.clone(),
                 tx2,
             )
-                .await
+            .await
             {
                 Ok(response) => {
                     self.steps[step_index].status = "done".to_string();
@@ -211,7 +217,8 @@ impl AgentOrchestrator {
                         response
                     ));
 
-                    let step_diffs = executor::parse_diffs(&response);
+                    let mut step_diffs = executor::parse_diffs(&response);
+                    attach_stage_provenance(&mut step_diffs, &stage.role.to_string(), &stage.name);
                     let generated_diff_count = step_diffs.len();
                     self.diffs.extend(step_diffs);
                     mark_pipeline_stage(&mut pipeline, stage_index, "completed");
@@ -277,7 +284,15 @@ impl AgentOrchestrator {
                 "diff_ready",
                 None,
                 None,
-                &format!("{} pending diff{} ready for review", self.pending_diff_count(), if self.pending_diff_count() == 1 { "" } else { "s" }),
+                &format!(
+                    "{} pending diff{} ready for review",
+                    self.pending_diff_count(),
+                    if self.pending_diff_count() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
                 "Diff review is waiting for user action.",
                 Some(context_summary.clone()),
                 Some(self.summarize_pending_diffs()),
@@ -507,10 +522,7 @@ fn format_context_budget_summary(
     final_chars: usize,
 ) -> String {
     let Some(budget) = budget else {
-        return format!(
-            "Context budget: unset\nContext chars: {}",
-            final_chars
-        );
+        return format!("Context budget: unset\nContext chars: {}", final_chars);
     };
     let estimated_input = estimated_input_tokens_from_budget(budget)
         .map(|value| value.to_string())
@@ -524,6 +536,26 @@ fn format_context_budget_summary(
         final_chars,
         final_chars < raw_chars
     )
+}
+
+fn attach_stage_provenance(
+    diffs: &mut [crate::agent::state_machine::FileDiff],
+    role: &str,
+    stage: &str,
+) {
+    for diff in diffs {
+        let provenance = diff.provenance.get_or_insert_with(|| DiffProvenance {
+            protocol: "unknown".to_string(),
+            operation: "unknown".to_string(),
+            rationale: None,
+            schema_version: None,
+            change_index: None,
+            source_role: None,
+            source_stage: None,
+        });
+        provenance.source_role = Some(role.to_string());
+        provenance.source_stage = Some(stage.to_string());
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +612,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             file: file.to_string(),
             base_hash: None,
+            provenance: None,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 old_lines: 1,
@@ -639,5 +672,16 @@ mod tests {
         assert!(summary.contains("Original excerpt: const oldValue = 1;"));
         assert!(summary.contains("Updated excerpt: const newValue = 2;"));
         assert!(!summary.contains("src/done.ts"));
+    }
+
+    #[test]
+    fn attach_stage_provenance_records_role_and_stage() {
+        let mut diffs = vec![make_diff("src/app.ts", "old", "new")];
+
+        attach_stage_provenance(&mut diffs, "coder", "Implement");
+
+        let provenance = diffs[0].provenance.as_ref().expect("provenance");
+        assert_eq!(provenance.source_role.as_deref(), Some("coder"));
+        assert_eq!(provenance.source_stage.as_deref(), Some("Implement"));
     }
 }

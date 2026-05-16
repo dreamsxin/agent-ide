@@ -224,6 +224,7 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             file: file.to_string(),
             base_hash: None,
+            provenance: None,
             hunks: vec![DiffHunk {
                 old_start: 1,
                 old_lines: original.lines().count().max(1) as u32,

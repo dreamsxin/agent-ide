@@ -224,6 +224,33 @@ export default function DiffView() {
                     <span className="truncate font-mono">{diff.baseHash}</span>
                   </div>
                 )}
+                {diff.provenance && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-surface-muted">
+                    <span className="rounded border border-surface-border px-1 py-0.5">
+                      {diff.provenance.protocol}
+                    </span>
+                    <span className="rounded border border-surface-border px-1 py-0.5">
+                      {diff.provenance.operation}
+                    </span>
+                    {diff.provenance.schemaVersion != null && (
+                      <span className="rounded border border-surface-border px-1 py-0.5">
+                        v{diff.provenance.schemaVersion}
+                      </span>
+                    )}
+                    {(diff.provenance.sourceRole || diff.provenance.sourceStage) && (
+                      <span className="rounded border border-surface-border px-1 py-0.5">
+                        {[diff.provenance.sourceRole, diff.provenance.sourceStage]
+                          .filter(Boolean)
+                          .join(" / ")}
+                      </span>
+                    )}
+                    {diff.provenance.rationale && (
+                      <span className="min-w-0 flex-1 truncate">
+                        {diff.provenance.rationale}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {diff.status === "pending" && (
                   <div className="mt-2 flex gap-2">
                     <button

@@ -44,7 +44,7 @@ cargo test
 
 ## Current State
 
-Status as of 2026-05-15: **Phase 7 in progress - Agent execution quality and auditability**.
+Status as of 2026-05-16: **Phase 7/8 in progress - daily IDE replacement hardening**.
 
 The app is no longer just a static UI prototype. It has a working Tauri/Rust backend, file commands, Git commands, LLM streaming, Agent planning/execution scaffolding, diff review UI, and settings for model configuration. Recent work focused on correcting safety and runtime assumptions:
 
@@ -118,6 +118,8 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Wired max context and reserved output metadata into Agent context building as estimated token-to-character budget trimming, with action logs recording raw/final context character counts.
 - Mapped per-profile max output tokens into OpenAI-compatible chat request bodies and added provider presets for default context/output budgets.
 - Moved LLM API key persistence out of plain JSON config and into the OS credential store; profile JSON now stores credential references only.
+- Added stricter structured Agent change protocol validation and first-class diff provenance metadata, including protocol, operation, schema version, change index, and rationale.
+- Wired Agent pipeline role/stage metadata into generated diff provenance so proposed changes can be traced back to the stage that produced them.
 
 Important distinction:
 
@@ -298,13 +300,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Per-file and per-hunk apply/reject are now wired in the backend and Diff view.
    - Mixed applied/rejected hunk state currently closes the file diff; add clearer partial status next.
 
-2. **Agent protocol is still markdown/diff-block based**
+2. **Agent protocol still needs stronger schema and persistence**
    - Pipeline stages now drive backend execution.
    - Reviewer receives pending diff summaries.
    - Model outputs can now use structured `agent-changes` JSON blocks.
    - Legacy free-form markdown diff blocks are still supported.
    - Optional `baseHash` validation now rejects stale edit diffs.
-   - Need stricter schema enforcement, operation metadata, and richer provenance.
+   - Structured changes now reject unsafe paths, mixed create/edit payloads, empty/no-op hunks, and NUL-containing hunks.
+   - Diff provenance now records protocol, operation, schema version, change index, rationale, source role, and source stage.
+   - Still needs persisted action logs and a formal versioned schema document.
 
 3. **Secret storage is weak**
    - LLM API keys are stored through the OS credential store.
@@ -529,16 +533,16 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Runtime-verify LLM provider profiles in `npm run tauri -- dev`, including legacy config migration, profile create/edit/delete/default, Chat profile selection, and per-run context mode.
-2. Add better SSH/passphrase UX for Git remote operations.
-3. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
-4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and large-workspace indexing behavior.
-5. Add Rust/Python LSP adapters after TypeScript and Go runtime validation.
-6. Add stricter validation to the structured Agent protocol.
-7. Persist Agent action logs with prompt/context/diff provenance.
-8. Runtime-validate OS credential storage for LLM profiles and add recovery UX for inaccessible/missing credentials.
-9. Runtime-verify max output request mapping against configured OpenAI-compatible providers and add request adapters for non-compatible APIs.
+1. Persist Agent action logs with prompt, context budget, selected context files, pending diff provenance, and apply/reject decisions.
+2. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
+3. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
+4. Add Rust/Python LSP adapters after TypeScript and Go runtime validation.
+5. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
+6. Improve Git SSH/passphrase UX and remote-operation recovery flows.
+7. Add terminal runtime smoke coverage for panel hide/show, workspace switching, long-running processes, restart, and command history/failure context.
+8. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
+9. Runtime-verify OS credential storage for LLM profiles/Git credentials and add recovery UX for inaccessible or missing secrets.
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; Go LSP/gopls first pass is wired alongside TypeScript, while large-workspace validation, SSH/passphrase UX, and merge editor controls remain next.*
+*Last updated: 2026-05-16 - TODO list replanned around daily IDE replacement. First execution item started: structured Agent change validation and diff provenance.*
