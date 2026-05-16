@@ -27,6 +27,7 @@ interface ContextMenuState {
   x: number;
   y: number;
   node: TreeNodeData;
+  scope: "node" | "blank";
 }
 
 interface FileClipboardState {
@@ -331,12 +332,14 @@ export default function Explorer() {
   // 右键菜单
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, node?: TreeNodeData | null) => {
+      let scope: ContextMenuState["scope"] = "node";
       if (!node) {
         if (!workspacePath) {
           closeContextMenu();
           return;
         }
         node = workspaceRootNode(workspacePath);
+        scope = "blank";
         e.preventDefault();
       }
       if (!node) {
@@ -355,9 +358,10 @@ export default function Explorer() {
         x,
         y,
         node,
+        scope,
       });
     },
-    [closeContextMenu]
+    [closeContextMenu, workspacePath]
   );
 
   // 全局交互关闭菜单
@@ -460,7 +464,7 @@ export default function Explorer() {
       showToast(`Copied to Explorer clipboard: ${node.name}`);
       closeContextMenu();
     },
-    [closeContextMenu, workspacePath]
+    [closeContextMenu]
   );
 
   const handlePaste = useCallback(
@@ -490,7 +494,7 @@ export default function Explorer() {
       }
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, workspacePath]
   );
 
   // 复制相对工作区路径
@@ -675,42 +679,46 @@ export default function Explorer() {
               <span>📌</span> Paste
             </button>
           )}
-          <button
-            onClick={() => handleCopy(contextMenu.node)}
-            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
-          >
-            <span>📋</span> Copy File
-          </button>
-          <button
-            onClick={() => handleCopyFilePath(contextMenu.node)}
-            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
-          >
-            <span>⧉</span> Copy File Path
-          </button>
-          <button
-            onClick={() => handleCopyRelativePath(contextMenu.node)}
-            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
-          >
-            <span>⧉</span> Copy Relative File Path
-          </button>
-          <button
-            onClick={() => handleRevealInFileExplorer(contextMenu.node)}
-            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
-          >
-            <span>📂</span> Reveal In File Explorer
-          </button>
-          <button
-            onClick={() => handleRename(contextMenu.node)}
-            className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
-          >
-            <span>✏️</span> Rename
-          </button>
-          <button
-            onClick={() => handleDelete(contextMenu.node)}
-            className="w-full text-left px-3 py-1.5 text-xs text-diff-remove hover:bg-diff-remove/10 flex items-center gap-2"
-          >
-            <span>🗑️</span> Delete
-          </button>
+          {contextMenu.scope === "node" && (
+            <>
+              <button
+                onClick={() => handleCopy(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>📋</span> Copy File
+              </button>
+              <button
+                onClick={() => handleCopyFilePath(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>⧉</span> Copy File Path
+              </button>
+              <button
+                onClick={() => handleCopyRelativePath(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>⧉</span> Copy Relative File Path
+              </button>
+              <button
+                onClick={() => handleRevealInFileExplorer(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>📂</span> Reveal In File Explorer
+              </button>
+              <button
+                onClick={() => handleRename(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>✏️</span> Rename
+              </button>
+              <button
+                onClick={() => handleDelete(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-diff-remove hover:bg-diff-remove/10 flex items-center gap-2"
+              >
+                <span>🗑️</span> Delete
+              </button>
+            </>
+          )}
         </div>
       )}
 
