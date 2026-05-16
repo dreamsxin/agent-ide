@@ -9,6 +9,26 @@ pub enum ContextCompressionMode {
     Compact,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ContextBudget {
+    #[serde(rename = "maxContextTokens")]
+    pub max_context_tokens: Option<usize>,
+    #[serde(rename = "reservedOutputTokens")]
+    pub reserved_output_tokens: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextBuildOptions {
+    pub compression: ContextCompressionMode,
+    pub budget: Option<ContextBudget>,
+}
+
+impl ContextBuildOptions {
+    pub fn new(compression: ContextCompressionMode, budget: Option<ContextBudget>) -> Self {
+        Self { compression, budget }
+    }
+}
+
 impl Default for ContextCompressionMode {
     fn default() -> Self {
         Self::Focused
@@ -76,6 +96,11 @@ impl AgentContext {
     }
 
     pub fn to_prompt_context_with_mode(&self, mode: &ContextCompressionMode) -> String {
+        self.to_prompt_context_with_options(&ContextBuildOptions::new(mode.clone(), None))
+    }
+
+    pub fn to_prompt_context_with_options(&self, options: &ContextBuildOptions) -> String {
+        let mode = &options.compression;
         let mut ctx = String::new();
         ctx.push_str("=== Project Context ===\n");
         ctx.push_str(&format!("Project: {}\n", self.project_path));
@@ -138,8 +163,28 @@ impl AgentContext {
             }
         }
 
-        ctx
+        fit_context_to_budget(ctx, options.budget.as_ref())
     }
+}
+
+pub fn estimated_input_tokens_from_budget(budget: &ContextBudget) -> Option<usize> {
+    let max_context = budget.max_context_tokens?;
+    let reserved = budget.reserved_output_tokens.unwrap_or(4096);
+    Some(max_context.saturating_sub(reserved).saturating_sub(512))
+}
+
+fn fit_context_to_budget(context: String, budget: Option<&ContextBudget>) -> String {
+    let Some(budget) = budget else {
+        return context;
+    };
+    let Some(input_tokens) = estimated_input_tokens_from_budget(budget) else {
+        return context;
+    };
+    let max_chars = input_tokens.saturating_mul(4);
+    if max_chars == 0 || context.len() <= max_chars {
+        return context;
+    }
+    excerpt_text(&context, max_chars)
 }
 
 pub fn build_project_tree_summary(max_entries: usize, max_depth: usize) -> Result<String, String> {
@@ -385,5 +430,20 @@ mod tests {
 
         assert!(prompt.contains("Git diff summary: 1 file(s), +1 -1 lines"));
         assert!(!prompt.contains("diff --git"));
+    }
+
+    #[test]
+    fn budget_options_trim_context_with_estimated_token_budget() {
+        let ctx = sample_context(&"x".repeat(20_000));
+        let prompt = ctx.to_prompt_context_with_options(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            Some(ContextBudget {
+                max_context_tokens: Some(1200),
+                reserved_output_tokens: Some(200),
+            }),
+        ));
+
+        assert!(prompt.len() <= 4_000 + 80);
+        assert!(prompt.contains("context truncated"));
     }
 }

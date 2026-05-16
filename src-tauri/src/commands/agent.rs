@@ -2,7 +2,7 @@ use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
 use crate::agent::state_machine::{AgentMode, AgentState, ApplyDiffsResult, FileDiff, TaskStep};
-use crate::services::context::{AgentContext, ContextCompressionMode};
+use crate::services::context::{AgentContext, ContextBudget, ContextCompressionMode};
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
@@ -216,6 +216,23 @@ impl AgentGlobalState {
             .ok_or_else(|| "LLM profile not configured".to_string())?;
         Ok(profile.to_config())
     }
+
+    pub fn get_context_budget(&self, profile_id: Option<&str>) -> Option<ContextBudget> {
+        let profiles = self.llm_profiles.lock().ok()?;
+        let selected_id = profile_id.unwrap_or(&profiles.active_profile_id);
+        let profile = profiles
+            .profiles
+            .iter()
+            .find(|profile| profile.id == selected_id)
+            .or_else(|| profiles.profiles.first())?;
+        if profile.max_context_tokens.is_none() && profile.reserved_output_tokens.is_none() {
+            return None;
+        }
+        Some(ContextBudget {
+            max_context_tokens: profile.max_context_tokens.map(|value| value as usize),
+            reserved_output_tokens: profile.reserved_output_tokens.map(|value| value as usize),
+        })
+    }
 }
 
 /// Agent status response DTO.
@@ -264,6 +281,7 @@ pub async fn send_agent_prompt(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<String, String> {
     let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
     let mut context = AgentContext {
         active_file: request.active_file,
@@ -298,6 +316,7 @@ pub async fn send_agent_prompt(
             request.prompt,
             context,
             compression,
+            context_budget,
             pipeline,
             cancel_flag,
             &llm,

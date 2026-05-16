@@ -3,7 +3,10 @@ use crate::agent::executor;
 use crate::agent::multi_agent::{mark_pipeline_stage, reset_pipeline_status, PipelineStage};
 use crate::agent::planner;
 use crate::agent::state_machine::{AgentMode, AgentStateManager, TaskStep};
-use crate::services::context::{AgentContext, ContextCompressionMode};
+use crate::services::context::{
+    estimated_input_tokens_from_budget, AgentContext, ContextBudget, ContextBuildOptions,
+    ContextCompressionMode,
+};
 use crate::services::llm_client::LlmClient;
 use serde::Serialize;
 use std::sync::{
@@ -55,6 +58,7 @@ impl AgentOrchestrator {
         prompt: String,
         context: AgentContext,
         context_compression: ContextCompressionMode,
+        context_budget: Option<ContextBudget>,
         pipeline: Vec<PipelineStage>,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
@@ -69,8 +73,17 @@ impl AgentOrchestrator {
         self.emit_state(&app);
 
         // 2. Call LLM Streaming for planning
-        let ctx_str = context.to_prompt_context_with_mode(&context_compression);
+        let raw_ctx_str = context.to_prompt_context_with_mode(&context_compression);
+        let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
+            context_compression.clone(),
+            context_budget.clone(),
+        ));
         let context_summary = summarize_text(&ctx_str, 600);
+        let budget_summary = format_context_budget_summary(
+            context_budget.as_ref(),
+            raw_ctx_str.len(),
+            ctx_str.len(),
+        );
         self.emit_action_log(
             &app,
             "info",
@@ -78,7 +91,12 @@ impl AgentOrchestrator {
             None,
             None,
             "Agent prompt received",
-            &format!("Prompt:\n{}\n\nContext mode: {}", prompt, context_compression.to_string()),
+            &format!(
+                "Prompt:\n{}\n\nContext mode: {}\n{}",
+                prompt,
+                context_compression,
+                budget_summary
+            ),
             Some(context_summary.clone()),
             None,
         );
@@ -481,6 +499,31 @@ fn summarize_text(text: &str, max_chars: usize) -> String {
         summary.push_str("...");
     }
     summary
+}
+
+fn format_context_budget_summary(
+    budget: Option<&ContextBudget>,
+    raw_chars: usize,
+    final_chars: usize,
+) -> String {
+    let Some(budget) = budget else {
+        return format!(
+            "Context budget: unset\nContext chars: {}",
+            final_chars
+        );
+    };
+    let estimated_input = estimated_input_tokens_from_budget(budget)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unset".to_string());
+    format!(
+        "Context budget: estimated input tokens={}, max context tokens={}, reserved output tokens={}\nContext chars: raw={}, final={}, trimmed={}",
+        estimated_input,
+        budget.max_context_tokens.map(|value| value.to_string()).unwrap_or_else(|| "unset".to_string()),
+        budget.reserved_output_tokens.map(|value| value.to_string()).unwrap_or_else(|| "unset".to_string()),
+        raw_chars,
+        final_chars,
+        final_chars < raw_chars
+    )
 }
 
 #[cfg(test)]
