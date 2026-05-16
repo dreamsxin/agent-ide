@@ -110,6 +110,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added frontend Vitest coverage for Windows/file-URI path normalization and terminal output problem parsing.
 - Routed build/test/lint/check-style project commands through the non-interactive command runner so Test also records exit code, duration, output, Problems, Logs, and failed-run Agent repair context.
 - Added `docs/smoke_test.md` as the real Tauri runtime regression checklist for LSP, Problems, Quick Fix, Commands/Run History, Terminal, Git, and Agent repair loops.
+- Added LLM provider profiles with backward-compatible legacy config migration, Settings profile management, Chat-level profile selection, and per-run context size selection.
 
 Important distinction:
 
@@ -519,11 +520,7 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Add multi-provider LLM profiles:
-   - store multiple providers/configs instead of one global endpoint/model/key
-   - select the active provider/model from Chat
-   - let each chat run choose context size (`focused`, `compact`, `full`) without going through Settings
-   - preserve Settings as provider/profile management
+1. Runtime-verify LLM provider profiles in `npm run tauri -- dev`, including legacy config migration, profile create/edit/delete/default, Chat profile selection, and per-run context mode.
 2. Add persistent credential storage and better SSH/passphrase UX for Git remote operations.
 3. Add richer merge editor UI for conflict blocks and safer destructive-action UX.
 4. Runtime-verify TypeScript LSP completion/diagnostics/code actions in `npm run tauri -- dev`, including Quick Fix refresh and workspace indexing behavior.
@@ -534,4 +531,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; smoke checklist and Problems/LSP summary tests added; next priority is multi-provider Chat selection and per-run context size.*
+*Last updated: 2026-05-16 - Phase 7 in progress; multi-provider LLM profiles and Chat-level profile/context selection implemented; runtime profile smoke validation is next.*

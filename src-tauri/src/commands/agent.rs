@@ -14,47 +14,120 @@ use tauri::Emitter;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
+const DEFAULT_PROFILE_ID: &str = "default";
+
 /// Global Agent state. Uses tokio::sync::Mutex for async orchestration.
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmProfile {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmProfilesConfig {
+    pub profiles: Vec<LlmProfile>,
+    pub active_profile_id: String,
+    pub context_compression: ContextCompressionMode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmProfileResponse {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub api_key_masked: String,
+    pub model: String,
+}
+
+impl LlmProfile {
+    fn to_config(&self) -> LlmConfig {
+        LlmConfig {
+            endpoint: self.endpoint.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+        }
+    }
+
+    fn to_response(&self) -> LlmProfileResponse {
+        LlmProfileResponse {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            provider: self.provider.clone(),
+            endpoint: self.endpoint.clone(),
+            api_key_masked: mask_api_key(&self.api_key),
+            model: self.model.clone(),
+        }
+    }
+}
+
 /// Save LLM configuration to disk.
-fn save_llm_config_to_disk(config: &LlmConfig, context_compression: &ContextCompressionMode) {
+fn save_llm_config_to_disk(config: &LlmProfilesConfig) {
     let dir = workspace::config_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("config.json");
-    if let Ok(json) = serde_json::to_string_pretty(&serde_json::json!({
-        "endpoint": config.endpoint,
-        "api_key": config.api_key,
-        "model": config.model,
-        "context_compression": context_compression.to_string(),
-    })) {
+    if let Ok(json) = serde_json::to_string_pretty(config) {
         let _ = std::fs::write(&path, json);
     }
 }
 
 /// Load LLM configuration from disk.
-fn load_llm_config_from_disk() -> Option<(LlmConfig, ContextCompressionMode)> {
+fn load_llm_config_from_disk() -> Option<LlmProfilesConfig> {
     let path = workspace::config_dir().join("config.json");
     let content = std::fs::read_to_string(&path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parse_llm_profiles_config(parsed)
+}
+
+fn parse_llm_profiles_config(parsed: serde_json::Value) -> Option<LlmProfilesConfig> {
     let context_compression = parsed
         .get("context_compression")
         .and_then(|v| v.as_str())
         .and_then(|v| ContextCompressionMode::from_str(v).ok())
         .unwrap_or_default();
-    Some((
-        LlmConfig {
+
+    if let Some(profiles) = parsed.get("profiles").and_then(|value| value.as_array()) {
+        let profiles: Vec<LlmProfile> = profiles
+            .iter()
+            .filter_map(|profile| serde_json::from_value(profile.clone()).ok())
+            .collect();
+        if profiles.is_empty() {
+            return None;
+        }
+        let active_profile_id = parsed
+            .get("active_profile_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&profiles[0].id)
+            .to_string();
+        return Some(LlmProfilesConfig {
+            profiles,
+            active_profile_id,
+            context_compression,
+        });
+    }
+
+    Some(LlmProfilesConfig {
+        profiles: vec![LlmProfile {
+            id: DEFAULT_PROFILE_ID.to_string(),
+            name: "Default".to_string(),
+            provider: "custom".to_string(),
             endpoint: parsed.get("endpoint")?.as_str()?.to_string(),
             api_key: parsed.get("api_key")?.as_str()?.to_string(),
             model: parsed.get("model")?.as_str()?.to_string(),
-        },
+        }],
+        active_profile_id: DEFAULT_PROFILE_ID.to_string(),
         context_compression,
-    ))
+    })
 }
 
 pub struct AgentGlobalState {
     pub orchestrator: Arc<Mutex<AgentOrchestrator>>,
-    pub llm_config: Arc<std::sync::Mutex<Option<LlmConfig>>>,
-    pub llm_client: Arc<std::sync::Mutex<Option<LlmClient>>>,
+    pub llm_profiles: Arc<std::sync::Mutex<LlmProfilesConfig>>,
     pub active_role: Arc<std::sync::Mutex<AgentRole>>,
     pub pipeline_stages: Arc<std::sync::Mutex<Vec<PipelineStage>>>,
     pub context_compression: Arc<std::sync::Mutex<ContextCompressionMode>>,
@@ -63,7 +136,7 @@ pub struct AgentGlobalState {
 
 impl AgentGlobalState {
     pub fn new() -> Self {
-        let (config, context_compression) = load_llm_config_from_disk().unwrap_or_else(|| {
+        let profiles_config = load_llm_config_from_disk().unwrap_or_else(|| {
             let endpoint = std::env::var("LLM_ENDPOINT")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
             let api_key = std::env::var("LLM_API_KEY").unwrap_or_default();
@@ -72,22 +145,24 @@ impl AgentGlobalState {
                 .ok()
                 .and_then(|v| ContextCompressionMode::from_str(&v).ok())
                 .unwrap_or_default();
-            (
-                LlmConfig {
+            LlmProfilesConfig {
+                profiles: vec![LlmProfile {
+                    id: DEFAULT_PROFILE_ID.to_string(),
+                    name: "Default".to_string(),
+                    provider: "openai".to_string(),
                     endpoint,
                     api_key,
                     model,
-                },
-                mode,
-            )
+                }],
+                active_profile_id: DEFAULT_PROFILE_ID.to_string(),
+                context_compression: mode,
+            }
         });
-
-        let client = LlmClient::new(config.clone());
+        let context_compression = profiles_config.context_compression.clone();
 
         Self {
             orchestrator: Arc::new(Mutex::new(AgentOrchestrator::new())),
-            llm_config: Arc::new(std::sync::Mutex::new(Some(config))),
-            llm_client: Arc::new(std::sync::Mutex::new(Some(client))),
+            llm_profiles: Arc::new(std::sync::Mutex::new(profiles_config)),
             active_role: Arc::new(std::sync::Mutex::new(AgentRole::Coder)),
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
@@ -96,12 +171,20 @@ impl AgentGlobalState {
     }
 
     /// Get a cloned LLM client.
-    pub fn get_llm_client(&self) -> Result<LlmClient, String> {
-        self.llm_client
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone()
-            .ok_or_else(|| "LLM client not initialized".to_string())
+    pub fn get_llm_client(&self, profile_id: Option<&str>) -> Result<LlmClient, String> {
+        Ok(LlmClient::new(self.get_llm_config(profile_id)?))
+    }
+
+    pub fn get_llm_config(&self, profile_id: Option<&str>) -> Result<LlmConfig, String> {
+        let profiles = self.llm_profiles.lock().map_err(|e| e.to_string())?;
+        let selected_id = profile_id.unwrap_or(&profiles.active_profile_id);
+        let profile = profiles
+            .profiles
+            .iter()
+            .find(|profile| profile.id == selected_id)
+            .or_else(|| profiles.profiles.first())
+            .ok_or_else(|| "LLM profile not configured".to_string())?;
+        Ok(profile.to_config())
     }
 }
 
@@ -124,6 +207,10 @@ pub struct SendPromptRequest {
     #[serde(rename = "activeFileContent")]
     pub active_file_content: Option<String>,
     pub selection: Option<String>,
+    #[serde(rename = "profileId")]
+    pub profile_id: Option<String>,
+    #[serde(rename = "contextCompression")]
+    pub context_compression: Option<String>,
 }
 
 /// Get the current Agent state.
@@ -146,7 +233,7 @@ pub async fn send_agent_prompt(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client()?;
+    let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
 
     let mut context = AgentContext {
         active_file: request.active_file,
@@ -160,11 +247,14 @@ pub async fn send_agent_prompt(
     context.enrich_from_workspace();
 
     // The async mutex can be held safely while the orchestrator runs.
-    let compression = agent_state
-        .context_compression
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
+    let compression = match request.context_compression.as_deref() {
+        Some(mode) => ContextCompressionMode::from_str(mode)?,
+        None => agent_state
+            .context_compression
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone(),
+    };
     let pipeline = agent_state
         .pipeline_stages
         .lock()
@@ -504,6 +594,87 @@ fn set_review_state_after_single_diff(orch: &mut AgentOrchestrator) {
     }
 }
 
+fn mask_api_key(api_key: &str) -> String {
+    if api_key.len() > 8 {
+        format!("{}****{}", &api_key[..4], &api_key[api_key.len() - 4..])
+    } else {
+        "****".to_string()
+    }
+}
+
+fn infer_provider(endpoint: &str) -> &'static str {
+    if endpoint.contains("openai.azure.com") {
+        "azure"
+    } else if endpoint.contains("api.openai.com") {
+        "openai"
+    } else if endpoint.contains("anthropic.com") {
+        "anthropic"
+    } else if endpoint.contains("deepseek.com") {
+        "deepseek"
+    } else {
+        "custom"
+    }
+}
+
+fn upsert_profile(profiles: &mut Vec<LlmProfile>, profile: LlmProfile) {
+    if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
+        *existing = profile;
+    } else {
+        profiles.push(profile);
+    }
+}
+
+fn profiles_response(config: &LlmProfilesConfig) -> LlmProfilesResponse {
+    LlmProfilesResponse {
+        profiles: config.profiles.iter().map(LlmProfile::to_response).collect(),
+        active_profile_id: config.active_profile_id.clone(),
+        context_compression: config.context_compression.to_string(),
+    }
+}
+
+fn chrono_like_timestamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod llm_profile_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_llm_config_migrates_to_default_profile_shape() {
+        let parsed: serde_json::Value = serde_json::json!({
+            "endpoint": "https://api.deepseek.com",
+            "api_key": "sk-test",
+            "model": "deepseek-chat",
+            "context_compression": "compact"
+        });
+        let config = parse_llm_profiles_config(parsed).expect("config");
+
+        assert_eq!(config.active_profile_id, DEFAULT_PROFILE_ID);
+        assert_eq!(config.context_compression.to_string(), "compact");
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.profiles[0].provider, "custom");
+        assert_eq!(config.profiles[0].endpoint, "https://api.deepseek.com");
+    }
+
+    #[test]
+    fn profile_response_masks_api_key() {
+        let profile = LlmProfile {
+            id: "p1".to_string(),
+            name: "Work".to_string(),
+            provider: "openai".to_string(),
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-1234567890".to_string(),
+            model: "gpt-4o".to_string(),
+        };
+
+        assert_eq!(profile.to_response().api_key_masked, "sk-1****7890");
+    }
+}
+
 /// Get the current steps.
 #[tauri::command]
 pub async fn get_agent_steps(
@@ -530,30 +701,26 @@ pub async fn update_llm_config(
     model: String,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<(), String> {
-    let config = LlmConfig {
+    let profile = LlmProfile {
+        id: DEFAULT_PROFILE_ID.to_string(),
+        name: "Default".to_string(),
+        provider: infer_provider(&endpoint).to_string(),
         endpoint,
         api_key,
         model,
     };
-
-    let client = LlmClient::new(config.clone());
-
-    {
-        let mut cfg = agent_state.llm_config.lock().map_err(|e| e.to_string())?;
-        *cfg = Some(config.clone());
-    }
-    {
-        let mut cli = agent_state.llm_client.lock().map_err(|e| e.to_string())?;
-        *cli = Some(client);
-    }
-
-    // 鎸佷箙鍖栧埌 ~/.agent-ide/config.json
     let compression = agent_state
         .context_compression
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
-    save_llm_config_to_disk(&config, &compression);
+    {
+        let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+        upsert_profile(&mut config.profiles, profile);
+        config.active_profile_id = DEFAULT_PROFILE_ID.to_string();
+        config.context_compression = compression;
+        save_llm_config_to_disk(&config);
+    }
 
     Ok(())
 }
@@ -565,37 +732,130 @@ pub struct LlmConfigResponse {
     pub api_key_masked: String,
     pub model: String,
     pub context_compression: String,
+    pub profiles: Vec<LlmProfileResponse>,
+    pub active_profile_id: String,
 }
 
 #[tauri::command]
 pub async fn get_llm_config(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<LlmConfigResponse, String> {
-    let cfg = agent_state.llm_config.lock().map_err(|e| e.to_string())?;
-    match &*cfg {
-        Some(c) => {
-            let masked = if c.api_key.len() > 8 {
-                format!(
-                    "{}****{}",
-                    &c.api_key[..4],
-                    &c.api_key[c.api_key.len() - 4..]
-                )
-            } else {
-                "****".to_string()
-            };
-            Ok(LlmConfigResponse {
-                endpoint: c.endpoint.clone(),
-                api_key_masked: masked,
-                model: c.model.clone(),
-                context_compression: agent_state
-                    .context_compression
-                    .lock()
-                    .map_err(|e| e.to_string())?
-                    .to_string(),
-            })
-        }
-        None => Err("LLM config not set".to_string()),
+    let config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+    let active = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == config.active_profile_id)
+        .or_else(|| config.profiles.first())
+        .ok_or_else(|| "LLM config not set".to_string())?;
+    Ok(LlmConfigResponse {
+        endpoint: active.endpoint.clone(),
+        api_key_masked: mask_api_key(&active.api_key),
+        model: active.model.clone(),
+        context_compression: agent_state
+            .context_compression
+            .lock()
+            .map_err(|e| e.to_string())?
+            .to_string(),
+        profiles: config.profiles.iter().map(LlmProfile::to_response).collect(),
+        active_profile_id: config.active_profile_id.clone(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveLlmProfileRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub provider: String,
+    pub endpoint: String,
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    pub model: String,
+    #[serde(rename = "setActive")]
+    pub set_active: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LlmProfilesResponse {
+    pub profiles: Vec<LlmProfileResponse>,
+    pub active_profile_id: String,
+    pub context_compression: String,
+}
+
+#[tauri::command]
+pub async fn save_llm_profile(
+    request: SaveLlmProfileRequest,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<LlmProfilesResponse, String> {
+    if request.name.trim().is_empty() || request.endpoint.trim().is_empty() || request.model.trim().is_empty() {
+        return Err("Profile name, endpoint, and model are required".to_string());
     }
+    let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+    let id = request
+        .id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("profile-{}", chrono_like_timestamp()));
+    let existing_api_key = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .map(|profile| profile.api_key.clone())
+        .unwrap_or_default();
+    let api_key = request
+        .api_key
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(existing_api_key);
+    if api_key.trim().is_empty() {
+        return Err("API key is required for a new profile".to_string());
+    }
+    let profile = LlmProfile {
+        id: id.clone(),
+        name: request.name.trim().to_string(),
+        provider: request.provider.trim().to_string(),
+        endpoint: request.endpoint.trim().to_string(),
+        api_key,
+        model: request.model.trim().to_string(),
+    };
+    upsert_profile(&mut config.profiles, profile);
+    if request.set_active.unwrap_or(true) {
+        config.active_profile_id = id;
+    }
+    save_llm_config_to_disk(&config);
+    Ok(profiles_response(&config))
+}
+
+#[tauri::command]
+pub async fn set_active_llm_profile(
+    profile_id: String,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<LlmProfilesResponse, String> {
+    let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+    if !config.profiles.iter().any(|profile| profile.id == profile_id) {
+        return Err(format!("LLM profile not found: {}", profile_id));
+    }
+    config.active_profile_id = profile_id;
+    save_llm_config_to_disk(&config);
+    Ok(profiles_response(&config))
+}
+
+#[tauri::command]
+pub async fn delete_llm_profile(
+    profile_id: String,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<LlmProfilesResponse, String> {
+    let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+    if config.profiles.len() <= 1 {
+        return Err("At least one LLM profile is required".to_string());
+    }
+    config.profiles.retain(|profile| profile.id != profile_id);
+    if config.active_profile_id == profile_id {
+        config.active_profile_id = config
+            .profiles
+            .first()
+            .map(|profile| profile.id.clone())
+            .unwrap_or_else(|| DEFAULT_PROFILE_ID.to_string());
+    }
+    save_llm_config_to_disk(&config);
+    Ok(profiles_response(&config))
 }
 
 #[tauri::command]
@@ -611,14 +871,9 @@ pub async fn set_context_compression(
             .map_err(|e| e.to_string())?;
         *current = parsed.clone();
     }
-    if let Some(config) = agent_state
-        .llm_config
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone()
-    {
-        save_llm_config_to_disk(&config, &parsed);
-    }
+    let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+    config.context_compression = parsed.clone();
+    save_llm_config_to_disk(&config);
     Ok(parsed.to_string())
 }
 
@@ -644,8 +899,9 @@ pub fn get_workspace_path() -> Result<Option<String>, String> {
 #[tauri::command]
 pub async fn test_llm_connection(
     agent_state: State<'_, AgentGlobalState>,
+    profile_id: Option<String>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client()?;
+    let llm = agent_state.get_llm_client(profile_id.as_deref())?;
 
     let messages = vec![crate::services::llm_client::ChatMessage {
         role: "user".to_string(),

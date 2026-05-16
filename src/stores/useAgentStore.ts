@@ -8,6 +8,9 @@ import type {
   ContextCompressionMode,
   PipelineStage,
   LlmConfigResponse,
+  LlmProfile,
+  LlmProfilesResponse,
+  SaveLlmProfileRequest,
   Task,
   Step,
   DiffEntry,
@@ -41,6 +44,10 @@ interface AgentStore {
   llmModel: string;
   apiKeyMasked: string;
   contextCompression: ContextCompressionMode;
+  llmProfiles: LlmProfile[];
+  activeProfileId: string;
+  chatProfileId: string | null;
+  chatContextCompression: ContextCompressionMode | null;
 
   // ====== 同步 Actions ======
   setState: (state: AgentState) => void;
@@ -69,6 +76,8 @@ interface AgentStore {
     activeFile?: string;
     activeFileContent?: string;
     selection?: string;
+    profileId?: string;
+    contextCompression?: ContextCompressionMode;
   }) => Promise<void>;
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
@@ -83,6 +92,11 @@ interface AgentStore {
   // ====== 模型配置 ======
   fetchLlmConfig: () => Promise<void>;
   updateLlmConfig: (endpoint: string, apiKey: string, model: string) => Promise<void>;
+  saveLlmProfile: (request: SaveLlmProfileRequest) => Promise<void>;
+  deleteLlmProfile: (profileId: string) => Promise<void>;
+  setActiveLlmProfile: (profileId: string) => Promise<void>;
+  setChatProfileId: (profileId: string | null) => void;
+  setChatContextCompression: (mode: ContextCompressionMode | null) => void;
   updateContextCompression: (mode: ContextCompressionMode) => Promise<void>;
 
   // ====== 角色管理 ======
@@ -98,7 +112,7 @@ interface AgentStore {
   testLlmConnection: () => Promise<string>;
 }
 
-export const useAgentStore = create<AgentStore>((set) => ({
+export const useAgentStore = create<AgentStore>((set, get) => ({
   // ========== 初始值 ==========
   state: "idle",
   mode: "suggest",
@@ -130,6 +144,10 @@ export const useAgentStore = create<AgentStore>((set) => ({
   llmModel: "",
   apiKeyMasked: "",
   contextCompression: "focused",
+  llmProfiles: [],
+  activeProfileId: "",
+  chatProfileId: null,
+  chatContextCompression: null,
 
   // ========== 同步 Actions ==========
   setState: (state) => set({ state }),
@@ -211,6 +229,8 @@ export const useAgentStore = create<AgentStore>((set) => ({
           activeFile: params.activeFile ?? null,
           activeFileContent: params.activeFileContent ?? null,
           selection: params.selection ?? null,
+          profileId: params.profileId ?? get().chatProfileId,
+          contextCompression: params.contextCompression ?? get().chatContextCompression,
         },
       });
     } catch (err: unknown) {
@@ -406,6 +426,9 @@ export const useAgentStore = create<AgentStore>((set) => ({
         llmModel: cfg.model,
         apiKeyMasked: cfg.api_key_masked,
         contextCompression: cfg.context_compression,
+        llmProfiles: cfg.profiles ?? [],
+        activeProfileId: cfg.active_profile_id ?? "",
+        chatProfileId: get().chatProfileId ?? cfg.active_profile_id ?? null,
       });
     } catch {
       set({ llmConfigured: false });
@@ -430,6 +453,34 @@ export const useAgentStore = create<AgentStore>((set) => ({
         : "****",
     });
   },
+
+  saveLlmProfile: async (request) => {
+    if (!isTauriRuntime()) {
+      throw new Error("LLM profile management is available in the Tauri app runtime.");
+    }
+    const response = await invoke<LlmProfilesResponse>("save_llm_profile", { request });
+    applyProfilesResponse(response, set, get);
+  },
+
+  deleteLlmProfile: async (profileId) => {
+    if (!isTauriRuntime()) {
+      throw new Error("LLM profile management is available in the Tauri app runtime.");
+    }
+    const response = await invoke<LlmProfilesResponse>("delete_llm_profile", { profileId });
+    applyProfilesResponse(response, set, get);
+  },
+
+  setActiveLlmProfile: async (profileId) => {
+    if (!isTauriRuntime()) {
+      set({ activeProfileId: profileId, chatProfileId: profileId });
+      return;
+    }
+    const response = await invoke<LlmProfilesResponse>("set_active_llm_profile", { profileId });
+    applyProfilesResponse(response, set, get);
+  },
+
+  setChatProfileId: (profileId) => set({ chatProfileId: profileId }),
+  setChatContextCompression: (mode) => set({ chatContextCompression: mode }),
 
   updateContextCompression: async (mode) => {
     if (!isTauriRuntime()) {
@@ -493,10 +544,32 @@ export const useAgentStore = create<AgentStore>((set) => ({
     if (!isTauriRuntime()) {
       throw new Error("LLM connection test is available in the Tauri app runtime.");
     }
-    const result = await invoke<string>("test_llm_connection");
+    const result = await invoke<string>("test_llm_connection", {
+      profileId: get().chatProfileId,
+    });
     return result;
   },
 }));
+
+function applyProfilesResponse(
+  response: LlmProfilesResponse,
+  set: (partial: Partial<AgentStore>) => void,
+  get: () => AgentStore
+) {
+  const active =
+    response.profiles.find((profile) => profile.id === response.active_profile_id) ??
+    response.profiles[0];
+  set({
+    llmConfigured: response.profiles.length > 0,
+    llmProfiles: response.profiles,
+    activeProfileId: response.active_profile_id,
+    chatProfileId: get().chatProfileId ?? response.active_profile_id,
+    contextCompression: response.context_compression,
+    llmEndpoint: active?.endpoint ?? "",
+    llmModel: active?.model ?? "",
+    apiKeyMasked: active?.api_key_masked ?? "",
+  });
+}
 
 function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
   if (hunks.every((hunk) => hunk.status === "applied" || hunk.status === "rejected")) {

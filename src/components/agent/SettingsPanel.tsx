@@ -82,12 +82,18 @@ export default function SettingsPanel() {
   const llmModel = useAgentStore((s) => s.llmModel);
   const apiKeyMasked = useAgentStore((s) => s.apiKeyMasked);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
+  const llmProfiles = useAgentStore((s) => s.llmProfiles);
+  const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const contextCompression = useAgentStore((s) => s.contextCompression);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
-  const updateLlmConfig = useAgentStore((s) => s.updateLlmConfig);
+  const saveLlmProfile = useAgentStore((s) => s.saveLlmProfile);
+  const deleteLlmProfile = useAgentStore((s) => s.deleteLlmProfile);
+  const setActiveLlmProfile = useAgentStore((s) => s.setActiveLlmProfile);
   const updateContextCompression = useAgentStore((s) => s.updateContextCompression);
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
 
+  const [profileId, setProfileId] = useState("");
+  const [profileName, setProfileName] = useState("Default");
   const [provider, setProvider] = useState<ModelProvider>("openai");
   const [endpoint, setEndpoint] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -104,14 +110,24 @@ export default function SettingsPanel() {
   // 后端配置回来之后填充表单
   useEffect(() => {
     if (llmConfigured) {
+      const active = llmProfiles.find((profile) => profile.id === activeProfileId) ?? llmProfiles[0];
+      if (active) {
+        setProfileId(active.id);
+        setProfileName(active.name);
+        setProvider(active.provider);
+        setEndpoint(active.endpoint);
+        setModel(active.model);
+      } else {
+        setEndpoint(llmEndpoint);
+        setModel(llmModel);
+        const matched = PROVIDERS.find((p) => p.defaultEndpoint && llmEndpoint.startsWith(p.defaultEndpoint));
+        setProvider(matched?.id ?? "custom");
+      }
       setEndpoint(llmEndpoint);
       setModel(llmModel);
       setCompression(contextCompression);
-      // 尝试匹配 provider
-      const matched = PROVIDERS.find((p) => p.defaultEndpoint && llmEndpoint.startsWith(p.defaultEndpoint));
-      setProvider(matched?.id ?? "custom");
     }
-  }, [contextCompression, llmConfigured, llmEndpoint, llmModel]);
+  }, [activeProfileId, contextCompression, llmConfigured, llmEndpoint, llmModel, llmProfiles]);
 
   // 切换 provider 时自动填默认值
   const handleProviderChange = useCallback(
@@ -129,14 +145,26 @@ export default function SettingsPanel() {
 
   // 保存
   const handleSave = useCallback(async () => {
-    if (!endpoint.trim() || !apiKey.trim() || !model.trim()) {
-      setMessage({ type: "err", text: "All fields are required" });
+    if (!profileName.trim() || !endpoint.trim() || !model.trim()) {
+      setMessage({ type: "err", text: "Profile name, endpoint, and model are required" });
+      return;
+    }
+    if (!profileId && !apiKey.trim()) {
+      setMessage({ type: "err", text: "Secret key is required for a new profile" });
       return;
     }
     setSaving(true);
     setMessage(null);
     try {
-      await updateLlmConfig(endpoint.trim(), apiKey.trim(), model.trim());
+      await saveLlmProfile({
+        id: profileId || undefined,
+        name: profileName.trim(),
+        provider,
+        endpoint: endpoint.trim(),
+        apiKey: apiKey.trim() || undefined,
+        model: model.trim(),
+        setActive: true,
+      });
       setMessage({ type: "ok", text: "Saved successfully" });
       setApiKey(""); // 保存后清空输入框中的 key
     } catch (e) {
@@ -144,7 +172,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [endpoint, apiKey, model, updateLlmConfig]);
+  }, [apiKey, endpoint, model, profileId, profileName, provider, saveLlmProfile]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -154,7 +182,15 @@ export default function SettingsPanel() {
     try {
       // 如果表单里还有新 key（用户修改后未点 Save），先保存
       if (apiKey.trim()) {
-        await updateLlmConfig(endpoint.trim(), apiKey.trim(), model.trim());
+        await saveLlmProfile({
+          id: profileId || undefined,
+          name: profileName.trim(),
+          provider,
+          endpoint: endpoint.trim(),
+          apiKey: apiKey.trim(),
+          model: model.trim(),
+          setActive: true,
+        });
         setApiKey(""); // 保存后清空输入框
       }
       // 后端已有配置，直接测试
@@ -169,7 +205,48 @@ export default function SettingsPanel() {
     } finally {
       setTesting(false);
     }
-  }, [endpoint, apiKey, model, llmConfigured, updateLlmConfig, testLlmConnection]);
+  }, [apiKey, endpoint, llmConfigured, model, profileId, profileName, provider, saveLlmProfile, testLlmConnection]);
+
+  const handleProfileSelect = useCallback((id: string) => {
+    const profile = llmProfiles.find((item) => item.id === id);
+    if (!profile) return;
+    setProfileId(profile.id);
+    setProfileName(profile.name);
+    setProvider(profile.provider);
+    setEndpoint(profile.endpoint);
+    setModel(profile.model);
+    setApiKey("");
+  }, [llmProfiles]);
+
+  const handleNewProfile = useCallback(() => {
+    const preset = PROVIDERS[0];
+    setProfileId("");
+    setProfileName("New Profile");
+    setProvider(preset.id);
+    setEndpoint(preset.defaultEndpoint);
+    setModel(preset.defaultModel);
+    setApiKey("");
+  }, []);
+
+  const handleSetDefault = useCallback(async () => {
+    if (!profileId) return;
+    try {
+      await setActiveLlmProfile(profileId);
+      setMessage({ type: "ok", text: "Default profile updated" });
+    } catch (e) {
+      setMessage({ type: "err", text: `Set default failed: ${e}` });
+    }
+  }, [profileId, setActiveLlmProfile]);
+
+  const handleDelete = useCallback(async () => {
+    if (!profileId) return;
+    try {
+      await deleteLlmProfile(profileId);
+      setMessage({ type: "ok", text: "Profile deleted" });
+    } catch (e) {
+      setMessage({ type: "err", text: `Delete failed: ${e}` });
+    }
+  }, [deleteLlmProfile, profileId]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
   const handleCompressionChange = useCallback(async (mode: ContextCompressionMode) => {
@@ -212,7 +289,7 @@ export default function SettingsPanel() {
       </div>
 
       <div className="text-surface-muted mb-3 font-semibold tracking-wide">
-        Model Configuration
+        Provider Profiles
       </div>
 
       {/* 当前配置状态卡 */}
@@ -245,6 +322,38 @@ export default function SettingsPanel() {
           No LLM service configured. Fill in the form below to connect an AI model.
         </div>
       )}
+
+      <label className="block text-surface-muted mb-1 text-[11px]">Profile</label>
+      <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] gap-1">
+        <select
+          value={profileId}
+          onChange={(e) => handleProfileSelect(e.target.value)}
+          className="min-w-0 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
+        >
+          <option value="">New profile</option>
+          {llmProfiles.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}{profile.id === activeProfileId ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={handleNewProfile}
+          className="rounded border border-surface-border px-2 py-1 text-[11px] text-surface-muted hover:text-surface-text"
+        >
+          New
+        </button>
+      </div>
+
+      <label className="block text-surface-muted mb-1 text-[11px]">Profile Name</label>
+      <input
+        type="text"
+        value={profileName}
+        onChange={(e) => setProfileName(e.target.value)}
+        placeholder="Work OpenAI"
+        className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
+      />
 
       {/* Provider 下拉 */}
       <label className="block text-surface-muted mb-1 text-[11px]">AI Provider</label>
@@ -317,8 +426,27 @@ export default function SettingsPanel() {
         disabled={saving}
         className="w-full py-1.5 rounded bg-accent-blue hover:bg-accent-blue/80 text-white text-xs font-medium disabled:opacity-50 transition-colors"
       >
-        {saving ? "Saving..." : "Save Configuration"}
+        {saving ? "Saving..." : "Save Profile"}
       </button>
+
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={handleSetDefault}
+          disabled={!profileId || profileId === activeProfileId}
+          className="rounded border border-surface-border py-1.5 text-[11px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Set Default
+        </button>
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={!profileId || llmProfiles.length <= 1}
+          className="rounded border border-diff-remove/40 py-1.5 text-[11px] text-diff-remove hover:bg-diff-remove/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Delete
+        </button>
+      </div>
 
       {/* Test Connection */}
       <button

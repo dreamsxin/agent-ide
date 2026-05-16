@@ -3,7 +3,7 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { withIdeRuntimeContext } from "../../utils/agentRuntimeContext";
 import ReactMarkdown from "react-markdown";
-import type { AgentState } from "../../types/agent";
+import type { AgentState, ContextCompressionMode } from "../../types/agent";
 
 /** 自动闭合未关闭的代码块，防止整个后缀被渲染为代码 */
 function sanitizeMarkdown(raw: string): string {
@@ -126,6 +126,13 @@ export default function ChatView() {
   const isStreaming = useAgentStore((s) => s.isStreaming);
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
   const stopAgent = useAgentStore((s) => s.stopAgent);
+  const llmProfiles = useAgentStore((s) => s.llmProfiles);
+  const activeProfileId = useAgentStore((s) => s.activeProfileId);
+  const chatProfileId = useAgentStore((s) => s.chatProfileId);
+  const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
+  const contextCompression = useAgentStore((s) => s.contextCompression);
+  const setChatProfileId = useAgentStore((s) => s.setChatProfileId);
+  const setChatContextCompression = useAgentStore((s) => s.setChatContextCompression);
 
   const activeFile = useEditorStore((s) => s.activeFile);
   const fileContents = useEditorStore((s) => s.fileContents);
@@ -139,6 +146,8 @@ export default function ChatView() {
 
   const info = STATE_INFO[agentState] ?? STATE_INFO.idle;
   const isSending = isActing;
+  const selectedProfileId = chatProfileId ?? activeProfileId;
+  const selectedContextMode = chatContextCompression ?? contextCompression;
 
   // 当前流式消息 ID：用于实时显示
   const streamingMsgId = useRef<string | null>(null);
@@ -198,9 +207,11 @@ export default function ChatView() {
     const ctx = buildContext();
     await sendPrompt({
       prompt: withIdeRuntimeContext(content),
+      profileId: selectedProfileId || undefined,
+      contextCompression: selectedContextMode,
       ...ctx,
     });
-  }, [input, isActing, sendPrompt, buildContext, addMessage]);
+  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -244,6 +255,37 @@ export default function ChatView() {
               {agentMode}
             </span>
           )}
+        </div>
+
+        <div className="mb-1.5 grid grid-cols-[minmax(0,1fr)_112px] gap-1.5">
+          <select
+            value={selectedProfileId}
+            onChange={(event) => setChatProfileId(event.target.value || null)}
+            disabled={isSending || llmProfiles.length === 0}
+            className="min-w-0 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
+            title="LLM profile for this chat run"
+          >
+            {llmProfiles.length === 0 ? (
+              <option value="">No provider configured</option>
+            ) : (
+              llmProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name} · {profile.model}
+                </option>
+              ))
+            )}
+          </select>
+          <select
+            value={selectedContextMode}
+            onChange={(event) => setChatContextCompression(event.target.value as ContextCompressionMode)}
+            disabled={isSending}
+            className="rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
+            title="Context size for this chat run"
+          >
+            <option value="focused">Focused</option>
+            <option value="compact">Compact</option>
+            <option value="full">Full</option>
+          </select>
         </div>
 
         {/* 输入 + 按钮 */}

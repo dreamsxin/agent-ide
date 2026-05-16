@@ -20,6 +20,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - OpenAI 兼容的流式 LLM 客户端。
 - 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
 - Agent 上下文压缩模式：`full`、`focused`、`compact`。
+- 支持多个 LLM provider profile，Chat 中可以选择本次使用的 provider/model 和上下文大小。
 - Agent 上下文增强：项目树摘要和 Git working-tree diff。
 - Logs 面板中可查看结构化 Agent action log。
 - Diff 审查和应用流程，支持结构化失败信息。

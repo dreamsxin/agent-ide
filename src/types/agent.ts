@@ -119,6 +119,33 @@ export interface LlmConfigResponse {
   api_key_masked: string;
   model: string;
   context_compression: ContextCompressionMode;
+  profiles?: LlmProfile[];
+  active_profile_id?: string;
+}
+
+export interface LlmProfile {
+  id: string;
+  name: string;
+  provider: ModelProvider;
+  endpoint: string;
+  api_key_masked: string;
+  model: string;
+}
+
+export interface LlmProfilesResponse {
+  profiles: LlmProfile[];
+  active_profile_id: string;
+  context_compression: ContextCompressionMode;
+}
+
+export interface SaveLlmProfileRequest {
+  id?: string;
+  name: string;
+  provider: ModelProvider;
+  endpoint: string;
+  apiKey?: string;
+  model: string;
+  setActive?: boolean;
 }
 
 /** 模型提供商预设 */
