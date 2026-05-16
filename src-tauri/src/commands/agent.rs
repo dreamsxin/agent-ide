@@ -3,6 +3,7 @@ use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
 use crate::agent::state_machine::{AgentMode, AgentState, ApplyDiffsResult, FileDiff, TaskStep};
 use crate::services::context::{AgentContext, ContextBudget, ContextCompressionMode};
+use crate::services::credentials;
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,9 @@ pub struct LlmProfile {
     pub name: String,
     pub provider: String,
     pub endpoint: String,
+    #[serde(default, rename = "credentialRef")]
+    pub credential_ref: Option<String>,
+    #[serde(default, skip_serializing)]
     pub api_key: String,
     pub model: String,
     #[serde(default, rename = "maxContextTokens")]
@@ -60,14 +64,14 @@ pub struct LlmProfileResponse {
 }
 
 impl LlmProfile {
-    fn to_config(&self) -> LlmConfig {
-        LlmConfig {
+    fn to_config(&self) -> Result<LlmConfig, String> {
+        Ok(LlmConfig {
             endpoint: self.endpoint.clone(),
-            api_key: self.api_key.clone(),
+            api_key: self.api_key()?,
             model: self.model.clone(),
             provider: self.provider.clone(),
             max_output_tokens: self.max_output_tokens,
-        }
+        })
     }
 
     fn to_response(&self) -> LlmProfileResponse {
@@ -76,7 +80,7 @@ impl LlmProfile {
             name: self.name.clone(),
             provider: self.provider.clone(),
             endpoint: self.endpoint.clone(),
-            api_key_masked: mask_api_key(&self.api_key),
+            api_key_masked: self.masked_api_key(),
             model: self.model.clone(),
             max_context_tokens: self.max_context_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
@@ -89,6 +93,27 @@ impl LlmProfile {
         let max_context = self.max_context_tokens?;
         let reserved = self.reserved_output_tokens.or(self.max_output_tokens).unwrap_or(4096);
         Some(max_context.saturating_sub(reserved).saturating_sub(512))
+    }
+
+    fn api_key(&self) -> Result<String, String> {
+        if !self.api_key.trim().is_empty() {
+            return Ok(self.api_key.clone());
+        }
+        let credential_ref = self
+            .credential_ref
+            .as_ref()
+            .ok_or_else(|| format!("LLM credential is not configured for profile '{}'", self.name))?;
+        credentials::read_secret(credential_ref)
+    }
+
+    fn masked_api_key(&self) -> String {
+        if !self.api_key.trim().is_empty() {
+            return mask_api_key(&self.api_key);
+        }
+        self.credential_ref
+            .as_ref()
+            .map(|_| "stored in OS credential store".to_string())
+            .unwrap_or_else(|| "not configured".to_string())
     }
 }
 
@@ -107,10 +132,21 @@ fn load_llm_config_from_disk() -> Option<LlmProfilesConfig> {
     let path = workspace::config_dir().join("config.json");
     let content = std::fs::read_to_string(&path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
-    parse_llm_profiles_config(parsed)
+    let (config, credentials_migrated) = parse_llm_profiles_config_with_migration(parsed)?;
+    if credentials_migrated {
+        save_llm_config_to_disk(&config);
+    }
+    Some(config)
 }
 
+#[cfg(test)]
 fn parse_llm_profiles_config(parsed: serde_json::Value) -> Option<LlmProfilesConfig> {
+    parse_llm_profiles_config_with_migration(parsed).map(|(config, _)| config)
+}
+
+fn parse_llm_profiles_config_with_migration(
+    parsed: serde_json::Value,
+) -> Option<(LlmProfilesConfig, bool)> {
     let context_compression = parsed
         .get("context_compression")
         .and_then(|v| v.as_str())
@@ -130,28 +166,56 @@ fn parse_llm_profiles_config(parsed: serde_json::Value) -> Option<LlmProfilesCon
             .and_then(|v| v.as_str())
             .unwrap_or(&profiles[0].id)
             .to_string();
-        return Some(LlmProfilesConfig {
+        let (profiles, credentials_migrated) = migrate_profile_credentials(profiles);
+        return Some((LlmProfilesConfig {
             profiles,
             active_profile_id,
             context_compression,
-        });
+        }, credentials_migrated));
     }
 
-    Some(LlmProfilesConfig {
-        profiles: vec![LlmProfile {
+    let api_key = parsed.get("api_key")?.as_str()?.to_string();
+    let (profiles, credentials_migrated) = migrate_profile_credentials(vec![LlmProfile {
             id: DEFAULT_PROFILE_ID.to_string(),
             name: "Default".to_string(),
             provider: "custom".to_string(),
             endpoint: parsed.get("endpoint")?.as_str()?.to_string(),
-            api_key: parsed.get("api_key")?.as_str()?.to_string(),
+            credential_ref: None,
+            api_key,
             model: parsed.get("model")?.as_str()?.to_string(),
             max_context_tokens: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
-        }],
+        }]);
+    Some((LlmProfilesConfig {
+        profiles,
         active_profile_id: DEFAULT_PROFILE_ID.to_string(),
         context_compression,
-    })
+    }, credentials_migrated))
+}
+
+fn migrate_profile_credentials(mut profiles: Vec<LlmProfile>) -> (Vec<LlmProfile>, bool) {
+    let mut credentials_migrated = true;
+    for profile in &mut profiles {
+        let credential_ref = profile
+            .credential_ref
+            .clone()
+            .unwrap_or_else(|| credentials::llm_credential_ref(&profile.id));
+        if !profile.api_key.trim().is_empty() {
+            match credentials::store_secret(&credential_ref, &profile.api_key) {
+                Ok(()) => {
+                    profile.credential_ref = Some(credential_ref);
+                    profile.api_key.clear();
+                }
+                Err(_) => {
+                    credentials_migrated = false;
+                }
+            }
+        } else if profile.credential_ref.is_none() {
+            profile.credential_ref = Some(credential_ref);
+        }
+    }
+    (profiles, credentials_migrated)
 }
 
 pub struct AgentGlobalState {
@@ -174,13 +238,18 @@ impl AgentGlobalState {
                 .ok()
                 .and_then(|v| ContextCompressionMode::from_str(&v).ok())
                 .unwrap_or_default();
+            let credential_ref = credentials::llm_credential_ref(DEFAULT_PROFILE_ID);
+            if !api_key.trim().is_empty() {
+                let _ = credentials::store_secret(&credential_ref, &api_key);
+            }
             LlmProfilesConfig {
                 profiles: vec![LlmProfile {
                     id: DEFAULT_PROFILE_ID.to_string(),
                     name: "Default".to_string(),
                     provider: "openai".to_string(),
                     endpoint,
-                    api_key,
+                    credential_ref: Some(credential_ref),
+                    api_key: String::new(),
                     model,
                     max_context_tokens: None,
                     reserved_output_tokens: None,
@@ -216,7 +285,7 @@ impl AgentGlobalState {
             .find(|profile| profile.id == selected_id)
             .or_else(|| profiles.profiles.first())
             .ok_or_else(|| "LLM profile not configured".to_string())?;
-        Ok(profile.to_config())
+        profile.to_config()
     }
 
     pub fn get_context_budget(&self, profile_id: Option<&str>) -> Option<ContextBudget> {
@@ -718,6 +787,7 @@ mod llm_profile_tests {
             name: "Work".to_string(),
             provider: "openai".to_string(),
             endpoint: "https://api.openai.com/v1".to_string(),
+            credential_ref: None,
             api_key: "sk-1234567890".to_string(),
             model: "gpt-4o".to_string(),
             max_context_tokens: Some(128000),
@@ -727,6 +797,27 @@ mod llm_profile_tests {
 
         assert_eq!(profile.to_response().api_key_masked, "sk-1****7890");
         assert_eq!(profile.to_response().effective_input_tokens, Some(123392));
+    }
+
+    #[test]
+    fn profile_serialization_omits_plain_api_key() {
+        let profile = LlmProfile {
+            id: "p1".to_string(),
+            name: "Work".to_string(),
+            provider: "openai".to_string(),
+            endpoint: "https://api.openai.com/v1".to_string(),
+            credential_ref: Some("llm-profile:p1".to_string()),
+            api_key: "sk-secret".to_string(),
+            model: "gpt-4o".to_string(),
+            max_context_tokens: None,
+            reserved_output_tokens: None,
+            max_output_tokens: None,
+        };
+
+        let serialized = serde_json::to_value(&profile).expect("serialize profile");
+
+        assert_eq!(serialized["credentialRef"], "llm-profile:p1");
+        assert!(serialized.get("api_key").is_none());
     }
 }
 
@@ -761,12 +852,14 @@ pub async fn update_llm_config(
         name: "Default".to_string(),
         provider: infer_provider(&endpoint).to_string(),
         endpoint,
-        api_key,
+        credential_ref: Some(credentials::llm_credential_ref(DEFAULT_PROFILE_ID)),
+        api_key: String::new(),
         model,
         max_context_tokens: None,
         reserved_output_tokens: None,
         max_output_tokens: None,
     };
+    credentials::store_secret(&credentials::llm_credential_ref(DEFAULT_PROFILE_ID), &api_key)?;
     let compression = agent_state
         .context_compression
         .lock()
@@ -807,7 +900,7 @@ pub async fn get_llm_config(
         .ok_or_else(|| "LLM config not set".to_string())?;
     Ok(LlmConfigResponse {
         endpoint: active.endpoint.clone(),
-        api_key_masked: mask_api_key(&active.api_key),
+        api_key_masked: active.masked_api_key(),
         model: active.model.clone(),
         context_compression: agent_state
             .context_compression
@@ -858,25 +951,37 @@ pub async fn save_llm_profile(
         .id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("profile-{}", chrono_like_timestamp()));
-    let existing_api_key = config
+    let existing_profile = config
         .profiles
         .iter()
         .find(|profile| profile.id == id)
-        .map(|profile| profile.api_key.clone())
-        .unwrap_or_default();
+        .cloned();
+    let credential_ref = existing_profile
+        .as_ref()
+        .and_then(|profile| profile.credential_ref.clone())
+        .unwrap_or_else(|| credentials::llm_credential_ref(&id));
     let api_key = request
         .api_key
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(existing_api_key);
-    if api_key.trim().is_empty() {
+        .unwrap_or_default();
+    if api_key.trim().is_empty()
+        && existing_profile
+            .as_ref()
+            .and_then(|profile| profile.credential_ref.as_ref())
+            .is_none()
+    {
         return Err("API key is required for a new profile".to_string());
+    }
+    if !api_key.trim().is_empty() {
+        credentials::store_secret(&credential_ref, &api_key)?;
     }
     let profile = LlmProfile {
         id: id.clone(),
         name: request.name.trim().to_string(),
         provider: request.provider.trim().to_string(),
         endpoint: request.endpoint.trim().to_string(),
-        api_key,
+        credential_ref: Some(credential_ref),
+        api_key: String::new(),
         model: request.model.trim().to_string(),
         max_context_tokens: request.max_context_tokens,
         reserved_output_tokens: request.reserved_output_tokens,
@@ -912,6 +1017,11 @@ pub async fn delete_llm_profile(
     let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
     if config.profiles.len() <= 1 {
         return Err("At least one LLM profile is required".to_string());
+    }
+    if let Some(profile) = config.profiles.iter().find(|profile| profile.id == profile_id) {
+        if let Some(credential_ref) = profile.credential_ref.as_ref() {
+            let _ = credentials::delete_secret(credential_ref);
+        }
     }
     config.profiles.retain(|profile| profile.id != profile_id);
     if config.active_profile_id == profile_id {

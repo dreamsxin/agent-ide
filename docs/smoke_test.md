@@ -210,6 +210,7 @@ Manual check:
 Expected:
 
 - Settings persists multiple profiles without requiring the API key again when editing an existing profile.
+- Profile config JSON stores credential references, not plaintext API keys.
 - Chat lists all configured profiles and shows the selected profile/model.
 - Chat displays an estimated input budget when max context metadata is present.
 - `focused`, `compact`, and `full` are shown as compression modes, not fixed context sizes.
@@ -217,7 +218,7 @@ Expected:
 
 Automated coverage:
 
-- Rust tests cover legacy config migration and API key masking.
+- Rust tests cover legacy config migration, API key masking, and profile serialization without plaintext API keys.
 - Max context and reserved output fields are used for estimated context trimming. Max output is mapped into OpenAI-compatible chat request bodies and should be runtime-verified per provider endpoint.
 
 ## 11. Release Smoke Notes

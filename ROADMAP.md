@@ -114,6 +114,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added per-profile model budget metadata for max context tokens, reserved output tokens, and max output tokens, with Chat showing an estimated effective input budget.
 - Wired max context and reserved output metadata into Agent context building as estimated token-to-character budget trimming, with action logs recording raw/final context character counts.
 - Mapped per-profile max output tokens into OpenAI-compatible chat request bodies and added provider presets for default context/output budgets.
+- Moved LLM API key persistence out of plain JSON config and into the OS credential store; profile JSON now stores credential references only.
 
 Important distinction:
 
@@ -303,8 +304,9 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Need stricter schema enforcement, operation metadata, and richer provenance.
 
 3. **Secret storage is weak**
-   - LLM API key is persisted in `~/.agent-ide/config.json`.
-   - Should move to OS keychain or a permission-hardened credential store.
+   - LLM API keys are stored through the OS credential store.
+   - Config JSON stores profile metadata and credential references only.
+   - Needs real-runtime validation across supported OS credential backends.
 
 4. **Cancellation is cooperative, not transport-abort based**
    - `stop_agent` now reaches the LLM request/stream loop quickly through a shared flag.
@@ -385,7 +387,7 @@ Goal: make the IDE safe enough for regular local development.
 Deliverables:
 
 - Workspace boundary applied consistently across FS, Agent, Git, terminal cwd, and CLI.
-- LLM key storage moved out of plain JSON or protected with strict permissions as an interim step.
+- LLM key storage moved out of plain JSON or protected with strict permissions as an interim step. **Current:** LLM keys use the OS credential store; cross-OS runtime validation remains.
 - Diff application returns structured errors to UI.
 - Agent cancellation token wired through orchestrator and LLM client.
 - Browser preview mode has clear disabled states.
@@ -530,9 +532,9 @@ target\release\agent_cli --help
 5. Add Rust/Python LSP adapters after TypeScript runtime validation.
 6. Add stricter validation to the structured Agent protocol.
 7. Persist Agent action logs with prompt/context/diff provenance.
-8. Move LLM API key storage to a safer credential path.
+8. Runtime-validate OS credential storage for LLM profiles and add recovery UX for inaccessible/missing credentials.
 9. Runtime-verify max output request mapping against configured OpenAI-compatible providers and add request adapters for non-compatible APIs.
 
 ---
 
-*Last updated: 2026-05-16 - Phase 7 in progress; per-profile context budgets now drive estimated context trimming and max output request limits for OpenAI-compatible providers.*
+*Last updated: 2026-05-16 - Phase 7 in progress; LLM API keys now use OS credential storage, while Git credential UX and cross-OS credential validation remain next.*

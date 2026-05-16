@@ -21,6 +21,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
 - Agent 上下文压缩模式：`full`、`focused`、`compact`。
 - 支持多个 LLM provider profile，Chat 中可以选择本次使用的 provider/model 和上下文压缩模式。
+- LLM API key 通过系统 credential store 保存；本地 JSON profile 配置只保留 credential 引用。
 - Provider profile 可配置模型预算元数据，例如 max context、reserved output 和 max output tokens；Chat 会显示所选 profile 的估算输入预算。
 - Agent context builder 会使用所选 profile 的 max context 和 reserved output 元数据进行估算式预算裁剪。
 - OpenAI 兼容请求会在配置后使用所选 profile 的 max output token 限制。
@@ -41,7 +42,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - Git 工作流还缺持久化 credential storage、更好的 SSH/passphrase UX 和更完整的 merge editor 控制。
 - LSP 仍需要工作区级索引验证、安装/配置 UX，并扩展到 TypeScript/JavaScript 之外的语言。
 - Agent change protocol 还需要更严格的 schema 校验和更完整的 provenance。
-- API key 仍保存在本地 JSON 配置中。
+- LLM credential storage 还需要在 Windows Credential Manager、macOS Keychain 和 Linux secret service 上做真实运行时验证。
 - Terminal 还需要在真实 Tauri runtime 中针对面板隐藏/显示、工作区切换和长运行进程做更多交互测试。
 - 前端测试和 Tauri smoke tests 仍然不足。
 

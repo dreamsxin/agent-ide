@@ -143,6 +143,7 @@ ChatView.handleSend()
   -> collect active file, active content, selected text, context file list
   -> useAgentStore.sendPrompt()
   -> invoke("send_agent_prompt", { request })
+  -> AgentGlobalState resolves selected LLM profile and reads its API key from the OS credential store
   -> AgentGlobalState clones LLM client, context compression, and current pipeline
   -> AgentContext is enriched with workspace project tree and Git diff
   -> ContextCompressionMode formats the context as full/focused/compact
@@ -177,6 +178,7 @@ Backend scheduling responsibilities:
 |--------|------|
 | `commands/agent.rs` | IPC boundary, request validation, context construction, pipeline/config lookup. |
 | `services/context.rs` | Workspace context enrichment and compression. |
+| `services/credentials.rs` | OS credential store access for LLM profile secrets. |
 | `agent/orchestrator.rs` | State transitions, planner call, pipeline sequencing, reviewer context, action logs. |
 | `agent/planner.rs` | Converts the user prompt and context into task steps. |
 | `agent/executor.rs` | Runs role-specific model calls and streams output. |
@@ -432,7 +434,7 @@ Safety rules:
 - Agent-generated HTML is not rendered directly; markdown rendering skips HTML.
 - Diff application returns structured failures and preserves failed file content.
 - Cancellation is cooperative through a shared atomic flag and streaming checks.
-- API keys are currently persisted in local JSON and should move to OS keychain or stricter credential storage.
+- LLM API keys are stored through the OS credential store; local JSON profile config stores credential references only. This still needs cross-OS runtime validation and recovery UX for inaccessible credentials.
 
 ---
 
@@ -511,7 +513,7 @@ Highest-impact gaps:
    - Make Agent actions auditable in the UI.
 
 5. **Secret storage**
-   - Move LLM API key from JSON config to OS credential storage or a permission-hardened interim store.
+   - Runtime-validate OS credential storage and add recovery UX for inaccessible or missing LLM credentials.
 
 6. **Runtime hardening**
    - Interactive Tauri smoke tests for boot, workspace open, file read/write, terminal, Agent prompt, diff apply.

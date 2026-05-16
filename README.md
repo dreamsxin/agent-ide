@@ -23,6 +23,7 @@ Implemented core capabilities:
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
 - Agent context compression modes: `full`, `focused`, `compact`.
 - Multiple LLM provider profiles, with Chat-level provider/model and context compression mode selection.
+- LLM API keys are stored through the OS credential store; local JSON profile config keeps only credential references.
 - Provider profiles can store model budget metadata such as max context, reserved output, and max output tokens; Chat displays the estimated input budget for the selected profile.
 - Agent context building uses the selected profile's max context and reserved output metadata for estimated budget-aware trimming.
 - OpenAI-compatible requests use the selected profile's max output token limit when configured.
@@ -42,7 +43,7 @@ Important remaining gaps:
 - Git workflow still needs persistent credential storage, better SSH/passphrase UX, and richer merge editor controls.
 - LSP support still needs workspace-wide indexing validation, install/configuration UX, and broader language coverage beyond TypeScript/JavaScript.
 - Agent change protocol still needs stricter schema validation and richer provenance.
-- API keys are still persisted in local JSON config.
+- LLM credential storage needs real-runtime validation across Windows Credential Manager, macOS Keychain, and Linux secret service.
 - Terminal still needs deeper interactive runtime testing across panel hide/show, workspace switching, and long-running processes.
 - Frontend test coverage and Tauri smoke tests are still thin.
 
