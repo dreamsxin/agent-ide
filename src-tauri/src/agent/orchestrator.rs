@@ -2,7 +2,9 @@ use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::executor;
 use crate::agent::multi_agent::{mark_pipeline_stage, reset_pipeline_status, PipelineStage};
 use crate::agent::planner;
-use crate::agent::state_machine::{AgentMode, AgentStateManager, DiffProvenance, TaskStep};
+use crate::agent::state_machine::{
+    AgentMode, AgentStateManager, DiffHunkProvenance, DiffProvenance, TaskStep,
+};
 use crate::services::context::{
     estimated_input_tokens_from_budget, AgentContext, ContextBudget, ContextBuildOptions,
     ContextCompressionMode, ContextSourceOptions,
@@ -304,10 +306,24 @@ impl AgentOrchestrator {
                         response
                     ));
 
-                    let mut step_diffs = executor::parse_diffs(&response);
+                    let parsed = executor::parse_diffs_with_diagnostics(&response);
+                    let mut step_diffs = parsed.diffs;
                     attach_stage_provenance(&mut step_diffs, &stage.role.to_string(), &stage.name);
                     let generated_diff_count = step_diffs.len();
                     self.diffs.extend(step_diffs);
+                    if !parsed.diagnostics.is_empty() {
+                        self.emit_action_log(
+                            &app,
+                            "warn",
+                            "agent_changes_validation",
+                            Some(stage.role.to_string()),
+                            Some(&stage.name),
+                            "Agent changes validation reported issues",
+                            &parsed.diagnostics.join("\n"),
+                            Some(context_summary.clone()),
+                            Some(self.summarize_pending_diffs()),
+                        );
+                    }
                     mark_pipeline_stage(&mut pipeline, stage_index, "completed");
                     self.emit_action_log(
                         &app,
@@ -680,6 +696,23 @@ fn attach_stage_provenance(
         });
         provenance.source_role = Some(role.to_string());
         provenance.source_stage = Some(stage.to_string());
+        for (hunk_index, hunk) in diff.hunks.iter_mut().enumerate() {
+            let hunk_provenance = hunk.provenance.get_or_insert_with(|| DiffHunkProvenance {
+                change_index: provenance.change_index,
+                hunk_index: Some(hunk_index),
+                source_role: None,
+                source_stage: None,
+                prompt_context: None,
+                rationale: provenance.rationale.clone(),
+            });
+            hunk_provenance.source_role = Some(role.to_string());
+            hunk_provenance.source_stage = Some(stage.to_string());
+            hunk_provenance.change_index = hunk_provenance.change_index.or(provenance.change_index);
+            hunk_provenance.hunk_index = hunk_provenance.hunk_index.or(Some(hunk_index));
+            if hunk_provenance.rationale.is_none() {
+                hunk_provenance.rationale = provenance.rationale.clone();
+            }
+        }
     }
 }
 
@@ -746,6 +779,7 @@ mod tests {
                 content: String::new(),
                 original: original.to_string(),
                 updated: updated.to_string(),
+                provenance: None,
                 status: None,
             }],
             status: "pending".to_string(),

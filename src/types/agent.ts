@@ -12,7 +12,7 @@ export type AgentState =
 /** Agent 控制模式 */
 export type AgentMode = "suggest" | "edit" | "auto";
 
-export type ContextCompressionMode = "full" | "focused" | "compact";
+export type ContextCompressionMode = "full" | "focused" | "compact" | "budgeted";
 export type StepScope = "selection" | "active_file" | "open_files" | "workspace";
 export type StepExecutionMode = "analyze" | "diff" | "test" | "fix";
 
@@ -72,8 +72,18 @@ export interface DiffHunk {
   content: string;
   original: string;
   updated: string;
+  provenance?: DiffHunkProvenance | null;
   status?: "pending" | "applied" | "rejected" | "failed";
   applyError?: string;
+}
+
+export interface DiffHunkProvenance {
+  changeIndex?: number | null;
+  hunkIndex?: number | null;
+  sourceRole?: string | null;
+  sourceStage?: string | null;
+  promptContext?: string | null;
+  rationale?: string | null;
 }
 
 export interface ApplyDiffError {

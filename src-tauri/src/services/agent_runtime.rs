@@ -1,5 +1,5 @@
 use crate::agent::executor;
-use crate::agent::state_machine::{DiffProvenance, FileDiff, TaskStep};
+use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff, TaskStep};
 use crate::services::llm_client::LlmClient;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ where
             token_sender(step),
         )
         .await?;
-        let diffs = executor::parse_diffs(&response);
+        let diffs = executor::parse_diffs_with_diagnostics(&response).diffs;
         on_step_finished(step, &response, &diffs);
         results.push(AgentStepExecution {
             step: step.clone(),
@@ -167,6 +167,23 @@ pub fn attach_step_provenance(
         provenance.source_stage = Some(step.title.clone());
         provenance.regenerated_from_diff_id = regenerated_from_diff_id.map(str::to_string);
         provenance.regenerated_from_hunk_index = regenerated_from_hunk_index;
+        for (hunk_index, hunk) in diff.hunks.iter_mut().enumerate() {
+            let hunk_provenance = hunk.provenance.get_or_insert_with(|| DiffHunkProvenance {
+                change_index: provenance.change_index,
+                hunk_index: Some(hunk_index),
+                source_role: None,
+                source_stage: None,
+                prompt_context: None,
+                rationale: provenance.rationale.clone(),
+            });
+            hunk_provenance.source_role = Some("agent-step".to_string());
+            hunk_provenance.source_stage = Some(step.title.clone());
+            hunk_provenance.change_index = hunk_provenance.change_index.or(provenance.change_index);
+            hunk_provenance.hunk_index = hunk_provenance.hunk_index.or(Some(hunk_index));
+            if hunk_provenance.rationale.is_none() {
+                hunk_provenance.rationale = provenance.rationale.clone();
+            }
+        }
     }
 }
 
@@ -238,6 +255,7 @@ mod tests {
                 content: String::new(),
                 original: "old".to_string(),
                 updated: "new".to_string(),
+                provenance: None,
                 status: None,
             }],
             status: "pending".to_string(),

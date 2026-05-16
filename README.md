@@ -21,7 +21,7 @@ Implemented core capabilities:
 - PTY terminal backend using `portable-pty` and xterm.js frontend integration.
 - OpenAI-compatible streaming LLM client.
 - Role-aware Agent pipeline: planner -> architect -> coder -> tester -> reviewer.
-- Agent context compression modes: `full`, `focused`, `compact`.
+- Agent context compression modes: `full`, `focused`, `compact`, `budgeted`.
 - Multiple LLM provider profiles, with Chat-level provider/model and context compression mode selection.
 - LLM API keys are stored through the OS credential store; local JSON profile config keeps only credential references.
 - Provider profiles can store model budget metadata such as max context, reserved output, and max output tokens; Chat displays the estimated input budget for the selected profile.
@@ -204,12 +204,13 @@ The main scheduling modules are:
 | LLM | `src-tauri/src/services/llm_client.rs` | OpenAI-compatible streaming chat client. |
 | Diff apply | `src-tauri/src/agent/diff_apply.rs` | Applies reviewable file changes inside the workspace boundary. |
 
-Context compression is configured in the Agent panel's Settings tab:
+Context compression is selected per Chat run:
 
 | Mode | Use |
 |------|-----|
 | `focused` | Default practical mode: selection, active-file excerpt, project summary, Git diff. |
 | `compact` | Lower-token mode: outline and metadata for broad context. |
+| `budgeted` | Token-budget-aware packing that uses provider profile budget metadata or a safe default budget. |
 | `full` | Maximum-fidelity mode: complete active context when accuracy matters more than token use. |
 
 Agent events are streamed back to the UI and action log:
@@ -222,7 +223,7 @@ Agent events are streamed back to the UI and action log:
 - `agent-diff-ready`
 - `agent-action-log`
 
-For the full design, read [docs/agent_ide_design.md](docs/agent_ide_design.md), especially sections 4.3 Agent Prompt, 4.4 Agent Pipeline, 5 Context Model, and 6 Agent Modes and Safety.
+For the full design, read [docs/agent_ide_design.md](docs/agent_ide_design.md), especially sections 4.3 Agent Prompt, 4.4 Agent Pipeline, 5 Context Model, and 6 Agent Modes and Safety. The structured change protocol is documented in [docs/agent_changes_schema.md](docs/agent_changes_schema.md).
 
 ## Agent Change Protocol
 
@@ -231,6 +232,7 @@ Preferred structured output:
 ````text
 ```agent-changes
 {
+  "version": 1,
   "changes": [
     {
       "type": "edit",
@@ -247,12 +249,20 @@ Preferred structured output:
       "rationale": "why this file is needed",
       "content": "complete file content"
     }
+  ],
+  "findings": [
+    {
+      "severity": "warning",
+      "file": "path/to/file",
+      "hunkIndex": 0,
+      "message": "optional reviewer finding tied to this hunk"
+    }
   ]
 }
 ```
 ````
 
-Legacy `diff:path` and `new:path` code blocks are still supported.
+Legacy `diff:path` and `new:path` code blocks are still supported. Schema details and validation behavior are documented in [docs/agent_changes_schema.md](docs/agent_changes_schema.md).
 
 ## Configuration
 

@@ -217,6 +217,7 @@ enum ContextModeArg {
     Full,
     Focused,
     Compact,
+    Budgeted,
 }
 
 impl From<ContextModeArg> for ContextCompressionMode {
@@ -225,6 +226,7 @@ impl From<ContextModeArg> for ContextCompressionMode {
             ContextModeArg::Full => ContextCompressionMode::Full,
             ContextModeArg::Focused => ContextCompressionMode::Focused,
             ContextModeArg::Compact => ContextCompressionMode::Compact,
+            ContextModeArg::Budgeted => ContextCompressionMode::Budgeted,
         }
     }
 }
@@ -1177,6 +1179,7 @@ fn cli_capabilities() -> CliCapabilities {
             "full".to_string(),
             "focused".to_string(),
             "compact".to_string(),
+            "budgeted".to_string(),
         ],
         artifacts: vec![
             "summary.json".to_string(),

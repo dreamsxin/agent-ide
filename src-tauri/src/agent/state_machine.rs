@@ -138,7 +138,25 @@ pub struct DiffHunk {
     /// 更新后的代码块
     pub updated: String,
     #[serde(default)]
+    pub provenance: Option<DiffHunkProvenance>,
+    #[serde(default)]
     pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiffHunkProvenance {
+    #[serde(rename = "changeIndex", default)]
+    pub change_index: Option<usize>,
+    #[serde(rename = "hunkIndex", default)]
+    pub hunk_index: Option<usize>,
+    #[serde(rename = "sourceRole", default)]
+    pub source_role: Option<String>,
+    #[serde(rename = "sourceStage", default)]
+    pub source_stage: Option<String>,
+    #[serde(rename = "promptContext", default)]
+    pub prompt_context: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 /// Agent 状态管理器 —— 封装状态转换逻辑

@@ -25,6 +25,9 @@ function HunkBlock({
   const hasUpdated = hunk.updated && hunk.updated.trim().length > 0;
   const hunkStatus = hunk.status ?? "pending";
   const canAct = isReviewableDiffStatus(diffStatus) && hunkStatus !== "applied" && hunkStatus !== "rejected";
+  const provenanceLabel = [hunk.provenance?.sourceRole, hunk.provenance?.sourceStage]
+    .filter(Boolean)
+    .join(" / ");
 
   const header = (
     <div className="flex items-center justify-between gap-2 border-b border-surface-border bg-surface-panel/70 px-2 py-1">
@@ -81,11 +84,27 @@ function HunkBlock({
     </div>
   );
 
+  const provenancePanel = hunk.provenance && (
+    <div className="border-b border-surface-border/60 bg-surface-base/60 px-2 py-1 font-sans text-[10px] leading-snug text-surface-muted">
+      {provenanceLabel && <span>{provenanceLabel}</span>}
+      {hunk.provenance.changeIndex != null && (
+        <span className="ml-2">change {hunk.provenance.changeIndex}</span>
+      )}
+      {hunk.provenance.hunkIndex != null && (
+        <span className="ml-2">hunk {hunk.provenance.hunkIndex}</span>
+      )}
+      {hunk.provenance.promptContext && (
+        <div className="mt-0.5 truncate">{hunk.provenance.promptContext}</div>
+      )}
+    </div>
+  );
+
   if (!hasOriginal && hasUpdated) {
     const lines = hunk.updated.split("\n");
     return (
       <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
         {header}
+        {provenancePanel}
         {findingPanel}
         <div className="border-b border-diff-add/20 bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
           + New file
@@ -106,6 +125,7 @@ function HunkBlock({
     return (
       <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
         {header}
+        {provenancePanel}
         {findingPanel}
         <div className="grid grid-cols-2 border-b border-surface-border">
           <div className="bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
@@ -139,6 +159,7 @@ function HunkBlock({
   return (
     <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
       {header}
+      {provenancePanel}
       {findingPanel}
       {lines.map((line, i) => {
         let bg = "";

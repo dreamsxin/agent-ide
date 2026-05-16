@@ -428,7 +428,8 @@ pub async fn run_agent_step(
             ));
             upsert_step(&mut orch.steps, step.clone());
 
-            let mut diffs = crate::agent::executor::parse_diffs(&response);
+            let parsed = crate::agent::executor::parse_diffs_with_diagnostics(&response);
+            let mut diffs = parsed.diffs;
             agent_runtime::attach_step_provenance(
                 &mut diffs,
                 &step,
@@ -436,6 +437,15 @@ pub async fn run_agent_step(
                 request.regenerated_from_hunk_index,
             );
             orch.diffs.extend(diffs);
+            if !parsed.diagnostics.is_empty() {
+                orch.emit_review_action_log(
+                    &app_handle,
+                    "warn",
+                    "agent_changes_validation",
+                    "Agent changes validation reported issues",
+                    &parsed.diagnostics.join("\n"),
+                );
+            }
             let _ = app_handle.emit(
                 "agent-step-update",
                 serde_json::to_value(&step).unwrap_or_default(),
@@ -1062,6 +1072,7 @@ mod llm_profile_tests {
             content: "line".to_string(),
             original: "line".to_string(),
             updated: "line".to_string(),
+            provenance: None,
             status: status.map(|value| value.to_string()),
         }
     }

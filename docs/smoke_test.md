@@ -247,7 +247,7 @@ Expected:
 - Profile config JSON stores credential references, not plaintext API keys.
 - Chat lists all configured profiles and shows the selected profile/model.
 - Chat displays an estimated input budget when max context metadata is present.
-- `focused`, `compact`, and `full` are shown as compression modes, not fixed context sizes.
+- `focused`, `compact`, `budgeted`, and `full` are shown as compression modes, not fixed context sizes.
 - Existing legacy single-provider config is migrated into a default profile.
 
 Automated coverage:

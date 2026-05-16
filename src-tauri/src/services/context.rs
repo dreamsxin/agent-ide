@@ -7,6 +7,7 @@ pub enum ContextCompressionMode {
     Full,
     Focused,
     Compact,
+    Budgeted,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -28,6 +29,19 @@ impl ContextBuildOptions {
         Self {
             compression,
             budget,
+        }
+    }
+
+    fn with_effective_budget(&self) -> Self {
+        if self.budget.is_some() || !matches!(self.compression, ContextCompressionMode::Budgeted) {
+            return self.clone();
+        }
+        Self {
+            compression: self.compression.clone(),
+            budget: Some(ContextBudget {
+                max_context_tokens: Some(32_000),
+                reserved_output_tokens: Some(4_000),
+            }),
         }
     }
 }
@@ -86,6 +100,7 @@ impl std::fmt::Display for ContextCompressionMode {
             Self::Full => write!(f, "full"),
             Self::Focused => write!(f, "focused"),
             Self::Compact => write!(f, "compact"),
+            Self::Budgeted => write!(f, "budgeted"),
         }
     }
 }
@@ -96,6 +111,7 @@ impl ContextCompressionMode {
             "full" => Ok(Self::Full),
             "focused" => Ok(Self::Focused),
             "compact" => Ok(Self::Compact),
+            "budgeted" => Ok(Self::Budgeted),
             _ => Err(format!("Invalid context compression mode: {}", mode)),
         }
     }
@@ -152,14 +168,22 @@ impl AgentContext {
     }
 
     pub fn to_prompt_context_with_options(&self, options: &ContextBuildOptions) -> String {
-        build_context_with_estimate(self.build_prompt_sections(&options.compression), options).0
+        build_context_with_estimate(
+            self.build_prompt_sections(&options.compression),
+            &options.with_effective_budget(),
+        )
+        .0
     }
 
     pub fn estimate_prompt_context(
         &self,
         options: &ContextBuildOptions,
     ) -> ContextEstimateResponse {
-        build_context_with_estimate(self.build_prompt_sections(&options.compression), options).1
+        build_context_with_estimate(
+            self.build_prompt_sections(&options.compression),
+            &options.with_effective_budget(),
+        )
+        .1
     }
 
     pub fn build_prompt_sections(&self, mode: &ContextCompressionMode) -> Vec<ContextSection> {
@@ -190,6 +214,12 @@ impl AgentContext {
             let section_content = match mode {
                 ContextCompressionMode::Full => {
                     format!("Current file content:\n```\n{}\n```\n", content)
+                }
+                ContextCompressionMode::Budgeted => {
+                    format!(
+                        "Current file budgeted content:\n```\n{}\n```\n",
+                        excerpt_text(content, 24_000)
+                    )
                 }
                 ContextCompressionMode::Focused => {
                     format!(
@@ -233,6 +263,12 @@ impl AgentContext {
                 let section_content = match mode {
                     ContextCompressionMode::Full => {
                         format!("Git working tree diff:\n```diff\n{}\n```\n", diff)
+                    }
+                    ContextCompressionMode::Budgeted => {
+                        format!(
+                            "Git working tree diff budgeted excerpt:\n```diff\n{}\n```\n",
+                            excerpt_text(diff, 20_000)
+                        )
                     }
                     ContextCompressionMode::Focused => {
                         format!(
@@ -640,5 +676,31 @@ mod tests {
             .sections
             .iter()
             .any(|section| section.trimmed || section.excluded_reason.is_some()));
+    }
+
+    #[test]
+    fn budgeted_mode_uses_budget_aware_packing() {
+        let mut ctx = sample_context(&"x".repeat(40_000));
+        ctx.git_diff = Some("diff --git a/src/app.ts b/src/app.ts\n+change\n".repeat(2_000));
+
+        let estimate = ctx.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Budgeted,
+            Some(ContextBudget {
+                max_context_tokens: Some(4_000),
+                reserved_output_tokens: Some(1_000),
+            }),
+        ));
+        let prompt = ctx.to_prompt_context_with_options(&ContextBuildOptions::new(
+            ContextCompressionMode::Budgeted,
+            Some(ContextBudget {
+                max_context_tokens: Some(4_000),
+                reserved_output_tokens: Some(1_000),
+            }),
+        ));
+
+        assert!(prompt.contains("Context mode: budgeted"));
+        assert!(prompt.len() <= 10_000 + 120);
+        assert!(estimate.trimmed);
+        assert!(estimate.input_budget_tokens.is_some());
     }
 }

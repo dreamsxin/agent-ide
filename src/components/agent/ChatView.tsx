@@ -400,6 +400,7 @@ export default function ChatView() {
           >
             <option value="focused">Mode: Focused</option>
             <option value="compact">Mode: Compact</option>
+            <option value="budgeted">Mode: Budgeted</option>
             <option value="full">Mode: Full</option>
           </select>
         </div>

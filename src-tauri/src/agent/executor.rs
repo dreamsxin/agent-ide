@@ -1,5 +1,5 @@
 use crate::agent::multi_agent::AgentRole;
-use crate::agent::state_machine::{DiffProvenance, FileDiff};
+use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff};
 use crate::services::llm_client::{ChatMessage, LlmClient};
 use serde::Deserialize;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -72,10 +72,11 @@ pub async fn execute_stage(
     let output_rules = match role {
         AgentRole::Architect => "Output a concise implementation plan. Do not output code diffs.",
         AgentRole::Coder | AgentRole::Tester => {
-            r#"When code changes are needed, prefer this structured Agent IDE protocol:
+            r#"When code changes are needed, prefer the Agent IDE `agent-changes` schema version 1:
 
 ```agent-changes
 {
+  "version": 1,
   "changes": [
     {
       "type": "edit",
@@ -91,6 +92,14 @@ pub async fn execute_stage(
       "file": "path/to/new-file",
       "rationale": "why this file is needed",
       "content": "complete file content"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "warning",
+      "file": "path/to/file",
+      "hunkIndex": 0,
+      "message": "optional reviewer finding tied to a hunk"
     }
   ]
 }
@@ -146,7 +155,18 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
 
 /// 从 LLM 响应中解析 diff 块
 pub fn parse_diffs(response: &str) -> Vec<FileDiff> {
+    parse_diffs_with_diagnostics(response).diffs
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedDiffs {
+    pub diffs: Vec<FileDiff>,
+    pub diagnostics: Vec<String>,
+}
+
+pub fn parse_diffs_with_diagnostics(response: &str) -> ParsedDiffs {
     let mut diffs = Vec::new();
+    let mut diagnostics = Vec::new();
     let lines: Vec<&str> = response.lines().collect();
     let mut i = 0;
 
@@ -167,7 +187,9 @@ pub fn parse_diffs(response: &str) -> Vec<FileDiff> {
             match block_type.as_str() {
                 "agent-changes" => {
                     let content = block_lines.join("\n");
-                    diffs.extend(parse_agent_changes(&content));
+                    let parsed = parse_agent_changes(&content);
+                    diffs.extend(parsed.diffs);
+                    diagnostics.extend(parsed.diagnostics);
                 }
                 "diff" => {
                     let (original, updated) = split_diff_content(&block_lines);
@@ -188,7 +210,7 @@ pub fn parse_diffs(response: &str) -> Vec<FileDiff> {
         i += 1;
     }
 
-    diffs
+    ParsedDiffs { diffs, diagnostics }
 }
 
 /// 检测代码块类型和文件名: 返回 (类型, 文件名)
@@ -231,6 +253,8 @@ struct AgentChangesBlock {
     #[serde(default)]
     version: Option<u32>,
     changes: Vec<AgentChange>,
+    #[serde(default)]
+    findings: Vec<AgentFinding>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,16 +275,48 @@ struct AgentChangeHunk {
     updated: String,
 }
 
-fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
-    let Ok(block) = serde_json::from_str::<AgentChangesBlock>(json) else {
-        return Vec::new();
+#[derive(Debug, Deserialize)]
+struct AgentFinding {
+    severity: String,
+    file: String,
+    #[serde(rename = "hunkIndex")]
+    hunk_index: Option<usize>,
+    message: String,
+}
+
+fn parse_agent_changes(json: &str) -> ParsedDiffs {
+    let block = match serde_json::from_str::<AgentChangesBlock>(json) {
+        Ok(block) => block,
+        Err(err) => {
+            return ParsedDiffs {
+                diffs: Vec::new(),
+                diagnostics: vec![format!("agent-changes JSON parse error: {}", err)],
+            };
+        }
     };
 
     let mut diffs = Vec::new();
+    let mut diagnostics = Vec::new();
+    if block.version != Some(1) {
+        diagnostics.push(format!(
+            "agent-changes version must be 1; got {:?}",
+            block.version
+        ));
+        return ParsedDiffs { diffs, diagnostics };
+    }
+    if block.changes.is_empty() {
+        diagnostics.push("agent-changes must include at least one change".to_string());
+        return ParsedDiffs { diffs, diagnostics };
+    }
+    let findings = block.findings;
     for (change_index, change) in block.changes.into_iter().enumerate() {
         let change_type = change.change_type.trim();
         let file = change.file.trim();
         if !is_valid_relative_file_path(file) {
+            diagnostics.push(format!(
+                "agent-changes change {} has invalid relative file path: {}",
+                change_index, change.file
+            ));
             continue;
         }
         let provenance = DiffProvenance {
@@ -291,22 +347,59 @@ fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
                             }
                         }
                         diffs.push(diff);
+                    } else {
+                        diagnostics.push(format!(
+                            "agent-changes create change {} must provide non-empty content and no hunks",
+                            change_index
+                        ));
                     }
+                } else {
+                    diagnostics.push(format!(
+                        "agent-changes create change {} is missing content",
+                        change_index
+                    ));
                 }
             }
             "edit" | "modify" => {
+                if change.content.is_some() {
+                    diagnostics.push(format!(
+                        "agent-changes edit change {} must use hunks and not content",
+                        change_index
+                    ));
+                    continue;
+                };
                 let Some(hunks) = change.hunks else {
+                    diagnostics.push(format!(
+                        "agent-changes edit change {} is missing hunks",
+                        change_index
+                    ));
                     continue;
                 };
                 let parsed_hunks: Vec<_> = hunks
                     .into_iter()
-                    .filter(|hunk| {
-                        !hunk.original.trim().is_empty()
-                            && hunk.original != hunk.updated
-                            && !hunk.updated.contains("\u{0000}")
-                            && !hunk.original.contains("\u{0000}")
-                    })
-                    .map(|hunk| {
+                    .enumerate()
+                    .filter_map(|(hunk_index, hunk)| {
+                        if hunk.original.trim().is_empty() {
+                            diagnostics.push(format!(
+                                "agent-changes edit change {} hunk {} has empty original",
+                                change_index, hunk_index
+                            ));
+                            return None;
+                        }
+                        if hunk.original == hunk.updated {
+                            diagnostics.push(format!(
+                                "agent-changes edit change {} hunk {} does not change content",
+                                change_index, hunk_index
+                            ));
+                            return None;
+                        }
+                        if hunk.updated.contains("\u{0000}") || hunk.original.contains("\u{0000}") {
+                            diagnostics.push(format!(
+                                "agent-changes edit change {} hunk {} contains NUL bytes",
+                                change_index, hunk_index
+                            ));
+                            return None;
+                        }
                         let old_count = hunk
                             .original
                             .lines()
@@ -319,7 +412,7 @@ fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
                             .filter(|line| !line.trim().is_empty())
                             .count()
                             .max(1) as u32;
-                        crate::agent::state_machine::DiffHunk {
+                        Some(crate::agent::state_machine::DiffHunk {
                             old_start: 0,
                             old_lines: old_count,
                             new_start: 0,
@@ -327,12 +420,23 @@ fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
                             content: change.rationale.clone().unwrap_or_default(),
                             original: hunk.original,
                             updated: hunk.updated,
+                            provenance: Some(DiffHunkProvenance {
+                                change_index: Some(change_index),
+                                hunk_index: Some(hunk_index),
+                                source_role: None,
+                                source_stage: None,
+                                prompt_context: Some(format!(
+                                    "agent-changes change {} hunk {}",
+                                    change_index, hunk_index
+                                )),
+                                rationale: change.rationale.clone(),
+                            }),
                             status: None,
-                        }
+                        })
                     })
                     .collect();
 
-                if !parsed_hunks.is_empty() && change.content.is_none() {
+                if !parsed_hunks.is_empty() {
                     diffs.push(FileDiff {
                         id: uuid::Uuid::new_v4().to_string(),
                         file: file.to_string(),
@@ -341,13 +445,78 @@ fn parse_agent_changes(json: &str) -> Vec<FileDiff> {
                         hunks: parsed_hunks,
                         status: "pending".to_string(),
                     });
+                } else {
+                    diagnostics.push(format!(
+                        "agent-changes edit change {} has no valid hunks",
+                        change_index
+                    ));
                 }
             }
-            _ => {}
+            _ => diagnostics.push(format!(
+                "agent-changes change {} has unsupported type: {}",
+                change_index, change.change_type
+            )),
         }
     }
 
-    diffs
+    attach_findings_to_hunks(&mut diffs, &findings, &mut diagnostics);
+
+    ParsedDiffs { diffs, diagnostics }
+}
+
+fn attach_findings_to_hunks(
+    diffs: &mut [FileDiff],
+    findings: &[AgentFinding],
+    diagnostics: &mut Vec<String>,
+) {
+    for (finding_index, finding) in findings.iter().enumerate() {
+        if finding.message.trim().is_empty() {
+            diagnostics.push(format!(
+                "agent-changes finding {} has empty message",
+                finding_index
+            ));
+            continue;
+        }
+        let file = finding.file.trim();
+        let Some(diff) = diffs.iter_mut().find(|diff| diff.file == file) else {
+            diagnostics.push(format!(
+                "agent-changes finding {} references unknown file: {}",
+                finding_index, finding.file
+            ));
+            continue;
+        };
+        let hunk_index = finding.hunk_index.unwrap_or(0);
+        let Some(hunk) = diff.hunks.get_mut(hunk_index) else {
+            diagnostics.push(format!(
+                "agent-changes finding {} references missing hunk {} in {}",
+                finding_index, hunk_index, finding.file
+            ));
+            continue;
+        };
+        let provenance = hunk.provenance.get_or_insert_with(|| DiffHunkProvenance {
+            change_index: diff
+                .provenance
+                .as_ref()
+                .and_then(|value| value.change_index),
+            hunk_index: Some(hunk_index),
+            source_role: None,
+            source_stage: None,
+            prompt_context: None,
+            rationale: diff
+                .provenance
+                .as_ref()
+                .and_then(|value| value.rationale.clone()),
+        });
+        let note = format!(
+            "reviewer finding [{}]: {}",
+            finding.severity.trim(),
+            finding.message.trim()
+        );
+        provenance.prompt_context = Some(match provenance.prompt_context.as_deref() {
+            Some(existing) if !existing.trim().is_empty() => format!("{}\n{}", existing, note),
+            _ => note,
+        });
+    }
 }
 
 fn normalized_operation(change_type: &str) -> &'static str {
@@ -446,6 +615,14 @@ fn make_diff(file: &str, content: &str, original: &[String], updated: &[String])
             content: content.to_string(),
             original: original.join("\n"),
             updated: updated.join("\n"),
+            provenance: Some(DiffHunkProvenance {
+                change_index: None,
+                hunk_index: Some(0),
+                source_role: None,
+                source_stage: None,
+                prompt_context: Some("legacy diff block".to_string()),
+                rationale: None,
+            }),
             status: None,
         }],
         status: "pending".to_string(),
@@ -477,6 +654,14 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
             content: content.to_string(),
             original: String::new(),
             updated: content.to_string(),
+            provenance: Some(DiffHunkProvenance {
+                change_index: None,
+                hunk_index: Some(0),
+                source_role: None,
+                source_stage: None,
+                prompt_context: Some("legacy new-file block".to_string()),
+                rationale: None,
+            }),
             status: None,
         }],
         status: "pending".to_string(),
@@ -533,6 +718,10 @@ mod tests {
         );
         assert_eq!(diffs[0].hunks[0].original, "const value = 1;");
         assert_eq!(diffs[0].hunks[0].updated, "const value = 2;");
+        assert_eq!(
+            diffs[0].hunks[0].provenance.as_ref().unwrap().change_index,
+            Some(0)
+        );
         assert_eq!(diffs[1].file, "src/new.ts");
         assert_eq!(diffs[1].provenance.as_ref().unwrap().operation, "create");
         assert_eq!(diffs[1].hunks[0].updated, "export const helper = true;\n");
@@ -592,8 +781,70 @@ const value = 2;
 }
 ```"#;
 
-        let diffs = parse_diffs(response);
+        let parsed = parse_diffs_with_diagnostics(response);
 
-        assert!(diffs.is_empty());
+        assert!(parsed.diffs.is_empty());
+        assert!(!parsed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_diffs_reports_structured_validation_errors() {
+        let response = r#"```agent-changes
+{
+  "version": 2,
+  "changes": []
+}
+```"#;
+
+        let parsed = parse_diffs_with_diagnostics(response);
+
+        assert!(parsed.diffs.is_empty());
+        assert!(parsed
+            .diagnostics
+            .iter()
+            .any(|item| item.contains("version must be 1")));
+    }
+
+    #[test]
+    fn parse_diffs_attaches_review_findings_to_hunk_provenance() {
+        let response = r#"```agent-changes
+{
+  "version": 1,
+  "changes": [
+    {
+      "type": "edit",
+      "file": "src/app.ts",
+      "rationale": "fix value",
+      "hunks": [
+        {
+          "original": "const value = 1;",
+          "updated": "const value = 2;"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "severity": "warning",
+      "file": "src/app.ts",
+      "hunkIndex": 0,
+      "message": "verify value usage"
+    }
+  ]
+}
+```"#;
+
+        let parsed = parse_diffs_with_diagnostics(response);
+
+        assert_eq!(parsed.diffs.len(), 1);
+        let hunk_provenance = parsed.diffs[0].hunks[0]
+            .provenance
+            .as_ref()
+            .expect("hunk provenance");
+        assert!(hunk_provenance
+            .prompt_context
+            .as_deref()
+            .unwrap_or_default()
+            .contains("verify value usage"));
     }
 }

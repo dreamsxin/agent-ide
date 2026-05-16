@@ -44,7 +44,7 @@ cargo test
 
 ## Current State
 
-Status as of 2026-05-16: **Phase 7/8 in progress - daily IDE replacement hardening**.
+Status as of 2026-05-16: **Phase 7 feature-complete; Phase 8 in progress - daily IDE replacement hardening**.
 
 Reassessment as of 2026-05-16:
 
@@ -55,7 +55,7 @@ Reassessment as of 2026-05-16:
 The app is no longer just a static UI prototype. It has a working Tauri/Rust backend, file commands, Git commands, LLM streaming, Agent planning/execution scaffolding, diff review UI, and settings for model configuration. Recent work focused on correcting safety and runtime assumptions:
 
 - Added workspace path resolution and path-bound file operations.
-- Added Agent context compression modes: `focused`, `compact`, `full`.
+- Added Agent context compression modes: `focused`, `compact`, `full`, and `budgeted`.
 - Replaced unsafe Agent Markdown HTML injection with `ReactMarkdown skipHtml`.
 - Restored a Tauri CSP instead of `csp: null`.
 - Added browser/Tauri runtime guards so `npm run dev` can preview UI without crashing.
@@ -75,6 +75,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added `docs/agent_ide_design.md` as the detailed design document for workflows, context handling, Agent orchestration, and technical boundaries.
 - Added backend Agent context enrichment with bounded project tree summaries and Git working-tree diff excerpts.
 - Added a compatible structured `agent-changes` JSON output protocol for model file changes while preserving legacy diff/new-file block parsing.
+- Added a formal `agent-changes` version 1 schema document, validation diagnostics in action logs, optional reviewer findings, and hunk-level provenance.
 - Fixed terminal PTY input handling by keeping a persistent writer per terminal instance instead of taking a new writer for each keystroke.
 - Improved terminal startup feedback and guarded resize fitting when the panel has no measurable size.
 - Added `README.md` with setup, runtime modes, verification, Agent workflow, protocol, and project status.
@@ -519,6 +520,8 @@ Add focused tests:
 
 Goal: turn Agent scaffolding into a reliable controllable coding loop.
 
+Status: **feature-complete as of 2026-05-16**. Remaining validation is covered by the Phase 8 real-runtime smoke loop.
+
 Deliverables:
 
 - Role-aware orchestration: architect -> coder -> tester -> reviewer.
@@ -532,6 +535,8 @@ Deliverables:
   - `compact`: outline and metadata.
   - `budgeted`: token-budget-aware file packing.
 - Structured model protocol instead of free-form markdown-only diff parsing.
+- Formal `agent-changes` version 1 schema and validation diagnostics in Agent action logs.
+- Hunk-level provenance for structured changes and reviewer findings.
 
 Acceptance checks:
 
@@ -539,6 +544,14 @@ Acceptance checks:
 - Each stage emits state and logs.
 - Diff suggestions include source context metadata.
 - Stop cancels active LLM streaming.
+
+Implementation status:
+
+- Plan stages, role-aware execution, and action logs are wired.
+- Diff suggestions include file and hunk provenance.
+- `budgeted` context mode is available in UI, CLI, backend parsing, and context estimation.
+- Invalid structured model output emits `agent_changes_validation` warnings.
+- Stop/cancel is wired in backend; final provider/runtime confirmation remains in Phase 8 smoke notes.
 
 ### Phase 8 - IDE Workflow Completion
 
@@ -634,13 +647,12 @@ target\release\agent_cli --help
 1. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
 2. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
 3. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
-4. Add a formal versioned `agent-changes` schema document and expose schema validation failures in the Logs panel instead of silently ignoring malformed blocks.
-5. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
-6. Expand Agent workflow UI with stage input/output source panels, reviewer finding provenance, and explicit per-stage approve/skip controls.
-7. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
-8. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
-9. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
+4. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
+5. Expand Agent workflow UI with stage input/output source panels and explicit per-stage approve/skip controls.
+6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
+7. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
+8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
 
 ---
 
-*Last updated: 2026-05-16 - Diff review now preserves partial hunk state and shows same-file Problems/Agent findings inside matching hunks; smoke checklist now includes the full Terminal/Commands/Problems/LSP/Git/Agent repair loop and large TypeScript/Go workspace indexing validation.*
+*Last updated: 2026-05-16 - Phase 7 is feature-complete: budgeted context mode, versioned agent-changes schema docs, validation diagnostics in action logs, and hunk-level provenance/finding metadata are wired. Phase 8 runtime smoke remains next.*

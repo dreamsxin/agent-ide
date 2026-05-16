@@ -19,7 +19,7 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 - 基于 `portable-pty` 的 PTY 后端和 xterm.js 前端终端。
 - OpenAI 兼容的流式 LLM 客户端。
 - 角色化 Agent 流水线：planner -> architect -> coder -> tester -> reviewer。
-- Agent 上下文压缩模式：`full`、`focused`、`compact`。
+- Agent 上下文压缩模式：`full`、`focused`、`compact`、`budgeted`。
 - 支持多个 LLM provider profile，Chat 中可以选择本次使用的 provider/model 和上下文压缩模式。
 - LLM API key 通过系统 credential store 保存；本地 JSON profile 配置只保留 credential 引用。
 - Provider profile 可配置模型预算元数据，例如 max context、reserved output 和 max output tokens；Chat 会显示所选 profile 的估算输入预算。
@@ -203,12 +203,13 @@ Chat prompt
 | LLM | `src-tauri/src/services/llm_client.rs` | OpenAI 兼容的流式 chat client。 |
 | Diff 应用 | `src-tauri/src/agent/diff_apply.rs` | 在 workspace 边界内应用可审查文件改动。 |
 
-上下文压缩模式在 Agent 面板的 Settings tab 中配置：
+上下文压缩模式在 Chat 中按本次运行选择：
 
 | 模式 | 用途 |
 |------|------|
 | `focused` | 默认实用模式：selection、active-file excerpt、project summary、Git diff。 |
 | `compact` | 低 token 模式：用 outline 和 metadata 表达更宽的上下文。 |
+| `budgeted` | 按 provider profile 的上下文预算做 token-aware packing；没有模型预算时使用安全默认值。 |
 | `full` | 高保真模式：尽量包含完整 active context，适合准确性优先的任务。 |
 
 Agent 事件会流式回传给前端和 action log：
@@ -221,7 +222,7 @@ Agent 事件会流式回传给前端和 action log：
 - `agent-diff-ready`
 - `agent-action-log`
 
-完整设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)，重点阅读 4.3 Agent Prompt、4.4 Agent Pipeline、5 Context Model、6 Agent Modes and Safety。
+完整设计见 [docs/agent_ide_design.md](docs/agent_ide_design.md)，重点阅读 4.3 Agent Prompt、4.4 Agent Pipeline、5 Context Model、6 Agent Modes and Safety。结构化变更协议见 [docs/agent_changes_schema.md](docs/agent_changes_schema.md)。
 
 ## Agent Change Protocol
 
@@ -230,6 +231,7 @@ Agent 事件会流式回传给前端和 action log：
 ````text
 ```agent-changes
 {
+  "version": 1,
   "changes": [
     {
       "type": "edit",
@@ -246,12 +248,20 @@ Agent 事件会流式回传给前端和 action log：
       "rationale": "why this file is needed",
       "content": "complete file content"
     }
+  ],
+  "findings": [
+    {
+      "severity": "warning",
+      "file": "path/to/file",
+      "hunkIndex": 0,
+      "message": "optional reviewer finding tied to this hunk"
+    }
   ]
 }
 ```
 ````
 
-旧的 `diff:path` 和 `new:path` 代码块仍然兼容。
+旧的 `diff:path` 和 `new:path` 代码块仍然兼容。Schema 细节和校验行为见 [docs/agent_changes_schema.md](docs/agent_changes_schema.md)。
 
 ## 配置
 

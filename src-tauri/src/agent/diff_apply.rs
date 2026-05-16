@@ -233,6 +233,7 @@ mod tests {
                 content: String::new(),
                 original: original.to_string(),
                 updated: updated.to_string(),
+                provenance: None,
                 status: None,
             }],
             status: "pending".to_string(),
@@ -355,6 +356,7 @@ mod tests {
             content: String::new(),
             original: "const missing = 1;".to_string(),
             updated: "const missing = 2;".to_string(),
+            provenance: None,
             status: None,
         });
 
