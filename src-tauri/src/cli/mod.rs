@@ -63,6 +63,8 @@ enum CliCommand {
     Plan(AgentCommandArgs),
     /// Run the Agent. This is also the default command when no subcommand is used.
     Run(AgentCommandArgs),
+    /// Run deterministic backend smoke workflows for IDE integration paths.
+    Smoke(SmokeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -178,6 +180,18 @@ struct AgentCommandArgs {
     prompt: Vec<String>,
 }
 
+#[derive(Args, Debug)]
+struct SmokeArgs {
+    #[command(subcommand)]
+    command: SmokeCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum SmokeCommand {
+    /// Exercise workspace resolution, project scripts, command checks, Problems, diff apply, and repair-chain artifacts.
+    IdeBackend(AgentCommandArgs),
+}
+
 impl Default for RunArgs {
     fn default() -> Self {
         Self {
@@ -270,6 +284,7 @@ struct CliSummary {
     problems: Vec<ProblemEntry>,
     repair_chain: Vec<RepairIterationRecord>,
     repair_summary: Vec<RepairIterationSummary>,
+    project_tasks: Vec<project_tasks::ProjectTask>,
     capabilities: Option<CliCapabilities>,
     errors: Vec<String>,
 }
@@ -291,6 +306,7 @@ struct CliCapabilities {
     supports_output_limit: bool,
     supports_diff_file_limit: bool,
     supports_compact_ci_summary: bool,
+    supports_ide_backend_smoke: bool,
     supports_interactive_review: bool,
     supports_git_mutation: bool,
     scope: String,
@@ -453,6 +469,7 @@ where
             run_agent_command("plan", run, args.prompt).await
         }
         Some(CliCommand::Run(args)) => run_agent_command("run", args.run, args.prompt).await,
+        Some(CliCommand::Smoke(args)) => run_smoke(args).await,
         None => Err((
             ExitCode::InvalidInput,
             "No command provided. Use run, plan, context estimate, or doctor.".to_string(),
@@ -475,7 +492,16 @@ where
     if raw.iter().skip(1).any(|arg| {
         matches!(
             arg.as_str(),
-            "doctor" | "context" | "plan" | "run" | "help" | "--help" | "-h" | "--version" | "-V"
+            "doctor"
+                | "context"
+                | "plan"
+                | "run"
+                | "smoke"
+                | "help"
+                | "--help"
+                | "-h"
+                | "--version"
+                | "-V"
         )
     }) {
         return raw;
@@ -538,6 +564,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         problems: Vec::new(),
         repair_chain: Vec::new(),
         repair_summary: Vec::new(),
+        project_tasks: Vec::new(),
         capabilities: Some(cli_capabilities()),
         errors,
     };
@@ -595,6 +622,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         problems: Vec::new(),
         repair_chain: Vec::new(),
         repair_summary: Vec::new(),
+        project_tasks: Vec::new(),
         capabilities: None,
         errors: Vec::new(),
     };
@@ -615,6 +643,8 @@ async fn run_agent_command(
         .unwrap_or_else(|| make_run_id(args.workspace.as_deref()));
     let workspace_path = resolve_workspace(args.workspace.as_deref())?;
     configure_workspace(&workspace_path)?;
+    let project_tasks = project_tasks::discover_project_tasks_in_root(&workspace_path)
+        .map_err(|err| (ExitCode::InternalError, err))?;
     let artifact_dir = args
         .artifact_dir
         .clone()
@@ -707,6 +737,7 @@ async fn run_agent_command(
             problems: Vec::new(),
             repair_chain: Vec::new(),
             repair_summary: Vec::new(),
+            project_tasks,
             capabilities: None,
             errors: Vec::new(),
         };
@@ -832,7 +863,7 @@ async fn run_agent_command(
         }
     }
 
-    let command_problems = collect_command_problems(&command_results);
+    let command_problems = collect_all_observed_problems(&command_results, &repair_chain);
     let apply_result = merge_apply_results(apply_results);
     let exit = if checks_failed {
         ExitCode::ChecksFailed
@@ -903,6 +934,7 @@ async fn run_agent_command(
         problems: command_problems,
         repair_summary: repair_chain_summary(&repair_chain),
         repair_chain,
+        project_tasks,
         capabilities: None,
         errors,
     };
@@ -915,6 +947,51 @@ async fn run_agent_command(
         Some(&diffs),
     )?;
     Ok(exit)
+}
+
+async fn run_smoke(args: SmokeArgs) -> Result<ExitCode, (ExitCode, String)> {
+    match args.command {
+        SmokeCommand::IdeBackend(args) => run_ide_backend_smoke(args).await,
+    }
+}
+
+async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (ExitCode, String)> {
+    let workspace_path = resolve_workspace(args.run.workspace.as_deref())?;
+    configure_workspace(&workspace_path)?;
+
+    if args.run.run_commands.is_empty() {
+        let tasks = project_tasks::discover_project_tasks_in_root(&workspace_path)
+            .map_err(|err| (ExitCode::InternalError, err))?;
+        let command = select_smoke_command(&tasks).ok_or_else(|| {
+            (
+                ExitCode::PreconditionFailed,
+                "No package/Cargo test, check, lint, or build command was discovered for smoke ide-backend.".to_string(),
+            )
+        })?;
+        args.run.run_commands.push(command);
+    }
+
+    for command in args.run.run_commands.clone() {
+        if !is_command_allowed(&command, &args.run.allow_run) {
+            args.run.allow_run.push(command);
+        }
+    }
+
+    args.run.apply = true;
+    if args.run.max_iterations == 0 {
+        args.run.max_iterations = 1;
+    }
+    if args.run.include.is_empty() {
+        args.run.include = vec![ContextSourceArg::ProjectTree, ContextSourceArg::GitDiff];
+    }
+    if args.prompt.is_empty() {
+        args.prompt = vec![
+            "Run the IDE backend smoke loop. Fix the failing project command while preserving behavior."
+                .to_string(),
+        ];
+    }
+
+    run_agent_command("smoke ide-backend", args.run, args.prompt).await
 }
 
 async fn execute_steps(
@@ -1103,6 +1180,12 @@ fn write_artifacts(
     if !summary.commands.is_empty() {
         write_json(artifact_dir.join("commands.json"), &summary.commands)?;
     }
+    if !summary.project_tasks.is_empty() {
+        write_json(
+            artifact_dir.join("project-tasks.json"),
+            &summary.project_tasks,
+        )?;
+    }
     if !summary.problems.is_empty() {
         write_json(artifact_dir.join("problems.json"), &summary.problems)?;
     }
@@ -1160,6 +1243,7 @@ fn error_summary(
         problems: Vec::new(),
         repair_chain: Vec::new(),
         repair_summary: Vec::new(),
+        project_tasks: Vec::new(),
         capabilities: None,
         errors: vec![error],
     }
@@ -1173,6 +1257,7 @@ fn cli_capabilities() -> CliCapabilities {
             "context estimate".to_string(),
             "plan".to_string(),
             "run".to_string(),
+            "smoke ide-backend".to_string(),
         ],
         output_modes: vec!["text".to_string(), "json".to_string(), "ndjson".to_string()],
         context_modes: vec![
@@ -1204,10 +1289,33 @@ fn cli_capabilities() -> CliCapabilities {
         supports_output_limit: true,
         supports_diff_file_limit: true,
         supports_compact_ci_summary: true,
+        supports_ide_backend_smoke: true,
         supports_interactive_review: false,
         supports_git_mutation: false,
         scope: "headless automation runner; not a full command-line IDE".to_string(),
     }
+}
+
+fn select_smoke_command(tasks: &[project_tasks::ProjectTask]) -> Option<String> {
+    const PREFERRED_LABELS: &[&str] = &["test", "check", "lint", "typecheck", "build"];
+    for label in PREFERRED_LABELS {
+        if let Some(task) = tasks
+            .iter()
+            .find(|task| task.label.eq_ignore_ascii_case(label))
+        {
+            return Some(task.command.clone());
+        }
+    }
+    tasks
+        .iter()
+        .find(|task| {
+            let command = task.command.to_ascii_lowercase();
+            command.contains(" test")
+                || command.ends_with("test")
+                || command.contains(" check")
+                || command.ends_with("check")
+        })
+        .map(|task| task.command.clone())
 }
 
 fn repair_chain_summary(chain: &[RepairIterationRecord]) -> Vec<RepairIterationSummary> {
@@ -1314,6 +1422,24 @@ fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec<Pro
         .iter()
         .flat_map(|result| result.problems.clone())
         .collect()
+}
+
+fn collect_all_observed_problems(
+    command_results: &[RunProjectTaskResult],
+    repair_chain: &[RepairIterationRecord],
+) -> Vec<ProblemEntry> {
+    let mut problems = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for problem in collect_command_problems(command_results).into_iter().chain(
+        repair_chain
+            .iter()
+            .flat_map(|iteration| iteration.problems_before.clone()),
+    ) {
+        if seen.insert(problem.id.clone()) {
+            problems.push(problem);
+        }
+    }
+    problems
 }
 
 fn failed_command_results(command_results: &[RunProjectTaskResult]) -> Vec<RunProjectTaskResult> {
@@ -1680,6 +1806,14 @@ mod tests {
         fn path(&self, name: &str) -> PathBuf {
             self.root.join(name)
         }
+
+        fn write(&self, name: &str, content: &str) {
+            let path = self.path(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, content).unwrap();
+        }
     }
 
     impl Drop for SmokeWorkspace {
@@ -1937,9 +2071,35 @@ mod tests {
         assert!(capabilities.supports_output_limit);
         assert!(capabilities.supports_diff_file_limit);
         assert!(capabilities.supports_compact_ci_summary);
+        assert!(capabilities.supports_ide_backend_smoke);
         assert!(!capabilities.supports_interactive_review);
         assert!(!capabilities.supports_git_mutation);
         assert!(capabilities.scope.contains("headless automation"));
+    }
+
+    #[test]
+    fn smoke_command_selects_package_test_before_build() {
+        let tasks = vec![
+            project_tasks::ProjectTask {
+                id: "npm:build".to_string(),
+                label: "build".to_string(),
+                command: "npm run build".to_string(),
+                source: "package.json".to_string(),
+                description: "vite build".to_string(),
+            },
+            project_tasks::ProjectTask {
+                id: "npm:test".to_string(),
+                label: "test".to_string(),
+                command: "npm run test".to_string(),
+                source: "package.json".to_string(),
+                description: "node test.js".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            select_smoke_command(&tasks).as_deref(),
+            Some("npm run test")
+        );
     }
 
     #[tokio::test]
@@ -2112,5 +2272,132 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary["repairSummary"][0]["checksFailedAfter"], false);
+    }
+
+    #[tokio::test]
+    async fn smoke_ide_backend_covers_project_command_problem_apply_and_repair_artifacts() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("ide-backend", "initial");
+        workspace.write(
+            "package.json",
+            r#"{"scripts":{"build":"node test.js","test":"node test.js"}}"#,
+        );
+        let test_js = r#"import { readFileSync } from "node:fs";
+const value = readFileSync("smoke.txt", "utf8").trim();
+if (value !== "fixed") {
+  console.error("ReferenceError: smoke is not fixed");
+  console.error("    at file:///WORKSPACE/test.js:3:1");
+  process.exit(1);
+}
+console.log("ok");
+"#
+        .replace(
+            "WORKSPACE",
+            &workspace.root.to_string_lossy().replace('\\', "/"),
+        );
+        workspace.write("test.js", &test_js);
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "smoke".to_string(),
+            "ide-backend".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--endpoint".to_string(),
+            "mock://cli-smoke".to_string(),
+            "--api-key".to_string(),
+            "sk-smoke".to_string(),
+            "--model".to_string(),
+            "mock-model".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+            "Fix backend smoke failure".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(exit, ExitCode::Success);
+        assert_eq!(
+            fs::read_to_string(workspace.path("smoke.txt")).unwrap(),
+            "fixed"
+        );
+
+        for artifact in [
+            "summary.json",
+            "context.json",
+            "project-tasks.json",
+            "commands.json",
+            "problems.json",
+            "changes.json",
+            "apply-result.json",
+            "repair-chain.json",
+            "repair-summary.json",
+        ] {
+            assert!(
+                workspace.artifacts.join(artifact).exists(),
+                "missing artifact {artifact}"
+            );
+        }
+
+        let tasks: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("project-tasks.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(tasks
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["command"] == "npm run test"));
+
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["command"], "smoke ide-backend");
+        assert_eq!(summary["status"], "applied");
+        assert_eq!(summary["commands"][0]["command"], "npm run test");
+        assert_eq!(summary["commands"][0]["exitCode"], 0);
+        assert_eq!(summary["repairSummary"][0]["problemCountBefore"], 1);
+        assert_eq!(summary["repairSummary"][0]["checksFailedAfter"], false);
+
+        let problems: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("problems.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(problems.as_array().unwrap().len(), 1);
+        assert_eq!(
+            problems[0]["file"],
+            workspace
+                .path("test.js")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        assert_eq!(problems[0]["line"], 3);
+        assert_eq!(problems[0]["column"], 1);
+
+        let chain: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("repair-chain.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(chain.as_array().unwrap().len(), 1);
+        assert_eq!(
+            chain[0]["failedCommandsBefore"][0]["command"],
+            "npm run test"
+        );
+        assert!(chain[0]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Parsed Problems"));
+        assert_eq!(
+            chain[0]["applyResult"]["applied"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(chain[0]["commandsAfter"][0]["exitCode"], 0);
     }
 }

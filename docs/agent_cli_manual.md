@@ -31,6 +31,7 @@ Commands:
   context  Context utilities
   plan     Generate a plan only
   run      Run the Agent. This is also the default command when no subcommand is used
+  smoke    Run deterministic backend smoke workflows for IDE integration paths
   help     Print help
 
 Options:
@@ -242,11 +243,43 @@ When checks fail after an applied change, the CLI builds a repair prompt from th
 
 Each repair iteration is recorded in `repair-chain.json` with the failed commands before repair, parsed Problems, generated diffs, apply result, rerun command results, and final failed/pass state for that iteration. `repair-summary.json` keeps the same chain compact for CI dashboards and logs.
 
+`problems.json` records all observed Problems for the run, including Problems seen before a successful repair. This keeps the failure -> repair -> rerun chain traceable even when the final command result is clean.
+
 Hardening flags:
 
 - `--timeout-seconds <N>` bounds Agent execution and command checks.
 - `--max-output-bytes <N>` trims command stdout/stderr in artifacts after Problems are parsed.
 - `--max-diff-files <N>` rejects generated changes that touch too many files.
+
+## IDE Backend Smoke
+
+Use `smoke ide-backend` when you want CLI automation to validate backend pieces that the desktop UI depends on:
+
+```powershell
+target\release\agent_cli smoke ide-backend `
+  --profile default `
+  --workspace D:\work\my-project `
+  --output json `
+  --artifact-dir .agent-ide\smoke\ide-backend `
+  "Fix failing backend smoke"
+```
+
+If no `--run-command` is supplied, the smoke command discovers project tasks from `package.json` and Cargo manifests, then prefers `test`, `check`, `lint`, `typecheck`, or `build`. It forces apply mode and enables one bounded repair iteration by default. Discovered tasks are written to `project-tasks.json`.
+
+This smoke covers:
+
+- workspace resolution and boundary setup;
+- package scripts / project command discovery;
+- shared command runner execution;
+- terminal-like output parsing into Problems;
+- `problems.json`, including pre-repair failures;
+- repair prompt construction from failed command output and Problems;
+- diff parsing;
+- apply result;
+- rerun result;
+- `repair-chain.json` and `repair-summary.json`.
+
+It still does not test Monaco markers, xterm rendering, panel state, Tauri IPC event timing, or interactive Git/LSP UI behavior. Those remain desktop runtime smoke items.
 
 ## Exit Codes
 
@@ -276,6 +309,7 @@ Implemented:
 - Generated diff preview.
 - Optional all-diff apply.
 - `doctor`, `context estimate`, `plan`, and `run` command shape.
+- `smoke ide-backend` for IDE backend integration smoke.
 - `--output text|json|ndjson`.
 - run-id and artifact directory output.
 - stable exit-code contract.
@@ -287,6 +321,7 @@ Implemented:
 - timeout, command-output, and generated-diff file-count limits for automation runs.
 - compact text and JSON summaries with command/problem/repair counts for CI logs.
 - smoke coverage for `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json`.
+- smoke coverage for workspace parsing, package script discovery, command runner, Problems artifact, repair prompt, diff parsing, apply, rerun, and repair-chain through `smoke ide-backend`.
 - Workspace-boundary protection.
 - Shared backend diff-apply behavior.
 

@@ -253,7 +253,7 @@ cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
 
-CLI 模式已经完成 headless automation 第一版。它支持 `doctor`、`context estimate`、`plan`、`run`，支持 text/JSON/NDJSON 输出、运行 artifacts、可选 apply、项目命令检查、有边界的 repair iterations、命令 allow-list、timeout/output/diff 限制，以及经过 smoke test 覆盖的 `repair-chain.json` / `repair-summary.json` artifacts。
+CLI 模式已经完成 headless automation 第一版。它支持 `doctor`、`context estimate`、`plan`、`run` 和 `smoke ide-backend`，支持 text/JSON/NDJSON 输出、运行 artifacts、可选 apply、项目命令检查、有边界的 repair iterations、命令 allow-list、timeout/output/diff 限制，以及经过 smoke test 覆盖的 `project-tasks.json`、`problems.json`、`repair-chain.json` 和 `repair-summary.json` artifacts。
 
 它有意不作为完整命令行 IDE 替代方案。可视化 Agent Plan 控制、Problems/Terminal/Git 闭环、LSP 视图、Run History 和 per-hunk review UI 仍然属于桌面 IDE 工作流。
 

@@ -255,7 +255,7 @@ cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
 
-CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, and `run`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `repair-chain.json` / `repair-summary.json` artifacts.
+CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, `run`, and `smoke ide-backend`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `project-tasks.json`, `problems.json`, `repair-chain.json`, and `repair-summary.json` artifacts.
 
 It is intentionally not a full command-line IDE replacement. Visual Agent plan controls, Problems/Terminal/Git integration, LSP views, run history, and per-hunk review UI remain desktop IDE workflows.
 

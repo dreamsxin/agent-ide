@@ -495,7 +495,8 @@ Current status:
 - `repair-chain.json` records each bounded repair iteration as failure context -> repair prompt -> generated diffs -> apply result -> rerun result.
 - `--timeout-seconds`, `--max-output-bytes`, and `--max-diff-files` provide first-pass automation limits.
 - Compact text summaries and `repair-summary.json` include command/problem/repair counts for CI logs.
-- CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json` using a mock provider.
+- CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, and `smoke ide-backend` using a mock provider.
+- `smoke ide-backend` discovers package/Cargo tasks, runs the selected project command, parses terminal-like output into Problems, preserves pre-repair Problems in `problems.json`, verifies repair prompt construction, applies generated diffs, reruns checks, and writes `project-tasks.json`, `commands.json`, `apply-result.json`, `repair-chain.json`, and `repair-summary.json`.
 - Broader permission policy is still pending.
 
 ### Phase CLI-5: Toolchain Packaging
@@ -517,7 +518,7 @@ Acceptance:
 
 ## 11. Recommended Next Coding Task
 
-CLI Phase 1-4 are now first-pass complete for the intended scope: a headless automation runner that can plan, generate diffs, optionally apply them, run checks, parse Problems, perform bounded repair iterations, and write machine-readable artifacts.
+CLI Phase 1-4 are now first-pass complete for the intended scope: a headless automation runner that can plan, generate diffs, optionally apply them, run checks, parse Problems, perform bounded repair iterations, run IDE-backend smoke workflows, and write machine-readable artifacts.
 
 Do not keep expanding this into a second interactive IDE by default. Interactive plan editing, per-hunk review, Git workflows, terminal sessions, LSP views, and Problems UI should remain desktop features unless there is a separate product decision to build a full terminal UI.
 

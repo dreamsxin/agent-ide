@@ -328,7 +328,7 @@ Follow-up fixes:
 
 Status as of 2026-05-16:
 
-- Automated CLI smoke coverage exists for `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json`.
+- Automated CLI smoke coverage exists for `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, and `smoke ide-backend`.
 - Frontend unit coverage exists for file URI/path normalization, terminal failure parsing, problem store behavior, and LSP diagnostics bridging.
 - Rust unit coverage exists for Git conflict/status operations, LSP path/indexing helpers, Agent context/diff behavior, and CLI repair artifacts.
 - Full Tauri desktop runtime smoke remains required before calling Phase 8 complete, especially for PTY lifecycle, Monaco marker rendering, real LSP server behavior, OS credential storage, and remote Git operations.

@@ -152,6 +152,8 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added first-pass CLI bounded repair iterations with `--max-iterations`, feeding failed `--run-command` output and parsed Problems back into an Agent repair prompt after applied changes.
 - Added first-pass CLI repair-loop command authorization with `--allow-run`, including exact, prefix wildcard, and trusted all-command patterns.
 - Added `repair-chain.json` artifacts for CLI repair loops, linking failed commands, parsed Problems, generated repair diffs, apply results, and rerun results.
+- Added `agent_cli smoke ide-backend` to validate workspace resolution, package script discovery, project command execution, terminal-like Problems parsing, repair prompt construction, diff parsing, apply, rerun, and repair-chain artifacts without launching the desktop UI.
+- CLI `problems.json` now preserves observed pre-repair Problems even when the final rerun passes, keeping failure -> repair -> rerun traceability intact.
 - Added Pipeline stage source/output visualization from Agent action logs and clearer Diff hunk review/regeneration status in the desktop UI.
 - Added a reusable Phase 8 real-runtime smoke run template and baseline notes to `docs/smoke_test.md`.
 
@@ -424,7 +426,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - It uses the shared project command runner for `--run-command`, records parsed backend Problems, can feed failed command output into bounded repair iterations with `--max-iterations` guarded by `--allow-run`, and writes `repair-chain.json` for iteration traceability.
    - `doctor --output json` exposes a machine-readable capability contract for external tools.
    - CLI automation runs now support `--timeout-seconds`, `--max-output-bytes`, `--max-diff-files`, compact text summaries, and `repair-summary.json` with command/problem/repair counts.
-   - CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, and `repair-chain.json` using a mock provider.
+   - CLI smoke tests cover `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, and `smoke ide-backend` using a mock provider.
    - Interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery remain desktop IDE workflows unless a separate terminal UI is intentionally planned.
    - CLI hardening is now mostly closed; only broaden permissions if the CLI scope is intentionally widened.
 
@@ -657,4 +659,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-05-16 - Phase 8 desktop polish continued: Pipeline stage source/output summaries and clearer Diff hunk/regeneration status are wired, and the real-runtime smoke template is documented. Full Tauri runtime smoke remains next.*
+*Last updated: 2026-05-17 - CLI IDE-backend smoke now covers workspace resolution, package script discovery, command runner, Problems artifacts, repair prompt, diff parsing, apply, rerun, and repair-chain traceability. Full Tauri runtime smoke remains next.*
