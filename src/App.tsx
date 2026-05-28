@@ -161,7 +161,7 @@ export default function App() {
   );
 
   return (
-    <div className="h-screen flex flex-col bg-surface-base text-surface-text overflow-hidden">
+    <div data-testid="app-root" className="h-screen flex flex-col bg-surface-base text-surface-text overflow-hidden">
       <ShortcutsHelp
         shortcuts={allShortcuts}
         visible={helpVisible}

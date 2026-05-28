@@ -48,7 +48,7 @@ export default function ProblemsPanel() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-black text-xs">
+    <div data-testid="problems-panel" className="flex h-full flex-col bg-black text-xs">
       <div className="flex items-center gap-3 border-b border-surface-border px-3 py-1.5">
         <span className="font-semibold text-surface-text">Problems</span>
         <span className="text-diff-remove">{counts.error} errors</span>
@@ -60,6 +60,7 @@ export default function ProblemsPanel() {
             <button
               onClick={() => void fixProblem()}
               disabled={isAgentBusy}
+              data-testid="problems-fix-with-agent"
               className="rounded border border-accent-blue/40 px-2 py-0.5 text-[11px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Fix with Agent
@@ -86,6 +87,7 @@ export default function ProblemsPanel() {
               <div
                 key={problem.id}
                 onClick={() => void handleProblemClick(problem.file, problem.line, problem.column)}
+                data-testid="problem-row"
                 className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_max-content] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
               >
                 <span className={`font-bold ${style.color}`}>{style.label}</span>
@@ -116,6 +118,7 @@ export default function ProblemsPanel() {
                       void fixProblem(problem);
                     }}
                     disabled={isAgentBusy}
+                    data-testid="problem-fix-with-agent"
                     className="rounded border border-accent-blue/30 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Fix

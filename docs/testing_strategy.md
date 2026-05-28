@@ -77,6 +77,12 @@ tests/e2e/
 
 See `docs/smoke_test.md` sections 2–10 for the full manual checklist that these E2E tests will automate.
 
+### Windows Desktop Workflow E2E
+
+`npm run e2e:workflow` is the Phase 10.0 local golden-path gate on Windows. It uses a small PowerShell/Win32/UI Automation controller instead of browser preview automation, launches the real Tauri debug application, and drives the daily IDE loop through the visible desktop window. The test prepares an isolated clone of this repository, seeds a failing `workflow` command and `smoke.txt`, configures `mock://workflow`, then verifies failure → Problems → Fix with Agent → Diff hunk apply → rerun success → Git commit.
+
+`npm run verify:workflow` runs the baseline build/tests/checks and then this E2E workflow.
+
 ## CLI Smoke Coverage
 
 The Agent CLI has automated smoke coverage independent of the desktop UI:
@@ -177,6 +183,12 @@ cargo check
 
 # Full dev runtime verification
 npm run tauri -- dev
+
+# Windows desktop golden-path E2E
+npm run e2e:workflow
+
+# Baseline + Windows desktop golden-path E2E
+npm run verify:workflow
 
 # CLI binary tests
 cd src-tauri

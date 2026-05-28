@@ -193,12 +193,13 @@ fn cargo_task_set(directory: &str) -> Vec<ProjectTask> {
 
 fn score_package_script(name: &str) -> usize {
     match name {
-        "dev" => 0,
-        "build" => 1,
-        "test" => 2,
-        "lint" => 3,
-        "typecheck" | "check" => 4,
-        "preview" => 5,
+        "workflow" => 0,
+        "dev" => 1,
+        "build" => 2,
+        "test" => 3,
+        "lint" => 4,
+        "typecheck" | "check" => 5,
+        "preview" => 6,
         _ => 10,
     }
 }
@@ -255,11 +256,12 @@ mod tests {
         let env = TestEnv::new();
         env.write(
             "package.json",
-            r#"{"scripts":{"test":"vitest","build":"vite build","dev":"vite"}}"#,
+            r#"{"scripts":{"test":"vitest","build":"vite build","dev":"vite","workflow":"node workflow-smoke.js"}}"#,
         );
 
         let tasks = discover_project_tasks(None).unwrap();
 
+        assert_eq!(tasks[0].label, "workflow");
         assert!(tasks
             .iter()
             .any(|task| task.id == "npm:dev" && task.command == "npm run dev"));

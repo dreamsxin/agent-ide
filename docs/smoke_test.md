@@ -229,7 +229,9 @@ Expected:
 
 Automated coverage:
 
-- This full loop still needs Playwright/Tauri-driver coverage. Until then, it is a required manual smoke for changes touching any involved panel.
+- Windows desktop controller coverage is available with `npm run e2e:workflow`.
+- The controller launches the real Tauri debug app against an isolated dogfood workspace, runs the workflow command, verifies Problems, triggers Fix with Agent through the UI, applies a diff hunk, reruns the command, and commits the smoke change in the temporary workspace.
+- Tauri-driver/WebDriver coverage remains the preferred future cross-platform/CI route; the Windows controller is the local required gate for this workflow.
 
 ## 11. LLM Profiles and Budget Metadata
 
@@ -290,6 +292,7 @@ Record each manual smoke run with:
 Recommended first target:
 
 - Complete sections 2 through 9 before expanding Rust/Python LSP adapters.
+- For Phase 10.0 workflow stabilization, run `npm run verify:workflow` on Windows and attach the generated `artifacts/e2e/workflow/<run>/` screenshots/logs when a failure occurs.
 
 ### Smoke Run Template
 
@@ -332,3 +335,28 @@ Status as of 2026-05-16:
 - Frontend unit coverage exists for file URI/path normalization, terminal failure parsing, problem store behavior, and LSP diagnostics bridging.
 - Rust unit coverage exists for Git conflict/status operations, LSP path/indexing helpers, Agent context/diff behavior, and CLI repair artifacts.
 - Full Tauri desktop runtime smoke remains required before calling Phase 8 complete, especially for PTY lifecycle, Monaco marker rendering, real LSP server behavior, OS credential storage, and remote Git operations.
+
+## 15. Phase 10.0 Windows Workflow E2E
+
+Command:
+
+```powershell
+npm run e2e:workflow
+```
+
+What it validates:
+
+- Real Tauri desktop app boots with a preconfigured temporary dogfood workspace.
+- `workflow` command fails and emits `smoke.txt:1:1` output.
+- Problems displays the parsed failure.
+- `Fix with Agent` uses the deterministic `mock://workflow` provider.
+- Diff review shows a hunk for `smoke.txt`; applying the hunk writes `fixed`.
+- Rerunning the workflow command succeeds.
+- Git sees the changed `smoke.txt`; the E2E commits it inside the temporary workspace.
+
+Artifacts:
+
+- `artifacts/e2e/workflow/<timestamp>/metadata.json`
+- `artifacts/e2e/workflow/<timestamp>/screenshots/*.png`
+- `artifacts/e2e/workflow/<timestamp>/logs/*.log`
+- `artifacts/e2e/workflow/<timestamp>/workspace/`

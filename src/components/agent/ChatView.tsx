@@ -370,7 +370,7 @@ export default function ChatView() {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-testid="agent-chat" className="flex flex-col h-full">
       {/* 消息列表 */}
       <div className="flex-1 overflow-auto p-3 space-y-3">
         {messages.map((msg) => (
@@ -635,6 +635,7 @@ export default function ChatView() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={isSending ? undefined : handleKeyDown}
+            data-testid="agent-chat-input"
             placeholder={
               isSending
                 ? "Agent is working…"
@@ -665,6 +666,7 @@ export default function ChatView() {
             <button
               onClick={handleSend}
               disabled={!input.trim()}
+              data-testid="agent-chat-send"
               className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
             >
               ↩&nbsp;Send
@@ -674,6 +676,7 @@ export default function ChatView() {
             <button
               onClick={handleSend}
               disabled={!input.trim()}
+              data-testid="agent-chat-send"
               className="px-3 bg-green-600/70 hover:bg-green-600 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
             >
               ✓&nbsp;Continue
@@ -683,6 +686,7 @@ export default function ChatView() {
             <button
               onClick={handleSend}
               disabled={!input.trim()}
+              data-testid="agent-chat-send"
               className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
             >
               ↻&nbsp;Retry
@@ -692,6 +696,7 @@ export default function ChatView() {
             <button
               onClick={handleSend}
               disabled={!input.trim()}
+              data-testid="agent-chat-send"
               className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
             >
               ↑&nbsp;Send

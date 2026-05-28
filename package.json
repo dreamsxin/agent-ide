@@ -10,6 +10,8 @@
     "test:watch": "vitest",
     "preview": "vite preview",
     "tauri": "tauri",
+    "e2e:workflow": "powershell -ExecutionPolicy Bypass -File scripts/e2e/run-workflow.ps1",
+    "verify:workflow": "powershell -ExecutionPolicy Bypass -File scripts/e2e/verify-workflow.ps1",
     "package:windows": "powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1",
     "package:windows:fast": "powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -SkipChecks",
     "package:windows:nsis": "powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -BundleTargets nsis",

@@ -27,6 +27,10 @@ function uniquePaths(entries: GitStatusEntry[]): string[] {
   return Array.from(new Set(entries.map((entry) => entry.path)));
 }
 
+function sanitizeTestId(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
 export default function GitPanel() {
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const status = useGitStore((s) => s.status);
@@ -348,6 +352,7 @@ export default function GitPanel() {
           checked={isChecked}
           onChange={() => toggleSelection(entry)}
           onClick={(event) => event.stopPropagation()}
+          data-testid={`git-select-${sanitizeTestId(entry.path)}`}
           className="h-3 w-3 accent-accent-blue"
           title="Select for batch action"
         />
@@ -359,6 +364,7 @@ export default function GitPanel() {
             entry.staged ? handleUnstage([entry]) : handleStage([entry]);
           }}
           title={entry.staged ? "Unstage" : "Stage"}
+          data-testid={`git-stage-toggle-${sanitizeTestId(entry.path)}`}
           className="opacity-0 group-hover:opacity-100 text-surface-muted hover:text-surface-text px-1"
         >
           {entry.staged ? "-" : "+"}
@@ -368,7 +374,7 @@ export default function GitPanel() {
   };
 
   return (
-    <div className="h-full flex flex-col bg-surface-panel text-xs">
+    <div data-testid="git-panel" className="h-full flex flex-col bg-surface-panel text-xs">
       <div className="flex items-center justify-between px-3 py-2 border-b border-surface-border">
         <span className="font-semibold text-surface-text tracking-wide text-[11px]">
           SOURCE CONTROL
@@ -555,10 +561,11 @@ export default function GitPanel() {
             {selectedKeys.length} selected
           </div>
           <div className="flex flex-wrap gap-1">
-            <button
-              onClick={() => handleStage(selectedEntries)}
-              disabled={selectedUnstaged.length === 0 || loading}
-              className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
+          <button
+            onClick={() => handleStage(selectedEntries)}
+            disabled={selectedUnstaged.length === 0 || loading}
+            data-testid="git-stage-selected"
+            className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
               Stage
             </button>
@@ -591,7 +598,7 @@ export default function GitPanel() {
       <div className="min-h-0 flex-1 overflow-auto">
         {staged.length > 0 && (
           <div>
-            <div className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
+            <div data-testid="git-staged-section" className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
               Staged Changes ({staged.length})
             </div>
             {staged.map(renderEntry)}
@@ -600,7 +607,7 @@ export default function GitPanel() {
 
         {unstaged.length > 0 && (
           <div>
-            <div className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
+            <div data-testid="git-changes-section" className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
               Changes ({unstaged.length})
             </div>
             {unstaged.map(renderEntry)}
@@ -662,6 +669,7 @@ export default function GitPanel() {
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             placeholder="Commit message..."
+            data-testid="git-commit-message"
             rows={2}
             className="w-full bg-surface-base border border-surface-border rounded px-2 py-1 text-surface-text text-[11px] font-mono resize-none focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
             onKeyDown={(e) => {
@@ -674,6 +682,7 @@ export default function GitPanel() {
           <button
             onClick={handleCommit}
             disabled={!message.trim() || loading}
+            data-testid="git-commit"
             className="mt-1.5 w-full bg-accent-blue text-white rounded py-1 text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
           >
             {loading ? "Committing..." : "Commit (Ctrl+Enter)"}

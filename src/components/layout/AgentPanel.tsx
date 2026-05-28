@@ -20,7 +20,7 @@ export default function AgentPanel() {
   const [activeTab, setActiveTab] = useState<TabId>("chat");
 
   return (
-    <div className="h-full flex flex-col bg-surface-panel border-l border-surface-border">
+    <div data-testid="agent-panel" className="h-full flex flex-col bg-surface-panel border-l border-surface-border">
       {/* Tab 头部 — 紧凑布局 */}
       <div className="flex border-b border-surface-border no-select flex-shrink-0">
         {tabs.map((tab) => (
@@ -28,6 +28,7 @@ export default function AgentPanel() {
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             title={tab.tooltip}
+            data-testid={`agent-tab-${tab.id}`}
             className={`flex items-center gap-1 px-1.5 py-1.5 text-[11px] transition-colors whitespace-nowrap ${
               activeTab === tab.id
                 ? "text-surface-text border-b-2 border-accent-blue bg-surface-base/50"

@@ -18,7 +18,7 @@ export default function BottomPanel() {
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
 
   return (
-    <div className="h-full flex flex-col border-t border-surface-border bg-black">
+    <div data-testid="bottom-panel" className="h-full flex flex-col border-t border-surface-border bg-black">
       {/* Tab 头部 */}
       <div className="flex items-center bg-surface-panel border-b border-surface-border no-select">
         {tabs.map((tab) => (
@@ -26,6 +26,7 @@ export default function BottomPanel() {
             key={tab.id}
             onClick={() => setBottomTab(tab.id)}
             title={tab.tooltip}
+            data-testid={`bottom-tab-${tab.id}`}
             className={`flex items-center gap-1 px-3 py-1.5 text-[11px] transition-colors ${
               activeTab === tab.id
                 ? "text-surface-text border-t-2 border-t-accent-blue bg-surface-base"

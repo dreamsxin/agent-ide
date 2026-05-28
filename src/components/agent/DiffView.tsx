@@ -38,12 +38,14 @@ function HunkBlock({
         <span className="flex items-center gap-1">
           <button
             onClick={onApply}
+            data-testid="apply-hunk"
             className="rounded border border-diff-add/40 px-1.5 py-0.5 text-[10px] text-diff-add hover:bg-diff-add/10"
           >
             Apply hunk
           </button>
           <button
             onClick={onReject}
+            data-testid="reject-hunk"
             className="rounded border border-diff-remove/40 px-1.5 py-0.5 text-[10px] text-diff-remove hover:bg-diff-remove/10"
           >
             Reject hunk
@@ -102,7 +104,7 @@ function HunkBlock({
   if (!hasOriginal && hasUpdated) {
     const lines = hunk.updated.split("\n");
     return (
-      <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
+      <div data-testid={`diff-hunk-${index}`} className="border-b border-surface-border text-xs font-mono leading-relaxed">
         {header}
         {provenancePanel}
         {findingPanel}
@@ -123,7 +125,7 @@ function HunkBlock({
     const updLines = hunk.updated.split("\n");
 
     return (
-      <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
+      <div data-testid={`diff-hunk-${index}`} className="border-b border-surface-border text-xs font-mono leading-relaxed">
         {header}
         {provenancePanel}
         {findingPanel}
@@ -157,7 +159,7 @@ function HunkBlock({
 
   const lines = hunk.content.split("\n");
   return (
-    <div className="border-b border-surface-border text-xs font-mono leading-relaxed">
+    <div data-testid={`diff-hunk-${index}`} className="border-b border-surface-border text-xs font-mono leading-relaxed">
       {header}
       {provenancePanel}
       {findingPanel}
@@ -240,7 +242,7 @@ export default function DiffView() {
   );
 
   return (
-    <div className="flex h-full flex-col space-y-3 p-2 animate-fade-in">
+    <div data-testid="diff-view" className="flex h-full flex-col space-y-3 p-2 animate-fade-in">
       {lastApplyResult && lastApplyResult.failed.length > 0 && (
         <div className="flex-shrink-0 rounded border border-diff-remove/40 bg-diff-remove/10 p-2 text-xs text-diff-remove">
           <div className="mb-1 flex items-center justify-between gap-2">
@@ -290,6 +292,7 @@ export default function DiffView() {
             return (
               <div
                 key={diff.id}
+                data-testid="diff-card"
                 className="overflow-hidden rounded-lg border border-surface-border bg-surface-base"
               >
               <div className="border-b border-surface-border bg-surface-panel px-3 py-2">

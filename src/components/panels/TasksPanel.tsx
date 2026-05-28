@@ -32,7 +32,7 @@ export default function TasksPanel() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-black text-xs">
+    <div data-testid="commands-panel" className="flex h-full flex-col bg-black text-xs">
       <div className="flex items-center justify-between gap-3 border-b border-surface-border px-3 py-1.5">
         <div className="min-w-0">
           <div className="font-semibold text-surface-text">Commands</div>
@@ -80,6 +80,7 @@ export default function TasksPanel() {
                   key={task.id}
                   onClick={() => void runProjectTask(task)}
                   disabled={!isTauriRuntime()}
+                  data-testid={`command-${sanitizeTestId(task.label)}`}
                   className="grid w-full grid-cols-[minmax(120px,0.9fr)_minmax(180px,1.3fr)_72px] items-center gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20 disabled:cursor-not-allowed disabled:opacity-50"
                   title={task.description}
                 >
@@ -100,6 +101,7 @@ export default function TasksPanel() {
                           void fixTaskFailure(runState);
                         }}
                         disabled={isAgentBusy}
+                        data-testid="fix-with-agent"
                         className="ml-1 rounded border border-accent-blue/40 px-1 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         Fix
@@ -115,7 +117,7 @@ export default function TasksPanel() {
         <div className="grid min-w-0 grid-rows-[minmax(96px,0.38fr)_minmax(120px,1fr)]">
           <div className="min-h-0 border-b border-surface-border">
             <div className="flex items-center justify-between gap-2 border-b border-surface-border px-3 py-1.5">
-              <span className="font-semibold text-surface-text">Run History</span>
+              <span data-testid="run-history" className="font-semibold text-surface-text">Run History</span>
               {taskRunHistory.length > 0 && (
                 <button
                   onClick={clearTaskRunHistory}
@@ -135,6 +137,7 @@ export default function TasksPanel() {
                   <button
                     key={run.runId}
                     onClick={() => setSelectedRunId(run.runId)}
+                    data-testid={`run-history-entry-${sanitizeTestId(run.label)}`}
                     className={`grid w-full grid-cols-[1fr_auto_auto] items-center gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left ${
                       selectedRun?.runId === run.runId
                         ? "bg-accent-blue/10"
@@ -159,7 +162,7 @@ export default function TasksPanel() {
               <span className="min-w-0 flex-1 truncate font-semibold text-surface-text">
                 {selectedRun ? selectedRun.label : "Output"}
               </span>
-              {selectedRun && (
+                  {selectedRun && (
                 <>
                   <span className="font-mono text-[10px] text-surface-muted">
                     exit {selectedRun.exitCode ?? "unknown"}
@@ -167,6 +170,7 @@ export default function TasksPanel() {
                   <button
                     onClick={() => rerunHistoryEntry(selectedRun)}
                     disabled={!isTauriRuntime()}
+                    data-testid="run-history-rerun"
                     className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Rerun
@@ -175,6 +179,7 @@ export default function TasksPanel() {
                     <button
                       onClick={() => void fixTaskFailure(selectedRun)}
                       disabled={isAgentBusy}
+                      data-testid="run-history-fix-with-agent"
                       className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       Fix with Agent
@@ -197,6 +202,10 @@ export default function TasksPanel() {
       )}
     </div>
   );
+}
+
+function sanitizeTestId(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
 function statusClass(status: string) {

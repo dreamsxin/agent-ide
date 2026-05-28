@@ -134,6 +134,7 @@ export default function TopBar() {
 
   return (
     <div
+      data-testid="topbar"
       data-tauri-drag-region
       className="flex items-center justify-between h-10 px-2 border-b border-surface-border bg-surface-panel no-select flex-shrink-0"
     >
@@ -265,9 +266,10 @@ export default function TopBar() {
             {buildStatus === "running" ? "Building..." : "Build"}
           </button>
           <button
-            onClick={() => runProjectTask(testTask)}
-            disabled={!testTask || !isTauriRuntime()}
-            className="rounded px-2 py-0.5 text-[11px] text-surface-muted hover:bg-surface-border/40 hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
+          onClick={() => runProjectTask(testTask)}
+          disabled={!testTask || !isTauriRuntime()}
+          data-testid="topbar-test"
+          className="rounded px-2 py-0.5 text-[11px] text-surface-muted hover:bg-surface-border/40 hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
             title={testTask ? testTask.command : "No test task discovered"}
           >
             {testStatus === "running" ? "Testing..." : "Test"}

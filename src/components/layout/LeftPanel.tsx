@@ -12,7 +12,7 @@ export default function LeftPanel() {
   const setLeftTab = useLayoutStore((s) => s.setLeftTab);
 
   return (
-    <div className="h-full flex flex-col border-r border-surface-border bg-surface-panel">
+    <div data-testid="left-panel" className="h-full flex flex-col border-r border-surface-border bg-surface-panel">
       {/* Tab 头部 */}
       <div className="flex border-b border-surface-border no-select">
         {tabs.map((tab) => (
@@ -20,6 +20,7 @@ export default function LeftPanel() {
             key={tab.id}
             onClick={() => setLeftTab(tab.id)}
             title={tab.tooltip}
+            data-testid={`left-tab-${tab.id}`}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] transition-colors ${
               leftTab === tab.id
                 ? "text-surface-text border-b-2 border-b-accent-blue bg-surface-base/50"

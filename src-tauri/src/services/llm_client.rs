@@ -177,7 +177,25 @@ async fn stream_mock_chat(
         .find(|message| message.role == "user")
         .map(|message| message.content.as_str())
         .unwrap_or_default();
-    let response = if system.contains("software engineering planner") {
+    let response = if self::is_workflow_mock(&messages) && system.contains("software engineering planner") {
+        r#"```plan
+[STEP] title="Repair workflow smoke file" type="edit"
+```"#
+            .to_string()
+    } else if self::is_workflow_mock(&messages) && system.contains("Coder Agent") {
+        [
+            "```diff:smoke.txt",
+            "<<<<<<< ORIGINAL",
+            "broken",
+            "=======",
+            "fixed",
+            ">>>>>>> UPDATED",
+            "```",
+        ]
+        .join("\n")
+    } else if self::is_workflow_mock(&messages) && system.contains("Tester Agent") {
+        "Workflow smoke repair is testable by rerunning `npm run workflow`.".to_string()
+    } else if system.contains("software engineering planner") {
         r#"```plan
 [STEP] title="Update smoke.txt" type="edit"
 ```"#
@@ -212,6 +230,15 @@ Capture a lightweight design artifact before implementation.
     };
     let _ = tx.send(response.clone()).await;
     Ok(response)
+}
+
+fn is_workflow_mock(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .to_ascii_lowercase()
+            .contains("workflow smoke")
+    })
 }
 
 fn mock_diff_response(original: &str, updated: &str) -> String {
