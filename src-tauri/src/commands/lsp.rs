@@ -281,7 +281,8 @@ pub fn lsp_initialize(
         .spawn()
         .map_err(|e| {
             format!(
-                "Start TypeScript LSP failed: {}. Executable: {}",
+                "Start {} failed: {}. Executable: {}",
+                spec.display_name,
                 e,
                 executable.display()
             )
@@ -289,11 +290,11 @@ pub fn lsp_initialize(
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "TypeScript LSP stdin is unavailable".to_string())?;
+        .ok_or_else(|| format!("{} stdin is unavailable", spec.display_name))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "TypeScript LSP stdout is unavailable".to_string())?;
+        .ok_or_else(|| format!("{} stdout is unavailable", spec.display_name))?;
 
     {
         let mut server = manager.inner.server.lock().map_err(|e| e.to_string())?;
@@ -350,7 +351,10 @@ pub fn lsp_initialize(
         }),
     )?;
     if initialize.get("error").is_some() {
-        return Err(format!("TypeScript LSP initialize failed: {}", initialize));
+        return Err(format!(
+            "{} initialize failed: {}",
+            spec.display_name, initialize
+        ));
     }
     notify(&manager, "initialized", json!({}))?;
     Ok(())
@@ -540,8 +544,9 @@ pub fn lsp_status(manager: tauri::State<'_, LspManager>) -> Result<LspStatusSnap
             language_name: "Language Server".to_string(),
             server_path: None,
             server_source: None,
-            install_command: "Open a TypeScript/JavaScript or Go file to see install guidance."
-                .to_string(),
+            install_command:
+                "Open a TypeScript/JavaScript, Go, Python, or Rust file to see install guidance."
+                    .to_string(),
             workspace_config_files: Vec::new(),
             indexing_status: "unavailable".to_string(),
             indexing_message: "Start a language server to validate workspace indexing.".to_string(),
@@ -578,7 +583,7 @@ fn request(manager: &LspManager, method: &str, params: Value) -> Result<Value, S
         let mut guard = manager.inner.server.lock().map_err(|e| e.to_string())?;
         let server = guard
             .as_mut()
-            .ok_or_else(|| "TypeScript LSP is not initialized".to_string())?;
+            .ok_or_else(|| "Language server is not initialized".to_string())?;
         server.pending.insert(id, tx);
         write_message(
             &mut server.stdin,
@@ -593,7 +598,7 @@ fn notify(manager: &LspManager, method: &str, params: Value) -> Result<(), Strin
     let mut guard = manager.inner.server.lock().map_err(|e| e.to_string())?;
     let server = guard
         .as_mut()
-        .ok_or_else(|| "TypeScript LSP is not initialized".to_string())?;
+        .ok_or_else(|| "Language server is not initialized".to_string())?;
     write_message(
         &mut server.stdin,
         &json!({ "jsonrpc": "2.0", "method": method, "params": params }),
@@ -618,12 +623,13 @@ fn read_lsp_output(app: AppHandle, state: Arc<LspInner>, stdout: std::process::C
         let message = match read_message(&mut reader) {
             Ok(Some(message)) => message,
             Ok(None) => {
-                set_server_error(&state, "TypeScript LSP stdout closed.");
+                let name = current_language_name(&state);
+                set_server_error(&state, &format!("{} stdout closed.", name));
                 let _ = app.emit(
                     "lsp-status",
                     LspStatusEvent {
                         status: "error".to_string(),
-                        message: "TypeScript LSP stdout closed.".to_string(),
+                        message: format!("{} stdout closed.", name),
                     },
                 );
                 break;
@@ -701,6 +707,15 @@ fn set_server_error(state: &Arc<LspInner>, error: &str) {
     });
 }
 
+fn current_language_name(state: &Arc<LspInner>) -> String {
+    state
+        .server
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| server.language_name.clone()))
+        .unwrap_or_else(|| "Language server".to_string())
+}
+
 fn handle_server_request(state: &Arc<LspInner>, id: Value, method: &str, params: Option<Value>) {
     let result = match method {
         "workspace/configuration" => lsp_configuration_response(params.as_ref()),
@@ -766,6 +781,18 @@ fn lsp_configuration_response(params: Option<&Value>) -> Value {
                         "tsserver": {},
                         "validate": { "enable": true }
                     }),
+                    "python" => json!({
+                        "analysis": {
+                            "autoImportCompletions": true,
+                            "diagnosticMode": "workspace",
+                            "typeCheckingMode": "basic"
+                        }
+                    }),
+                    "rust-analyzer" => json!({
+                        "cargo": { "allFeatures": true },
+                        "checkOnSave": true,
+                        "diagnostics": { "enable": true }
+                    }),
                     _ => Value::Null,
                 }
             })
@@ -779,6 +806,7 @@ struct LspSpec {
     display_name: &'static str,
     server_name: &'static str,
     binary_name: &'static str,
+    fallback_binary_names: &'static [&'static str],
     windows_binary_names: &'static [&'static str],
     install_command: &'static str,
     workspace_markers: &'static [&'static str],
@@ -791,6 +819,7 @@ fn lsp_spec(language_id: &str) -> Result<LspSpec, String> {
             display_name: "TypeScript LSP",
             server_name: "typescript-language-server",
             binary_name: "typescript-language-server",
+            fallback_binary_names: &[],
             windows_binary_names: &[
                 "typescript-language-server.cmd",
                 "typescript-language-server.exe",
@@ -804,6 +833,7 @@ fn lsp_spec(language_id: &str) -> Result<LspSpec, String> {
             display_name: "TypeScript LSP",
             server_name: "typescript-language-server",
             binary_name: "typescript-language-server",
+            fallback_binary_names: &[],
             windows_binary_names: &[
                 "typescript-language-server.cmd",
                 "typescript-language-server.exe",
@@ -817,9 +847,45 @@ fn lsp_spec(language_id: &str) -> Result<LspSpec, String> {
             display_name: "Go LSP",
             server_name: "gopls",
             binary_name: "gopls",
+            fallback_binary_names: &[],
             windows_binary_names: &["gopls.exe", "gopls.cmd", "gopls"],
             install_command: "go install golang.org/x/tools/gopls@latest",
             workspace_markers: &["go.work", "go.mod"],
+        }),
+        "python" => Ok(LspSpec {
+            language_id: "python",
+            display_name: "Python LSP",
+            server_name: "pyright-langserver",
+            binary_name: "pyright-langserver",
+            fallback_binary_names: &["pylsp"],
+            windows_binary_names: &[
+                "pyright-langserver.cmd",
+                "pyright-langserver.exe",
+                "pyright-langserver",
+                "pylsp.exe",
+                "pylsp.cmd",
+                "pylsp",
+            ],
+            install_command:
+                "npm install -D pyright (or pip install python-lsp-server for pylsp fallback)",
+            workspace_markers: &[
+                "pyproject.toml",
+                "setup.py",
+                "setup.cfg",
+                "requirements.txt",
+                "Pipfile",
+                "poetry.lock",
+            ],
+        }),
+        "rust" => Ok(LspSpec {
+            language_id: "rust",
+            display_name: "Rust LSP",
+            server_name: "rust-analyzer",
+            binary_name: "rust-analyzer",
+            fallback_binary_names: &[],
+            windows_binary_names: &["rust-analyzer.exe", "rust-analyzer.cmd", "rust-analyzer"],
+            install_command: "rustup component add rust-analyzer",
+            workspace_markers: &["Cargo.toml", "Cargo.lock", "rust-project.json"],
         }),
         other => Err(format!(
             "No language server configured for language: {}",
@@ -1199,6 +1265,9 @@ fn find_language_server(workspace_root: &Path, spec: &LspSpec) -> Option<PathBuf
                 }
             } else {
                 candidates.push(entry.join(spec.binary_name));
+                for name in spec.fallback_binary_names {
+                    candidates.push(entry.join(name));
+                }
             }
         }
     }
@@ -1214,6 +1283,20 @@ fn classify_lsp_server_source(workspace_root: &Path, executable: &Path, spec: &L
         "workspace devDependency".to_string()
     } else if spec.language_id == "go" && executable.to_string_lossy().contains("\\go\\bin") {
         "GOPATH bin".to_string()
+    } else if spec.language_id == "python"
+        && executable
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("python")
+    {
+        "Python environment".to_string()
+    } else if spec.language_id == "rust"
+        && executable
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains(".cargo")
+    {
+        "Cargo bin".to_string()
     } else {
         "global PATH".to_string()
     }
@@ -1236,6 +1319,12 @@ fn infer_indexing_state(
 ) -> (String, String) {
     if spec.language_id == "go" {
         return infer_go_indexing_state(workspace_root, config_files);
+    }
+    if spec.language_id == "python" {
+        return infer_python_indexing_state(workspace_root, config_files);
+    }
+    if spec.language_id == "rust" {
+        return infer_rust_indexing_state(workspace_root, config_files);
     }
     if config_files
         .iter()
@@ -1261,6 +1350,62 @@ fn infer_indexing_state(
     (
         "empty".to_string(),
         "No TypeScript/JavaScript project files detected in the workspace.".to_string(),
+    )
+}
+
+fn infer_python_indexing_state(workspace_root: &Path, config_files: &[String]) -> (String, String) {
+    if config_files.iter().any(|file| file == "pyproject.toml") {
+        return (
+            "configured".to_string(),
+            "Workspace has pyproject.toml; Pyright can use project configuration and environment metadata.".to_string(),
+        );
+    }
+    if config_files.iter().any(|file| {
+        matches!(
+            file.as_str(),
+            "setup.py" | "setup.cfg" | "requirements.txt" | "Pipfile" | "poetry.lock"
+        )
+    }) {
+        return (
+            "implicit".to_string(),
+            "Python project markers found; Pyright will index opened files and infer imports from workspace/environment.".to_string(),
+        );
+    }
+    if has_files_with_extensions(workspace_root, &["py"]) {
+        return (
+            "adhoc".to_string(),
+            "Python files found without project config; indexing is limited to opened files and inferred paths.".to_string(),
+        );
+    }
+    (
+        "empty".to_string(),
+        "No Python project files detected in the workspace.".to_string(),
+    )
+}
+
+fn infer_rust_indexing_state(workspace_root: &Path, config_files: &[String]) -> (String, String) {
+    if config_files.iter().any(|file| file == "Cargo.toml") {
+        return (
+            "crate".to_string(),
+            "Workspace has Cargo.toml; rust-analyzer can index the crate graph.".to_string(),
+        );
+    }
+    if config_files.iter().any(|file| file == "rust-project.json") {
+        return (
+            "configured".to_string(),
+            "Workspace has rust-project.json; rust-analyzer can use explicit project layout."
+                .to_string(),
+        );
+    }
+    if has_files_with_extensions(workspace_root, &["rs"]) {
+        return (
+            "standalone".to_string(),
+            "Rust files found without Cargo.toml; rust-analyzer will use limited standalone-file analysis.".to_string(),
+        );
+    }
+    (
+        "empty".to_string(),
+        "No Rust project files detected in the workspace.".to_string(),
     )
 }
 
@@ -1405,6 +1550,46 @@ mod tests {
         assert_eq!(configs, vec!["go.mod".to_string()]);
         assert_eq!(status, "module");
         assert!(message.contains("go.mod"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lsp_indexing_state_detects_python_project() {
+        let spec = lsp_spec("python").unwrap();
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("lsp-indexing-python-project");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").unwrap();
+
+        let configs = detect_lsp_workspace_config_files(&root, &spec);
+        let (status, message) = infer_indexing_state(&root, &configs, &spec);
+
+        assert_eq!(configs, vec!["pyproject.toml".to_string()]);
+        assert_eq!(status, "configured");
+        assert!(message.contains("pyproject.toml"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lsp_indexing_state_detects_rust_crate() {
+        let spec = lsp_spec("rust").unwrap();
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("lsp-indexing-rust-crate");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+
+        let configs = detect_lsp_workspace_config_files(&root, &spec);
+        let (status, message) = infer_indexing_state(&root, &configs, &spec);
+
+        assert_eq!(configs, vec!["Cargo.toml".to_string()]);
+        assert_eq!(status, "crate");
+        assert!(message.contains("Cargo.toml"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

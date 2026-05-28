@@ -12,12 +12,71 @@ export type AgentState =
 /** Agent 控制模式 */
 export type AgentMode = "suggest" | "edit" | "auto";
 
+/** IDE 工作模式，独立于 Agent 权限模式 */
+export type IdeMode = "code" | "plan";
+
+/** Agent 权限预设 */
+export type AgentPermissionPreset = "ask" | "suggest" | "auto";
+
+/** 细粒度 Agent 权限 */
+export interface AgentPermission {
+  allowFileCreate: boolean;
+  allowFileDelete: boolean;
+  allowCommandRun: boolean;
+  allowGitActions: boolean;
+}
+
+/** 默认权限（ask 模式下的全手动确认） */
+export const DEFAULT_PERMISSIONS: AgentPermission = {
+  allowFileCreate: false,
+  allowFileDelete: false,
+  allowCommandRun: false,
+  allowGitActions: false,
+};
+
+/** suggest 预设：审查但不自动执行 */
+export const SUGGEST_PERMISSIONS: AgentPermission = {
+  allowFileCreate: true,
+  allowFileDelete: false,
+  allowCommandRun: false,
+  allowGitActions: false,
+};
+
+/** auto 预设：全部放行 */
+export const AUTO_PERMISSIONS: AgentPermission = {
+  allowFileCreate: true,
+  allowFileDelete: true,
+  allowCommandRun: true,
+  allowGitActions: true,
+};
+
+/** 根据预设获取权限 */
+export function permissionsForPreset(preset: AgentPermissionPreset): AgentPermission {
+  switch (preset) {
+    case "ask": return { ...DEFAULT_PERMISSIONS };
+    case "suggest": return { ...SUGGEST_PERMISSIONS };
+    case "auto": return { ...AUTO_PERMISSIONS };
+  }
+}
+
+/** 破坏性操作类型 */
+export type DestructiveOpType = "file_delete" | "command_run" | "git_push" | "git_force";
+
+export interface DestructiveOpConfirm {
+  id: string;
+  opType: DestructiveOpType;
+  title: string;
+  description: string;
+  detail: string;
+  requireExplicitConfirm: boolean;
+}
+
 export type ContextCompressionMode = "full" | "focused" | "compact" | "budgeted";
 export type StepScope = "selection" | "active_file" | "open_files" | "workspace";
 export type StepExecutionMode = "analyze" | "diff" | "test" | "fix";
 
 /** Agent 角色 */
-export type AgentRole = "architect" | "coder" | "tester" | "reviewer";
+export type AgentRole = "architect" | "designer" | "coder" | "tester" | "reviewer";
 
 /** Pipeline 阶段状态 */
 export type PipelineStageStatus = "pending" | "active" | "completed" | "failed" | "paused";
@@ -110,6 +169,31 @@ export interface AgentActionLogEntry {
   diffSummary?: string | null;
 }
 
+export interface SddArtifact {
+  id: string;
+  title: string;
+  slug: string;
+  frontmatter: Record<string, string>;
+  markdown: string;
+  sourceRunId?: string | null;
+  reviewFindings: string[];
+  status: "draft" | "reviewed" | "approved" | string;
+}
+
+export interface SavedSddArtifactResponse {
+  path: string;
+  artifact: SddArtifact;
+}
+
+export interface GhostSuggestion {
+  id: string;
+  title: string;
+  detail: string;
+  prompt: string;
+  source: "problems" | "tasks" | "logs" | "workspace";
+  createdAt: number;
+}
+
 /** Task 任务 */
 export interface Task {
   id: string;
@@ -162,6 +246,7 @@ export interface LlmProfile {
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
   effectiveInputTokens?: number;
+  toolCallMode?: "text_protocol" | "native_tools";
 }
 
 export interface LlmProfilesResponse {
@@ -199,6 +284,7 @@ export interface SaveLlmProfileRequest {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  toolCallMode?: "text_protocol" | "native_tools";
   setActive?: boolean;
 }
 
@@ -212,4 +298,5 @@ export interface ProviderPreset {
   defaultMaxContextTokens?: number;
   defaultReservedOutputTokens?: number;
   defaultMaxOutputTokens?: number;
+  defaultToolCallMode?: "text_protocol" | "native_tools";
 }

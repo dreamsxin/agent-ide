@@ -24,6 +24,25 @@ export function withIdeRuntimeContext(prompt: string, options?: IdeRuntimeContex
     : prompt;
 }
 
+export function buildProblemExplainPrompt(problem?: ProblemEntry) {
+  const target = problem
+    ? [
+        "Target problem:",
+        `- file: ${problem.file}`,
+        `- location: ${problem.line}:${problem.column}`,
+        `- severity: ${problem.severity}`,
+        `- source: ${problem.source}`,
+        `- message: ${problem.message}`,
+      ].join("\n")
+    : "Target: explain the most severe Problems entries.";
+
+  return [
+    "Explain the following IDE problem. Describe what it means, what likely caused it, and what the fix approach should be — but do NOT propose code changes. Only explain.",
+    "",
+    target,
+  ].join("\n");
+}
+
 export function buildProblemFixPrompt(problem?: ProblemEntry) {
   const target = problem
     ? [

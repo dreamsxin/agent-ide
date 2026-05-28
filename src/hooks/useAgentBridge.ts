@@ -3,12 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
-import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry } from "../types/agent";
+import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
   state: string;
   mode?: string;
+  ideMode?: string;
   currentRunId?: string | null;
   lastRunId?: string | null;
 }
@@ -22,6 +23,7 @@ export function useAgentBridge() {
   const setSteps = useAgentStore((s) => s.setSteps);
   const updateStep = useAgentStore((s) => s.updateStep);
   const setDiffs = useAgentStore((s) => s.setDiffs);
+  const setSddArtifact = useAgentStore((s) => s.setSddArtifact);
   const setPipeline = useAgentStore((s) => s.setPipeline);
   const appendStreamContent = useAgentStore((s) => s.appendStreamContent);
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
@@ -42,6 +44,9 @@ export function useAgentBridge() {
             setState(state as AgentState);
             if (mode) {
               useAgentStore.getState().setMode(mode as "suggest" | "edit" | "auto");
+            }
+            if (e.payload.ideMode) {
+              useAgentStore.getState().setIdeMode(e.payload.ideMode as "code" | "plan");
             }
           }),
 
@@ -71,6 +76,11 @@ export function useAgentBridge() {
                   message: diff.applyError ?? "Agent diff failed to apply",
                 }))
             );
+          }),
+
+          listen<SddArtifact>("agent-sdd-ready", (e) => {
+            setSddArtifact(e.payload);
+            clearStreamContent();
           }),
 
           listen<PipelineStage[]>("agent-pipeline-update", (e) => {
@@ -125,7 +135,7 @@ export function useAgentBridge() {
       stopped = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, [addLog, appendStreamContent, clearStreamContent, setDiffs, setPipeline, setState, setSteps, updateStep, upsertProblems]);
+  }, [addLog, appendStreamContent, clearStreamContent, setDiffs, setPipeline, setSddArtifact, setState, setSteps, updateStep, upsertProblems]);
 }
 
 function formatLogTime(timestamp: string) {

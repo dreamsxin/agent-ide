@@ -3,8 +3,14 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLspStore } from "../../stores/useLspStore";
 import { useLogStore } from "../../stores/useLogStore";
+import { useAgentStore } from "../../stores/useAgentStore";
 import { pathsEqual } from "../../utils/paths";
 import { MonacoContext } from "./MonacoContext";
+import {
+  AGENT_QUICK_ACTIONS,
+  buildActionPrompt,
+  type AgentQuickActionKey,
+} from "../../utils/agentActions";
 import EditorTabs from "./EditorTabs";
 import InlineSuggestion from "./InlineSuggestion";
 import DiffOverlay from "./DiffOverlay";
@@ -88,6 +94,13 @@ export default function EditorContainer() {
   const setSelectedRange = useEditorStore((s) => s.setSelectedRange);
   const pendingRevealLocation = useEditorStore((s) => s.pendingRevealLocation);
   const clearPendingRevealLocation = useEditorStore((s) => s.clearPendingRevealLocation);
+
+  // Agent store for context menu and lightbulb actions
+  const sendPrompt = useAgentStore((s) => s.sendPrompt);
+  const addMessage = useAgentStore((s) => s.addMessage);
+  const agentState = useAgentStore((s) => s.state);
+  const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
+  const rightVisible = useLayoutStore((s) => s.rightVisible);
 
   const [editorRef, setEditorRef] = useState<editor.IStandaloneCodeEditor | null>(null);
   const [monacoRef, setMonacoRef] = useState<typeof import("monaco-editor") | null>(null);
@@ -215,7 +228,7 @@ export default function EditorContainer() {
 
       if (!lspRegisteredRef.current) {
         lspRegisteredRef.current = true;
-        for (const language of ["typescript", "javascript"]) {
+        for (const language of ["typescript", "javascript", "go", "python", "rust"]) {
           const completionDisposable = monacoInst.languages.registerCompletionItemProvider(language, {
             triggerCharacters: [".", "\"", "'", "/", "@", "<"],
             provideCompletionItems: async (model, position) => {
@@ -368,6 +381,96 @@ export default function EditorContainer() {
         },
       });
       disposablesRef.current.add(definitionDisposable);
+
+      // ▸▸▸ Agent context menu actions
+      const isAgentBusy = () => {
+        const s = agentState;
+        return s !== "idle" && s !== "done" && s !== "error" && s !== "waiting_user";
+      };
+
+      const runAgentAction = async (action: AgentQuickActionKey) => {
+        const selection = editorInst.getSelection();
+        if (!selection || selection.isEmpty()) return;
+        const model = editorInst.getModel();
+        if (!model) return;
+        const selectedText = model.getValueInRange(selection);
+        if (!selectedText) return;
+
+        if (!rightVisible) toggleRightPanel();
+
+        const prompt = buildActionPrompt(
+          action,
+          selectedText,
+          activeFile,
+          selection.startLineNumber,
+          selection.endLineNumber
+        );
+
+        addMessage({
+          id: `ctx-${Date.now()}`,
+          role: "user",
+          content: prompt,
+          timestamp: Date.now(),
+        });
+
+        await sendPrompt({
+          prompt,
+          contextFiles: activeFile ? [activeFile] : [],
+          activeFile: activeFile ?? undefined,
+          activeFileContent: activeFile ? fileContents[activeFile] : undefined,
+          selection: selectedText,
+          ideMode: "code",
+        });
+      };
+
+      for (const act of AGENT_QUICK_ACTIONS) {
+        const disposable = editorInst.addAction({
+          id: `agent-ide.${act.key}-selection`,
+          label: `${act.icon} ${act.label} with Agent`,
+          contextMenuGroupId: "agent",
+          contextMenuOrder: AGENT_QUICK_ACTIONS.indexOf(act) + 1,
+          precondition: "editorHasSelection",
+          run: () => { void runAgentAction(act.key as AgentQuickActionKey); },
+        });
+        disposablesRef.current.add(disposable);
+      }
+
+      // ▸▸▸ Agent lightbulb (CodeActionProvider)
+      const agentLightbulbDisposable = monacoInst.languages.registerCodeActionProvider("*", {
+        provideCodeActions: (_model, _range, _context) => {
+          if (isAgentBusy()) return { actions: [], dispose: () => {} };
+          const selection = editorInst.getSelection();
+          if (!selection || selection.isEmpty()) return { actions: [], dispose: () => {} };
+          // only show lightbulb when there's a selection (not just cursor)
+          const model = editorInst.getModel();
+          if (!model) return { actions: [], dispose: () => {} };
+          const selectedText = model.getValueInRange(selection);
+          if (!selectedText || selectedText.length < 1) return { actions: [], dispose: () => {} };
+
+          return {
+            actions: AGENT_QUICK_ACTIONS.map((act) => ({
+              title: `${act.icon} ${act.label} with Agent`,
+              kind: "refactor.rewrite",
+              diagnostics: [],
+              command: {
+                id: `agent-ide.lightbulb-${act.key}`,
+                title: `${act.label} with Agent`,
+              },
+            })),
+            dispose: () => {},
+          };
+        },
+      });
+      disposablesRef.current.add(agentLightbulbDisposable);
+
+      // Register commands for lightbulb actions
+      for (const act of AGENT_QUICK_ACTIONS) {
+        const cmdDisposable = monacoInst.editor.registerCommand(
+          `agent-ide.lightbulb-${act.key}`,
+          () => { void runAgentAction(act.key as AgentQuickActionKey); }
+        );
+        disposablesRef.current.add(cmdDisposable);
+      }
     },
     [addLog, setSelectedRange, setSelectedText, updateFileContent]
   );
@@ -384,7 +487,7 @@ export default function EditorContainer() {
     const languageId = activeTab ? activeTab.language || detectLanguage(activeTab.path) : "typescript";
     if (!isLspLanguage(languageId)) {
       setLspReady(false);
-      setLspStatus("idle", "Open a TypeScript/JavaScript or Go file to start a language server.");
+      setLspStatus("idle", "Open a TypeScript/JavaScript, Go, Python, or Rust file to start a language server.");
       return;
     }
     lspOpenedFilesRef.current.clear();

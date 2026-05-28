@@ -62,6 +62,8 @@ pub fn run() {
             commands::agent::reject_diff_hunk,
             commands::agent::get_agent_steps,
             commands::agent::get_agent_diffs,
+            commands::agent::get_agent_sdd_artifacts,
+            commands::agent::save_sdd_artifact,
             commands::agent::update_llm_config,
             commands::agent::get_llm_config,
             commands::agent::save_llm_profile,

@@ -2,6 +2,8 @@
 
 > Goal: turn `agent_cli` from a preview/apply helper into a stable automation surface that can be embedded in CI, scripts, other IDEs, task runners, and fully autonomous repair workflows.
 
+**NOTE:** Not all features described in this design are currently implemented. See the Implementation Status table below for current state. The CLI manual ([agent_cli_manual.md](agent_cli_manual.md)) documents the current working feature set.
+
 ---
 
 ## 1. Product Goal
@@ -50,6 +52,48 @@ Current limitations:
 - No autonomous repair loop.
 - No run-id/artifact persistence.
 - No policy model for file, command, Git, and network operations.
+
+---
+
+## 2.5 Implementation Status
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Basic CLI entry point (`agent_cli` with clap) | Implemented | Phase CLI-1 |
+| `doctor` command | Implemented | Validates workspace, Git, credentials, provider profiles |
+| `context estimate` command | Implemented | Shared backend context builder |
+| `plan` command | Implemented | Plan-only generation |
+| `run` command (single prompt) | Implemented | Headless Agent execution |
+| `smoke ide-backend` command | Implemented | Backend integration smoke tests |
+| `--apply` flag | Implemented | Writes generated diffs to workspace |
+| `--output text\|json\|ndjson` | Implemented | Machine-readable output formats |
+| `--profile` flag | Implemented | Shared provider profiles + OS credential store |
+| `--context-mode`, `--include` flags | Implemented | Context source control |
+| `--prompt-file`, `--stdin` flags | Implemented | Prompt input alternatives |
+| `--run-command` check execution | Implemented | Shared project command runner |
+| `--allow-run` flag | Implemented | Command authorization for repair loops (exact, prefix, wildcard) |
+| `--max-iterations` (repair loop) | Implemented | Bounded repair with failure→diff→apply→rerun chain |
+| `--timeout-seconds`, `--max-output-bytes`, `--max-diff-files` | Implemented | Automation safety limits |
+| Stable exit codes (0–8) | Implemented | Machine-readable exit-code contract |
+| Run-id and artifact directory | Implemented | `summary.json`, `events.ndjson`, `changes.json`, etc. |
+| `repair-chain.json` / `repair-summary.json` | Implemented | Full repair iteration trace |
+| `problems.json` artifact | Implemented | Parsed file/line/column Problems from command output |
+| Workspace boundary checks | Implemented | Shared with desktop app |
+| Shared diff parser/apply | Implemented | Shared with desktop app |
+| `config list-profiles` / `config show-profile` | Future | Phase CLI-2 |
+| `review` command / `--review` mode | Future | Phase CLI-3 — per-file/per-hunk terminal review |
+| `apply` command (standalone, from saved changes) | Future | Phase CLI-3 |
+| `fix` command (from failure artifact) | Future | Phase CLI-3 |
+| `--permission suggest\|edit\|auto` | Future | Phase CLI-4 — broader permission policy |
+| `--allow-create`, `--allow-edit`, `--allow-delete` | Future | Phase CLI-4 — file mutation permissions |
+| `--allow-git` | Future | Phase CLI-4 — Git mutation permissions |
+| `--deny-path` | Future | Phase CLI-4 — path exclusion policy |
+| `--confirm-risky` | Future | Phase CLI-4 — risky operation confirmation |
+| `--auto` flag | Future | Phase CLI-4 — full autonomous mode |
+| `--require-clean` / `--allow-dirty` | Future | Phase CLI-4 — Git worktree precondition |
+| `--dry-run` | Future | Phase CLI-4 — mutation simulation |
+| Shell completion generation | Future | Phase CLI-5 — toolchain packaging |
+| Full policy model (file/command/Git/network) | Future | Phase CLI-4+ — depends on scope decision |
 
 ---
 

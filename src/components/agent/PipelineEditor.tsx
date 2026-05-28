@@ -4,12 +4,13 @@ import type { AgentRole, PipelineStage } from "../../types/agent";
 
 const ROLE_LABELS: Record<AgentRole, { label: string; icon: string }> = {
   architect: { label: "Architect", icon: "🏗" },
+  designer: { label: "Designer", icon: "📐" },
   coder: { label: "Coder", icon: "💻" },
   tester: { label: "Tester", icon: "🧪" },
   reviewer: { label: "Reviewer", icon: "🔍" },
 };
 
-const ALL_ROLES: AgentRole[] = ["architect", "coder", "tester", "reviewer"];
+const ALL_ROLES: AgentRole[] = ["architect", "designer", "coder", "tester", "reviewer"];
 
 export default function PipelineEditor() {
   const pipeline = useAgentStore((s) => s.pipeline);

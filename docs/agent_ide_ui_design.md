@@ -1,8 +1,10 @@
 # Agent IDE — Product-Level UI Design Specification
 
+**NOTE:** This document describes the target UI design vision. Features are at various stages of implementation. Status badges indicate current state — see ROADMAP.md for timeline.
+
 ---
 
-## 1. Overall Layout
+## 1. Overall Layout `[Implemented]`
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -26,7 +28,7 @@
 
 ## 2. Core Areas
 
-### Area 1: Top Control Bar (Global Control)
+### Area 1: Top Control Bar (Global Control) `[Implemented]`
 
 **Functions:**
 - Agent mode switch: Suggest / Edit / Auto
@@ -41,7 +43,7 @@
 
 ---
 
-### Area 2: Left Side — File Area (Stable Zone)
+### Area 2: Left Side — File Area (Stable Zone) `[Implemented]`
 
 **Contents:**
 - File tree (Explorer)
@@ -55,23 +57,23 @@
 
 ---
 
-### Area 3: Center — Code Editor (Main Stage)
+### Area 3: Center — Code Editor (Main Stage) `[Implemented]`
 
 **Core principle:** User always has control
 
 **Feature layers:**
 
-#### (A) Base Editing
-- Multi-file tabs
-- Split view
-- Minimap
+#### (A) Base Editing `[Implemented]`
+- Multi-file tabs `[Implemented]`
+- Split view `[Future - Phase 11]`
+- Minimap `[Implemented]`
 
-#### (B) AI Enhancement (Non-intrusive)
+#### (B) AI Enhancement (Non-intrusive) `[Implemented]`
 
-**Inline Suggestion:**
+**Inline Suggestion:** `[Implemented]`
 - Gray ghost text (Copilot-like)
 
-**Diff Overlay (Key Feature):**
+**Diff Overlay (Key Feature):** `[Implemented]`
 - AI modifications displayed as overlay
 - Not directly written to file
 
@@ -81,7 +83,7 @@ Example:
 + new code (AI suggestion)
 ```
 
-**Intent Layer (Innovation):**
+**Intent Layer (Innovation):** `[Implemented]`
 - Inline AI intent hints
 
 Example:
@@ -94,16 +96,16 @@ Example:
 
 ---
 
-### Area 4: Right Side — Agent Panel (Intelligence Core)
+### Area 4: Right Side — Agent Panel (Intelligence Core) `[Implemented]`
 
 **Three-layer structure:**
 
-#### Chat Layer (Conversation)
+#### Chat Layer (Conversation) `[Implemented]`
 - Input tasks
 - Multi-turn dialogue
 - Context binding (file / selection)
 
-#### Task Layer (Execution Visualization)
+#### Task Layer (Execution Visualization) `[Implemented]`
 
 Example:
 ```
@@ -120,7 +122,7 @@ Task: Login System
 - Rollback
 - Re-run
 
-#### Diff Layer (Trust Core)
+#### Diff Layer (Trust Core) `[Implemented]`
 
 Show:
 - File changes
@@ -131,7 +133,7 @@ Show:
 
 ---
 
-### Area 5: Bottom — Execution Panel
+### Area 5: Bottom — Execution Panel `[Implemented]`
 
 **Contents:**
 - Terminal
@@ -155,28 +157,28 @@ Agent: Fixed test/login.test.js
 
 ## 3. Core Interaction Design
 
-### 3.1 Selection as Context
+### 3.1 Selection as Context `[Implemented]`
 - Select code -> Ask Agent
 - Auto-attaches context
 
-### 3.2 Drag-Driven AI
+### 3.2 Drag-Driven AI `[Future - Phase 10]`
 - Drag file to Agent panel
 - Drag error log to Chat
 
-### 3.3 Quick Action Layer (Important)
+### 3.3 Quick Action Layer (Important) `[Implemented]`
 
 Floating on selection:
 ```
 Explain | Fix | Refactor | Optimize
 ```
 
-### 3.4 AI Control Level Toggle
+### 3.4 AI Control Level Toggle `[Implemented]`
 
 - Suggest (suggestions only)
 - Edit (can modify code)
 - Auto (automatic execution)
 
-### 3.5 Ghost Mode (Background AI)
+### 3.5 Ghost Mode (Background AI) `[Future - Phase 10]`
 
 **Behavior:**
 - Pre-analyze project
@@ -185,7 +187,7 @@ Explain | Fix | Refactor | Optimize
 
 ---
 
-## 4. State System
+## 4. State System `[Implemented]`
 
 **Agent States:**
 
@@ -226,7 +228,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 
 ---
 
-## 7. Figma Component Breakdown
+## 7. Figma Component Breakdown `[Implemented]`
 
 ### 7.1 Design Tokens
 
@@ -284,7 +286,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 
 ---
 
-## 8. Agent State Machine + Data Flow
+## 8. Agent State Machine + Data Flow `[Implemented]`
 
 ### 8.1 State Machine
 
@@ -351,7 +353,7 @@ Apply Patch -> Editor
 
 ---
 
-## 9. Multi-Agent Collaboration UI
+## 9. Multi-Agent Collaboration UI `[In-Progress]`
 
 ### 9.1 Core Concept
 
@@ -362,7 +364,7 @@ Apply Patch -> Editor
 - Tester
 - Reviewer
 
-### 9.2 Agent List (Right Panel Top)
+### 9.2 Agent List (Right Panel Top) `[In-Progress]`
 
 ```
 [Architect] [Coder] [Tester] [Reviewer]
@@ -370,7 +372,7 @@ Apply Patch -> Editor
 
 Status: Active / Idle / Busy
 
-### 9.3 Collaboration View
+### 9.3 Collaboration View `[In-Progress]`
 
 **Task Pipeline:**
 ```
@@ -379,7 +381,7 @@ Design -> Implement -> Test -> Review -> Merge
 
 Each stage handled by a different Agent.
 
-### 9.4 Conflict Resolution UI
+### 9.4 Conflict Resolution UI `[Future - Phase 9]`
 
 When multiple Agents modify the same file:
 
@@ -389,7 +391,7 @@ Agent A vs Agent B
 [Accept A] [Accept B] [Merge]
 ```
 
-### 9.5 Advanced Capabilities (Future)
+### 9.5 Advanced Capabilities (Future) `[Future - Phase 10]`
 
 - Agent parallel execution
 - Automatic task assignment

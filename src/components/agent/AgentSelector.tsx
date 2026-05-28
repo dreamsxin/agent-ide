@@ -5,6 +5,7 @@ import PipelineEditor from "./PipelineEditor";
 
 const ROLES: { id: AgentRole; label: string; desc: string; icon: string }[] = [
   { id: "architect", label: "Architect", desc: "Design architecture & plan tasks", icon: "🏗" },
+  { id: "designer", label: "Designer", desc: "Draft SDD artifacts", icon: "📐" },
   { id: "coder", label: "Coder", desc: "Write and modify code", icon: "💻" },
   { id: "tester", label: "Tester", desc: "Write and run tests", icon: "🧪" },
   { id: "reviewer", label: "Reviewer", desc: "Review code quality & security", icon: "🔍" },
@@ -12,6 +13,7 @@ const ROLES: { id: AgentRole; label: string; desc: string; icon: string }[] = [
 
 export default function AgentSelector() {
   const mode = useAgentStore((s) => s.mode);
+  const ideMode = useAgentStore((s) => s.ideMode);
   const state = useAgentStore((s) => s.state);
   const activeRole = useAgentStore((s) => s.activeRole);
   const setActiveRole = useAgentStore((s) => s.setActiveRole);
@@ -90,7 +92,7 @@ export default function AgentSelector() {
           </button>
         </div>
         <div className="text-surface-muted text-[10px] mt-1">
-          Mode: <span className="text-accent-blue">{mode}</span>
+          IDE: <span className="text-accent-blue">{ideMode}</span> · Permission: <span className="text-accent-blue">{mode}</span>
         </div>
       </div>
 

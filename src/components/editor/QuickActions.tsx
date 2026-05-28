@@ -3,25 +3,14 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useMonacoContext } from "./MonacoContext";
-
-const actions = [
-  { key: "explain", label: "Explain", icon: "💡" },
-  { key: "fix", label: "Fix", icon: "🔧" },
-  { key: "refactor", label: "Refactor", icon: "♻️" },
-  { key: "optimize", label: "Optimize", icon: "⚡" },
-] as const;
-
-type QuickActionKey = (typeof actions)[number]["key"];
-
-const ACTION_PROMPTS: Record<QuickActionKey, string> = {
-  explain: "Explain the selected code. Focus on behavior, inputs, outputs, side effects, and any hidden assumptions.",
-  fix: "Find and fix bugs in the selected code. Return proposed code changes as reviewable diffs when a code change is needed.",
-  refactor: "Refactor the selected code for readability and maintainability without changing behavior. Return proposed code changes as reviewable diffs.",
-  optimize: "Optimize the selected code only where there is a clear performance or complexity benefit. Explain the tradeoff and return reviewable diffs if changing code.",
-};
+import {
+  AGENT_QUICK_ACTIONS,
+  buildActionPrompt,
+  type AgentQuickActionKey,
+} from "../../utils/agentActions";
 
 /**
- * 选区浮动工具栏 —— 选中文本时在选区上方弹出 [Explain | Fix | Refactor | Optimize]
+ * Floating toolbar above selected text: [Explain | Fix | Refactor | Optimize]
  */
 export default function QuickActions() {
   const selectedText = useEditorStore((s) => s.selectedText);
@@ -35,17 +24,16 @@ export default function QuickActions() {
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const { editor, monaco } = useMonacoContext();
 
-  // 计算工具栏的像素位置
+  // Calculate toolbar pixel position
   const position = useMemo(() => {
     if (!editor || !monaco || !selectedRange || !selectedText) return null;
 
     try {
-      // 选区起始行的像素 Top
       const top = editor.getTopForLineNumber(selectedRange.startLine);
       const editorLayout = editor.getLayoutInfo();
 
       return {
-        top: top - 40, // 选区上方 40px
+        top: top - 40,
         left: editorLayout.contentLeft + editorLayout.contentWidth / 2,
       };
     } catch {
@@ -59,24 +47,19 @@ export default function QuickActions() {
     agentState !== "error" &&
     agentState !== "waiting_user";
 
-  const runQuickAction = async (action: QuickActionKey) => {
+  const runQuickAction = async (action: AgentQuickActionKey) => {
     if (!selectedText || isAgentBusy) return;
     if (!rightVisible) {
       toggleRightPanel();
     }
 
-    const rangeText = selectedRange
-      ? `lines ${selectedRange.startLine}-${selectedRange.endLine}`
-      : "current selection";
-    const fileText = activeFile ? ` in ${activeFile}` : "";
-    const prompt = `${ACTION_PROMPTS[action]}
-
-Target: ${rangeText}${fileText}
-
-Selected code:
-\`\`\`
-${selectedText}
-\`\`\``;
+    const prompt = buildActionPrompt(
+      action,
+      selectedText,
+      activeFile,
+      selectedRange?.startLine,
+      selectedRange?.endLine
+    );
 
     addMessage({
       id: `quick-${Date.now()}`,
@@ -91,10 +74,10 @@ ${selectedText}
       activeFile: activeFile ?? undefined,
       activeFileContent: activeFile ? fileContents[activeFile] : undefined,
       selection: selectedText,
+      ideMode: "code",
     });
   };
 
-  // 无选区或位置计算失败 → 不渲染
   if (!selectedText || !position) return null;
 
   return (
@@ -107,12 +90,12 @@ ${selectedText}
       }}
     >
       <div className="flex gap-0.5 bg-surface-panel border border-surface-border rounded-lg p-1 shadow-lg">
-        {actions.map((action) => (
+        {AGENT_QUICK_ACTIONS.map((action) => (
           <button
             key={action.key}
             onClick={(e) => {
               e.stopPropagation();
-              void runQuickAction(action.key);
+              void runQuickAction(action.key as AgentQuickActionKey);
             }}
             disabled={isAgentBusy}
             className="flex items-center gap-1 px-2 py-1 text-xs text-surface-muted hover:text-surface-text hover:bg-surface-border/50 rounded transition-colors whitespace-nowrap"

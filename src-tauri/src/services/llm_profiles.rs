@@ -23,6 +23,8 @@ pub struct LlmProfile {
     pub reserved_output_tokens: Option<u32>,
     #[serde(default, rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    #[serde(default = "default_tool_call_mode", rename = "toolCallMode")]
+    pub tool_call_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +50,8 @@ pub struct LlmProfileResponse {
     pub max_output_tokens: Option<u32>,
     #[serde(rename = "effectiveInputTokens")]
     pub effective_input_tokens: Option<u32>,
+    #[serde(rename = "toolCallMode")]
+    pub tool_call_mode: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +76,8 @@ pub struct SaveLlmProfileRequest {
     pub reserved_output_tokens: Option<u32>,
     #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    #[serde(rename = "toolCallMode")]
+    pub tool_call_mode: Option<String>,
     #[serde(rename = "setActive")]
     pub set_active: Option<bool>,
 }
@@ -84,6 +90,7 @@ impl LlmProfile {
             model: self.model.clone(),
             provider: self.provider.clone(),
             max_output_tokens: self.max_output_tokens,
+            tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
         })
     }
 
@@ -99,6 +106,7 @@ impl LlmProfile {
             reserved_output_tokens: self.reserved_output_tokens,
             max_output_tokens: self.max_output_tokens,
             effective_input_tokens: self.effective_input_tokens(),
+            tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
         }
     }
 
@@ -184,6 +192,7 @@ fn default_config_from_env() -> LlmProfilesConfig {
             max_context_tokens: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
+            tool_call_mode: default_tool_call_mode(),
         }],
         active_profile_id: DEFAULT_PROFILE_ID.to_string(),
         context_compression: mode,
@@ -240,6 +249,7 @@ fn parse_llm_profiles_config_with_migration(
         max_context_tokens: None,
         reserved_output_tokens: None,
         max_output_tokens: None,
+        tool_call_mode: default_tool_call_mode(),
     }]);
     Some((
         LlmProfilesConfig {
@@ -326,6 +336,7 @@ pub fn update_default_profile(
         max_context_tokens: None,
         reserved_output_tokens: None,
         max_output_tokens: None,
+        tool_call_mode: default_tool_call_mode(),
     };
     credentials::store_secret(
         &credentials::llm_credential_ref(DEFAULT_PROFILE_ID),
@@ -387,6 +398,11 @@ pub fn save_profile(
         max_context_tokens: request.max_context_tokens,
         reserved_output_tokens: request.reserved_output_tokens,
         max_output_tokens: request.max_output_tokens,
+        tool_call_mode: request
+            .tool_call_mode
+            .as_deref()
+            .map(normalized_tool_call_mode)
+            .unwrap_or_else(default_tool_call_mode),
     };
     upsert_profile(&mut config.profiles, profile);
     if request.set_active.unwrap_or(true) {
@@ -497,6 +513,17 @@ fn chrono_like_timestamp() -> u128 {
         .unwrap_or(0)
 }
 
+fn default_tool_call_mode() -> String {
+    "text_protocol".to_string()
+}
+
+fn normalized_tool_call_mode(value: &str) -> String {
+    match value.trim() {
+        "native_tools" => "native_tools".to_string(),
+        _ => "text_protocol".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,10 +558,12 @@ mod tests {
             max_context_tokens: Some(128000),
             reserved_output_tokens: Some(4096),
             max_output_tokens: Some(4096),
+            tool_call_mode: "native_tools".to_string(),
         };
 
         assert_eq!(profile.to_response().api_key_masked, "sk-1****7890");
         assert_eq!(profile.to_response().effective_input_tokens, Some(123392));
+        assert_eq!(profile.to_response().tool_call_mode, "native_tools");
     }
 
     #[test]
@@ -550,11 +579,27 @@ mod tests {
             max_context_tokens: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
+            tool_call_mode: default_tool_call_mode(),
         };
 
         let serialized = serde_json::to_value(&profile).expect("serialize profile");
 
         assert_eq!(serialized["credentialRef"], "llm-profile:p1");
+        assert_eq!(serialized["toolCallMode"], "text_protocol");
         assert!(serialized.get("api_key").is_none());
+    }
+
+    #[test]
+    fn profile_deserialization_defaults_to_text_protocol_tools() {
+        let profile: LlmProfile = serde_json::from_value(serde_json::json!({
+            "id": "p1",
+            "name": "Work",
+            "provider": "openai",
+            "endpoint": "https://api.openai.com/v1",
+            "model": "gpt-4o"
+        }))
+        .expect("profile");
+
+        assert_eq!(profile.tool_call_mode, "text_protocol");
     }
 }

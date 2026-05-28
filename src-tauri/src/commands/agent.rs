@@ -1,7 +1,10 @@
 use crate::agent::diff_apply::apply_pending_diffs;
+use crate::agent::executor;
 use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
-use crate::agent::state_machine::{AgentMode, AgentState, ApplyDiffsResult, FileDiff, TaskStep};
+use crate::agent::state_machine::{
+    AgentMode, AgentState, ApplyDiffsResult, FileDiff, IdeMode, SddArtifact, TaskStep,
+};
 use crate::services::agent_runtime;
 use crate::services::context::{
     AgentContext, ContextBudget, ContextBuildOptions, ContextCompressionMode,
@@ -68,6 +71,8 @@ impl AgentGlobalState {
 pub struct AgentStatus {
     pub state: String,
     pub mode: String,
+    #[serde(rename = "ideMode")]
+    pub ide_mode: String,
     pub context_files: Vec<String>,
     #[serde(rename = "currentRunId")]
     pub current_run_id: Option<String>,
@@ -94,6 +99,21 @@ pub struct SendPromptRequest {
     pub context_sources: Option<ContextSourceOptions>,
     #[serde(rename = "runId")]
     pub run_id: Option<String>,
+    #[serde(rename = "ideMode")]
+    pub ide_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveSddArtifactRequest {
+    pub artifact: SddArtifact,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SavedSddArtifactResponse {
+    pub path: String,
+    pub artifact: SddArtifact,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +168,7 @@ pub async fn get_agent_state(
     Ok(AgentStatus {
         state: orch.state_mgr.state.to_string(),
         mode: orch.mode.to_string(),
+        ide_mode: orch.ide_mode.to_string(),
         context_files: Vec::new(),
         current_run_id: orch.current_run_id.clone(),
         last_run_id: orch.last_run_id.clone(),
@@ -205,6 +226,12 @@ pub async fn send_agent_prompt(
         .lock()
         .map_err(|e| e.to_string())?
         .clone();
+    let ide_mode = request
+        .ide_mode
+        .as_deref()
+        .map(IdeMode::from_str)
+        .transpose()?
+        .unwrap_or(IdeMode::Code);
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
@@ -217,6 +244,7 @@ pub async fn send_agent_prompt(
             context_budget,
             context_sources,
             pipeline,
+            ide_mode,
             cancel_flag,
             &llm,
             app_handle.clone(),
@@ -234,6 +262,7 @@ pub async fn send_agent_prompt(
                 serde_json::json!({
                     "state": orch.state_mgr.state.to_string(),
                     "mode": orch.mode.to_string(),
+                    "ideMode": ide_mode.to_string(),
                     "currentRunId": orch.current_run_id,
                     "lastRunId": orch.last_run_id,
                 }),
@@ -256,8 +285,10 @@ pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<Stri
     let mut orch = agent_state.orchestrator.lock().await;
     orch.finish_run();
     orch.state_mgr.set(AgentState::Idle);
+    orch.ide_mode = IdeMode::Code;
     orch.steps.clear();
     orch.diffs.clear();
+    orch.sdd_artifacts.clear();
     Ok("Agent stopped".to_string())
 }
 
@@ -582,6 +613,7 @@ pub async fn continue_agent_pipeline(
             paused.stage_outputs,
             paused.stage_index,
             true,
+            paused.ide_mode,
             cancel_flag,
             &llm,
             app_handle.clone(),
@@ -595,11 +627,13 @@ pub async fn continue_agent_pipeline(
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
             orch.state_mgr.set(AgentState::Idle);
+            let ide_mode = orch.ide_mode;
             let _ = app_handle.emit(
                 "agent-state-changed",
                 serde_json::json!({
                     "state": orch.state_mgr.state.to_string(),
                     "mode": orch.mode.to_string(),
+                    "ideMode": ide_mode.to_string(),
                     "currentRunId": orch.current_run_id,
                     "lastRunId": orch.last_run_id,
                 }),
@@ -1148,6 +1182,15 @@ mod llm_profile_tests {
         assert_eq!(provenance.regenerated_from_diff_id.as_deref(), Some("d1"));
         assert_eq!(provenance.regenerated_from_hunk_index, Some(2));
     }
+
+    #[test]
+    fn plan_mode_uses_dedicated_designer_pipeline() {
+        let stages = crate::agent::multi_agent::plan_pipeline();
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].role, AgentRole::Designer);
+        assert_eq!(stages[1].role, AgentRole::Reviewer);
+    }
 }
 
 /// Get the current steps.
@@ -1166,6 +1209,37 @@ pub async fn get_agent_diffs(
 ) -> Result<Vec<FileDiff>, String> {
     let orch = agent_state.orchestrator.lock().await;
     Ok(orch.diffs.clone())
+}
+
+#[tauri::command]
+pub async fn get_agent_sdd_artifacts(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Vec<SddArtifact>, String> {
+    let orch = agent_state.orchestrator.lock().await;
+    Ok(orch.sdd_artifacts.clone())
+}
+
+#[tauri::command]
+pub async fn save_sdd_artifact(
+    request: SaveSddArtifactRequest,
+) -> Result<SavedSddArtifactResponse, String> {
+    if !executor::is_safe_slug(&request.artifact.slug) {
+        return Err(format!("Invalid SDD slug: {}", request.artifact.slug));
+    }
+    let relative = format!("docs/design/{}.md", request.artifact.slug);
+    let path = workspace::resolve_for_write(&relative)?;
+    if path.exists() && !request.overwrite {
+        return Err(format!("SDD already exists: {}", relative));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Create SDD directory: {}", e))?;
+    }
+    std::fs::write(&path, &request.artifact.markdown)
+        .map_err(|e| format!("Write SDD artifact: {}", e))?;
+    Ok(SavedSddArtifactResponse {
+        path: path.to_string_lossy().to_string(),
+        artifact: request.artifact,
+    })
 }
 
 /// Update LLM configuration.
@@ -1335,6 +1409,7 @@ pub async fn set_active_role(
 ) -> Result<String, String> {
     let parsed = match role.as_str() {
         "architect" => AgentRole::Architect,
+        "designer" => AgentRole::Designer,
         "coder" => AgentRole::Coder,
         "tester" => AgentRole::Tester,
         "reviewer" => AgentRole::Reviewer,

@@ -170,6 +170,21 @@ struct RunArgs {
 
     #[arg(long)]
     max_diff_files: Option<usize>,
+
+    #[arg(long = "deny-path")]
+    deny_paths: Vec<String>,
+
+    #[arg(long = "allow-create")]
+    allow_create: bool,
+
+    #[arg(long = "allow-edit")]
+    allow_edit: bool,
+
+    #[arg(long = "allow-delete")]
+    allow_delete: bool,
+
+    #[arg(long = "allow-git")]
+    allow_git: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -214,6 +229,11 @@ impl Default for RunArgs {
             timeout_seconds: None,
             max_output_bytes: None,
             max_diff_files: None,
+            deny_paths: Vec::new(),
+            allow_create: false,
+            allow_edit: false,
+            allow_delete: false,
+            allow_git: Vec::new(),
         }
     }
 }
@@ -286,6 +306,7 @@ struct CliSummary {
     repair_summary: Vec<RepairIterationSummary>,
     project_tasks: Vec<project_tasks::ProjectTask>,
     capabilities: Option<CliCapabilities>,
+    policy: CliPolicySummary,
     errors: Vec<String>,
 }
 
@@ -307,6 +328,9 @@ struct CliCapabilities {
     supports_diff_file_limit: bool,
     supports_compact_ci_summary: bool,
     supports_ide_backend_smoke: bool,
+    supports_file_permission_policy: bool,
+    supports_path_deny_policy: bool,
+    supports_git_permission_policy: bool,
     supports_interactive_review: bool,
     supports_git_mutation: bool,
     scope: String,
@@ -566,6 +590,7 @@ async fn run_doctor(args: DoctorArgs) -> Result<ExitCode, (ExitCode, String)> {
         repair_summary: Vec::new(),
         project_tasks: Vec::new(),
         capabilities: Some(cli_capabilities()),
+        policy: default_policy_summary(),
         errors,
     };
 
@@ -624,6 +649,7 @@ async fn run_context_estimate(args: ContextEstimateArgs) -> Result<ExitCode, (Ex
         repair_summary: Vec::new(),
         project_tasks: Vec::new(),
         capabilities: None,
+        policy: default_policy_summary(),
         errors: Vec::new(),
     };
     emit_summary(&mut output, &summary)?;
@@ -739,6 +765,7 @@ async fn run_agent_command(
             repair_summary: Vec::new(),
             project_tasks,
             capabilities: None,
+            policy: cli_policy_summary(&args, Vec::new()),
             errors: Vec::new(),
         };
         output.event(CliEvent::RunFinished {
@@ -768,6 +795,7 @@ async fn run_agent_command(
     )
     .await?;
     validate_diff_limit(&diffs, args.max_diff_files)?;
+    let policy_before_apply = validate_cli_policy(&args, &diffs)?;
     output.event(CliEvent::DiffsReady {
         diff_count: diffs.len(),
     });
@@ -830,6 +858,7 @@ async fn run_agent_command(
             )
             .await?;
             validate_diff_limit(&repair_diffs, args.max_diff_files)?;
+            let _ = validate_cli_policy(&args, &repair_diffs)?;
             let repair_apply = apply_pending_diffs(&repair_diffs);
             output.event(CliEvent::ApplyFinished {
                 applied_count: repair_apply.applied.len(),
@@ -936,6 +965,7 @@ async fn run_agent_command(
         repair_chain,
         project_tasks,
         capabilities: None,
+        policy: cli_policy_summary(&args, policy_before_apply),
         errors,
     };
     emit_summary(&mut output, &summary)?;
@@ -978,6 +1008,8 @@ async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (
     }
 
     args.run.apply = true;
+    args.run.allow_create = true;
+    args.run.allow_edit = true;
     if args.run.max_iterations == 0 {
         args.run.max_iterations = 1;
     }
@@ -1151,6 +1183,7 @@ fn write_artifacts(
         )
     })?;
     write_json(artifact_dir.join("summary.json"), summary)?;
+    write_json(artifact_dir.join("policy.json"), &summary.policy)?;
     write_json(artifact_dir.join("events.json"), events)?;
     let ndjson = events
         .iter()
@@ -1245,6 +1278,7 @@ fn error_summary(
         repair_summary: Vec::new(),
         project_tasks: Vec::new(),
         capabilities: None,
+        policy: default_policy_summary(),
         errors: vec![error],
     }
 }
@@ -1270,6 +1304,7 @@ fn cli_capabilities() -> CliCapabilities {
             "summary.json".to_string(),
             "events.json".to_string(),
             "events.ndjson".to_string(),
+            "policy.json".to_string(),
             "prompt.txt".to_string(),
             "context.json".to_string(),
             "context.txt".to_string(),
@@ -1290,6 +1325,9 @@ fn cli_capabilities() -> CliCapabilities {
         supports_diff_file_limit: true,
         supports_compact_ci_summary: true,
         supports_ide_backend_smoke: true,
+        supports_file_permission_policy: true,
+        supports_path_deny_policy: true,
+        supports_git_permission_policy: true,
         supports_interactive_review: false,
         supports_git_mutation: false,
         scope: "headless automation runner; not a full command-line IDE".to_string(),
@@ -1388,6 +1426,118 @@ fn validate_diff_limit(
         ));
     }
     Ok(())
+}
+
+fn validate_cli_policy(
+    args: &RunArgs,
+    diffs: &[FileDiff],
+) -> Result<Vec<String>, (ExitCode, String)> {
+    let policy = effective_policy(args);
+    let mut decisions = Vec::new();
+    for diff in diffs {
+        let normalized_file = diff.file.replace('\\', "/");
+        if let Some(pattern) = policy
+            .deny_paths
+            .iter()
+            .find(|pattern| path_denied(&normalized_file, pattern))
+        {
+            return Err((
+                ExitCode::PreconditionFailed,
+                format!(
+                    "Policy denied generated change for {} by --deny-path {}",
+                    diff.file, pattern
+                ),
+            ));
+        }
+        let operation = diff
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.operation.as_str())
+            .unwrap_or("edit");
+        if !args.apply {
+            decisions.push(format!("preview {} {}", operation, diff.file));
+            continue;
+        }
+        match operation {
+            "create" if !policy.allow_create => {
+                return Err((
+                    ExitCode::PreconditionFailed,
+                    format!(
+                        "Policy denied file creation for {}. Pass --allow-create to permit it.",
+                        diff.file
+                    ),
+                ));
+            }
+            "delete" if !policy.allow_delete => {
+                return Err((
+                    ExitCode::PreconditionFailed,
+                    format!(
+                        "Policy denied file deletion for {}. Pass --allow-delete to permit it.",
+                        diff.file
+                    ),
+                ));
+            }
+            "edit" | "unknown" if !policy.allow_edit => {
+                return Err((
+                    ExitCode::PreconditionFailed,
+                    format!(
+                        "Policy denied file edit for {}. Pass --allow-edit to permit it.",
+                        diff.file
+                    ),
+                ));
+            }
+            _ => {
+                decisions.push(format!("allow {} {}", operation, diff.file));
+            }
+        }
+    }
+    if !policy.allow_git.is_empty() {
+        decisions.push(format!("allow git actions: {}", policy.allow_git.join(",")));
+    }
+    Ok(decisions)
+}
+
+fn effective_policy(args: &RunArgs) -> CliPolicySummary {
+    CliPolicySummary {
+        allow_create: args.allow_create || args.apply,
+        allow_edit: args.allow_edit || args.apply,
+        allow_delete: args.allow_delete,
+        allow_git: args.allow_git.clone(),
+        deny_paths: args.deny_paths.clone(),
+        decisions: Vec::new(),
+    }
+}
+
+fn cli_policy_summary(args: &RunArgs, decisions: Vec<String>) -> CliPolicySummary {
+    CliPolicySummary {
+        decisions,
+        ..effective_policy(args)
+    }
+}
+
+fn default_policy_summary() -> CliPolicySummary {
+    CliPolicySummary {
+        allow_create: false,
+        allow_edit: false,
+        allow_delete: false,
+        allow_git: Vec::new(),
+        deny_paths: Vec::new(),
+        decisions: Vec::new(),
+    }
+}
+
+fn path_denied(file: &str, pattern: &str) -> bool {
+    let pattern = pattern.replace('\\', "/");
+    if pattern.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return file == prefix || file.starts_with(&format!("{}/", prefix));
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return file.starts_with(prefix);
+    }
+    file == pattern || file.starts_with(&format!("{}/", pattern.trim_end_matches('/')))
 }
 
 fn trim_command_outputs(results: &mut [RunProjectTaskResult], max_output_bytes: Option<usize>) {
@@ -1589,7 +1739,19 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         model,
         provider: "custom".to_string(),
         max_output_tokens: None,
+        tool_call_mode: "text_protocol".to_string(),
     }))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliPolicySummary {
+    allow_create: bool,
+    allow_edit: bool,
+    allow_delete: bool,
+    allow_git: Vec<String>,
+    deny_paths: Vec<String>,
+    decisions: Vec<String>,
 }
 
 fn read_prompt(
@@ -1894,6 +2056,12 @@ mod tests {
             "1024",
             "--max-diff-files",
             "5",
+            "--deny-path",
+            "secrets/**",
+            "--allow-create",
+            "--allow-edit",
+            "--allow-git",
+            "status",
             "--apply",
             "fix tests",
         ])
@@ -1906,6 +2074,10 @@ mod tests {
                 assert_eq!(args.run.timeout_seconds, Some(30));
                 assert_eq!(args.run.max_output_bytes, Some(1024));
                 assert_eq!(args.run.max_diff_files, Some(5));
+                assert_eq!(args.run.deny_paths, vec!["secrets/**"]);
+                assert!(args.run.allow_create);
+                assert!(args.run.allow_edit);
+                assert_eq!(args.run.allow_git, vec!["status"]);
                 assert!(args.run.apply);
                 assert_eq!(args.prompt, vec!["fix tests".to_string()]);
             }
@@ -2000,6 +2172,59 @@ mod tests {
     }
 
     #[test]
+    fn cli_policy_rejects_denied_paths() {
+        let args = RunArgs {
+            apply: true,
+            deny_paths: vec!["secrets/**".to_string()],
+            ..RunArgs::default()
+        };
+        let diffs = vec![FileDiff {
+            id: "d1".to_string(),
+            file: "secrets/token.txt".to_string(),
+            base_hash: None,
+            provenance: None,
+            hunks: Vec::new(),
+            status: "pending".to_string(),
+        }];
+
+        assert!(validate_cli_policy(&args, &diffs).is_err());
+    }
+
+    #[test]
+    fn cli_policy_rejects_delete_during_apply_by_default() {
+        let args = RunArgs {
+            apply: true,
+            ..RunArgs::default()
+        };
+        let diffs = vec![FileDiff {
+            id: "d1".to_string(),
+            file: "src/old.ts".to_string(),
+            base_hash: None,
+            provenance: Some(crate::agent::state_machine::DiffProvenance {
+                protocol: "agent-changes".to_string(),
+                operation: "delete".to_string(),
+                rationale: None,
+                schema_version: Some(1),
+                change_index: Some(0),
+                source_role: None,
+                source_stage: None,
+                regenerated_from_diff_id: None,
+                regenerated_from_hunk_index: None,
+            }),
+            hunks: Vec::new(),
+            status: "pending".to_string(),
+        }];
+
+        assert!(validate_cli_policy(&args, &diffs).is_err());
+        let allowed = RunArgs {
+            apply: true,
+            allow_delete: true,
+            ..RunArgs::default()
+        };
+        assert!(validate_cli_policy(&allowed, &diffs).is_ok());
+    }
+
+    #[test]
     fn repair_prompt_includes_problems_and_failed_output() {
         let problems = vec![ProblemEntry {
             id: "p1".to_string(),
@@ -2072,6 +2297,9 @@ mod tests {
         assert!(capabilities.supports_diff_file_limit);
         assert!(capabilities.supports_compact_ci_summary);
         assert!(capabilities.supports_ide_backend_smoke);
+        assert!(capabilities.supports_file_permission_policy);
+        assert!(capabilities.supports_path_deny_policy);
+        assert!(capabilities.supports_git_permission_policy);
         assert!(!capabilities.supports_interactive_review);
         assert!(!capabilities.supports_git_mutation);
         assert!(capabilities.scope.contains("headless automation"));

@@ -18,8 +18,10 @@ import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
+  const ideMode = useAgentStore((s) => s.ideMode);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const changeMode = useAgentStore((s) => s.changeMode);
+  const setIdeMode = useAgentStore((s) => s.setIdeMode);
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const focusMode = useLayoutStore((s) => s.focusMode);
   const toggleFocusMode = useLayoutStore((s) => s.toggleFocusMode);
@@ -271,6 +273,24 @@ export default function TopBar() {
             {testStatus === "running" ? "Testing..." : "Test"}
           </button>
         </div>
+        <div className="flex items-center gap-0.5 rounded border border-surface-border bg-surface-base p-0.5">
+          {(["code", "plan"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setIdeMode(mode)}
+              disabled={isRunning}
+              className={`rounded px-2 py-0.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                ideMode === mode
+                  ? "bg-accent-blue text-white"
+                  : "text-surface-muted hover:bg-surface-border/40 hover:text-surface-text"
+              }`}
+              title={mode === "plan" ? "Plan/SDD IDE mode" : "Code IDE mode"}
+            >
+              {mode === "plan" ? "Plan" : "Code"}
+            </button>
+          ))}
+        </div>
         <ModeSwitch mode={agentMode} onChange={handleModeChange} />
       </div>
 
@@ -431,6 +451,8 @@ function lspStatusClass(status: string) {
 function languageFromPath(path: string) {
   const ext = path.split(".").pop()?.toLowerCase();
   if (ext === "go") return "go";
+  if (ext === "py") return "python";
+  if (ext === "rs") return "rust";
   if (ext === "ts" || ext === "tsx") return "typescript";
   if (ext === "js" || ext === "jsx") return "javascript";
   return "typescript";
@@ -438,10 +460,14 @@ function languageFromPath(path: string) {
 
 function lspBadgeLabel(languageId: string) {
   if (languageId === "go") return "Go";
+  if (languageId === "python") return "Py";
+  if (languageId === "rust") return "Rust";
   return "TS";
 }
 
 function installCommandForLanguage(languageId: string) {
   if (languageId === "go") return "go install golang.org/x/tools/gopls@latest";
+  if (languageId === "python") return "npm install -D pyright";
+  if (languageId === "rust") return "rustup component add rust-analyzer";
   return "npm install -D typescript typescript-language-server";
 }

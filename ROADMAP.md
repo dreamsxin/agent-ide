@@ -583,22 +583,81 @@ Acceptance checks:
 - Ask Agent for a small change, review diff, apply one hunk.
 - Run terminal command and see output.
 
-### Phase 9 - Release Readiness
+### Phase 9: Release Readiness (Target: 3 weeks after Phase 8)
 
-Goal: make the app packageable and maintainable.
+**Goal:** Production-quality packaging, security hardening, and CI coverage for public beta.
 
-Deliverables:
+| Task | Deliverable | Priority |
+|------|-------------|----------|
+| 9.1 CI Pipeline Complete | GitHub Actions: lint + typecheck + cargo check + cargo test + vitest + Tauri smoke | Critical |
+| 9.2 Code Splitting & Bundle Optimization | Monaco/xterm/markdown lazy-loaded; initial bundle < 500KB | High |
+| 9.3 Security Policy Document | Unified doc covering: workspace boundaries, credential storage, Agent approval model, data exposure limits | Critical |
+| 9.4 Cross-Platform Packaging | Windows MSI validated; macOS .dmg script; Linux AppImage/deb | High |
+| 9.5 Secret Storage Validation | Keyring tested on Windows Credential Manager, macOS Keychain, Linux Secret Service | High |
+| 9.6 Performance Baselines | Startup < 3s, memory < 300MB idle, editor input latency < 50ms; regression tests in CI | Medium |
+| 9.7 Diff Application Hardening | Version-aware hunk matching using file hash + line offset tolerance; stale rejection mandatory | High |
 
-- CI for TypeScript, Rust, tests, formatting.
-- Tauri smoke tests for app boot, workspace open, file read/write, settings load.
-- Packaging validation for Windows first.
-- Security model documentation:
-  - workspace policy
-  - terminal permissions
-  - Agent auto-edit policy
-  - LLM data exposure
-  - secret storage
-- Troubleshooting guide for Vite vs Tauri dev modes.
+**Exit Criteria:** Clean CI green on Windows + macOS; installer produces working app from scratch; security doc reviewed.
+
+---
+
+### Phase 10: Agent Intelligence, Plan/SDD Mode & Language Expansion (Target: 4 weeks after Phase 9)
+
+**Goal:** Expand Agent capabilities with structured design document generation, IDE planning mode, and broader language support.
+
+| Task | Deliverable | Priority |
+|------|-------------|----------|
+| 10.1 Plan/SDD IDE Mode | IDE-level "Plan Mode" toggle: Agent produces design docs instead of code changes | Critical |
+| 10.2 SDD Pipeline Stage | New Agent pipeline role "Designer" that outputs structured SDD Markdown | Critical |
+| 10.3 SDD Template System | Markdown templates with frontmatter schema for SDD docs, stored in `docs/` | High |
+| 10.4 Python LSP Adapter | pylsp/pyright integration with diagnostics, completions, hover | High |
+| 10.5 Rust LSP Adapter | rust-analyzer integration | Medium |
+| 10.6 Provider-Native Tool Calls | Replace text-parsing with native function-call API for OpenAI/Anthropic/local | High |
+| 10.7 Agent Context Token Budget UI | Real-time token meter showing budget usage per source; warn on overflow | Medium |
+| 10.8 Ghost Mode (Background Analysis) | Lightweight background indexing producing proactive suggestions; user-dismissable | Medium |
+| 10.9 CLI Permission Model V2 | Implement `--deny-path`, `--allow-create/edit/delete`, `--allow-git` from design doc | Medium |
+| 10.10 Workspace Indexing Scalability | Validate on 10k+ file workspaces; implement incremental indexing if needed | High |
+
+**Plan/SDD Mode Technical Design:**
+
+The Plan/SDD Mode is a dual-layer feature:
+
+1. **IDE Mode Layer** - A mode toggle in `ModeSwitch` component (`src/components/shared/ModeSwitch.tsx`) switches between `code` and `plan` modes via `useAgentStore`. In plan mode, the Agent pipeline skips Coder/Tester stages and outputs documents instead of diffs.
+
+2. **Designer Pipeline Stage** - New pipeline: `Planner -> Designer -> Reviewer`. The Designer role receives the original prompt, project context, file tree, and existing docs. It outputs structured SDD Markdown following a template schema with frontmatter (type, title, version, date, author, status, module). Output is saved to `docs/design/`.
+
+3. **SDD Template Structure:**
+   - Overview (Purpose, Scope, Definitions)
+   - System Context (Architecture Position, External Interfaces, Dependencies)
+   - Design Details (Component Architecture, Data Models, Interface Definitions, State Management, Error Handling)
+   - Implementation Plan (Task Breakdown, File Changes, Migration Notes)
+   - Quality Assurance (Test Strategy, Acceptance Criteria, Performance)
+   - Risks & Mitigations
+   - Open Questions
+
+4. **Frontend Flow:** User toggles Plan Mode → describes feature → Agent runs Designer pipeline → ChatView renders SDD preview → User can edit inline, save to docs/, iterate, or "Proceed to Code" which feeds task breakdown into Coder pipeline.
+
+5. **CLI Support:** `agent-cli plan --output docs/design/feature.md` generates SDD in headless mode.
+
+**Exit Criteria:** Plan Mode produces valid SDD documents; Python + Rust projects get full LSP; Agent uses native tool calls with at least one provider.
+
+---
+
+### Phase 11: Production Polish & Ecosystem (Target: 6 weeks after Phase 10)
+
+**Goal:** Polish for public release; address accessibility, extensibility, and community onboarding.
+
+| Task | Deliverable | Priority |
+|------|-------------|----------|
+| 11.1 Command Palette Enhancement | Recent commands, symbol search, workspace file search, template commands | Medium |
+| 11.2 Accessibility Audit | Keyboard navigation for all panels; ARIA labels; high-contrast theme support | Medium |
+| 11.3 Plugin/Extension API Design | Document extension points for: language adapters, Agent roles, UI panels | Low |
+| 11.4 Troubleshooting Guide | Structured guide covering common failures with solutions | Medium |
+| 11.5 Cancellation at Provider Level | Transport-abort for streaming LLM calls (where provider supports it) | Low |
+| 11.6 Agent Run History & Replay | Persist Agent runs with full action logs; replay/compare past runs | Low |
+| 11.7 Split View & Advanced Editor | Side-by-side file editing; enhanced minimap with Agent change indicators | Low |
+| 11.8 Extended Document Types | Add HLD/LLD, RFC/ADR, Test Plan templates to Plan Mode; template marketplace | Low |
+| 11.9 SDD-to-Code Pipeline | One-click "Implement from SDD" that feeds approved design tasks into Coder pipeline | Medium |
 
 ---
 

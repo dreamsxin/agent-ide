@@ -4,6 +4,7 @@ import { isTauriRuntime } from "../utils/tauri";
 import type {
   AgentState,
   AgentMode,
+  IdeMode,
   AgentRole,
   ContextCompressionMode,
   PipelineStage,
@@ -17,15 +18,29 @@ import type {
   ApplyDiffsResult,
   ChatMessage,
   ContextEstimateResponse,
+  SddArtifact,
+  SavedSddArtifactResponse,
+  GhostSuggestion,
+  AgentPermission,
+  AgentPermissionPreset,
+  DestructiveOpConfirm,
+} from "../types/agent";
+import {
+  DEFAULT_PERMISSIONS,
+  permissionsForPreset,
 } from "../types/agent";
 
 interface AgentStore {
   // ====== Agent 状态 ======
   state: AgentState;
   mode: AgentMode;
+  ideMode: IdeMode;
   currentTask: Task | null;
   tasks: Task[];
   diffs: DiffEntry[];
+  sddArtifacts: SddArtifact[];
+  activeSddArtifact: SddArtifact | null;
+  ghostSuggestions: GhostSuggestion[];
   steps: Step[];
   error: string | null;
   lastApplyResult: ApplyDiffsResult | null;
@@ -52,14 +67,26 @@ interface AgentStore {
   chatProfileId: string | null;
   chatContextCompression: ContextCompressionMode | null;
 
+  // ====== 权限控制 ======
+  permissionPreset: AgentPermissionPreset;
+  permissions: AgentPermission;
+  pendingConfirm: DestructiveOpConfirm | null;
+
   // ====== 同步 Actions ======
   setState: (state: AgentState) => void;
   setMode: (mode: AgentMode) => void;
+  setIdeMode: (mode: IdeMode) => void;
   setCurrentTask: (task: Task | null) => void;
   addTask: (task: Task) => void;
   setSteps: (steps: Step[]) => void;
   updateStep: (stepId: string, updates: Partial<Step>) => void;
   setDiffs: (diffs: DiffEntry[]) => void;
+  setSddArtifact: (artifact: SddArtifact) => void;
+  updateActiveSddMarkdown: (markdown: string) => void;
+  saveActiveSdd: (overwrite?: boolean) => Promise<SavedSddArtifactResponse | null>;
+  promoteSddToCodePrompt: () => void;
+  setGhostSuggestions: (suggestions: GhostSuggestion[]) => void;
+  dismissGhostSuggestion: (id: string) => void;
   restoreDiffs: (workspacePath?: string) => void;
   restoreAgentSession: (workspacePath?: string) => void;
   reconcileBackendRun: () => Promise<void>;
@@ -89,6 +116,7 @@ interface AgentStore {
       includeProjectTree?: boolean;
       includeGitDiff?: boolean;
     };
+    ideMode?: IdeMode;
   }) => Promise<void>;
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
@@ -126,6 +154,12 @@ interface AgentStore {
   updatePipeline: (stages: PipelineStage[]) => Promise<void>;
   resetPipeline: () => Promise<void>;
 
+  // ====== 权限管理 ======
+  setPermissionPreset: (preset: AgentPermissionPreset) => void;
+  togglePermission: (key: keyof AgentPermission) => void;
+  requestConfirm: (confirm: DestructiveOpConfirm) => void;
+  clearConfirm: () => void;
+
   // ====== 连通性测试 ======
   testLlmConnection: () => Promise<string>;
 }
@@ -141,6 +175,7 @@ interface AgentContextParams {
     includeProjectTree?: boolean;
     includeGitDiff?: boolean;
   };
+  ideMode?: IdeMode;
 }
 
 interface AgentStepRunParams extends AgentContextParams {
@@ -167,6 +202,7 @@ interface AgentRestoredSession {
 interface AgentStatusResponse {
   state: AgentState;
   mode: AgentMode;
+  ideMode?: IdeMode;
   context_files: string[];
   currentRunId?: string | null;
   lastRunId?: string | null;
@@ -183,9 +219,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   // ========== 初始值 ==========
   state: "idle",
   mode: "suggest",
+  ideMode: "code",
   currentTask: null,
   tasks: [],
   diffs: [],
+  sddArtifacts: [],
+  activeSddArtifact: null,
+  ghostSuggestions: [],
   steps: [],
   error: null,
   lastApplyResult: null,
@@ -213,6 +253,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   chatProfileId: null,
   chatContextCompression: null,
 
+  // ====== 权限初始值 ======
+  permissionPreset: "suggest",
+  permissions: DEFAULT_PERMISSIONS,
+  pendingConfirm: null,
+
   // ========== 同步 Actions ==========
   setState: (state) => {
     set({ state });
@@ -220,6 +265,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
   setMode: (mode) => {
     set({ mode });
+    persistAgentSession(get());
+  },
+  setIdeMode: (ideMode) => {
+    set({ ideMode });
     persistAgentSession(get());
   },
   setCurrentTask: (currentTask) => {
@@ -252,6 +301,53 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     persistDiffs(diffs);
     set({ diffs, lastApplyResult: null });
   },
+  setSddArtifact: (artifact) =>
+    set((state) => {
+      const sddArtifacts = [
+        ...state.sddArtifacts.filter((item) => item.id !== artifact.id),
+        artifact,
+      ].slice(-50);
+      const next = { sddArtifacts, activeSddArtifact: artifact };
+      windowQueuePersist(() => persistAgentSession({ ...get(), ...next }));
+      return next;
+    }),
+  updateActiveSddMarkdown: (markdown) =>
+    set((state) => {
+      if (!state.activeSddArtifact) return {};
+      const activeSddArtifact = { ...state.activeSddArtifact, markdown };
+      const sddArtifacts = state.sddArtifacts.map((item) =>
+        item.id === activeSddArtifact.id ? activeSddArtifact : item
+      );
+      return { activeSddArtifact, sddArtifacts };
+    }),
+  saveActiveSdd: async (overwrite = false) => {
+    const artifact = get().activeSddArtifact;
+    if (!artifact) return null;
+    if (!isTauriRuntime()) {
+      throw new Error("SDD save is available in the Tauri app runtime.");
+    }
+    const response = await invoke<SavedSddArtifactResponse>("save_sdd_artifact", {
+      request: { artifact, overwrite },
+    });
+    get().setSddArtifact({ ...response.artifact, status: "approved" });
+    return response;
+  },
+  promoteSddToCodePrompt: () => {
+    const artifact = get().activeSddArtifact;
+    if (!artifact) return;
+    set({ ideMode: "code" });
+    get().addMessage({
+      id: `sdd-code-${Date.now()}`,
+      role: "system",
+      content: `SDD approved for code mode: ${artifact.title}\n\n${artifact.markdown}`,
+      timestamp: Date.now(),
+    });
+  },
+  setGhostSuggestions: (ghostSuggestions) => set({ ghostSuggestions }),
+  dismissGhostSuggestion: (id) =>
+    set((state) => ({
+      ghostSuggestions: state.ghostSuggestions.filter((item) => item.id !== id),
+    })),
   restoreDiffs: (workspacePath) => set({ diffs: loadDiffs(workspacePath), lastApplyResult: null }),
   restoreAgentSession: (workspacePath) => {
     const restored = loadAgentSession(workspacePath);
@@ -268,6 +364,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         (status.currentRunId === restored.runId || status.lastRunId === restored.runId)
       );
       set((state) => ({
+        ideMode: status.ideMode ?? state.ideMode,
         restoredSession: state.restoredSession
           ? { ...state.restoredSession, backendMatched: matched }
           : null,
@@ -290,6 +387,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       tasks: [],
       steps: [],
       pipeline: DEFAULT_PIPELINE,
+      sddArtifacts: [],
+      activeSddArtifact: null,
+      ghostSuggestions: [],
       error: null,
       streamContent: "",
       isStreaming: false,
@@ -355,6 +455,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       currentTask: null,
       steps: [],
       diffs: [],
+      sddArtifacts: [],
+      activeSddArtifact: null,
+      ghostSuggestions: [],
       error: null,
       lastApplyResult: null,
       streamContent: "",
@@ -364,9 +467,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
   },
 
+  // ====== 权限管理实现 ======
+  setPermissionPreset: (preset) => {
+    const permissions = permissionsForPreset(preset);
+    set({ permissionPreset: preset, permissions });
+  },
+  togglePermission: (key) =>
+    set((s) => ({
+      permissions: { ...s.permissions, [key]: !s.permissions[key] },
+    })),
+  requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
+  clearConfirm: () => set({ pendingConfirm: null }),
+
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {
     const runId = makeAgentRunId("chat");
+    const requestIdeMode = params.ideMode ?? get().ideMode;
     set({
       error: null,
       lastApplyResult: null,
@@ -391,8 +507,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
           runId,
+          ideMode: requestIdeMode,
         },
       });
+      if (requestIdeMode === "plan" && get().activeSddArtifact) {
+        get().addMessage({
+          id: `sdd-ready-${Date.now()}`,
+          role: "system",
+          content: `SDD draft ready: ${get().activeSddArtifact?.title}`,
+          timestamp: Date.now(),
+        });
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "Agent task cancelled") {
@@ -951,10 +1076,13 @@ interface PersistedAgentSession {
   runId: string | null;
   state: AgentState;
   mode: AgentMode;
+  ideMode: IdeMode;
   currentTask: Task | null;
   tasks: Task[];
   steps: Step[];
   pipeline: PipelineStage[];
+  sddArtifacts: SddArtifact[];
+  activeSddArtifact: SddArtifact | null;
   error: string | null;
   updatedAt: number;
 }
@@ -985,10 +1113,10 @@ function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] 
   }
 }
 
-function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "currentTask" | "tasks" | "steps" | "pipeline" | "error" | "agentRunId">) {
+function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode" | "currentTask" | "tasks" | "steps" | "pipeline" | "sddArtifacts" | "activeSddArtifact" | "error" | "agentRunId">) {
   if (typeof window === "undefined") return;
   const workspacePath = currentWorkspacePath();
-  const hasSessionData = state.steps.length > 0 || state.pipeline.some((stage) => stage.status !== "pending") || state.currentTask !== null;
+  const hasSessionData = state.steps.length > 0 || state.pipeline.some((stage) => stage.status !== "pending") || state.currentTask !== null || Boolean(state.activeSddArtifact);
   if (!workspacePath || !hasSessionData) {
     clearPersistedAgentSession();
     return;
@@ -998,10 +1126,13 @@ function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "current
     runId: state.agentRunId,
     state: normalizeRestoredAgentState(state.state),
     mode: state.mode,
+    ideMode: state.ideMode,
     currentTask: state.currentTask,
     tasks: state.tasks.slice(-50),
     steps: state.steps.slice(-100),
     pipeline: state.pipeline,
+    sddArtifacts: state.sddArtifacts.slice(-50),
+    activeSddArtifact: state.activeSddArtifact,
     error: state.error,
     updatedAt: Date.now(),
   };
@@ -1028,10 +1159,13 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
     return {
       state: normalizeRestoredAgentState(parsed.state),
       mode: parsed.mode ?? "suggest",
+      ideMode: parsed.ideMode ?? "code",
       currentTask: parsed.currentTask ?? null,
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
       steps: steps.map(normalizeRestoredStep),
       pipeline: pipeline.map(normalizeRestoredPipelineStage),
+      sddArtifacts: Array.isArray(parsed.sddArtifacts) ? parsed.sddArtifacts : [],
+      activeSddArtifact: parsed.activeSddArtifact ?? null,
       error: parsed.error ?? null,
       agentRunId: parsed.runId ?? null,
       restoredSession: {

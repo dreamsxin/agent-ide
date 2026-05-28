@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
-import type { ModelProvider, ProviderPreset } from "../../types/agent";
+import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
+
+type ToolCallMode = "text_protocol" | "native_tools";
 
 // ====== 提供商预设 ======
 const providerLabels: Record<string, string> = {
@@ -79,6 +81,10 @@ export default function SettingsPanel() {
   const deleteLlmProfile = useAgentStore((s) => s.deleteLlmProfile);
   const setActiveLlmProfile = useAgentStore((s) => s.setActiveLlmProfile);
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
+  const permissionPreset = useAgentStore((s) => s.permissionPreset);
+  const permissions = useAgentStore((s) => s.permissions);
+  const setPermissionPreset = useAgentStore((s) => s.setPermissionPreset);
+  const togglePermission = useAgentStore((s) => s.togglePermission);
 
   const [profileId, setProfileId] = useState("");
   const [profileName, setProfileName] = useState("Default");
@@ -89,6 +95,7 @@ export default function SettingsPanel() {
   const [maxContextTokens, setMaxContextTokens] = useState("");
   const [reservedOutputTokens, setReservedOutputTokens] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
@@ -110,6 +117,7 @@ export default function SettingsPanel() {
         setMaxContextTokens(numberToInput(active.maxContextTokens));
         setReservedOutputTokens(numberToInput(active.reservedOutputTokens));
         setMaxOutputTokens(numberToInput(active.maxOutputTokens));
+        setToolCallMode(active.toolCallMode ?? "text_protocol");
       } else {
         setEndpoint(llmEndpoint);
         setModel(llmModel);
@@ -132,6 +140,7 @@ export default function SettingsPanel() {
         setMaxContextTokens(numberToInput(preset.defaultMaxContextTokens));
         setReservedOutputTokens(numberToInput(preset.defaultReservedOutputTokens));
         setMaxOutputTokens(numberToInput(preset.defaultMaxOutputTokens));
+        setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
       }
       // 不清除 apiKey
     },
@@ -161,6 +170,7 @@ export default function SettingsPanel() {
         maxContextTokens: inputToNumber(maxContextTokens),
         reservedOutputTokens: inputToNumber(reservedOutputTokens),
         maxOutputTokens: inputToNumber(maxOutputTokens),
+        toolCallMode,
         setActive: true,
       });
       setMessage({ type: "ok", text: "Saved successfully" });
@@ -170,7 +180,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile]);
+  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -190,6 +200,7 @@ export default function SettingsPanel() {
           maxContextTokens: inputToNumber(maxContextTokens),
           reservedOutputTokens: inputToNumber(reservedOutputTokens),
           maxOutputTokens: inputToNumber(maxOutputTokens),
+          toolCallMode,
           setActive: true,
         });
         setApiKey(""); // 保存后清空输入框
@@ -206,7 +217,7 @@ export default function SettingsPanel() {
     } finally {
       setTesting(false);
     }
-  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection]);
+  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
 
   const handleProfileSelect = useCallback((id: string) => {
     const profile = llmProfiles.find((item) => item.id === id);
@@ -219,6 +230,7 @@ export default function SettingsPanel() {
     setMaxContextTokens(numberToInput(profile.maxContextTokens));
     setReservedOutputTokens(numberToInput(profile.reservedOutputTokens));
     setMaxOutputTokens(numberToInput(profile.maxOutputTokens));
+    setToolCallMode(profile.toolCallMode ?? "text_protocol");
     setApiKey("");
   }, [llmProfiles]);
 
@@ -232,6 +244,7 @@ export default function SettingsPanel() {
     setMaxContextTokens("");
     setReservedOutputTokens("");
     setMaxOutputTokens("");
+    setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
     setApiKey("");
   }, []);
 
@@ -285,6 +298,10 @@ export default function SettingsPanel() {
             <div className="flex justify-between">
               <span className="text-surface-muted">API Key</span>
               <span className="text-surface-text font-mono">{apiKeyMasked || '****'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-muted">Tools</span>
+              <span className="text-surface-text font-mono text-[10px]">{toolCallMode}</span>
             </div>
           </div>
         </div>
@@ -424,6 +441,23 @@ export default function SettingsPanel() {
         </div>
       </div>
 
+      <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">
+          Tool Call Mode
+        </div>
+        <select
+          value={toolCallMode}
+          onChange={(event) => setToolCallMode(event.target.value as ToolCallMode)}
+          className="w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text outline-none focus:border-accent-blue"
+        >
+          <option value="text_protocol">Text protocol</option>
+          <option value="native_tools">Provider-native tools</option>
+        </select>
+        <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
+          Native tools advertises Agent changes and SDD drafts as provider tool schemas; text protocol remains the fallback path.
+        </div>
+      </div>
+
       {/* Save */}
       <button
         onClick={handleSave}
@@ -432,6 +466,66 @@ export default function SettingsPanel() {
       >
         {saving ? "Saving..." : "Save Profile"}
       </button>
+
+      {/* ▸▸▸▸ Agent Permission Settings ▸▸▸▸ */}
+      <div className="mt-4 pt-3 border-t border-surface-border">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted tracking-wide">
+          Agent Permissions
+        </div>
+
+        {/* Permission Preset */}
+        <label className="block text-surface-muted mb-1 text-[11px]">Permission Preset</label>
+        <div className="mb-2 grid grid-cols-3 gap-1">
+          {(["ask", "suggest", "auto"] as AgentPermissionPreset[]).map((preset) => (
+            <button
+              key={preset}
+              onClick={() => setPermissionPreset(preset)}
+              className={`rounded border px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                permissionPreset === preset
+                  ? "border-accent-blue bg-accent-blue/10 text-accent-blue"
+                  : "border-surface-border text-surface-muted hover:text-surface-text"
+              }`}
+            >
+              {preset === "ask" ? "\u{2753} Ask" : preset === "suggest" ? "\u{1F4DD} Suggest" : "\u{26A1} Auto"}
+            </button>
+          ))}
+        </div>
+        <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
+          {permissionPreset === "ask"
+            ? "Always confirm before any file or command operation."
+            : permissionPreset === "suggest"
+            ? "Allow file creation; confirm destructive operations."
+            : "Allow all operations without confirmation."}
+        </p>
+
+        {/* Granular Toggles */}
+        <div className="mb-3 space-y-1.5 rounded border border-surface-border bg-surface-border/10 p-2">
+          <PermissionToggle
+            label="File Creation"
+            desc="Allow Agent to create new files"
+            checked={permissions.allowFileCreate}
+            onChange={() => togglePermission("allowFileCreate")}
+          />
+          <PermissionToggle
+            label="File Deletion"
+            desc="Allow Agent to delete files (destructive)"
+            checked={permissions.allowFileDelete}
+            onChange={() => togglePermission("allowFileDelete")}
+          />
+          <PermissionToggle
+            label="Command Execution"
+            desc="Allow Agent to run shell commands (destructive)"
+            checked={permissions.allowCommandRun}
+            onChange={() => togglePermission("allowCommandRun")}
+          />
+          <PermissionToggle
+            label="Git Actions"
+            desc="Allow Agent to perform git push/force operations"
+            checked={permissions.allowGitActions}
+            onChange={() => togglePermission("allowGitActions")}
+          />
+        </div>
+      </div>
 
       <div className="mt-2 grid grid-cols-2 gap-2">
         <button
@@ -530,4 +624,31 @@ function estimateInputTokens(maxContext: string, reservedOutput: string, maxOutp
 function formatTokenBudget(value?: number) {
   if (value === undefined) return "not set";
   return value.toLocaleString();
+}
+
+function PermissionToggle({
+  label,
+  desc,
+  checked,
+  onChange,
+}: {
+  label: string;
+  desc: string;
+  checked: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onChange}
+        className="rounded border-surface-border"
+      />
+      <div className="min-w-0">
+        <div className="text-[11px] text-surface-text">{label}</div>
+        <div className="text-[10px] text-surface-muted">{desc}</div>
+      </div>
+    </label>
+  );
 }

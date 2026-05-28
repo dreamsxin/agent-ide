@@ -1,9 +1,13 @@
 use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::executor;
-use crate::agent::multi_agent::{mark_pipeline_stage, reset_pipeline_status, PipelineStage};
+use crate::agent::multi_agent::{
+    default_pipeline, mark_pipeline_stage, plan_pipeline, reset_pipeline_status, AgentRole,
+    PipelineStage,
+};
 use crate::agent::planner;
 use crate::agent::state_machine::{
-    AgentMode, AgentStateManager, DiffHunkProvenance, DiffProvenance, TaskStep,
+    AgentMode, AgentStateManager, DiffHunkProvenance, DiffProvenance, IdeMode, SddArtifact,
+    TaskStep,
 };
 use crate::services::context::{
     estimated_input_tokens_from_budget, AgentContext, ContextBudget, ContextBuildOptions,
@@ -39,8 +43,10 @@ pub struct ActionLogEntry {
 pub struct AgentOrchestrator {
     pub state_mgr: AgentStateManager,
     pub mode: AgentMode,
+    pub ide_mode: IdeMode,
     pub steps: Vec<TaskStep>,
     pub diffs: Vec<crate::agent::state_machine::FileDiff>,
+    pub sdd_artifacts: Vec<SddArtifact>,
     pub current_run_id: Option<String>,
     pub last_run_id: Option<String>,
     pub paused_run: Option<PausedPipelineRun>,
@@ -54,6 +60,7 @@ pub struct PausedPipelineRun {
     pub stage_outputs: Vec<String>,
     pub pipeline: Vec<PipelineStage>,
     pub stage_index: usize,
+    pub ide_mode: IdeMode,
 }
 
 impl AgentOrchestrator {
@@ -61,8 +68,10 @@ impl AgentOrchestrator {
         Self {
             state_mgr: AgentStateManager::new(),
             mode: AgentMode::Suggest,
+            ide_mode: IdeMode::Code,
             steps: Vec::new(),
             diffs: Vec::new(),
+            sdd_artifacts: Vec::new(),
             current_run_id: None,
             last_run_id: None,
             paused_run: None,
@@ -88,12 +97,14 @@ impl AgentOrchestrator {
         context_budget: Option<ContextBudget>,
         context_sources: ContextSourceOptions,
         pipeline: Vec<PipelineStage>,
+        ide_mode: IdeMode,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
         app: AppHandle,
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
 
+        self.ide_mode = ide_mode;
         // 1. Transition to Thinking
         let _ = self
             .state_mgr
@@ -129,8 +140,10 @@ impl AgentOrchestrator {
             Some(context_summary.clone()),
             None,
         );
-        let pipeline = if pipeline.is_empty() {
-            reset_pipeline_status(&crate::agent::multi_agent::default_pipeline())
+        let pipeline = if ide_mode == IdeMode::Plan {
+            reset_pipeline_status(&plan_pipeline())
+        } else if pipeline.is_empty() {
+            reset_pipeline_status(&default_pipeline())
         } else {
             reset_pipeline_status(&pipeline)
         };
@@ -186,6 +199,7 @@ impl AgentOrchestrator {
             stage_outputs,
             0,
             false,
+            ide_mode,
             cancel_flag,
             llm,
             app,
@@ -203,12 +217,14 @@ impl AgentOrchestrator {
         mut stage_outputs: Vec<String>,
         start_index: usize,
         ignore_pause_once: bool,
+        ide_mode: IdeMode,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
         app: AppHandle,
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
 
+        self.ide_mode = ide_mode;
         for stage_index in start_index..pipeline.len() {
             let stage = pipeline[stage_index].clone();
             if stage.pause_before && !(ignore_pause_once && stage_index == start_index) {
@@ -220,6 +236,7 @@ impl AgentOrchestrator {
                     stage_outputs: stage_outputs.clone(),
                     pipeline: pipeline.clone(),
                     stage_index,
+                    ide_mode,
                 });
                 self.emit_pipeline(&app, &pipeline);
                 self.emit_action_log(
@@ -306,24 +323,39 @@ impl AgentOrchestrator {
                         response
                     ));
 
-                    let parsed = executor::parse_diffs_with_diagnostics(&response);
-                    let mut step_diffs = parsed.diffs;
-                    attach_stage_provenance(&mut step_diffs, &stage.role.to_string(), &stage.name);
-                    let generated_diff_count = step_diffs.len();
-                    self.diffs.extend(step_diffs);
-                    if !parsed.diagnostics.is_empty() {
-                        self.emit_action_log(
+                    let generated_diff_count = if ide_mode == IdeMode::Plan {
+                        self.handle_plan_stage_response(
                             &app,
-                            "warn",
-                            "agent_changes_validation",
-                            Some(stage.role.to_string()),
-                            Some(&stage.name),
-                            "Agent changes validation reported issues",
-                            &parsed.diagnostics.join("\n"),
-                            Some(context_summary.clone()),
-                            Some(self.summarize_pending_diffs()),
+                            &stage,
+                            &response,
+                            &prompt,
+                            context_summary.clone(),
+                        )
+                    } else {
+                        let parsed = executor::parse_diffs_with_diagnostics(&response);
+                        let mut step_diffs = parsed.diffs;
+                        attach_stage_provenance(
+                            &mut step_diffs,
+                            &stage.role.to_string(),
+                            &stage.name,
                         );
-                    }
+                        let generated_diff_count = step_diffs.len();
+                        self.diffs.extend(step_diffs);
+                        if !parsed.diagnostics.is_empty() {
+                            self.emit_action_log(
+                                &app,
+                                "warn",
+                                "agent_changes_validation",
+                                Some(stage.role.to_string()),
+                                Some(&stage.name),
+                                "Agent changes validation reported issues",
+                                &parsed.diagnostics.join("\n"),
+                                Some(context_summary.clone()),
+                                Some(self.summarize_pending_diffs()),
+                            );
+                        }
+                        generated_diff_count
+                    };
                     mark_pipeline_stage(&mut pipeline, stage_index, "completed");
                     self.emit_action_log(
                         &app,
@@ -332,9 +364,14 @@ impl AgentOrchestrator {
                         Some(stage.role.to_string()),
                         Some(&stage.name),
                         &format!(
-                            "{} stage completed with {} new diff{}",
+                            "{} stage completed with {} new {}{}",
                             stage.name,
                             generated_diff_count,
+                            if ide_mode == IdeMode::Plan {
+                                "artifact"
+                            } else {
+                                "diff"
+                            },
                             if generated_diff_count == 1 { "" } else { "s" }
                         ),
                         &response,
@@ -376,6 +413,33 @@ impl AgentOrchestrator {
         }
 
         // 5. Auto applies diffs immediately; other modes wait for review.
+        if ide_mode == IdeMode::Plan {
+            if let Some(artifact) = self.sdd_artifacts.last() {
+                let _ = app.emit(
+                    "agent-sdd-ready",
+                    serde_json::to_value(artifact).unwrap_or_default(),
+                );
+                self.emit_action_log(
+                    &app,
+                    "info",
+                    "sdd_ready",
+                    None,
+                    None,
+                    &format!("SDD draft ready: {}", artifact.title),
+                    "Plan mode completed without producing file diffs.",
+                    Some(context_summary.clone()),
+                    None,
+                );
+            }
+            if let Some(artifact) = self.sdd_artifacts.last().cloned() {
+                let _ = self.state_mgr.transition(&AgentEvent::SddReady(artifact));
+            }
+            self.state_mgr
+                .set(crate::agent::state_machine::AgentState::WaitingUser);
+            self.emit_state(&app);
+            return Ok(());
+        }
+
         if !self.diffs.is_empty() {
             let _ = app.emit(
                 "agent-diff-ready",
@@ -454,11 +518,63 @@ impl AgentOrchestrator {
         Ok(())
     }
 
+    fn handle_plan_stage_response(
+        &mut self,
+        app: &AppHandle,
+        stage: &PipelineStage,
+        response: &str,
+        prompt: &str,
+        context_summary: String,
+    ) -> usize {
+        if stage.role == AgentRole::Designer {
+            let artifact = executor::parse_sdd_artifact(
+                response,
+                prompt,
+                self.last_run_id
+                    .clone()
+                    .or_else(|| self.current_run_id.clone()),
+            );
+            self.sdd_artifacts.push(artifact.clone());
+            let _ = app.emit(
+                "agent-sdd-ready",
+                serde_json::to_value(&artifact).unwrap_or_default(),
+            );
+            self.emit_action_log(
+                app,
+                "success",
+                "sdd_draft",
+                Some(stage.role.to_string()),
+                Some(&stage.name),
+                &format!("SDD draft produced: {}", artifact.title),
+                &artifact.markdown,
+                Some(context_summary),
+                None,
+            );
+            1
+        } else if stage.role == AgentRole::Reviewer {
+            let findings = executor::extract_review_findings(response);
+            if !findings.is_empty() {
+                if let Some(artifact) = self.sdd_artifacts.last_mut() {
+                    artifact.review_findings.extend(findings);
+                    artifact.status = "reviewed".to_string();
+                    let _ = app.emit(
+                        "agent-sdd-ready",
+                        serde_json::to_value(artifact).unwrap_or_default(),
+                    );
+                }
+            }
+            0
+        } else {
+            0
+        }
+    }
+
     /// Emit the current state to the frontend.
     fn emit_state(&self, app: &AppHandle) {
         let payload = serde_json::json!({
             "state": self.state_mgr.state.to_string(),
             "mode": self.mode.to_string(),
+            "ideMode": self.ide_mode.to_string(),
         });
         let _ = app.emit("agent-state-changed", payload);
     }
@@ -876,6 +992,7 @@ mod tests {
             stage_outputs: vec!["Planner output".to_string()],
             pipeline: pipeline.clone(),
             stage_index: 1,
+            ide_mode: IdeMode::Code,
         });
 
         let paused = orchestrator.paused_run.as_ref().expect("paused run");

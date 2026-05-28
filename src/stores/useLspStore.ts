@@ -19,7 +19,7 @@ interface LspStore {
 
 export const useLspStore = create<LspStore>((set) => ({
   status: "idle",
-  message: "TypeScript LSP is not initialized.",
+  message: "Language server is not initialized.",
   diagnosticSummaries: [],
   setStatus: (status, message) =>
     set({
@@ -36,15 +36,15 @@ export const useLspStore = create<LspStore>((set) => ({
 function defaultMessage(status: LspStatus) {
   switch (status) {
     case "checking":
-      return "Checking TypeScript language server...";
+      return "Checking language server...";
     case "ready":
-      return "TypeScript LSP ready.";
+      return "Language server ready.";
     case "unavailable":
-      return "TypeScript LSP unavailable. Install in this workspace: npm install -D typescript typescript-language-server";
+      return "Language server unavailable. Open an LSP-supported file for install guidance.";
     case "error":
-      return "TypeScript LSP failed.";
+      return "Language server failed.";
     case "idle":
     default:
-      return "TypeScript LSP is not initialized.";
+      return "Language server is not initialized.";
   }
 }

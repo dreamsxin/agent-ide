@@ -83,13 +83,15 @@ export interface LspStatusSnapshot {
 }
 
 export function isLspLanguage(languageId: string) {
-  return ["typescript", "javascript", "go"].includes(languageId);
+  return ["typescript", "javascript", "go", "python", "rust"].includes(languageId);
 }
 
 export function toLspLanguageId(languageId: string) {
   if (languageId === "typescript") return "typescript";
   if (languageId === "javascript") return "javascript";
   if (languageId === "go") return "go";
+  if (languageId === "python") return "python";
+  if (languageId === "rust") return "rust";
   return languageId;
 }
 
@@ -109,7 +111,7 @@ export async function getLspStatus() {
   try {
     return await invoke<LspStatusSnapshot>("lsp_status");
   } catch (error) {
-    console.warn("Read TypeScript LSP status failed:", error);
+    console.warn("Read language server status failed:", error);
     return null;
   }
 }

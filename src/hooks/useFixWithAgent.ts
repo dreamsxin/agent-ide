@@ -5,6 +5,7 @@ import { useLayoutStore } from "../stores/useLayoutStore";
 import type { ProblemEntry } from "../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../stores/useTaskStore";
 import {
+  buildProblemExplainPrompt,
   buildProblemFixPrompt,
   buildTaskFailureFixPrompt,
   withIdeRuntimeContext,
@@ -47,6 +48,7 @@ export function useFixWithAgent() {
         activeFile: activeFile ?? undefined,
         activeFileContent: activeFile ? fileContents[activeFile] : undefined,
         selection: selectedText ?? undefined,
+        ideMode: "code",
       });
     },
     [
@@ -59,6 +61,13 @@ export function useFixWithAgent() {
       sendPrompt,
       toggleRightPanel,
     ]
+  );
+
+  const explainProblem = useCallback(
+    async (problem?: ProblemEntry) => {
+      await sendFixPrompt(buildProblemExplainPrompt(problem));
+    },
+    [sendFixPrompt]
   );
 
   const fixProblem = useCallback(
@@ -77,6 +86,7 @@ export function useFixWithAgent() {
 
   return {
     isAgentBusy,
+    explainProblem,
     fixProblem,
     fixTaskFailure,
   };

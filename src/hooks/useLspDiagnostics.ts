@@ -115,7 +115,7 @@ function applyMarkers(
       ...lspRangeToMonacoRange(diagnostic.range),
       severity: toMonacoMarkerSeverity(monaco, diagnostic.severity),
       message: diagnostic.message,
-      source: diagnostic.source || "typescript-language-server",
+      source: diagnostic.source || "language-server",
     }))
   );
 }

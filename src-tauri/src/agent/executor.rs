@@ -1,7 +1,8 @@
 use crate::agent::multi_agent::AgentRole;
-use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff};
+use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff, SddArtifact};
 use crate::services::llm_client::{ChatMessage, LlmClient};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::mpsc;
 
@@ -71,6 +72,51 @@ pub async fn execute_stage(
 ) -> Result<String, String> {
     let output_rules = match role {
         AgentRole::Architect => "Output a concise implementation plan. Do not output code diffs.",
+        AgentRole::Designer => {
+            r#"Output one SDD Markdown draft and no source-code diffs. Wrap the document in an `sdd` fence:
+
+```sdd
+---
+type: sdd
+title: Clear design title
+version: 1
+date: YYYY-MM-DD
+status: draft
+module: module-or-feature-name
+---
+
+# Clear design title
+
+## Problem
+...
+
+## Goals
+...
+
+## Non-Goals
+...
+
+## Proposed Design
+...
+
+## User Flows
+...
+
+## Interfaces and Data
+...
+
+## Acceptance Criteria
+...
+
+## Risks
+...
+
+## Implementation Notes
+...
+```
+
+The draft must be specific enough for a later code-mode Agent run to implement it."#
+        }
         AgentRole::Coder | AgentRole::Tester => {
             r#"When code changes are needed, prefer the Agent IDE `agent-changes` schema version 1:
 
@@ -156,6 +202,202 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
 /// 从 LLM 响应中解析 diff 块
 pub fn parse_diffs(response: &str) -> Vec<FileDiff> {
     parse_diffs_with_diagnostics(response).diffs
+}
+
+pub fn parse_sdd_artifact(
+    response: &str,
+    prompt: &str,
+    source_run_id: Option<String>,
+) -> SddArtifact {
+    let raw_markdown = extract_sdd_markdown(response);
+    let (mut frontmatter, body) = split_frontmatter(&raw_markdown);
+    let title = frontmatter
+        .get("title")
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| extract_markdown_title(&body))
+        .unwrap_or_else(|| summarize_prompt_as_title(prompt));
+    let slug = frontmatter
+        .get("slug")
+        .cloned()
+        .filter(|value| is_safe_slug(value))
+        .unwrap_or_else(|| slugify(&title));
+
+    frontmatter
+        .entry("type".to_string())
+        .or_insert_with(|| "sdd".to_string());
+    frontmatter
+        .entry("title".to_string())
+        .or_insert_with(|| title.clone());
+    frontmatter
+        .entry("version".to_string())
+        .or_insert_with(|| "1".to_string());
+    frontmatter
+        .entry("date".to_string())
+        .or_insert_with(|| chrono::Utc::now().date_naive().to_string());
+    frontmatter
+        .entry("status".to_string())
+        .or_insert_with(|| "draft".to_string());
+    frontmatter
+        .entry("module".to_string())
+        .or_insert_with(|| slug.clone());
+
+    let markdown = format!(
+        "---\n{}---\n\n{}",
+        format_frontmatter(&frontmatter),
+        body.trim_start()
+    );
+    SddArtifact {
+        id: uuid::Uuid::new_v4().to_string(),
+        title,
+        slug,
+        frontmatter,
+        markdown,
+        source_run_id,
+        review_findings: Vec::new(),
+        status: "draft".to_string(),
+    }
+}
+
+pub fn extract_review_findings(response: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let mut in_findings = false;
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_findings = trimmed
+                .trim_start_matches('#')
+                .trim()
+                .to_ascii_lowercase()
+                .contains("finding");
+            continue;
+        }
+        if in_findings && (trimmed.starts_with("- ") || trimmed.starts_with("* ")) {
+            let finding = trimmed[2..].trim();
+            if !finding.is_empty() {
+                findings.push(finding.to_string());
+            }
+        }
+    }
+    findings
+}
+
+fn extract_sdd_markdown(response: &str) -> String {
+    let lines: Vec<&str> = response.lines().collect();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        let rest = trimmed.strip_prefix("```");
+        if matches!(rest, Some("sdd") | Some("markdown:sdd") | Some("md:sdd")) {
+            let mut block = Vec::new();
+            index += 1;
+            while index < lines.len() && lines[index].trim() != "```" {
+                block.push(lines[index]);
+                index += 1;
+            }
+            return block.join("\n");
+        }
+        index += 1;
+    }
+    response.trim().to_string()
+}
+
+fn split_frontmatter(markdown: &str) -> (BTreeMap<String, String>, String) {
+    let normalized = markdown.trim_start();
+    if !normalized.starts_with("---\n") && !normalized.starts_with("---\r\n") {
+        return (BTreeMap::new(), normalized.to_string());
+    }
+
+    let mut lines = normalized.lines();
+    let _ = lines.next();
+    let mut frontmatter = BTreeMap::new();
+    let mut body_lines = Vec::new();
+    let mut in_frontmatter = true;
+    for line in lines {
+        if in_frontmatter && line.trim() == "---" {
+            in_frontmatter = false;
+            continue;
+        }
+        if in_frontmatter {
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                if !key.is_empty() {
+                    frontmatter.insert(key.to_string(), value.to_string());
+                }
+            }
+        } else {
+            body_lines.push(line);
+        }
+    }
+    (frontmatter, body_lines.join("\n"))
+}
+
+fn format_frontmatter(frontmatter: &BTreeMap<String, String>) -> String {
+    frontmatter
+        .iter()
+        .map(|(key, value)| format!("{}: {}\n", key, value))
+        .collect()
+}
+
+fn extract_markdown_title(markdown: &str) -> Option<String> {
+    markdown.lines().find_map(|line| {
+        let title = line.trim().strip_prefix("# ")?;
+        let title = title.trim();
+        (!title.is_empty()).then(|| title.to_string())
+    })
+}
+
+fn summarize_prompt_as_title(prompt: &str) -> String {
+    let title = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Design Specification")
+        .chars()
+        .take(72)
+        .collect::<String>();
+    if title.trim().is_empty() {
+        "Design Specification".to_string()
+    } else {
+        title.trim().to_string()
+    }
+}
+
+fn slugify(title: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in title.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            slug.push(lower);
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        format!(
+            "design-{}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .chars()
+                .take(8)
+                .collect::<String>()
+        )
+    } else {
+        slug
+    }
+}
+
+pub fn is_safe_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        && !value.contains("..")
 }
 
 #[derive(Debug, Clone)]
@@ -846,5 +1088,60 @@ const value = 2;
             .as_deref()
             .unwrap_or_default()
             .contains("verify value usage"));
+    }
+
+    #[test]
+    fn parse_sdd_artifact_normalizes_frontmatter_and_slug() {
+        let artifact = parse_sdd_artifact(
+            r#"```sdd
+---
+type: sdd
+title: Token Budget Meter
+version: 1
+status: draft
+module: chat
+---
+
+# Token Budget Meter
+
+## Goals
+- Show budget usage.
+```"#,
+            "Build token budget UI",
+            Some("run-1".to_string()),
+        );
+
+        assert_eq!(artifact.title, "Token Budget Meter");
+        assert_eq!(artifact.slug, "token-budget-meter");
+        assert_eq!(artifact.source_run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            artifact.frontmatter.get("type").map(String::as_str),
+            Some("sdd")
+        );
+        assert!(artifact.markdown.starts_with("---\n"));
+    }
+
+    #[test]
+    fn parse_sdd_artifact_adds_required_frontmatter_when_missing() {
+        let artifact = parse_sdd_artifact(
+            "# Python LSP\n\n## Goals\n- Diagnostics",
+            "Python LSP",
+            None,
+        );
+
+        assert_eq!(artifact.title, "Python LSP");
+        assert_eq!(artifact.slug, "python-lsp");
+        assert_eq!(
+            artifact.frontmatter.get("status").map(String::as_str),
+            Some("draft")
+        );
+        assert!(artifact.markdown.contains("type: sdd"));
+    }
+
+    #[test]
+    fn sdd_slug_validation_rejects_path_traversal() {
+        assert!(is_safe_slug("token-budget-meter"));
+        assert!(!is_safe_slug("../secret"));
+        assert!(!is_safe_slug("feature/name"));
     }
 }

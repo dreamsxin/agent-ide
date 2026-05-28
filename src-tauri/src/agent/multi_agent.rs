@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub enum AgentRole {
     #[serde(rename = "architect")]
     Architect,
+    #[serde(rename = "designer")]
+    Designer,
     #[serde(rename = "coder")]
     Coder,
     #[serde(rename = "tester")]
@@ -16,6 +18,7 @@ impl AgentRole {
     pub fn to_string(&self) -> &'static str {
         match self {
             AgentRole::Architect => "architect",
+            AgentRole::Designer => "designer",
             AgentRole::Coder => "coder",
             AgentRole::Tester => "tester",
             AgentRole::Reviewer => "reviewer",
@@ -32,6 +35,14 @@ impl AgentRole {
 4. Hand off implementation-ready guidance to later stages.
 
 Do not write code diffs. Output a concise architecture plan."#
+            }
+            AgentRole::Designer => {
+                r#"You are a Designer Agent for Specification Driven Development. Your job is:
+1. Convert the user's requirement and planner output into a concrete SDD Markdown draft.
+2. Define scope, user flows, interfaces, data contracts, risks, and acceptance criteria.
+3. Keep the document implementation-ready without producing source-code diffs.
+
+Output only the requested SDD Markdown draft."#
             }
             AgentRole::Coder => {
                 r#"You are a Coder Agent. Your job is:
@@ -108,6 +119,13 @@ pub fn default_pipeline() -> Vec<PipelineStage> {
     ]
 }
 
+pub fn plan_pipeline() -> Vec<PipelineStage> {
+    vec![
+        PipelineStage::new(AgentRole::Designer, "Draft SDD"),
+        PipelineStage::new(AgentRole::Reviewer, "Review SDD"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +144,15 @@ mod tests {
         assert_eq!(reset[0].name, "Design");
         assert!(reset[2].pause_before);
         assert!(reset.iter().all(|stage| stage.status == "pending"));
+    }
+
+    #[test]
+    fn plan_pipeline_uses_designer_before_reviewer() {
+        let stages = plan_pipeline();
+
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].role, AgentRole::Designer);
+        assert_eq!(stages[1].role, AgentRole::Reviewer);
     }
 
     #[test]

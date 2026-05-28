@@ -13,11 +13,12 @@ const SEVERITY_STYLE: Record<ProblemSeverity, { label: string; color: string }> 
 export default function ProblemsPanel() {
   const problems = useProblemStore((s) => s.problems);
   const clearProblems = useProblemStore((s) => s.clearProblems);
+  const removeProblem = useProblemStore((s) => s.removeProblem);
   const openFile = useEditorStore((s) => s.openFile);
   const setActiveFile = useEditorStore((s) => s.setActiveFile);
   const revealLocation = useEditorStore((s) => s.revealLocation);
   const openFiles = useEditorStore((s) => s.openFiles);
-  const { fixProblem, isAgentBusy } = useFixWithAgent();
+  const { explainProblem, fixProblem, isAgentBusy } = useFixWithAgent();
 
   const counts = useMemo(
     () => ({
@@ -85,7 +86,7 @@ export default function ProblemsPanel() {
               <div
                 key={problem.id}
                 onClick={() => void handleProblemClick(problem.file, problem.line, problem.column)}
-                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_64px] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
+                className="grid w-full grid-cols-[24px_minmax(120px,1fr)_80px_max-content] items-start gap-2 border-b border-surface-border/40 px-3 py-1.5 text-left hover:bg-surface-border/20"
               >
                 <span className={`font-bold ${style.color}`}>{style.label}</span>
                 <span className="min-w-0">
@@ -95,18 +96,41 @@ export default function ProblemsPanel() {
                   </span>
                 </span>
                 <span className="truncate text-[10px] uppercase text-surface-muted">
-                  {problem.source} · {problem.severity}
+                  {problem.source} &middot; {problem.severity}
                 </span>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void fixProblem(problem);
-                  }}
-                  disabled={isAgentBusy}
-                  className="rounded border border-accent-blue/30 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Fix
-                </button>
+                <span className="flex items-center gap-1">
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void explainProblem(problem);
+                    }}
+                    disabled={isAgentBusy}
+                    className="rounded border border-accent-green/30 px-1.5 py-0.5 text-[10px] text-accent-green hover:bg-accent-green/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    title="Ask Agent to explain this problem"
+                  >
+                    Explain
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void fixProblem(problem);
+                    }}
+                    disabled={isAgentBusy}
+                    className="rounded border border-accent-blue/30 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Fix
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      removeProblem(problem.id);
+                    }}
+                    className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text hover:border-surface-muted"
+                    title="Ignore this problem"
+                  >
+                    Ignore
+                  </button>
+                </span>
               </div>
             );
           })

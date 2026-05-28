@@ -18,6 +18,7 @@ interface ProblemStore {
   setProblems: (problems: ProblemEntry[]) => void;
   upsertProblems: (source: ProblemSource, problems: ProblemEntry[]) => void;
   replaceProblems: (source: ProblemSource, problems: ProblemEntry[]) => void;
+  removeProblem: (id: string) => void;
   clearProblems: (source?: ProblemSource) => void;
 }
 
@@ -37,6 +38,11 @@ export const useProblemStore = create<ProblemStore>((set) => ({
         ...state.problems.filter((problem) => problem.source !== source),
         ...problems.map((problem) => ({ ...problem, source })),
       ]),
+    })),
+
+  removeProblem: (id) =>
+    set((state) => ({
+      problems: state.problems.filter((problem) => problem.id !== id),
     })),
 
   clearProblems: (source) =>

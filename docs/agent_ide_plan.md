@@ -1,5 +1,7 @@
 # Agent IDE — Tauri v2 + React Project Plan
 
+> **NOTE**: This document reflects the original implementation plan. For the current project state and roadmap, see **ROADMAP.md** (canonical source of truth).
+
 > **Goal**: Code-centric controllable AI Agent IDE, prioritizing performance and interaction
 > **Stack**: Rust (Tauri v2) + React 18 + TypeScript + Tailwind CSS + Monaco Editor
 
@@ -24,36 +26,51 @@
 
 ## 2. Project Directory Structure
 
+> The directory tree below reflects the **current** file structure as of Phase 8. Items from the original plan that were renamed or removed during implementation are not shown.
+
 ```
 agent-ide/
 ├── src-tauri/                    # Rust Backend
 │   ├── Cargo.toml
+│   ├── Cargo.lock
 │   ├── tauri.conf.json
+│   ├── build.rs
 │   ├── capabilities/
+│   │   └── default.json
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── lib.rs                # Plugin registration
-│   │   ├── commands/
-│   │   │   ├── mod.rs
-│   │   │   ├── fs.rs             # File system operations
-│   │   │   ├── terminal.rs       # PTY terminal
-│   │   │   ├── git.rs            # Git operations
-│   │   │   └── agent.rs          # Agent dispatch
 │   │   ├── agent/
 │   │   │   ├── mod.rs
 │   │   │   ├── state_machine.rs  # State machine
 │   │   │   ├── planner.rs        # Task decomposition
 │   │   │   ├── executor.rs       # Code execution
+│   │   │   ├── orchestrator.rs   # Pipeline orchestration
 │   │   │   ├── diff_gen.rs       # Diff generation
+│   │   │   ├── diff_apply.rs     # Diff application with conflict detection
 │   │   │   └── multi_agent.rs    # Multi-agent collaboration
-│   │   ├── services/
+│   │   ├── bin/
+│   │   │   └── agent_cli.rs      # Headless CLI runner
+│   │   ├── cli/
+│   │   │   └── mod.rs            # CLI argument parsing
+│   │   ├── commands/
 │   │   │   ├── mod.rs
-│   │   │   ├── llm_client.rs     # LLM API (streaming)
-│   │   │   ├── context.rs        # Context builder
-│   │   │   └── project.rs        # Project analysis
-│   │   └── utils/
+│   │   │   ├── fs.rs             # File system operations
+│   │   │   ├── terminal.rs       # PTY terminal
+│   │   │   ├── git.rs            # Git operations
+│   │   │   ├── lsp.rs            # LSP integration
+│   │   │   ├── agent.rs          # Agent dispatch
+│   │   │   └── tasks.rs          # Project task discovery
+│   │   └── services/
 │   │       ├── mod.rs
-│   │       └── diff.rs           # Diff algorithm
+│   │       ├── llm_client.rs     # LLM API (streaming)
+│   │       ├── llm_profiles.rs   # LLM provider profiles & credentials
+│   │       ├── context.rs        # Context builder
+│   │       ├── credentials.rs    # OS credential store
+│   │       ├── workspace.rs      # Workspace resolution & boundary checks
+│   │       ├── problem_parser.rs # Terminal output → Problems parsing
+│   │       ├── project_tasks.rs  # Shared project task runner
+│   │       └── agent_runtime.rs  # Shared Agent step runtime
 │   └── icons/
 │
 ├── src/                          # React Frontend
@@ -62,10 +79,15 @@ agent-ide/
 │   ├── styles/
 │   │   └── index.css             # Tailwind + global styles
 │   ├── stores/
-│   │   ├── useAgentStore.ts
-│   │   ├── useEditorStore.ts
-│   │   ├── useLayoutStore.ts
-│   │   └── useProjectStore.ts
+│   │   ├── useAgentStore.ts      # Agent state, mode, tasks, diffs
+│   │   ├── useEditorStore.ts     # Open files, content cache, suggestions
+│   │   ├── useLayoutStore.ts     # Panel sizes, visibility, focus mode
+│   │   ├── useGitStore.ts        # Git status, diff, branches
+│   │   ├── useLogStore.ts        # Action log entries
+│   │   ├── useLspStore.ts        # LSP status & diagnostics
+│   │   ├── useProblemStore.ts    # Unified Problems (diagnostics, test, Agent)
+│   │   ├── useTaskStore.ts       # Project task sessions & run history
+│   │   └── useThemeStore.ts      # Theme state
 │   ├── components/
 │   │   ├── layout/
 │   │   │   ├── TopBar.tsx
@@ -75,48 +97,76 @@ agent-ide/
 │   │   │   └── ResizeHandle.tsx
 │   │   ├── editor/
 │   │   │   ├── EditorContainer.tsx
-│   │   │   ├── CodeLayer.tsx
+│   │   │   ├── EditorTabs.tsx
 │   │   │   ├── InlineSuggestion.tsx
 │   │   │   ├── DiffOverlay.tsx
 │   │   │   ├── IntentHint.tsx
 │   │   │   ├── QuickActions.tsx
-│   │   │   └── EditorTabs.tsx
+│   │   │   ├── DiagnosticsBridge.tsx      # Monaco diagnostics → Problems
+│   │   │   ├── ProblemsMarkerBridge.tsx   # Problems → Monaco markers
+│   │   │   └── MonacoContext.tsx           # Monaco instance provider
 │   │   ├── agent/
 │   │   │   ├── ChatView.tsx
 │   │   │   ├── TaskView.tsx
 │   │   │   ├── DiffView.tsx
 │   │   │   ├── TaskPipeline.tsx
-│   │   │   └── AgentSelector.tsx
+│   │   │   ├── PipelineEditor.tsx         # Pipeline stage editor
+│   │   │   ├── AgentSelector.tsx
+│   │   │   └── SettingsPanel.tsx           # LLM profiles & settings
 │   │   ├── panels/
 │   │   │   ├── Explorer.tsx
-│   │   │   ├── SearchPanel.tsx
 │   │   │   ├── GitPanel.tsx
 │   │   │   ├── Terminal.tsx
 │   │   │   ├── LogView.tsx
-│   │   │   └── TestView.tsx
+│   │   │   ├── ProblemsPanel.tsx           # Unified Problems view
+│   │   │   └── TasksPanel.tsx              # Project commands
 │   │   └── shared/
-│   │       ├── StatusDot.tsx
+│   │       ├── CommandPalette.tsx           # Unified command entry
+│   │       ├── ErrorBoundary.tsx
 │   │       ├── ModeSwitch.tsx
-│   │       ├── Button.tsx
-│   │       ├── Badge.tsx
-│   │       └── Spinner.tsx
+│   │       ├── ShortcutsHelp.tsx
+│   │       └── StatusDot.tsx
 │   ├── hooks/
-│   │   ├── useTauriCommand.ts
-│   │   ├── useTauriEvent.ts
-│   │   ├── useDragDrop.ts
-│   │   └── useKeyboard.ts
-│   └── types/
-│       ├── agent.ts
-│       ├── editor.ts
-│       └── project.ts
+│   │   ├── useAgentBridge.ts
+│   │   ├── useFixWithAgent.ts             # Fix with Agent from Problems/Commands
+│   │   ├── useLspDiagnostics.ts
+│   │   ├── useProjectTasks.ts             # Shared task discovery hook
+│   │   ├── useRunProjectTask.ts           # Shared task runner hook
+│   │   ├── useShortcuts.ts
+│   │   └── useTauriEvent.ts
+│   ├── types/
+│   │   ├── agent.ts
+│   │   ├── editor.ts
+│   │   └── project.ts
+│   └── utils/
+│       ├── agentRuntimeContext.ts          # IDE failure context injection
+│       ├── codeCompletion.ts              # Local Monaco completion provider
+│       ├── lspClient.ts                   # Frontend LSP bridge
+│       ├── paths.ts                       # Path normalization
+│       ├── tauri.ts                       # Runtime detection
+│       ├── terminalProblemParser.ts       # Terminal output → Problems
+│       └── typescriptSemantic.ts          # Monaco TS worker defaults
 │
 ├── docs/
-│   ├── agent_ide_plan.md           # This file
+│   ├── agent_ide_plan.md           # This file (original plan)
+│   ├── agent_ide_design.md         # Detailed current design
 │   ├── agent_ide_ui_design.md      # UI design specs
+│   ├── agent_cli_design.md         # CLI design document
+│   ├── agent_cli_manual.md         # CLI manual
+│   ├── agent_changes_schema.md     # Agent changes protocol schema
+│   ├── smoke_test.md               # Runtime regression checklist
 │   └── skeleton.jsx                # Original skeleton reference
+├── scripts/
+│   └── package-windows.ps1
+├── demo/
+│   ├── hello.js
+│   ├── hello.js.backup
+│   └── e2e_test.ps1
 ├── index.html
 ├── package.json
+├── package-lock.json
 ├── tsconfig.json
+├── tsconfig.node.json
 ├── vite.config.ts
 ├── tailwind.config.js
 ├── postcss.config.js
@@ -131,36 +181,44 @@ agent-ide/
 <App>                                          # CSS Grid main layout
 ├── <TopBar>                                   # grid-row:1 / col-span:3
 │   ├── Logo + ProjectName
+│   ├── Project Run/Build/Test/Debug buttons
 │   ├── <ModeSwitch />                         # Suggest | Edit | Auto
+│   ├── LSP Status
 │   └── <StatusDot /> + Run/Stop/Settings
 │
 ├── <LeftPanel>                                # grid-row:2 / col-start:1
 │   ├── <Explorer />                           # File tree (react-arborist)
-│   ├── <SearchPanel />
-│   └── <GitPanel />
+│   └── <GitPanel />                           # Source Control
 │
 ├── <EditorContainer>                          # grid-row:2 / col-start:2
 │   ├── <EditorTabs />
-│   ├── <CodeLayer />                          # Monaco Editor (core)
+│   ├── <MonacoContext />                       # Monaco instance provider
+│   ├── Monaco Editor (core)
 │   ├── <InlineSuggestion />                   # Ghost Text layer
 │   ├── <DiffOverlay />                        # Diff highlight layer
 │   ├── <IntentHint />                         # AI bubble layer
-│   └── <QuickActions />                       # Selection floating bar
+│   ├── <QuickActions />                       # Selection floating bar
+│   ├── <DiagnosticsBridge />                  # Monaco diagnostics → Problems
+│   └── <ProblemsMarkerBridge />               # Problems → Monaco markers
 │
 ├── <AgentPanel>                               # grid-row:2 / col-start:3
 │   ├── TabHeader: [Chat | Tasks | Diff]
 │   ├── <AgentSelector />
+│   ├── <SettingsPanel />                      # LLM profiles & settings
 │   ├── <ChatView />
+│   │   └── Context source toggles & budget
 │   ├── <TaskView />
-│   │   └── <TaskPipeline />
-│   └── <DiffView />
+│   │   └── <TaskPipeline /> / <PipelineEditor />
+│   └── <DiffView />                           # Per-file & per-hunk review
 │
 ├── <BottomPanel>                              # grid-row:3 / col-span:3
-│   ├── <Terminal />                           # xterm.js + PTY
-│   ├── <LogView />
-│   ├── <TestView />
-│   └── <ActionHistory />
+│   ├── <Terminal />                           # xterm.js + PTY (multi-session)
+│   ├── <TasksPanel />                         # Project commands & run history
+│   ├── <ProblemsPanel />                      # Unified diagnostics/problems
+│   └── <LogView />                            # Agent & system action logs
 │
+├── <CommandPalette />                         # Ctrl+Shift+P overlay
+├── <ShortcutsHelp />
 └── <ResizeHandle /> x3                        # Panel resize handles
 ```
 
@@ -169,6 +227,8 @@ agent-ide/
 ## 4. Rust Backend Module Architecture
 
 ### 4.1 IPC Commands
+
+> **Note**: The command signatures below are from the original plan and may not reflect current naming or parameter shapes. See `src-tauri/src/commands/` for actual implementations.
 
 ```rust
 // commands/fs.rs
@@ -193,6 +253,12 @@ agent-ide/
 #[tauri::command] async fn stop_agent() -> ...
 #[tauri::command] async fn apply_diff(diff_id: String) -> ...
 #[tauri::command] async fn reject_diff(diff_id: String) -> ...
+
+// Additional commands added since original plan:
+// commands/lsp.rs — LSP status, hover, completion, definition, symbols, rename, code actions
+// commands/tasks.rs — Project task discovery from package.json/Cargo.toml
+// Per-file and per-hunk apply/reject diff commands
+// LLM profile management and context compression commands
 ```
 
 ### 4.2 Agent State Machine
@@ -283,6 +349,14 @@ interface LayoutStore {
   bottomVisible: boolean;
   focusMode: boolean;        // editor only
 }
+
+// Additional stores added since original plan:
+// stores/useGitStore.ts      — Git status, diff modes, branches, conflicts
+// stores/useLogStore.ts      — Action log entries per workspace
+// stores/useLspStore.ts      — LSP server status & diagnostics
+// stores/useProblemStore.ts  — Unified Problems (diagnostics, test, Agent findings)
+// stores/useTaskStore.ts     — Project task sessions, run history, terminal output
+// stores/useThemeStore.ts    — Theme state
 ```
 
 ---
@@ -294,7 +368,7 @@ interface LayoutStore {
 ```
 User types in Chat "implement login feature"
   -> Zustand: sendPrompt("implement login feature")
-    -> Tauri invoke("send_prompt", { prompt, context })
+    -> Tauri invoke("send_agent_prompt", { prompt, context, sources })
       -> Rust Agent state machine starts
         -> State: Thinking (emit event -> frontend StatusDot turns purple)
         -> State: Planning (emit PlanReady -> TaskView renders steps)
@@ -302,7 +376,7 @@ User types in Chat "implement login feature"
         -> State: Reviewing (emit DiffReady -> DiffView + DiffOverlay display)
         -> State: WaitingUser
   -> User clicks Apply
-    -> Tauri invoke("apply_diff")
+    -> Tauri invoke("apply_diffs") or per-hunk apply
       -> Rust writes files
       -> Frontend Monaco updates content
 ```
@@ -313,11 +387,24 @@ User types in Chat "implement login feature"
 User selects code block in Editor
   -> QuickActions floats: [Explain | Fix | Refactor | Optimize]
     -> Click "Explain"
-      -> Auto-build context (file path + selection content)
+      -> Auto-build context (file path + selection content + line range)
       -> Chat sends: "Explain the following code: [selection]"
+      -> Normal Agent planning/review/diff flow
 ```
 
-### 6.3 Drag Context
+### 6.3 Problems → Fix with Agent
+
+```
+Monaco markers, terminal test/lint output, or Agent error events
+  -> useProblemStore
+    -> ProblemsPanel displays unified list
+      -> Click "Fix with Agent" on a problem
+        -> Build IDE runtime failure context (failed command, Problems, Terminal output, Logs)
+        -> Send focused repair prompt through Agent
+          -> Normal Agent planning/review/diff flow
+```
+
+### 6.4 Drag Context (Original Plan)
 
 ```
 User drags file to Agent panel
@@ -390,7 +477,9 @@ uuid = "1"
 
 ## 9. Phased Implementation Plan
 
-### Phase 1 — Skeleton (2 weeks) ✅ COMPLETE
+> Phase numbers in this section correspond to the original plan. The ROADMAP.md uses an expanded phase numbering that reflects the actual implementation sequence. Cross-reference: Original Phase 1 ≈ ROADMAP Phase 1; Original Phases 2–5 were expanded into ROADMAP Phases 2–8+.
+
+### Phase 1 — Skeleton ✅ COMPLETE
 - [x] Tauri v2 project init + window config
 - [x] React + Vite + Tailwind integration
 - [x] CSS Grid main layout + resizable panels
@@ -399,36 +488,119 @@ uuid = "1"
 - [x] xterm.js + Tauri PTY terminal
 - [x] File tree (react-arborist + Tauri FS lazy loading)
 
-### Phase 2 — Editor Enhancements (2 weeks)
-- [ ] EditorTabs multi-file management (implemented as placeholder)
-- [ ] InlineSuggestion Ghost Text layer
-- [ ] DiffOverlay rendering (Monaco diff mode)
-- [ ] IntentHint bubbles
-- [ ] QuickActions selection floating bar
-- [ ] File save/sync watcher
+### Phase 2 — Editor Enhancements ✅ COMPLETE
+- [x] EditorTabs multi-file management
+- [x] InlineSuggestion Ghost Text layer
+- [x] DiffOverlay rendering (Monaco diff mode)
+- [x] IntentHint bubbles
+- [x] QuickActions selection floating bar
+- [x] File save/sync watcher
+- [x] DiagnosticsBridge (Monaco diagnostics → Problems)
+- [x] ProblemsMarkerBridge (Problems → Monaco markers)
+- [x] MonacoContext provider
+- [x] Local code completion (keywords, symbols, snippets, paths)
+- [x] TypeScript/JavaScript semantic completion via Monaco TS worker
+- [x] TypeScript LSP integration (hover, completion, definition, symbols, rename, code actions, diagnostics)
+- [x] Go LSP integration (gopls detection/startup, completion, hover, diagnostics)
+- [x] Quick Fix / code action application with state sync
 
-### Phase 3 — Agent System (3 weeks)
-- [ ] Rust side Agent state machine
-- [ ] LLM HTTP streaming call + Tauri Event push
-- [ ] ChatView multi-turn conversation
-- [ ] TaskView step visualization
-- [ ] DiffView change confirmation
-- [ ] Suggest/Edit/Auto mode switch
+### Phase 3 — Agent System ✅ COMPLETE
+- [x] Rust side Agent state machine
+- [x] LLM HTTP streaming call + Tauri Event push
+- [x] ChatView multi-turn conversation
+- [x] TaskView step visualization
+- [x] DiffView change confirmation (per-file and per-hunk apply/reject)
+- [x] Suggest/Edit/Auto mode switch
+- [x] Agent action log with prompt/context/diff provenance
+- [x] Role-aware pipeline execution: architect → coder → tester → reviewer
+- [x] Structured `agent-changes` JSON protocol with validation
+- [x] Hunk-level provenance for structured changes
+- [x] Context compression modes (full, focused, compact, budgeted)
+- [x] Context source toggles and token budget estimates
+- [x] Interactive plan controls (edit, reorder, skip, run single step, regenerate)
+- [x] Pipeline pause-before-stage controls and paused snapshots
+- [x] Agent state restoration after reload
+- [x] SettingsPanel for LLM provider profiles and credential management
+- [x] Failed/stale diff regeneration against current file
 
-### Phase 4 — Multi-Agent + Advanced (2 weeks)
-- [ ] Multi-Agent role selection and collaboration
-- [ ] TaskPipeline visualization
-- [ ] Git panel (status/diff/commit)
-- [ ] LogView timeline
-- [ ] Ghost Mode background analysis
-- [ ] Project-level context memory
+### Phase 4 — Multi-Agent + Advanced ✅ COMPLETE
+- [x] Multi-Agent role selection and collaboration
+- [x] TaskPipeline visualization
+- [x] Git panel (status/diff/commit, stage/unstage/discard, branch ops, remote actions, conflict resolution)
+- [x] LogView timeline (Agent action logs with expandable details)
+- [x] Project-level context memory (workspace persistence)
+- [x] Problems panel (diagnostics, Agent findings, terminal test/lint parsing)
+- [x] Project Tasks panel with discovered commands and run history
+- [x] Fix with Agent from Problems and failed commands
+- [x] Command Palette (Ctrl+Shift+P)
+- [x] LLM provider profiles with backward-compatible config migration
+- [x] Per-profile model budget metadata
+- [x] OS credential store for LLM API keys
+- [x] Terminal multi-session UI with task exit tracking
+- [x] Git credential inputs for remote actions
+- [x] Per-workspace state persistence (logs, context flags, diffs, task sessions)
+- [x] Agent CLI headless automation runner (doctor, context estimate, plan, run, repair loops)
 
-### Phase 5 — Polish & Release (1 week)
-- [ ] Keyboard shortcut system
-- [ ] Theme customization
-- [ ] Animation polish (state transitions, Diff fade-in)
-- [ ] Cross-platform packaging (Windows/MSI + macOS/DMG + Linux/AppImage)
-- [ ] Performance benchmarks
+### Phase 5 — Polish & Release ✅ COMPLETE
+- [x] Keyboard shortcut system
+- [x] Theme customization
+- [x] Animation polish (state transitions, Diff fade-in)
+- [x] Windows packaging (NSIS/MSI)
+- [x] Performance benchmarks (build/lint/type checks pass)
+- [x] Workspace boundary enforcement (FS, Git, Agent, Terminal, CLI)
+- [x] Browser/Tauri runtime guards for Vite preview mode
+- [x] Context compression test coverage
+- [x] Frontend test coverage (path normalization, terminal problem parsing)
+
+### Phase 6 — Stabilization and Safety ✅ COMPLETE
+- [x] Workspace boundary applied consistently across FS, Agent, Git, terminal cwd, and CLI
+- [x] LLM key storage moved to OS credential store
+- [x] Diff application returns structured errors to UI
+- [x] Agent cancellation token wired through orchestrator and LLM client
+- [x] Browser preview mode has clear disabled states
+- [x] Roadmap and docs reflect actual project state
+
+### Phase 7 — Agent Execution Quality ✅ COMPLETE
+- [x] Role-aware orchestration: architect → coder → tester → reviewer
+- [x] Pipeline stages influence prompts and state transitions
+- [x] Agent action log with prompt/context/diff provenance
+- [x] Reviewer uses actual pending diff summaries for structured review
+- [x] Context sources: selected files, open files, git diff, project tree summary, terminal/log excerpts
+- [x] Context compression strategy interface (full, focused, compact, budgeted)
+- [x] Structured model protocol with `agent-changes` version 1 schema
+- [x] Hunk-level provenance for structured changes and reviewer findings
+- [x] Formal `agent-changes` schema validation and diagnostics
+
+### Phase 8 — IDE Workflow Completion 🔄 IN PROGRESS
+- [ ] Terminal fully wired to backend PTY (spawn, write, resize, output, kill) — **mostly complete, needs runtime validation**
+- [ ] TopBar exposes common Run/Debug/Build/Test commands — **wired, needs polish**
+- [ ] QuickActions sends real Agent prompts — **implemented, needs runtime testing**
+- [ ] DiffView supports per-file and per-hunk apply/reject — **wired, needs clearer mixed-hunk status**
+- [ ] Git panel supports stage, unstage, discard with confirmation — **implemented, needs SSH/passphrase UX and richer merge editor**
+- [ ] Editor has local code completion for common languages and current-file symbols — **implemented, needs LLM inline completion**
+- [ ] Problems panel replaces static samples and accepts Monaco diagnostics, Agent findings, parsed terminal failures — **implemented, needs richer test-runner protocol integration**
+- [ ] Logs panel consumes backend and Agent event streams — **implemented, needs persisted action logs**
+- [ ] Runtime validation across all daily IDE workflows in `npm run tauri -- dev`
+- [ ] TypeScript/Go LSP large-workspace indexing validation
+- [ ] Frontend/Tauri smoke tests for daily workflows
+
+### Phase 9 — Release Readiness ⏳ UPCOMING
+- [ ] CI for TypeScript, Rust, tests, formatting
+- [ ] Tauri smoke tests for app boot, workspace open, file read/write, settings load
+- [ ] Packaging validation for Windows first
+- [ ] Security model documentation
+- [ ] Troubleshooting guide for Vite vs Tauri dev modes
+
+### Future — Phase 10/11
+- [ ] Ghost Mode (background analysis without user-initiated prompts)
+- [ ] Split View (side-by-side editor panes)
+- [ ] Advanced inline suggestions from LLM (real-time code completion via LLM streaming)
+- [ ] Full workspace diagnostics indexing beyond opened files
+- [ ] Richer test-runner protocol integration
+- [ ] SSH/passphrase UX for Git
+- [ ] Richer merge editor UI for conflict blocks
+- [ ] Web Worker offload for large file parsing
+- [ ] Dynamic imports / manual chunks for bundle size reduction
 
 ---
 
@@ -443,23 +615,33 @@ uuid = "1"
 │  ┌──────┬──────┬──────────┐   │  ┌───────────────────┐  │
 │  │Left  │Editor│Agent     │   │  │ Agent State Mach. │  │
 │  │240px │Flex  │360px     │◄──┼──┤ Planner/Executor  │  │
-│  │      │      │          │   │  │ Diff Generator    │  │
-│  │Expl..│Monaco│Chat/Task │   │  └───────────────────┘  │
-│  │      │      │          │   │  ┌───────────────────┐  │
-│  └──────┴──────┴──────────┘   │  │ File System       │  │
-│  ┌──────────────────────────┐ │  │ (read/write/watch)│  │
-│  │  Bottom 240px            │◄┼──┤                   │  │
-│  │  Terminal | Logs | Tests │ │  └───────────────────┘  │
-│  └──────────────────────────┘ │  ┌───────────────────┐  │
-│                                │  │ PTY Terminal      │  │
-│  Zustand Stores ───invoke────►│  │ (portable-pty)    │  │
-│  ◄────── listen(event) ────────│  └───────────────────┘  │
-│                                │  ┌───────────────────┐  │
+│  │      │      │          │   │  │ Orchestrator      │  │
+│  │Expl..│Monaco│Chat/Task │   │  │ Diff Gen/Apply    │  │
+│  │      │      │          │   │  │ Multi-Agent       │  │
+│  │Git   │      │Settings  │   │  └───────────────────┘  │
+│  └──────┴──────┴──────────┘   │  ┌───────────────────┐  │
+│  ┌──────────────────────────┐ │  │ File System       │  │
+│  │  Bottom 240px            │◄┼──┤ (read/write/watch)│  │
+│  │  Terminal | Commands |   │ │  └───────────────────┘  │
+│  │  Problems | Logs         │ │  ┌───────────────────┐  │
+│  └──────────────────────────┘ │  │ PTY Terminal      │  │
+│                                │  │ (portable-pty)    │  │
+│  Zustand Stores ───invoke────►│  └───────────────────┘  │
+│  ◄────── listen(event) ────────│  ┌───────────────────┐  │
 │                                │  │ LLM Client        │  │
-│                                │  │ (reqwest stream)  │  │
-│                                │  └───────────────────┘  │
+│  Command Palette               │  │ (reqwest stream)  │  │
+│  ShortcutsHelp                 │  │ LLM Profiles      │  │
+│  ErrorBoundary                 │  └───────────────────┘  │
 │                                │  ┌───────────────────┐  │
 │                                │  │ Git (git2)        │  │
+│                                │  └───────────────────┘  │
+│                                │  ┌───────────────────┐  │
+│                                │  │ LSP Bridge        │  │
+│                                │  │ (TS/JS + Go)      │  │
+│                                │  └───────────────────┘  │
+│                                │  ┌───────────────────┐  │
+│                                │  │ Agent CLI         │  │
+│                                │  │ (headless runner) │  │
 │                                │  └───────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -479,7 +661,10 @@ uuid = "1"
 | Git | None | Rust git2 integration |
 | Multi-Agent | None | Rust side role scheduling |
 | File writes | None | Tauri FS safe writes + confirmation flow |
+| LSP | None | TypeScript/JS + Go LSP with diagnostics and code actions |
+| Problems | None | Unified panel for Monaco diagnostics, test failures, Agent findings |
+| CLI | None | Headless Agent runner with repair loops |
 
 ---
 
-*Plan complete. See ROADMAP.md for implementation status and context recovery.*
+*This document preserves the original design intent and architecture decisions. For current project state, see ROADMAP.md.*

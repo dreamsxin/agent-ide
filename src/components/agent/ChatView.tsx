@@ -7,6 +7,9 @@ import { useLogStore } from "../../stores/useLogStore";
 import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
 import ReactMarkdown from "react-markdown";
 import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
+import type { ProblemEntry } from "../../stores/useProblemStore";
+import type { ProjectTaskRunState } from "../../stores/useTaskStore";
+import type { LogEntry } from "../../types/project";
 
 type ChatContextOptions = {
   activeFile: boolean;
@@ -171,7 +174,15 @@ export default function ChatView() {
   const messages = useAgentStore((s) => s.messages);
   const addMessage = useAgentStore((s) => s.addMessage);
   const updateMessage = useAgentStore((s) => s.updateMessage);
+  const activeSddArtifact = useAgentStore((s) => s.activeSddArtifact);
+  const ghostSuggestions = useAgentStore((s) => s.ghostSuggestions);
+  const setGhostSuggestions = useAgentStore((s) => s.setGhostSuggestions);
+  const dismissGhostSuggestion = useAgentStore((s) => s.dismissGhostSuggestion);
+  const updateActiveSddMarkdown = useAgentStore((s) => s.updateActiveSddMarkdown);
+  const saveActiveSdd = useAgentStore((s) => s.saveActiveSdd);
+  const promoteSddToCodePrompt = useAgentStore((s) => s.promoteSddToCodePrompt);
   const [input, setInput] = useState("");
+  const [sddSaveMessage, setSddSaveMessage] = useState("");
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextOptions, setContextOptions] = useState<ChatContextOptions>(() => loadContextOptions());
   const [contextEstimate, setContextEstimate] = useState<ContextEstimateResponse | null>(null);
@@ -179,6 +190,7 @@ export default function ChatView() {
 
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
+  const ideMode = useAgentStore((s) => s.ideMode);
   const streamContent = useAgentStore((s) => s.streamContent);
   const isStreaming = useAgentStore((s) => s.isStreaming);
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
@@ -200,6 +212,11 @@ export default function ChatView() {
   const taskRuns = useTaskStore((s) => s.taskRuns);
   const terminalOutput = useTaskStore((s) => s.terminalOutput);
   const logs = useLogStore((s) => s.logs);
+
+  useEffect(() => {
+    const suggestions = buildGhostSuggestions(problems, taskRuns, logs);
+    setGhostSuggestions(suggestions);
+  }, [logs, problems, setGhostSuggestions, taskRuns]);
 
   useEffect(() => {
     persistContextOptions(contextOptions);
@@ -329,6 +346,18 @@ export default function ChatView() {
     });
   }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions]);
 
+  const handleSaveSdd = useCallback(async () => {
+    setSddSaveMessage("");
+    try {
+      const saved = await saveActiveSdd(false);
+      if (saved) {
+        setSddSaveMessage(`Saved ${saved.path}`);
+      }
+    } catch (err) {
+      setSddSaveMessage(String(err));
+    }
+  }, [saveActiveSdd]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -353,6 +382,97 @@ export default function ChatView() {
             }
           />
         ))}
+        {activeSddArtifact && (
+          <div className="rounded border border-surface-border bg-surface-base/70 p-2 text-xs text-surface-text">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate font-semibold">{activeSddArtifact.title}</div>
+                <div className="text-[10px] text-surface-muted">
+                  docs/design/{activeSddArtifact.slug}.md · {activeSddArtifact.status}
+                </div>
+              </div>
+              <div className="flex flex-shrink-0 gap-1">
+                <button
+                  type="button"
+                  onClick={handleSaveSdd}
+                  className="rounded border border-accent-blue/50 px-2 py-1 text-[11px] text-accent-blue hover:bg-accent-blue/10"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    promoteSddToCodePrompt();
+                    setInput(`Implement the approved SDD: ${activeSddArtifact.title}`);
+                  }}
+                  className="rounded bg-accent-blue px-2 py-1 text-[11px] text-white hover:bg-blue-700"
+                >
+                  Code
+                </button>
+              </div>
+            </div>
+            {activeSddArtifact.reviewFindings.length > 0 && (
+              <div className="mb-2 rounded border border-diff-modify/30 bg-diff-modify/10 p-2 text-[11px]">
+                <div className="mb-1 font-medium text-diff-modify">Review Findings</div>
+                {activeSddArtifact.reviewFindings.map((finding, index) => (
+                  <div key={`${finding}-${index}`} className="truncate text-surface-muted" title={finding}>
+                    - {finding}
+                  </div>
+                ))}
+              </div>
+            )}
+            <textarea
+              value={activeSddArtifact.markdown}
+              onChange={(event) => updateActiveSddMarkdown(event.target.value)}
+              rows={12}
+              className="h-56 w-full resize-y rounded border border-surface-border bg-surface-panel p-2 font-mono text-[11px] leading-relaxed text-surface-text outline-none focus:border-accent-blue"
+            />
+            {sddSaveMessage && (
+              <div className="mt-1 truncate text-[10px] text-surface-muted" title={sddSaveMessage}>
+                {sddSaveMessage}
+              </div>
+            )}
+          </div>
+        )}
+        {ghostSuggestions.length > 0 && (
+          <div className="space-y-1.5 rounded border border-surface-border bg-surface-base/50 p-2 text-xs">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-surface-muted">
+              Ghost Suggestions
+            </div>
+            {ghostSuggestions.map((suggestion) => (
+              <div
+                key={suggestion.id}
+                className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded border border-surface-border/60 bg-surface-panel/70 p-2"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-surface-text">{suggestion.title}</div>
+                  <div className="truncate text-[10px] text-surface-muted" title={suggestion.detail}>
+                    {suggestion.detail}
+                  </div>
+                </div>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInput(suggestion.prompt);
+                      dismissGhostSuggestion(suggestion.id);
+                    }}
+                    className="rounded border border-accent-blue/50 px-2 py-1 text-[11px] text-accent-blue hover:bg-accent-blue/10"
+                  >
+                    Use
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => dismissGhostSuggestion(suggestion.id)}
+                    className="rounded border border-surface-border px-2 py-1 text-[11px] text-surface-muted hover:text-surface-text"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
@@ -368,7 +488,7 @@ export default function ChatView() {
           </span>
           {agentState !== "idle" && agentState !== "error" && (
             <span className="text-[10px] text-surface-muted ml-auto">
-              {agentMode}
+              {ideMode}/{agentMode}
             </span>
           )}
         </div>
@@ -522,6 +642,8 @@ export default function ChatView() {
                 ? "Review diffs or continue… (Shift+Enter for newline)"
                 : agentState === "error"
                 ? "An error occurred. Try again…"
+                : ideMode === "plan"
+                ? "Draft an SDD… (Plan mode, Shift+Enter for newline)"
                 : `Ask Agent… (Mode: ${agentMode}, Shift+Enter for newline)`
             }
             disabled={isSending}
@@ -579,6 +701,48 @@ export default function ChatView() {
       </div>
     </div>
   );
+}
+
+function buildGhostSuggestions(
+  problems: ProblemEntry[],
+  taskRuns: Record<string, ProjectTaskRunState>,
+  logs: LogEntry[]
+) {
+  const suggestions = [];
+  const firstError = problems.find((problem) => problem.severity === "error") ?? problems[0];
+  if (firstError) {
+    suggestions.push({
+      id: `problem-${firstError.file}-${firstError.message}`,
+      title: `Inspect ${firstError.file}`,
+      detail: firstError.message,
+      prompt: `Analyze this diagnostic and propose a focused fix. File: ${firstError.file}\nDiagnostic: ${firstError.message}`,
+      source: "problems" as const,
+      createdAt: Date.now(),
+    });
+  }
+  const failedTask = Object.values(taskRuns).find((task) => task.status === "failed");
+  if (failedTask) {
+    suggestions.push({
+      id: `task-${failedTask.command ?? "failed"}`,
+      title: "Review failed task",
+      detail: failedTask.command ?? "A project task failed",
+      prompt: `Analyze the failed task output and propose the smallest fix. Command: ${failedTask.command ?? "unknown"}`,
+      source: "tasks" as const,
+      createdAt: Date.now(),
+    });
+  }
+  const warnLog = logs.find((log) => log.level === "error" || log.level === "warn");
+  if (warnLog) {
+    suggestions.push({
+      id: `log-${warnLog.message}`,
+      title: "Inspect recent log",
+      detail: warnLog.message,
+      prompt: `Analyze this recent IDE log and suggest whether code or configuration needs attention:\n${warnLog.message}`,
+      source: "logs" as const,
+      createdAt: Date.now(),
+    });
+  }
+  return suggestions.slice(0, 3);
 }
 
 function loadContextOptions(): ChatContextOptions {

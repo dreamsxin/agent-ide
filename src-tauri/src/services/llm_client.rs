@@ -15,6 +15,7 @@ pub struct LlmConfig {
     pub model: String, // e.g. "gpt-4"
     pub provider: String,
     pub max_output_tokens: Option<u32>,
+    pub tool_call_mode: String,
 }
 
 /// Chat 消息
@@ -181,6 +182,29 @@ async fn stream_mock_chat(
 [STEP] title="Update smoke.txt" type="edit"
 ```"#
             .to_string()
+    } else if system.contains("Designer Agent") {
+        r#"```sdd
+---
+type: sdd
+title: Smoke Design
+version: 1
+date: 2026-05-28
+status: draft
+module: smoke
+---
+
+# Smoke Design
+
+## Problem
+Capture a lightweight design artifact before implementation.
+
+## Goals
+- Produce a reviewable SDD draft.
+
+## Acceptance Criteria
+- The SDD can be saved under docs/design.
+```"#
+            .to_string()
     } else if user.contains("Repair iteration") {
         mock_diff_response("changed", "fixed")
     } else {
@@ -216,15 +240,80 @@ fn build_chat_request(config: &LlmConfig, messages: Vec<ChatMessage>) -> serde_j
         "stream": true,
     });
 
-    let Some(max_output_tokens) = config.max_output_tokens else {
-        return body;
-    };
-
-    let key = output_token_key(config);
     if let Some(object) = body.as_object_mut() {
-        object.insert(key.to_string(), serde_json::json!(max_output_tokens));
+        if let Some(max_output_tokens) = config.max_output_tokens {
+            let key = output_token_key(config);
+            object.insert(key.to_string(), serde_json::json!(max_output_tokens));
+        }
+        if config.tool_call_mode == "native_tools" {
+            object.insert("tools".to_string(), native_tools_schema());
+            object.insert("tool_choice".to_string(), serde_json::json!("auto"));
+        }
     }
     body
+}
+
+fn native_tools_schema() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "emit_agent_changes",
+                "description": "Emit reviewable Agent IDE file changes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "version": { "type": "integer", "enum": [1] },
+                        "changes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "enum": ["edit", "create"] },
+                                    "file": { "type": "string" },
+                                    "baseHash": { "type": "string" },
+                                    "rationale": { "type": "string" },
+                                    "content": { "type": "string" },
+                                    "hunks": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "original": { "type": "string" },
+                                                "updated": { "type": "string" }
+                                            },
+                                            "required": ["original", "updated"]
+                                        }
+                                    }
+                                },
+                                "required": ["type", "file"]
+                            }
+                        },
+                        "findings": { "type": "array", "items": { "type": "object" } }
+                    },
+                    "required": ["version", "changes"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "emit_sdd_draft",
+                "description": "Emit an SDD Markdown draft artifact.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "slug": { "type": "string" },
+                        "markdown": { "type": "string" },
+                        "status": { "type": "string" },
+                        "reviewFindings": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["title", "markdown"]
+                }
+            }
+        }
+    ])
 }
 
 fn output_token_key(config: &LlmConfig) -> &'static str {
@@ -253,6 +342,7 @@ mod tests {
             model: model.to_string(),
             provider: provider.to_string(),
             max_output_tokens,
+            tool_call_mode: "text_protocol".to_string(),
         }
     }
 
@@ -279,5 +369,18 @@ mod tests {
 
         assert_eq!(body["max_completion_tokens"], 8192);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_request_includes_native_tools_when_enabled() {
+        let mut cfg = config("openai", "gpt-4o", Some(1024));
+        cfg.tool_call_mode = "native_tools".to_string();
+
+        let body = build_chat_request(&cfg, Vec::new());
+
+        assert_eq!(body["tool_choice"], "auto");
+        assert!(body["tools"]
+            .as_array()
+            .is_some_and(|items| items.len() == 2));
     }
 }

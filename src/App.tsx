@@ -8,6 +8,7 @@ import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import CommandPalette, { usePaletteCommands } from "./components/shared/CommandPalette";
+import ConfirmDialog from "./components/agent/ConfirmDialog";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { useLayoutStore } from "./stores/useLayoutStore";
 import { useEditorStore } from "./stores/useEditorStore";
@@ -171,6 +172,7 @@ export default function App() {
         commands={paletteCommands}
         onClose={() => setCommandPaletteVisible(false)}
       />
+      <ConfirmDialog />
 
       {/* 自定义标题栏 */}
       <TopBar />

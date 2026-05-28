@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Agent 状态枚举
@@ -36,6 +37,32 @@ pub enum AgentMode {
     Auto,
 }
 
+/// IDE work mode. This is separate from Agent permissions such as suggest/edit/auto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdeMode {
+    Code,
+    Plan,
+}
+
+impl IdeMode {
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "code" => Ok(IdeMode::Code),
+            "plan" => Ok(IdeMode::Plan),
+            other => Err(format!("Invalid IDE mode: {}", other)),
+        }
+    }
+}
+
+impl fmt::Display for IdeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IdeMode::Code => write!(f, "code"),
+            IdeMode::Plan => write!(f, "plan"),
+        }
+    }
+}
+
 impl fmt::Display for AgentMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -54,9 +81,24 @@ pub enum AgentEvent {
     StepStart(String),
     StepDone(String),
     DiffReady(Vec<FileDiff>),
+    SddReady(SddArtifact),
     UserApply,
     UserReject,
     Error(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SddArtifact {
+    pub id: String,
+    pub title: String,
+    pub slug: String,
+    pub frontmatter: BTreeMap<String, String>,
+    pub markdown: String,
+    #[serde(rename = "sourceRunId")]
+    pub source_run_id: Option<String>,
+    #[serde(rename = "reviewFindings", default)]
+    pub review_findings: Vec<String>,
+    pub status: String,
 }
 
 /// 任务步骤（可序列化，用于跨 IPC 传输）
@@ -179,6 +221,7 @@ impl AgentStateManager {
             (AgentState::Planning, AgentEvent::StepStart(_)) => AgentState::Acting,
             (AgentState::Acting, AgentEvent::StepDone(_)) => AgentState::Acting, // 保持
             (AgentState::Acting, AgentEvent::DiffReady(_)) => AgentState::Reviewing,
+            (AgentState::Acting, AgentEvent::SddReady(_)) => AgentState::Reviewing,
             (AgentState::Reviewing, _) => AgentState::WaitingUser,
             (AgentState::WaitingUser, AgentEvent::UserApply) => AgentState::Done,
             (AgentState::WaitingUser, AgentEvent::UserReject) => AgentState::Done,
