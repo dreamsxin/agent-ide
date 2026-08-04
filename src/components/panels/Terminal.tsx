@@ -11,6 +11,8 @@ import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import { useThemeStore, type Theme } from "../../stores/useThemeStore";
+import { Plus, RotateCcw, X } from "lucide-react";
 
 interface TerminalProps {
   terminalId: string;
@@ -122,7 +124,7 @@ export default function TerminalPanel() {
   }, [activeId, restartSession]);
 
   return (
-    <div className="flex h-full flex-col bg-black">
+    <div className="flex h-full flex-col bg-surface-base">
       <div className="flex items-center gap-1 border-b border-surface-border bg-surface-panel px-2 py-1">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-auto">
           {sessions.map((session) => (
@@ -151,21 +153,21 @@ export default function TerminalPanel() {
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
               title="Restart terminal"
             >
-              Restart
+              <RotateCcw aria-hidden="true" className="h-3 w-3" />
             </button>
             <button
               onClick={createSession}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
               title="New terminal"
             >
-              +
+              <Plus aria-hidden="true" className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={() => closeSession(activeSession.id)}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-diff-remove"
               title="Close terminal"
             >
-              x
+              <X aria-hidden="true" className="h-3.5 w-3.5" />
             </button>
           </>
         )}
@@ -207,6 +209,7 @@ function TerminalSessionView({
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const theme = useThemeStore((state) => state.theme);
   const readyRef = useRef(false);
   const initialCommandRef = useRef(initialCommand);
   const outputBufferRef = useRef("");
@@ -321,28 +324,7 @@ function TerminalSessionView({
       cursorStyle: "bar",
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Consolas', monospace",
-      theme: {
-        background: "#0D1117",
-        foreground: "#C9D1D9",
-        cursor: "#3B82F6",
-        selectionBackground: "#3B82F644",
-        black: "#484F58",
-        red: "#DA3633",
-        green: "#238636",
-        yellow: "#D29922",
-        blue: "#58A6FF",
-        magenta: "#BC8CFF",
-        cyan: "#39C5CF",
-        white: "#B1BAC4",
-        brightBlack: "#6E7681",
-        brightRed: "#FF7B72",
-        brightGreen: "#3FB950",
-        brightYellow: "#E3B341",
-        brightBlue: "#79C0FF",
-        brightMagenta: "#D2A8FF",
-        brightCyan: "#56D4DD",
-        brightWhite: "#F0F6FC",
-      },
+      theme: terminalTheme(theme),
       allowProposedApi: true,
       scrollback: 5000,
       cols: 80,
@@ -479,6 +461,10 @@ function TerminalSessionView({
     runQueuedCommands();
   }, [lastTask, runQueuedCommands]);
 
+  useEffect(() => {
+    if (xtermRef.current) xtermRef.current.options.theme = terminalTheme(theme);
+  }, [theme]);
+
   return (
     <div
       ref={containerRef}
@@ -497,6 +483,56 @@ function TerminalSessionView({
       )}
     </div>
   );
+}
+
+function terminalTheme(theme: Theme) {
+  if (theme === "light") {
+    return {
+      background: "#FFFFFF",
+      foreground: "#24292F",
+      cursor: "#0969DA",
+      selectionBackground: "#0969DA33",
+      black: "#24292F",
+      red: "#CF222E",
+      green: "#1A7F37",
+      yellow: "#9A6700",
+      blue: "#0969DA",
+      magenta: "#8250DF",
+      cyan: "#1B7C83",
+      white: "#D0D7DE",
+      brightBlack: "#656D76",
+      brightRed: "#A40E26",
+      brightGreen: "#116329",
+      brightYellow: "#7D4E00",
+      brightBlue: "#0550AE",
+      brightMagenta: "#6639BA",
+      brightCyan: "#0A6268",
+      brightWhite: "#F6F8FA",
+    };
+  }
+
+  return {
+    background: "#0D1117",
+    foreground: "#C9D1D9",
+    cursor: "#3B82F6",
+    selectionBackground: "#3B82F644",
+    black: "#484F58",
+    red: "#DA3633",
+    green: "#238636",
+    yellow: "#D29922",
+    blue: "#58A6FF",
+    magenta: "#BC8CFF",
+    cyan: "#39C5CF",
+    white: "#B1BAC4",
+    brightBlack: "#6E7681",
+    brightRed: "#FF7B72",
+    brightGreen: "#3FB950",
+    brightYellow: "#E3B341",
+    brightBlue: "#79C0FF",
+    brightMagenta: "#D2A8FF",
+    brightCyan: "#56D4DD",
+    brightWhite: "#F0F6FC",
+  };
 }
 
 function createTerminalSession(

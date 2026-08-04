@@ -5,20 +5,20 @@ export default {
     extend: {
       colors: {
         surface: {
-          base: "#0D1117",
-          panel: "#161B22",
-          border: "#30363D",
-          muted: "#8B949E",
-          text: "#E6EDF3",
+          base: "rgb(var(--bg-base-rgb) / <alpha-value>)",
+          panel: "rgb(var(--bg-panel-rgb) / <alpha-value>)",
+          border: "rgb(var(--bg-border-rgb) / <alpha-value>)",
+          muted: "rgb(var(--text-muted-rgb) / <alpha-value>)",
+          text: "rgb(var(--text-primary-rgb) / <alpha-value>)",
         },
         accent: {
-          blue: "#3B82F6",
-          purple: "#8B5CF6",
+          blue: "rgb(var(--accent-blue-rgb) / <alpha-value>)",
+          purple: "rgb(var(--accent-purple-rgb) / <alpha-value>)",
         },
         diff: {
-          add: "#238636",
-          remove: "#DA3633",
-          modify: "#D29922",
+          add: "rgb(var(--diff-add-rgb) / <alpha-value>)",
+          remove: "rgb(var(--diff-remove-rgb) / <alpha-value>)",
+          modify: "rgb(var(--diff-modify-rgb) / <alpha-value>)",
         },
       },
       fontFamily: {

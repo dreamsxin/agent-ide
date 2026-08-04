@@ -1,16 +1,33 @@
+import { useEffect, useState } from "react";
+import {
+  Circle,
+  CircleCheck,
+  CircleSlash,
+  CircleX,
+  LoaderCircle,
+  MoveDown,
+  MoveUp,
+  Play,
+  RefreshCcw,
+  SkipForward,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import type { Step } from "../../types/agent";
 
-const statusConfig: Record<Step["status"], { icon: string; color: string }> = {
-  todo: { icon: "○", color: "text-surface-muted" },
-  doing: { icon: "◉", color: "text-accent-blue" },
-  done: { icon: "●", color: "text-diff-add" },
-  error: { icon: "✕", color: "text-diff-remove" },
-  skipped: { icon: "⊘", color: "text-surface-muted" },
+const statusConfig: Record<
+  Step["status"],
+  { icon: LucideIcon; color: string }
+> = {
+  todo: { icon: Circle, color: "text-surface-muted" },
+  doing: { icon: LoaderCircle, color: "text-accent-blue" },
+  done: { icon: CircleCheck, color: "text-diff-add" },
+  error: { icon: CircleX, color: "text-diff-remove" },
+  skipped: { icon: CircleSlash, color: "text-surface-muted" },
 };
 
-export default function TaskView() {
+export default function TaskView({ embedded = false }: { embedded?: boolean }) {
   const steps = useAgentStore((s) => s.steps);
   const agentState = useAgentStore((s) => s.state);
   const currentTask = useAgentStore((s) => s.currentTask);
@@ -65,7 +82,7 @@ export default function TaskView() {
   };
 
   return (
-    <div className="p-3 space-y-2 animate-fade-in h-full overflow-auto">
+    <div className={`space-y-2 p-3 animate-fade-in ${embedded ? "" : "h-full overflow-auto"}`}>
       {/* 任务标题 + 状态 */}
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-semibold text-surface-text">{title}</span>
@@ -108,6 +125,7 @@ export default function TaskView() {
       {steps.length > 0 ? (
         steps.map((step, index) => {
           const config = statusConfig[step.status];
+          const StatusIcon = config.icon;
           return (
             <div
               key={step.id}
@@ -118,21 +136,15 @@ export default function TaskView() {
               }`}
             >
               <div className="flex items-center gap-2">
-                <span
-                  className={`${config.color} ${
-                    step.status === "doing" ? "animate-pulse-dot" : ""
+                <StatusIcon
+                  aria-hidden="true"
+                  className={`h-3.5 w-3.5 flex-shrink-0 ${config.color} ${
+                    step.status === "doing" ? "animate-spin" : ""
                   }`}
-                >
-                  {config.icon}
-                </span>
-                <input
-                  value={step.title}
-                  onChange={(event) => void updateStepField(step, { title: event.target.value })}
-                  className={`min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 outline-none focus:border-accent-blue focus:bg-surface-base ${
-                    step.status === "done" || step.status === "skipped"
-                      ? "text-surface-muted"
-                      : "text-surface-text"
-                  }`}
+                />
+                <EditableStepTitle
+                  step={step}
+                  onCommit={(title) => updateStepField(step, { title })}
                 />
               </div>
               <div className="grid grid-cols-2 gap-1">
@@ -161,37 +173,45 @@ export default function TaskView() {
                 <button
                   disabled={index === 0 || step.status === "doing"}
                   onClick={() => void moveStep(index, -1)}
-                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded border border-surface-border text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Move step up"
+                  aria-label="Move step up"
                 >
-                  Up
+                  <MoveUp aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
                 <button
                   disabled={index === steps.length - 1 || step.status === "doing"}
                   onClick={() => void moveStep(index, 1)}
-                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded border border-surface-border text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Move step down"
+                  aria-label="Move step down"
                 >
-                  Down
+                  <MoveDown aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
                 <button
                   disabled={!canRun || step.status === "doing"}
                   onClick={() => void runStep(step)}
-                  className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="inline-flex h-7 items-center gap-1 rounded border border-accent-blue/40 px-2 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Run only
+                  <Play aria-hidden="true" className="h-3 w-3" />
+                  Run
                 </button>
                 <button
                   disabled={!canRun || step.status === "doing"}
                   onClick={() => void runStep(step, true)}
-                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="inline-flex h-7 items-center gap-1 rounded border border-surface-border px-2 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Regenerate
+                  <RefreshCcw aria-hidden="true" className="h-3 w-3" />
+                  Retry
                 </button>
                 <button
                   disabled={step.status === "doing" || step.status === "skipped"}
                   onClick={() => void skipAgentStep(step.id)}
-                  className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded border border-surface-border text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Skip step"
+                  aria-label="Skip step"
                 >
-                  Skip
+                  <SkipForward aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
@@ -223,6 +243,48 @@ export default function TaskView() {
         </div>
       )}
     </div>
+  );
+}
+
+function EditableStepTitle({
+  step,
+  onCommit,
+}: {
+  step: Step;
+  onCommit: (title: string) => Promise<void>;
+}) {
+  const [value, setValue] = useState(step.title);
+
+  useEffect(() => setValue(step.title), [step.title]);
+
+  const commit = () => {
+    const next = value.trim();
+    if (!next) {
+      setValue(step.title);
+      return;
+    }
+    if (next !== step.title) void onCommit(next);
+  };
+
+  return (
+    <input
+      value={value}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setValue(step.title);
+          event.currentTarget.blur();
+        }
+      }}
+      aria-label="Step title"
+      className={`min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 outline-none focus:border-accent-blue focus:bg-surface-base ${
+        step.status === "done" || step.status === "skipped"
+          ? "text-surface-muted"
+          : "text-surface-text"
+      }`}
+    />
   );
 }
 

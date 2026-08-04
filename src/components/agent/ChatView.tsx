@@ -10,6 +10,7 @@ import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from
 import type { ProblemEntry } from "../../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../../stores/useTaskStore";
 import type { LogEntry } from "../../types/project";
+import { ArrowUp, Check, CornerDownLeft, RotateCcw, Square } from "lucide-react";
 
 type ChatContextOptions = {
   activeFile: boolean;
@@ -437,7 +438,7 @@ export default function ChatView() {
         {ghostSuggestions.length > 0 && (
           <div className="space-y-1.5 rounded border border-surface-border bg-surface-base/50 p-2 text-xs">
             <div className="text-[10px] font-semibold uppercase tracking-wide text-surface-muted">
-              Ghost Suggestions
+              Suggested next steps
             </div>
             {ghostSuggestions.map((suggestion) => (
               <div
@@ -657,9 +658,10 @@ export default function ChatView() {
             /* 工作中 → 停止按钮 */
             <button
               onClick={handleStop}
-              className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs font-medium transition-colors self-end flex-shrink-0"
+              className="inline-flex h-9 items-center gap-1.5 self-end rounded bg-red-600/70 px-3 text-xs font-medium text-white transition-colors hover:bg-red-600 flex-shrink-0"
             >
-              ■&nbsp;Stop
+              <Square aria-hidden="true" className="h-3 w-3 fill-current" />
+              Stop
             </button>
           ) : agentState === "waiting_user" ? (
             /* 等待用户 → 蓝色继续按钮 */
@@ -667,9 +669,10 @@ export default function ChatView() {
               onClick={handleSend}
               disabled={!input.trim()}
               data-testid="agent-chat-send"
-              className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+              className="inline-flex h-9 items-center gap-1.5 self-end rounded bg-accent-blue px-3 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40 flex-shrink-0"
             >
-              ↩&nbsp;Send
+              <CornerDownLeft aria-hidden="true" className="h-3.5 w-3.5" />
+              Send
             </button>
           ) : agentState === "done" ? (
             /* 完成 → 绿色继续按钮 */
@@ -677,9 +680,10 @@ export default function ChatView() {
               onClick={handleSend}
               disabled={!input.trim()}
               data-testid="agent-chat-send"
-              className="px-3 bg-green-600/70 hover:bg-green-600 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+              className="inline-flex h-9 items-center gap-1.5 self-end rounded bg-green-600/70 px-3 text-xs font-medium text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-40 flex-shrink-0"
             >
-              ✓&nbsp;Continue
+              <Check aria-hidden="true" className="h-3.5 w-3.5" />
+              Continue
             </button>
           ) : agentState === "error" ? (
             /* 出错 → 重试按钮 */
@@ -687,9 +691,10 @@ export default function ChatView() {
               onClick={handleSend}
               disabled={!input.trim()}
               data-testid="agent-chat-send"
-              className="px-3 bg-red-600/70 hover:bg-red-600 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+              className="inline-flex h-9 items-center gap-1.5 self-end rounded bg-red-600/70 px-3 text-xs font-medium text-white transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40 flex-shrink-0"
             >
-              ↻&nbsp;Retry
+              <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+              Retry
             </button>
           ) : (
             /* 空闲 → 发送按钮 */
@@ -697,9 +702,10 @@ export default function ChatView() {
               onClick={handleSend}
               disabled={!input.trim()}
               data-testid="agent-chat-send"
-              className="px-3 bg-accent-blue hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end flex-shrink-0"
+              className="inline-flex h-9 items-center gap-1.5 self-end rounded bg-accent-blue px-3 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40 flex-shrink-0"
             >
-              ↑&nbsp;Send
+              <ArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
+              Send
             </button>
           )}
         </div>

@@ -42,7 +42,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
           const statusColor: Record<string, string> = {
             pending: "bg-surface-border",
             active: "bg-accent-blue animate-pulse",
-            completed: "bg-accent-green",
+            completed: "bg-diff-add",
             failed: "bg-diff-remove",
             paused: "bg-diff-modify",
           };
@@ -66,7 +66,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
                   <div
                     className={`w-0.5 h-6 ${
                       stage.status === "completed"
-                        ? "bg-accent-green"
+                        ? "bg-diff-add"
                         : stage.status === "active"
                           ? "bg-accent-blue/50"
                           : "bg-surface-border"
@@ -83,7 +83,7 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
                       stage.status === "active"
                         ? "text-accent-blue"
                         : stage.status === "completed"
-                          ? "text-accent-green"
+                          ? "text-diff-add"
                           : stage.status === "failed"
                             ? "text-diff-remove"
                             : stage.status === "paused"

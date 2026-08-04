@@ -181,7 +181,7 @@ Click-Element $fix
 Start-Sleep -Seconds 6
 Screenshot "05-agent-ran"
 
-Click-Name "Diff"
+Click-Name "Changes"
 if (-not (Wait-Element "Apply hunk" 30)) {
   Fail "diff" "Diff hunk did not appear"
 }

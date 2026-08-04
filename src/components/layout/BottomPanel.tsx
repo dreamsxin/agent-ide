@@ -1,3 +1,5 @@
+import { CircleAlert, ListTree, ScrollText, SquareTerminal } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import Terminal from "../panels/Terminal";
 import LogView from "../panels/LogView";
@@ -6,11 +8,11 @@ import TasksPanel from "../panels/TasksPanel";
 
 type BottomTab = "terminal" | "commands" | "problems" | "logs";
 
-const tabs: { id: BottomTab; label: string; icon: string; tooltip: string }[] = [
-  { id: "terminal", label: "Terminal", icon: ">", tooltip: "Integrated system terminal" },
-  { id: "commands", label: "Commands", icon: ">", tooltip: "Build, test, run, and debug project commands" },
-  { id: "problems", label: "Problems", icon: "!", tooltip: "Diagnostics, test failures, and Agent findings" },
-  { id: "logs", label: "Logs", icon: "📋", tooltip: "Agent & system operation logs" },
+const tabs: { id: BottomTab; label: string; icon: LucideIcon; tooltip: string }[] = [
+  { id: "terminal", label: "Terminal", icon: SquareTerminal, tooltip: "Integrated system terminal" },
+  { id: "commands", label: "Commands", icon: ListTree, tooltip: "Build, test, run, and debug project commands" },
+  { id: "problems", label: "Problems", icon: CircleAlert, tooltip: "Diagnostics, test failures, and Agent findings" },
+  { id: "logs", label: "Logs", icon: ScrollText, tooltip: "Agent & system operation logs" },
 ];
 
 export default function BottomPanel() {
@@ -18,25 +20,28 @@ export default function BottomPanel() {
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
 
   return (
-    <div data-testid="bottom-panel" className="h-full flex flex-col border-t border-surface-border bg-black">
+    <div data-testid="bottom-panel" className="h-full flex flex-col border-t border-surface-border bg-surface-base">
       {/* Tab 头部 */}
       <div className="flex items-center bg-surface-panel border-b border-surface-border no-select">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setBottomTab(tab.id)}
-            title={tab.tooltip}
-            data-testid={`bottom-tab-${tab.id}`}
-            className={`flex items-center gap-1 px-3 py-1.5 text-[11px] transition-colors ${
-              activeTab === tab.id
-                ? "text-surface-text border-t-2 border-t-accent-blue bg-surface-base"
-                : "text-surface-muted hover:text-surface-text hover:bg-surface-border/20"
-            }`}
-          >
-            <span className="text-[10px]">{tab.icon}</span>
-            <span>{tab.label}</span>
-          </button>
-        ))}
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setBottomTab(tab.id)}
+              title={tab.tooltip}
+              data-testid={`bottom-tab-${tab.id}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] transition-colors ${
+                activeTab === tab.id
+                  ? "text-surface-text border-t-2 border-t-accent-blue bg-surface-base"
+                  : "text-surface-muted hover:text-surface-text hover:bg-surface-border/20"
+              }`}
+            >
+              <Icon aria-hidden="true" className="h-3 w-3" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
         <div className="flex-1" />
       </div>
 

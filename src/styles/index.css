@@ -4,6 +4,7 @@
 
 /* ===== Light Theme ===== */
 :root[data-theme="light"] {
+  color-scheme: light;
   --bg-base: #FFFFFF;
   --bg-panel: #F6F8FA;
   --bg-border: #D0D7DE;
@@ -14,11 +15,23 @@
   --diff-add: #1A7F37;
   --diff-remove: #CF222E;
   --diff-modify: #9A6700;
+  --bg-base-rgb: 255 255 255;
+  --bg-panel-rgb: 246 248 250;
+  --bg-border-rgb: 208 215 222;
+  --text-primary-rgb: 31 35 40;
+  --text-muted-rgb: 87 96 106;
+  --accent-blue-rgb: 9 105 218;
+  --accent-purple-rgb: 130 80 223;
+  --diff-add-rgb: 26 127 55;
+  --diff-remove-rgb: 207 34 46;
+  --diff-modify-rgb: 154 103 0;
+  --code-surface: #F0F3F6;
 }
 
 /* ===== Dark Theme (default) ===== */
 :root,
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg-base: #0D1117;
   --bg-panel: #161B22;
   --bg-border: #30363D;
@@ -29,6 +42,17 @@
   --diff-add: #238636;
   --diff-remove: #DA3633;
   --diff-modify: #D29922;
+  --bg-base-rgb: 13 17 23;
+  --bg-panel-rgb: 22 27 34;
+  --bg-border-rgb: 48 54 61;
+  --text-primary-rgb: 230 237 243;
+  --text-muted-rgb: 139 148 158;
+  --accent-blue-rgb: 59 130 246;
+  --accent-purple-rgb: 139 92 246;
+  --diff-add-rgb: 35 134 54;
+  --diff-remove-rgb: 218 54 51;
+  --diff-modify-rgb: 210 153 34;
+  --code-surface: #0D1117;
 }
 
 /* ---- 全局滚动条 ---- */
@@ -40,7 +64,7 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363D;
+  background: var(--bg-border);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -191,7 +215,7 @@
   width: 6px;
 }
 .xterm-container .xterm-viewport::-webkit-scrollbar-thumb {
-  background: #30363D;
+  background: var(--bg-border);
 }
 
 /* ---- Resize Handle ---- */
@@ -284,7 +308,7 @@
 .markdown-body pre {
   margin: 6px 0;
   padding: 10px 12px;
-  background: rgba(13, 17, 23, 0.85);
+  background: var(--code-surface);
   border: 1px solid var(--bg-border, #30363D);
   border-radius: 6px;
   overflow-x: auto;
@@ -295,7 +319,7 @@
   background: none;
   padding: 0;
   font-size: 11px;
-  color: #E6EDF3;
+  color: var(--text-primary);
   line-height: 1.5;
 }
 /* 行内 code 在 pre 内不受影响 */
@@ -305,7 +329,7 @@
   background: rgba(110, 118, 129, 0.2);
   padding: 1px 5px;
   border-radius: 3px;
-  color: #E6EDF3;
+  color: var(--text-primary);
 }
 
 .markdown-body blockquote {
@@ -325,7 +349,7 @@
 
 .markdown-body strong {
   font-weight: 600;
-  color: #f0f6fc;
+  color: var(--text-primary);
 }
 
 .markdown-body hr {

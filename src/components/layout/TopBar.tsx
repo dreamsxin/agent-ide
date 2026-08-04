@@ -14,6 +14,21 @@ import { isTauriRuntime } from "../../utils/tauri";
 import { getLspStatus, probeLsp, type LspStatusSnapshot } from "../../utils/lspClient";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
+import {
+  Bot,
+  CircleHelp,
+  Command,
+  Copy,
+  Focus,
+  FolderOpen,
+  Minus,
+  Moon,
+  PanelBottom,
+  PanelLeft,
+  Square as SquareIcon,
+  Sun,
+  X,
+} from "lucide-react";
 
 export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
@@ -148,7 +163,7 @@ export default function TopBar() {
           className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs flex-shrink-0"
           title="Open Folder (Ctrl+O)"
         >
-          📂
+          <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <span
           className="text-xs text-surface-muted truncate max-w-[200px]"
@@ -309,10 +324,11 @@ export default function TopBar() {
         {isRunning && (
           <button
             onClick={handleStop}
-            className="px-2.5 py-1 text-xs bg-red-600/70 hover:bg-red-600 text-white rounded transition-colors"
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs bg-red-600/70 hover:bg-red-600 text-white rounded transition-colors"
             title="Stop Agent"
           >
-            ■ Stop
+            <SquareIcon aria-hidden="true" className="h-3 w-3 fill-current" />
+            Stop
           </button>
         )}
 
@@ -324,21 +340,21 @@ export default function TopBar() {
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
           title="Toggle Explorer (Ctrl+Shift+E)"
         >
-          📁
+          <PanelLeft aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={toggleRightPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
           title="Toggle Agent Panel (Ctrl+Shift+X)"
         >
-          🤖
+          <Bot aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={toggleBottomPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
           title="Toggle Terminal (Ctrl+`)"
         >
-          ⬜
+          <PanelBottom aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={toggleFocusMode}
@@ -347,7 +363,7 @@ export default function TopBar() {
           }`}
           title="Focus Mode (Ctrl+Shift+F)"
         >
-          ⊡
+          <Focus aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
 
         <div className="w-px h-4 bg-surface-border" />
@@ -358,7 +374,11 @@ export default function TopBar() {
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
           title={`Switch to ${theme === "dark" ? "Light" : "Dark"} Theme`}
         >
-          {theme === "dark" ? "☀" : "🌙"}
+          {theme === "dark" ? (
+            <Sun aria-hidden="true" className="h-3.5 w-3.5" />
+          ) : (
+            <Moon aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
         </button>
 
         {/* 快捷键帮助 */}
@@ -367,7 +387,7 @@ export default function TopBar() {
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
           title="Command Palette (Ctrl+Shift+P)"
         >
-          ⌘
+          <Command aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
 
         {/* 快捷键帮助 */}
@@ -376,7 +396,7 @@ export default function TopBar() {
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
           title="Keyboard Shortcuts (F1)"
         >
-          ?
+          <CircleHelp aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
 
         {/* 窗口控制按钮 */}
@@ -386,21 +406,25 @@ export default function TopBar() {
             className="w-8 h-8 flex items-center justify-center text-surface-muted hover:text-surface-text hover:bg-surface-border/30 transition-colors text-sm"
             title="Minimize"
           >
-            ─
+            <Minus aria-hidden="true" className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={handleMaximize}
             className="w-8 h-8 flex items-center justify-center text-surface-muted hover:text-surface-text hover:bg-surface-border/30 transition-colors text-sm"
             title={isMaximized ? "Restore" : "Maximize"}
           >
-            {isMaximized ? "❐" : "□"}
+            {isMaximized ? (
+              <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+            ) : (
+              <SquareIcon aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
           </button>
           <button
             onClick={handleClose}
             className="w-8 h-8 flex items-center justify-center text-surface-muted hover:text-white hover:bg-red-600 transition-colors text-sm"
             title="Close"
           >
-            ✕
+            <X aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
       </div>
