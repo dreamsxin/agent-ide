@@ -1,10 +1,13 @@
+import { lazy, Suspense, useEffect, useState } from "react";
 import { CircleAlert, ListTree, ScrollText, SquareTerminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useLayoutStore } from "../../stores/useLayoutStore";
-import Terminal from "../panels/Terminal";
-import LogView from "../panels/LogView";
-import ProblemsPanel from "../panels/ProblemsPanel";
-import TasksPanel from "../panels/TasksPanel";
+import PanelLoading from "../shared/PanelLoading";
+
+const Terminal = lazy(() => import("../panels/Terminal"));
+const LogView = lazy(() => import("../panels/LogView"));
+const ProblemsPanel = lazy(() => import("../panels/ProblemsPanel"));
+const TasksPanel = lazy(() => import("../panels/TasksPanel"));
 
 type BottomTab = "terminal" | "commands" | "problems" | "logs";
 
@@ -18,6 +21,23 @@ const tabs: { id: BottomTab; label: string; icon: LucideIcon; tooltip: string }[
 export default function BottomPanel() {
   const activeTab = useLayoutStore((s) => s.bottomTab);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
+  const [visitedTabs, setVisitedTabs] = useState<Set<BottomTab>>(
+    () => new Set([activeTab])
+  );
+
+  useEffect(() => {
+    setVisitedTabs((current) => {
+      if (current.has(activeTab)) return current;
+      return new Set([...current, activeTab]);
+    });
+  }, [activeTab]);
+
+  const openTab = (tab: BottomTab) => {
+    setVisitedTabs((current) =>
+      current.has(tab) ? current : new Set([...current, tab])
+    );
+    setBottomTab(tab);
+  };
 
   return (
     <div data-testid="bottom-panel" className="h-full flex flex-col border-t border-surface-border bg-surface-base">
@@ -28,7 +48,7 @@ export default function BottomPanel() {
           return (
             <button
               key={tab.id}
-              onClick={() => setBottomTab(tab.id)}
+              onClick={() => openTab(tab.id)}
               title={tab.tooltip}
               data-testid={`bottom-tab-${tab.id}`}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] transition-colors ${
@@ -47,18 +67,34 @@ export default function BottomPanel() {
 
       {/* Tab 内容 */}
       <div className="flex-1 overflow-hidden">
-        <div className={activeTab === "terminal" ? "h-full" : "hidden h-full"}>
-          <Terminal />
-        </div>
-        <div className={activeTab === "commands" ? "h-full" : "hidden h-full"}>
-          <TasksPanel />
-        </div>
-        <div className={activeTab === "problems" ? "h-full" : "hidden h-full"}>
-          <ProblemsPanel />
-        </div>
-        <div className={activeTab === "logs" ? "h-full" : "hidden h-full"}>
-          <LogView />
-        </div>
+        {visitedTabs.has("terminal") && (
+          <div className={activeTab === "terminal" ? "h-full" : "hidden h-full"}>
+            <Suspense fallback={<PanelLoading label="Loading terminal" />}>
+              <Terminal />
+            </Suspense>
+          </div>
+        )}
+        {visitedTabs.has("commands") && (
+          <div className={activeTab === "commands" ? "h-full" : "hidden h-full"}>
+            <Suspense fallback={<PanelLoading label="Loading commands" />}>
+              <TasksPanel />
+            </Suspense>
+          </div>
+        )}
+        {visitedTabs.has("problems") && (
+          <div className={activeTab === "problems" ? "h-full" : "hidden h-full"}>
+            <Suspense fallback={<PanelLoading label="Loading problems" />}>
+              <ProblemsPanel />
+            </Suspense>
+          </div>
+        )}
+        {visitedTabs.has("logs") && (
+          <div className={activeTab === "logs" ? "h-full" : "hidden h-full"}>
+            <Suspense fallback={<PanelLoading label="Loading logs" />}>
+              <LogView />
+            </Suspense>
+          </div>
+        )}
       </div>
     </div>
   );

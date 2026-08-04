@@ -1,10 +1,15 @@
+import { lazy, Suspense } from "react";
+import { FolderTree, GitBranch } from "lucide-react";
 import Explorer from "../panels/Explorer";
-import GitPanel from "../panels/GitPanel";
+import PanelLoading from "../shared/PanelLoading";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import type { LucideIcon } from "lucide-react";
 
-const tabs: { id: "explorer" | "git"; label: string; icon: string; tooltip: string }[] = [
-  { id: "explorer", label: "Explorer", icon: "📁", tooltip: "Browse & manage project files" },
-  { id: "git", label: "Git", icon: "⬢", tooltip: "Version control & changes" },
+const GitPanel = lazy(() => import("../panels/GitPanel"));
+
+const tabs: { id: "explorer" | "git"; label: string; icon: LucideIcon; tooltip: string }[] = [
+  { id: "explorer", label: "Explorer", icon: FolderTree, tooltip: "Browse & manage project files" },
+  { id: "git", label: "Git", icon: GitBranch, tooltip: "Version control & changes" },
 ];
 
 export default function LeftPanel() {
@@ -15,28 +20,36 @@ export default function LeftPanel() {
     <div data-testid="left-panel" className="h-full flex flex-col border-r border-surface-border bg-surface-panel">
       {/* Tab 头部 */}
       <div className="flex border-b border-surface-border no-select">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setLeftTab(tab.id)}
-            title={tab.tooltip}
-            data-testid={`left-tab-${tab.id}`}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] transition-colors ${
-              leftTab === tab.id
-                ? "text-surface-text border-b-2 border-b-accent-blue bg-surface-base/50"
-                : "text-surface-muted hover:text-surface-text hover:bg-surface-border/20"
-            }`}
-          >
-            <span className="text-[10px]">{tab.icon}</span>
-            <span>{tab.label}</span>
-          </button>
-        ))}
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              type="button"
+              key={tab.id}
+              onClick={() => setLeftTab(tab.id)}
+              title={tab.tooltip}
+              data-testid={`left-tab-${tab.id}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] transition-colors ${
+                leftTab === tab.id
+                  ? "text-surface-text border-b-2 border-b-accent-blue bg-surface-base/50"
+                  : "text-surface-muted hover:text-surface-text hover:bg-surface-border/20"
+              }`}
+            >
+              <Icon aria-hidden="true" className="h-3 w-3" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Tab 内容 */}
       <div className="flex-1 overflow-hidden">
         {leftTab === "explorer" && <Explorer />}
-        {leftTab === "git" && <GitPanel />}
+        {leftTab === "git" && (
+          <Suspense fallback={<PanelLoading label="Loading source control" />}>
+            <GitPanel />
+          </Suspense>
+        )}
       </div>
     </div>
   );

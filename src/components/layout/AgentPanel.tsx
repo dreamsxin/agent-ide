@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import {
   FileDiff,
   ListChecks,
@@ -8,14 +8,16 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import AgentRunSummary from "../agent/AgentRunSummary";
-import AgentSelector from "../agent/AgentSelector";
 import ChatView from "../agent/ChatView";
-import DiffView from "../agent/DiffView";
-import SettingsPanel from "../agent/SettingsPanel";
-import TaskPipeline from "../agent/TaskPipeline";
-import TaskView from "../agent/TaskView";
+import PanelLoading from "../shared/PanelLoading";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { summarizeAgentRun } from "../../utils/agentExperience";
+
+const AgentSelector = lazy(() => import("../agent/AgentSelector"));
+const DiffView = lazy(() => import("../agent/DiffView"));
+const SettingsPanel = lazy(() => import("../agent/SettingsPanel"));
+const TaskPipeline = lazy(() => import("../agent/TaskPipeline"));
+const TaskView = lazy(() => import("../agent/TaskView"));
 
 type ViewId = "task" | "plan" | "changes" | "pipeline" | "settings";
 type PrimaryViewId = Extract<ViewId, "task" | "plan" | "changes">;
@@ -118,36 +120,46 @@ export default function AgentPanel() {
           </PrimaryView>
         )}
         {activeView === "plan" && (
-          <PrimaryView
-            onOpenChanges={() => setActiveView("changes")}
-            onOpenPlan={() => setActiveView("plan")}
-          >
-            <div className="h-full overflow-auto">
-              <TaskView embedded />
-              <div className="border-t border-surface-border">
+          <Suspense fallback={<PanelLoading label="Loading task plan" />}>
+            <PrimaryView
+              onOpenChanges={() => setActiveView("changes")}
+              onOpenPlan={() => setActiveView("plan")}
+            >
+              <div className="h-full overflow-auto">
+                <TaskView embedded />
+                <div className="border-t border-surface-border">
+                  <TaskPipeline />
+                </div>
+              </div>
+            </PrimaryView>
+          </Suspense>
+        )}
+        {activeView === "changes" && (
+          <Suspense fallback={<PanelLoading label="Loading changes" />}>
+            <PrimaryView
+              onOpenChanges={() => setActiveView("changes")}
+              onOpenPlan={() => setActiveView("plan")}
+            >
+              <DiffView />
+            </PrimaryView>
+          </Suspense>
+        )}
+        {activeView === "pipeline" && (
+          <Suspense fallback={<PanelLoading label="Loading pipeline" />}>
+            <div className="flex h-full flex-col overflow-auto">
+              <AgentSelector />
+              <div className="border-t border-surface-border" />
+              <div className="flex-1 overflow-auto">
                 <TaskPipeline />
               </div>
             </div>
-          </PrimaryView>
+          </Suspense>
         )}
-        {activeView === "changes" && (
-          <PrimaryView
-            onOpenChanges={() => setActiveView("changes")}
-            onOpenPlan={() => setActiveView("plan")}
-          >
-            <DiffView />
-          </PrimaryView>
+        {activeView === "settings" && (
+          <Suspense fallback={<PanelLoading label="Loading settings" />}>
+            <SettingsPanel />
+          </Suspense>
         )}
-        {activeView === "pipeline" && (
-          <div className="flex h-full flex-col overflow-auto">
-            <AgentSelector />
-            <div className="border-t border-surface-border" />
-            <div className="flex-1 overflow-auto">
-              <TaskPipeline />
-            </div>
-          </div>
-        )}
-        {activeView === "settings" && <SettingsPanel />}
       </div>
     </div>
   );

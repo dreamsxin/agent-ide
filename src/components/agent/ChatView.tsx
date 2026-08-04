@@ -1,16 +1,17 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { lazy, Suspense, useState, useRef, useEffect, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
-import ReactMarkdown from "react-markdown";
 import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
 import type { ProblemEntry } from "../../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../../stores/useTaskStore";
 import type { LogEntry } from "../../types/project";
-import { ArrowUp, Check, CornerDownLeft, RotateCcw, Square } from "lucide-react";
+import { ArrowUp, Check, Copy, CornerDownLeft, RotateCcw, Square } from "lucide-react";
+
+const MarkdownMessage = lazy(() => import("./MarkdownMessage"));
 
 type ChatContextOptions = {
   activeFile: boolean;
@@ -38,33 +39,6 @@ const DEFAULT_CONTEXT_OPTIONS: ChatContextOptions = {
 
 const CONTEXT_OPTIONS_KEY = "agent-ide-chat-context-options";
 
-/** 自动闭合未关闭的代码块，防止整个后缀被渲染为代码 */
-function sanitizeMarkdown(raw: string): string {
-  const lines = raw.split('\n');
-  let inBlock = false;
-  const result: string[] = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('```')) {
-      if (!inBlock) {
-        inBlock = true;
-      } else {
-        inBlock = false;
-      }
-    }
-    result.push(line);
-  }
-
-  // 未闭合的代码块自动补上 ```
-  if (inBlock) {
-    result.push('```');
-  }
-
-  return result.join('\n');
-}
-
-/** 将 markdown 渲染为 HTML，支持流式不完整代码块 */
 /** 各状态对应的 UI 信息 */
 const STATE_INFO: Record<AgentState, { label: string; spinner: boolean }> = {
   idle:         { label: "Ready",         spinner: false },
@@ -120,7 +94,9 @@ function MessageBubble({
         {/* 内容 */}
         {isAgent ? (
           <div className="markdown-body">
-            <ReactMarkdown skipHtml>{sanitizeMarkdown(msg.content)}</ReactMarkdown>
+            <Suspense fallback={<div className="whitespace-pre-wrap">{msg.content}</div>}>
+              <MarkdownMessage content={msg.content} />
+            </Suspense>
           </div>
         ) : (
           <div className="whitespace-pre-wrap">{msg.content}</div>
@@ -136,9 +112,14 @@ function MessageBubble({
           <button
             onClick={handleCopy}
             title="Copy raw content"
+            aria-label={copied ? "Message copied" : "Copy message"}
             className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-surface-border/50 text-surface-muted hover:text-surface-text text-[10px]"
           >
-            {copied ? "✓" : "📋"}
+            {copied ? (
+              <Check aria-hidden="true" className="h-3.5 w-3.5" />
+            ) : (
+              <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
           </button>
         )}
       </div>

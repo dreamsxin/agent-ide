@@ -1,8 +1,7 @@
-import { useCallback, useRef, useState, useEffect } from "react";
+import { lazy, Suspense, useCallback, useRef, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
-import EditorContainer from "./components/editor/EditorContainer";
 import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
 import ResizeHandle from "./components/layout/ResizeHandle";
@@ -10,6 +9,7 @@ import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import CommandPalette, { usePaletteCommands } from "./components/shared/CommandPalette";
 import ConfirmDialog from "./components/agent/ConfirmDialog";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
+import PanelLoading from "./components/shared/PanelLoading";
 import { useLayoutStore } from "./stores/useLayoutStore";
 import { useEditorStore } from "./stores/useEditorStore";
 import { useLogStore } from "./stores/useLogStore";
@@ -19,6 +19,8 @@ import useShortcuts from "./hooks/useShortcuts";
 import { useProjectTasks } from "./hooks/useProjectTasks";
 import { useRunProjectTask } from "./hooks/useRunProjectTask";
 import { isTauriRuntime } from "./utils/tauri";
+
+const EditorContainer = lazy(() => import("./components/editor/EditorContainer"));
 
 function AnimatedPanel({
   visible,
@@ -189,7 +191,9 @@ export default function App() {
 
         <div className="flex-1 min-w-0">
           <ErrorBoundary fallbackTitle="Editor failed to render">
-            <EditorContainer />
+            <Suspense fallback={<PanelLoading label="Loading editor" />}>
+              <EditorContainer />
+            </Suspense>
           </ErrorBoundary>
         </div>
 
