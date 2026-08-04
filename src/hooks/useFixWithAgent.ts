@@ -20,6 +20,7 @@ export function useFixWithAgent() {
   const selectedText = useEditorStore((s) => s.selectedText);
   const rightVisible = useLayoutStore((s) => s.rightVisible);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
+  const setAgentView = useLayoutStore((s) => s.setAgentView);
 
   const isAgentBusy =
     agentState !== "idle" &&
@@ -30,6 +31,7 @@ export function useFixWithAgent() {
   const sendFixPrompt = useCallback(
     async (prompt: string) => {
       if (isAgentBusy) return;
+      setAgentView("task");
       if (!rightVisible) {
         toggleRightPanel();
       }
@@ -57,6 +59,7 @@ export function useFixWithAgent() {
       fileContents,
       isAgentBusy,
       rightVisible,
+      setAgentView,
       selectedText,
       sendPrompt,
       toggleRightPanel,

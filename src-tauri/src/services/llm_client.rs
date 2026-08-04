@@ -34,10 +34,15 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
-        Self {
-            config,
-            client: Client::new(),
-        }
+        let client = if config.provider.eq_ignore_ascii_case("deepseek") {
+            Client::builder()
+                .http1_only()
+                .build()
+                .unwrap_or_else(|_| Client::new())
+        } else {
+            Client::new()
+        };
+        Self { config, client }
     }
 
     /// 流式 Chat 请求，通过 mpsc::Sender 发送每个 token
@@ -51,35 +56,23 @@ impl LlmClient {
             return stream_mock_chat(messages, cancel_flag, tx).await;
         }
 
-        let url = format!("{}/chat/completions", self.config.endpoint);
-        let body = build_chat_request(&self.config, messages);
+        if prefers_non_streaming(&self.config) {
+            return self.complete_chat(messages, cancel_flag, tx).await;
+        }
+
+        let url = format!(
+            "{}/chat/completions",
+            self.config.endpoint.trim_end_matches('/')
+        );
+        let body = build_chat_request(&self.config, messages, true);
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
         }
 
-        let request = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send();
-
-        let response = tokio::select! {
-            _ = wait_for_cancel(cancel_flag.clone()) => {
-                return Err("Agent task cancelled".to_string());
-            }
-            result = request => {
-                result.map_err(|e| format!("LLM request failed: {}", e))?
-            }
-        };
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(format!("LLM API error {}: {}", status, text));
-        }
+        let response = self
+            .send_chat_request(&url, &body, cancel_flag.clone())
+            .await?;
 
         let mut full_response = String::new();
         let mut stream = response.bytes_stream();
@@ -156,6 +149,113 @@ impl LlmClient {
         }
 
         Ok(full_response)
+    }
+
+    async fn complete_chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        cancel_flag: Arc<AtomicBool>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<String, String> {
+        let url = format!(
+            "{}/chat/completions",
+            self.config.endpoint.trim_end_matches('/')
+        );
+        let body = build_chat_request(&self.config, messages, false);
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err("Agent task cancelled".to_string());
+        }
+
+        let response = self
+            .send_chat_request(&url, &body, cancel_flag.clone())
+            .await?;
+
+        #[derive(Deserialize)]
+        struct CompletionResponse {
+            choices: Vec<CompletionChoice>,
+        }
+
+        #[derive(Deserialize)]
+        struct CompletionChoice {
+            message: CompletionMessage,
+        }
+
+        #[derive(Deserialize)]
+        struct CompletionMessage {
+            content: Option<String>,
+        }
+
+        let decode = response.json::<CompletionResponse>();
+        let payload = tokio::select! {
+            _ = wait_for_cancel(cancel_flag.clone()) => {
+                return Err("Agent task cancelled".to_string());
+            }
+            result = decode => {
+                result.map_err(|error| format!("LLM response decode failed: {}", error))?
+            }
+        };
+        let content = payload
+            .choices
+            .into_iter()
+            .find_map(|choice| choice.message.content)
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| "LLM response did not contain message content".to_string())?;
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err("Agent task cancelled".to_string());
+        }
+        let _ = tx.send(content.clone()).await;
+        Ok(content)
+    }
+
+    async fn send_chat_request(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<reqwest::Response, String> {
+        const MAX_ATTEMPTS: usize = 3;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let request = self
+                .client
+                .post(url)
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send();
+
+            let response = tokio::select! {
+                _ = wait_for_cancel(cancel_flag.clone()) => {
+                    return Err("Agent task cancelled".to_string());
+                }
+                result = request => {
+                    result.map_err(|error| format!("LLM request failed: {}", error))?
+                }
+            };
+
+            if response.status().is_success() {
+                return Ok(response);
+            }
+
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let retryable = is_retryable_status(status);
+            if !retryable || attempt + 1 == MAX_ATTEMPTS {
+                return Err(format!("LLM API error {}: {}", status, text));
+            }
+
+            let delay = tokio::time::Duration::from_millis(500 * (attempt as u64 + 1));
+            tokio::select! {
+                _ = wait_for_cancel(cancel_flag.clone()) => {
+                    return Err("Agent task cancelled".to_string());
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        Err("LLM request failed after retries".to_string())
     }
 }
 
@@ -260,11 +360,15 @@ async fn wait_for_cancel(cancel_flag: Arc<AtomicBool>) {
     }
 }
 
-fn build_chat_request(config: &LlmConfig, messages: Vec<ChatMessage>) -> serde_json::Value {
+fn build_chat_request(
+    config: &LlmConfig,
+    messages: Vec<ChatMessage>,
+    stream: bool,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": messages,
-        "stream": true,
+        "stream": stream,
     });
 
     if let Some(object) = body.as_object_mut() {
@@ -278,6 +382,15 @@ fn build_chat_request(config: &LlmConfig, messages: Vec<ChatMessage>) -> serde_j
         }
     }
     body
+}
+
+fn prefers_non_streaming(config: &LlmConfig) -> bool {
+    config.provider.eq_ignore_ascii_case("deepseek")
+        && config.model.eq_ignore_ascii_case("deepseek-v4-flash")
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 503)
 }
 
 fn native_tools_schema() -> serde_json::Value {
@@ -375,7 +488,7 @@ mod tests {
 
     #[test]
     fn chat_request_omits_output_limit_when_unset() {
-        let body = build_chat_request(&config("openai", "gpt-4o", None), Vec::new());
+        let body = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), true);
 
         assert_eq!(body["stream"], true);
         assert!(body.get("max_tokens").is_none());
@@ -384,7 +497,11 @@ mod tests {
 
     #[test]
     fn chat_request_maps_output_limit_for_openai_compatible_models() {
-        let body = build_chat_request(&config("deepseek", "deepseek-chat", Some(2048)), Vec::new());
+        let body = build_chat_request(
+            &config("deepseek", "deepseek-chat", Some(2048)),
+            Vec::new(),
+            true,
+        );
 
         assert_eq!(body["max_tokens"], 2048);
         assert!(body.get("max_completion_tokens").is_none());
@@ -392,7 +509,7 @@ mod tests {
 
     #[test]
     fn chat_request_maps_output_limit_for_openai_reasoning_models() {
-        let body = build_chat_request(&config("openai", "gpt-5", Some(8192)), Vec::new());
+        let body = build_chat_request(&config("openai", "gpt-5", Some(8192)), Vec::new(), true);
 
         assert_eq!(body["max_completion_tokens"], 8192);
         assert!(body.get("max_tokens").is_none());
@@ -403,11 +520,63 @@ mod tests {
         let mut cfg = config("openai", "gpt-4o", Some(1024));
         cfg.tool_call_mode = "native_tools".to_string();
 
-        let body = build_chat_request(&cfg, Vec::new());
+        let body = build_chat_request(&cfg, Vec::new(), true);
 
         assert_eq!(body["tool_choice"], "auto");
         assert!(body["tools"]
             .as_array()
             .is_some_and(|items| items.len() == 2));
+    }
+
+    #[test]
+    fn deepseek_v4_flash_uses_non_streaming_requests() {
+        let cfg = config("deepseek", "deepseek-v4-flash", Some(64));
+        let body = build_chat_request(&cfg, Vec::new(), false);
+
+        assert!(prefers_non_streaming(&cfg));
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn retries_only_transient_llm_statuses() {
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DEEPSEEK_TEST_KEY and network access"]
+    async fn deepseek_v4_flash_live_smoke() {
+        let api_key = std::env::var("DEEPSEEK_TEST_KEY")
+            .expect("DEEPSEEK_TEST_KEY is required for the live smoke test");
+        let client = LlmClient::new(LlmConfig {
+            endpoint: "https://api.deepseek.com".to_string(),
+            api_key,
+            model: "deepseek-v4-flash".to_string(),
+            provider: "deepseek".to_string(),
+            max_output_tokens: Some(64),
+            tool_call_mode: "text_protocol".to_string(),
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let response = tokio::time::timeout(
+            tokio::time::Duration::from_secs(60),
+            client.stream_chat(
+                vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: "Reply with exactly AGENT_IDE_OK".to_string(),
+                }],
+                Arc::new(AtomicBool::new(false)),
+                tx,
+            ),
+        )
+        .await
+        .expect("DeepSeek request timed out")
+        .expect("DeepSeek request failed");
+
+        assert!(!response.trim().is_empty());
+        assert_eq!(rx.recv().await.as_deref(), Some(response.as_str()));
     }
 }

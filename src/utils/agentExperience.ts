@@ -9,8 +9,10 @@ const REVIEWABLE_DIFF_STATUSES = new Set<DiffEntry["status"]>([
 export interface AgentRunSummary {
   activeStep: Step | null;
   completedSteps: number;
+  nextStep: Step | null;
   pendingChanges: number;
   progressPercent: number;
+  reviewRequired: boolean;
   totalSteps: number;
 }
 
@@ -19,12 +21,22 @@ export function summarizeAgentRun(steps: Step[], diffs: DiffEntry[]): AgentRunSu
     (step) => step.status === "done" || step.status === "skipped"
   ).length;
   const totalSteps = steps.length;
+  const activeStep = steps.find((step) => step.status === "doing") ?? null;
+  const pendingChanges = diffs.filter((diff) =>
+    REVIEWABLE_DIFF_STATUSES.has(diff.status)
+  ).length;
 
   return {
-    activeStep: steps.find((step) => step.status === "doing") ?? null,
+    activeStep,
     completedSteps,
-    pendingChanges: diffs.filter((diff) => REVIEWABLE_DIFF_STATUSES.has(diff.status)).length,
+    nextStep:
+      activeStep ??
+      steps.find((step) => step.status === "error") ??
+      steps.find((step) => step.status === "todo") ??
+      null,
+    pendingChanges,
     progressPercent: totalSteps === 0 ? 0 : Math.round((completedSteps / totalSteps) * 100),
+    reviewRequired: pendingChanges > 0,
     totalSteps,
   };
 }

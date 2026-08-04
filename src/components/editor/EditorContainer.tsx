@@ -396,6 +396,7 @@ export default function EditorContainer() {
         const selectedText = model.getValueInRange(selection);
         if (!selectedText) return;
 
+        useLayoutStore.getState().setAgentView("task");
         if (!rightVisible) toggleRightPanel();
 
         const prompt = buildActionPrompt(

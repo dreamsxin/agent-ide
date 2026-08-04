@@ -39,6 +39,7 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
   const mode = useAgentStore((store) => store.mode);
   const summary = summarizeAgentRun(steps, diffs);
   const StatusIcon = statusIcon(state);
+  const detail = runDetail(state, summary, ideMode, mode);
 
   return (
     <section
@@ -63,12 +64,13 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
             </span>
           </div>
           <div className="mt-0.5 truncate text-[10px] text-surface-muted">
-            {summary.activeStep?.title || `${ideMode} mode · ${mode} permissions`}
+            {detail}
           </div>
         </div>
         <button
           type="button"
           onClick={onOpenPlan}
+          aria-label={`Open task plan, ${summary.completedSteps} of ${summary.totalSteps} steps complete`}
           className="inline-flex h-7 items-center gap-1 rounded border border-surface-border px-1.5 text-[10px] text-surface-muted transition-colors hover:bg-surface-border/30 hover:text-surface-text"
           title="Open task plan"
         >
@@ -78,6 +80,11 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
         <button
           type="button"
           onClick={onOpenChanges}
+          aria-label={
+            summary.reviewRequired
+              ? `Review ${summary.pendingChanges} proposed changes`
+              : "Open proposed changes"
+          }
           className={`inline-flex h-7 items-center gap-1 rounded border px-1.5 text-[10px] transition-colors ${
             summary.pendingChanges > 0
               ? "border-diff-modify/50 bg-diff-modify/10 text-diff-modify hover:bg-diff-modify/20"
@@ -86,7 +93,7 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
           title="Review proposed changes"
         >
           <FileDiff aria-hidden="true" className="h-3.5 w-3.5" />
-          <span>{summary.pendingChanges}</span>
+          <span>{summary.reviewRequired ? `Review ${summary.pendingChanges}` : "0"}</span>
         </button>
       </div>
       {summary.totalSteps > 0 && (
@@ -99,6 +106,21 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
       )}
     </section>
   );
+}
+
+function runDetail(
+  state: AgentState,
+  summary: ReturnType<typeof summarizeAgentRun>,
+  ideMode: string,
+  mode: string
+) {
+  if (summary.reviewRequired) {
+    return `${summary.pendingChanges} change${summary.pendingChanges === 1 ? "" : "s"} ready for review`;
+  }
+  if (state === "waiting_user") return "Input required in the conversation";
+  if (summary.activeStep) return `Now: ${summary.activeStep.title}`;
+  if (summary.nextStep) return `Next: ${summary.nextStep.title}`;
+  return `${ideMode} mode · ${mode} permissions`;
 }
 
 function statusIcon(state: AgentState) {

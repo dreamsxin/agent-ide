@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, type ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import {
   FileDiff,
   ListChecks,
@@ -11,6 +11,7 @@ import AgentRunSummary from "../agent/AgentRunSummary";
 import ChatView from "../agent/ChatView";
 import PanelLoading from "../shared/PanelLoading";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useLayoutStore, type AgentViewId } from "../../stores/useLayoutStore";
 import { summarizeAgentRun } from "../../utils/agentExperience";
 
 const AgentSelector = lazy(() => import("../agent/AgentSelector"));
@@ -19,8 +20,7 @@ const SettingsPanel = lazy(() => import("../agent/SettingsPanel"));
 const TaskPipeline = lazy(() => import("../agent/TaskPipeline"));
 const TaskView = lazy(() => import("../agent/TaskView"));
 
-type ViewId = "task" | "plan" | "changes" | "pipeline" | "settings";
-type PrimaryViewId = Extract<ViewId, "task" | "plan" | "changes">;
+type PrimaryViewId = Extract<AgentViewId, "task" | "plan" | "changes">;
 
 const primaryViews: Array<{
   id: PrimaryViewId;
@@ -34,7 +34,8 @@ const primaryViews: Array<{
 ];
 
 export default function AgentPanel() {
-  const [activeView, setActiveView] = useState<ViewId>("task");
+  const activeView = useLayoutStore((store) => store.agentView);
+  const setActiveView = useLayoutStore((store) => store.setAgentView);
   const steps = useAgentStore((store) => store.steps);
   const diffs = useAgentStore((store) => store.diffs);
   const summary = summarizeAgentRun(steps, diffs);

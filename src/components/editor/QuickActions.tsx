@@ -22,6 +22,7 @@ export default function QuickActions() {
   const agentState = useAgentStore((s) => s.state);
   const rightVisible = useLayoutStore((s) => s.rightVisible);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
+  const setAgentView = useLayoutStore((s) => s.setAgentView);
   const { editor, monaco } = useMonacoContext();
 
   // Calculate toolbar pixel position
@@ -49,6 +50,7 @@ export default function QuickActions() {
 
   const runQuickAction = async (action: AgentQuickActionKey) => {
     if (!selectedText || isAgentBusy) return;
+    setAgentView("task");
     if (!rightVisible) {
       toggleRightPanel();
     }

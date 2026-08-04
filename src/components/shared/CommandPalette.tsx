@@ -136,6 +136,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const setLeftTab = useLayoutStore((s) => s.setLeftTab);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
+  const setAgentView = useLayoutStore((s) => s.setAgentView);
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
@@ -175,6 +176,30 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       panelCommand("panel.agent", "Show Agent", "Navigation", () => {
         if (!rightVisible) toggleRightPanel();
       }),
+      agentViewCommand(
+        "panel.agent.task",
+        "Open Agent Task",
+        "task",
+        setAgentView,
+        rightVisible,
+        toggleRightPanel
+      ),
+      agentViewCommand(
+        "panel.agent.plan",
+        "Open Agent Plan",
+        "plan",
+        setAgentView,
+        rightVisible,
+        toggleRightPanel
+      ),
+      agentViewCommand(
+        "panel.agent.changes",
+        "Review Agent Changes",
+        "changes",
+        setAgentView,
+        rightVisible,
+        toggleRightPanel
+      ),
       panelCommand("panel.terminal", "Show Terminal", "Navigation", () => {
         setBottomTab("terminal");
         if (!bottomVisible) toggleBottomPanel();
@@ -236,6 +261,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     rightVisible,
     runProjectTask,
     setBottomTab,
+    setAgentView,
     setLeftTab,
     setWorkspacePath,
     stopAgent,
@@ -250,6 +276,25 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
 
 function panelCommand(id: string, title: string, group: string, run: () => void): PaletteCommand {
   return { id, title, group, run };
+}
+
+function agentViewCommand(
+  id: string,
+  title: string,
+  view: "task" | "plan" | "changes",
+  setAgentView: (view: "task" | "plan" | "changes" | "pipeline" | "settings") => void,
+  rightVisible: boolean,
+  toggleRightPanel: () => void
+): PaletteCommand {
+  return {
+    id,
+    title,
+    group: "Agent",
+    run: () => {
+      setAgentView(view);
+      if (!rightVisible) toggleRightPanel();
+    },
+  };
 }
 
 function agentModeCommand(

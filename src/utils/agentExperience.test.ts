@@ -29,16 +29,29 @@ describe("agent experience helpers", () => {
     expect(summary.progressPercent).toBe(67);
     expect(summary.pendingChanges).toBe(2);
     expect(summary.activeStep?.id).toBe("two");
+    expect(summary.nextStep?.id).toBe("two");
+    expect(summary.reviewRequired).toBe(true);
   });
 
   it("keeps empty runs at zero progress", () => {
     expect(summarizeAgentRun([], [])).toEqual({
       activeStep: null,
       completedSteps: 0,
+      nextStep: null,
       pendingChanges: 0,
       progressPercent: 0,
+      reviewRequired: false,
       totalSteps: 0,
     });
+  });
+
+  it("prioritizes failed work before the next todo step", () => {
+    const summary = summarizeAgentRun(
+      [step("done", "done"), step("later", "todo"), step("failed", "error")],
+      []
+    );
+
+    expect(summary.nextStep?.id).toBe("failed");
   });
 
   it("uses task-oriented state labels", () => {

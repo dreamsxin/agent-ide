@@ -1395,7 +1395,8 @@ pub async fn test_llm_connection(
         Ok(response) => {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let full = handle.await.unwrap_or(response);
-            Ok(format!("OK - {}", &full[..full.len().min(120)]))
+            let preview: String = full.chars().take(120).collect();
+            Ok(format!("OK - {}", preview))
         }
         Err(e) => Err(format!("Connection failed: {}", e)),
     }

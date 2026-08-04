@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+export type AgentViewId = "task" | "plan" | "changes" | "pipeline" | "settings";
+
 interface LayoutStore {
   // 面板尺寸
   leftWidth: number;
@@ -20,6 +22,9 @@ interface LayoutStore {
   // 当前底部面板标签
   bottomTab: "terminal" | "commands" | "problems" | "logs";
 
+  // Agent 面板当前视图
+  agentView: AgentViewId;
+
   // workspacePath
   workspacePath: string;
 
@@ -33,6 +38,7 @@ interface LayoutStore {
   toggleFocusMode: () => void;
   setLeftTab: (tab: LayoutStore["leftTab"]) => void;
   setBottomTab: (tab: LayoutStore["bottomTab"]) => void;
+  setAgentView: (view: AgentViewId) => void;
   setWorkspacePath: (path: string) => void;
 }
 
@@ -46,6 +52,7 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
   focusMode: false,
   leftTab: "explorer",
   bottomTab: "terminal",
+  agentView: "task",
   workspacePath: "",
 
   setLeftWidth: (w) => set({ leftWidth: Math.max(180, Math.min(500, w)) }),
@@ -63,5 +70,6 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
     }),
   setLeftTab: (leftTab) => set({ leftTab }),
   setBottomTab: (bottomTab) => set({ bottomTab }),
+  setAgentView: (agentView) => set({ agentView }),
   setWorkspacePath: (workspacePath) => set({ workspacePath }),
 }));
