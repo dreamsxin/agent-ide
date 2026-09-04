@@ -1,6 +1,6 @@
 use crate::services::context::{ContextBudget, ContextCompressionMode};
 use crate::services::credentials;
-use crate::services::llm_client::LlmConfig;
+use crate::services::llm_client::{LlmConfig, LocalModelConfig, ModelType};
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,28 @@ pub struct LlmProfile {
     pub max_output_tokens: Option<u32>,
     #[serde(default = "default_tool_call_mode", rename = "toolCallMode")]
     pub tool_call_mode: String,
+    #[serde(default, rename = "modelType")]
+    pub model_type: Option<String>,
+    #[serde(default, rename = "modelPath")]
+    pub model_path: Option<String>,
+    #[serde(default, rename = "modelFile")]
+    pub model_file: Option<String>,
+    #[serde(default, rename = "nThreads")]
+    pub n_threads: Option<i32>,
+    #[serde(default, rename = "nCtx")]
+    pub n_ctx: Option<u32>,
+    #[serde(default, rename = "nGpuLayers")]
+    pub n_gpu_layers: Option<i32>,
+    #[serde(default, rename = "nBatch")]
+    pub n_batch: Option<i32>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default, rename = "topP")]
+    pub top_p: Option<f32>,
+    #[serde(default, rename = "topK")]
+    pub top_k: Option<i32>,
+    #[serde(default, rename = "maxTokens")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +74,27 @@ pub struct LlmProfileResponse {
     pub effective_input_tokens: Option<u32>,
     #[serde(rename = "toolCallMode")]
     pub tool_call_mode: String,
+    #[serde(rename = "modelType")]
+    pub model_type: Option<String>,
+    #[serde(rename = "modelPath")]
+    pub model_path: Option<String>,
+    #[serde(rename = "modelFile")]
+    pub model_file: Option<String>,
+    #[serde(rename = "nThreads")]
+    pub n_threads: Option<i32>,
+    #[serde(rename = "nCtx")]
+    pub n_ctx: Option<u32>,
+    #[serde(rename = "nGpuLayers")]
+    pub n_gpu_layers: Option<i32>,
+    #[serde(rename = "nBatch")]
+    pub n_batch: Option<i32>,
+    pub temperature: Option<f32>,
+    #[serde(rename = "topP")]
+    pub top_p: Option<f32>,
+    #[serde(rename = "topK")]
+    pub top_k: Option<i32>,
+    #[serde(rename = "maxTokens")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,17 +123,73 @@ pub struct SaveLlmProfileRequest {
     pub tool_call_mode: Option<String>,
     #[serde(rename = "setActive")]
     pub set_active: Option<bool>,
+    #[serde(rename = "modelType")]
+    pub model_type: Option<String>,
+    #[serde(rename = "modelPath")]
+    pub model_path: Option<String>,
+    #[serde(rename = "modelFile")]
+    pub model_file: Option<String>,
+    #[serde(rename = "nThreads")]
+    pub n_threads: Option<i32>,
+    #[serde(rename = "nCtx")]
+    pub n_ctx: Option<u32>,
+    #[serde(rename = "nGpuLayers")]
+    pub n_gpu_layers: Option<i32>,
+    #[serde(rename = "nBatch")]
+    pub n_batch: Option<i32>,
+    pub temperature: Option<f32>,
+    #[serde(rename = "topP")]
+    pub top_p: Option<f32>,
+    #[serde(rename = "topK")]
+    pub top_k: Option<i32>,
+    #[serde(rename = "maxTokens")]
+    pub max_tokens: Option<u32>,
 }
 
 impl LlmProfile {
     pub fn to_config(&self) -> Result<LlmConfig, String> {
+        let model_type = self
+            .model_type
+            .as_deref()
+            .map(ModelType::from_string)
+            .unwrap_or_else(|| ModelType::from_string(&self.model));
+        let is_local = self.provider.eq_ignore_ascii_case("local") || model_type.is_local();
+        let local_model_config = if is_local {
+            Some(LocalModelConfig {
+                name: self.model.clone(),
+                model_type: model_type.clone(),
+                model_path: self
+                    .model_path
+                    .clone()
+                    .or_else(|| model_type.default_model_path())
+                    .unwrap_or_default(),
+                model_file: self.model_file.clone().unwrap_or_default(),
+                enabled: true,
+                n_threads: self.n_threads.unwrap_or(4),
+                n_ctx: self.n_ctx.unwrap_or(4096),
+                n_gpu_layers: self.n_gpu_layers.unwrap_or(0),
+                n_batch: self.n_batch.unwrap_or(512),
+                temperature: self.temperature.unwrap_or(0.2),
+                top_p: self.top_p.unwrap_or(0.9),
+                top_k: self.top_k.unwrap_or(40),
+                max_tokens: self.max_tokens.or(self.max_output_tokens).unwrap_or(512),
+            })
+        } else {
+            None
+        };
         Ok(LlmConfig {
             endpoint: self.endpoint.clone(),
-            api_key: self.api_key()?,
+            api_key: if is_local {
+                String::new()
+            } else {
+                self.api_key()?
+            },
             model: self.model.clone(),
             provider: self.provider.clone(),
             max_output_tokens: self.max_output_tokens,
             tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
+            model_type,
+            local_model_config,
         })
     }
 
@@ -107,6 +206,17 @@ impl LlmProfile {
             max_output_tokens: self.max_output_tokens,
             effective_input_tokens: self.effective_input_tokens(),
             tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
+            model_type: self.model_type.clone(),
+            model_path: self.model_path.clone(),
+            model_file: self.model_file.clone(),
+            n_threads: self.n_threads,
+            n_ctx: self.n_ctx,
+            n_gpu_layers: self.n_gpu_layers,
+            n_batch: self.n_batch,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            top_k: self.top_k,
+            max_tokens: self.max_tokens,
         }
     }
 
@@ -193,6 +303,17 @@ fn default_config_from_env() -> LlmProfilesConfig {
             reserved_output_tokens: None,
             max_output_tokens: None,
             tool_call_mode: default_tool_call_mode(),
+            model_type: None,
+            model_path: None,
+            model_file: None,
+            n_threads: None,
+            n_ctx: None,
+            n_gpu_layers: None,
+            n_batch: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
         }],
         active_profile_id: DEFAULT_PROFILE_ID.to_string(),
         context_compression: mode,
@@ -250,6 +371,17 @@ fn parse_llm_profiles_config_with_migration(
         reserved_output_tokens: None,
         max_output_tokens: None,
         tool_call_mode: default_tool_call_mode(),
+        model_type: None,
+        model_path: None,
+        model_file: None,
+        n_threads: None,
+        n_ctx: None,
+        n_gpu_layers: None,
+        n_batch: None,
+        temperature: None,
+        top_p: None,
+        top_k: None,
+        max_tokens: None,
     }]);
     Some((
         LlmProfilesConfig {
@@ -337,6 +469,17 @@ pub fn update_default_profile(
         reserved_output_tokens: None,
         max_output_tokens: None,
         tool_call_mode: default_tool_call_mode(),
+        model_type: None,
+        model_path: None,
+        model_file: None,
+        n_threads: None,
+        n_ctx: None,
+        n_gpu_layers: None,
+        n_batch: None,
+        temperature: None,
+        top_p: None,
+        top_k: None,
+        max_tokens: None,
     };
     credentials::store_secret(
         &credentials::llm_credential_ref(DEFAULT_PROFILE_ID),
@@ -353,11 +496,18 @@ pub fn save_profile(
     config: &mut LlmProfilesConfig,
     request: SaveLlmProfileRequest,
 ) -> Result<LlmProfilesResponse, String> {
-    if request.name.trim().is_empty()
-        || request.endpoint.trim().is_empty()
-        || request.model.trim().is_empty()
-    {
-        return Err("Profile name, endpoint, and model are required".to_string());
+    if request.name.trim().is_empty() || request.model.trim().is_empty() {
+        return Err("Profile name and model are required".to_string());
+    }
+    let is_local = request.provider.eq_ignore_ascii_case("local")
+        || request
+            .model_type
+            .as_deref()
+            .map(ModelType::from_string)
+            .map(|model_type| model_type.is_local())
+            .unwrap_or(false);
+    if !is_local && request.endpoint.trim().is_empty() {
+        return Err("Endpoint is required for cloud profiles".to_string());
     }
     let id = request
         .id
@@ -376,7 +526,8 @@ pub fn save_profile(
         .api_key
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_default();
-    if api_key.trim().is_empty()
+    if !is_local
+        && api_key.trim().is_empty()
         && existing_profile
             .as_ref()
             .and_then(|profile| profile.credential_ref.as_ref())
@@ -392,7 +543,7 @@ pub fn save_profile(
         name: request.name.trim().to_string(),
         provider: request.provider.trim().to_string(),
         endpoint: request.endpoint.trim().to_string(),
-        credential_ref: Some(credential_ref),
+        credential_ref: if is_local { None } else { Some(credential_ref) },
         api_key: String::new(),
         model: request.model.trim().to_string(),
         max_context_tokens: request.max_context_tokens,
@@ -402,7 +553,32 @@ pub fn save_profile(
             .tool_call_mode
             .as_deref()
             .map(normalized_tool_call_mode)
-            .unwrap_or_else(default_tool_call_mode),
+            .unwrap_or_else(|| {
+                if is_local {
+                    "text_protocol".to_string()
+                } else {
+                    default_tool_call_mode()
+                }
+            }),
+        model_type: if is_local {
+            Some(
+                request
+                    .model_type
+                    .unwrap_or_else(|| ModelType::from_string(&request.model).to_string()),
+            )
+        } else {
+            None
+        },
+        model_path: request.model_path,
+        model_file: request.model_file,
+        n_threads: request.n_threads,
+        n_ctx: request.n_ctx,
+        n_gpu_layers: request.n_gpu_layers,
+        n_batch: request.n_batch,
+        temperature: request.temperature,
+        top_p: request.top_p,
+        top_k: request.top_k,
+        max_tokens: request.max_tokens,
     };
     upsert_profile(&mut config.profiles, profile);
     if request.set_active.unwrap_or(true) {
@@ -559,6 +735,17 @@ mod tests {
             reserved_output_tokens: Some(4096),
             max_output_tokens: Some(4096),
             tool_call_mode: "native_tools".to_string(),
+            model_type: None,
+            model_path: None,
+            model_file: None,
+            n_threads: None,
+            n_ctx: None,
+            n_gpu_layers: None,
+            n_batch: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
         };
 
         assert_eq!(profile.to_response().api_key_masked, "sk-1****7890");
@@ -580,6 +767,17 @@ mod tests {
             reserved_output_tokens: None,
             max_output_tokens: None,
             tool_call_mode: default_tool_call_mode(),
+            model_type: None,
+            model_path: None,
+            model_file: None,
+            n_threads: None,
+            n_ctx: None,
+            n_gpu_layers: None,
+            n_batch: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
         };
 
         let serialized = serde_json::to_value(&profile).expect("serialize profile");

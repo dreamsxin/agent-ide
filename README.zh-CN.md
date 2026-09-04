@@ -14,6 +14,7 @@ Phase 7 已完成功能收口。Phase 8 正在推进“可稳定替代 IDE 日�
 
 - 桌面 IDE 壳：Monaco 编辑器、Explorer、Git、Terminal、Problems、Logs、Commands 和 Agent 面板。
 - Agent 闭环：角色流水线、可编辑 Plan、上下文预览/预算、结构化 action log、`agent-changes` 协议、Diff 审查/应用/重新生成。
+- 项目记忆：workspace 根目录的 `AGENTS.md` 会注入 Agent 上下文（有边界、参与 token 预算、IDE 与 CLI 通用）。
 - 语义与运行闭环：TypeScript/JavaScript 和 Go LSP 第一版、diagnostics 到 Problems/editor markers、项目命令 Run History、terminal failure 上下文进入 Agent repair。
 - 自动化与发布：headless `agent_cli` 第一版和 Windows packaging workflow。
 
@@ -37,29 +38,336 @@ npm run tauri -- dev
 
 ## 环境准备
 
-需要：
+### 前置要求
 
-- Node.js 和 npm
-- Rust toolchain
-- 当前系统所需的 Tauri v2 依赖
+在开始之前，请确保已安装以下软件：
 
-安装依赖：
+#### 必需
+
+- **Node.js** (v18 或更高版本) 和 npm
+  - 下载地址：https://nodejs.org/
+  - 验证：`node --version` 和 `npm --version`
+
+- **Rust 工具链** (最新稳定版)
+  - **Windows**: 下载并运行 [rustup-init.exe](https://rustup.rs/)
+  - **macOS**: 运行 `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+  - **Linux**: 运行 `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+  - 验证：`rustc --version` 和 `cargo --version`
+
+#### Tauri v2 依赖
+
+**Windows:**
+- Microsoft Visual C++ Build Tools 2015 或更高版本
+- WebView2 Runtime (通常包含在 Windows 10/11 中)
+- OpenSSL (部分依赖需要)
+
+**macOS:**
+- Xcode Command Line Tools: `xcode-select --install`
+- CocoaPods: `sudo gem install cocoapods`
+
+**Linux:**
+- WebKitGTK 开发库
+- libayatana-appindicator 开发库
+- OpenSSL 开发库
+
+### 安装步骤
+
+#### 1. 安装 Rust (如果尚未安装)
+
+**Windows:**
+```powershell
+# 下载并运行 rustup 安装程序
+# 访问：https://rustup.rs/
+# 或使用 PowerShell:
+Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+.\rustup-init.exe
+```
+
+**macOS/Linux:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+#### 2. 验证 Rust 安装
+
+```powershell
+rustc --version
+cargo --version
+```
+
+预期输出：
+```
+rustc 1.80.0 (或更高版本)
+cargo 1.80.0 (或更高版本)
+```
+
+#### 3. 安装 Tauri 依赖
+
+**Windows:**
+```powershell
+# 安装 Visual Studio Build Tools
+# 从以下地址下载：https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# 选择"使用 C++ 的桌面开发"工作负载
+
+# 安装 WebView2 (如果不存在)
+# 从以下地址下载：https://developer.microsoft.com/en-us/microsoft-edge/webview2/
+```
+
+**macOS:**
+```bash
+# 安装 Xcode Command Line Tools
+xcode-select --install
+
+# 安装 CocoaPods
+sudo gem install cocoapods
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install libwebkit2gtk-4.0-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    openssl-dev \
+    libssl-dev \
+    curl \
+    wget \
+    file \
+    libxdo-dev \
+    libxcb-dev
+```
+
+#### 4. 安装前端依赖
 
 ```powershell
 npm install
 ```
 
-运行 Web 预览：
+#### 5. 验证安装
+
+```powershell
+# 验证 Node.js 和 npm
+node --version
+npm --version
+
+# 验证 Rust 和 Cargo
+rustc --version
+cargo --version
+
+# 验证 Tauri CLI
+npm run tauri -- --version
+```
+
+### 运行应用
+
+#### Web 预览模式 (仅前端)
 
 ```powershell
 npm run dev
 ```
 
-运行桌面应用：
+此模式仅运行 Vite Web 预览。Tauri IPC、文件系统、终端、Git 和 Agent 后端功能将被禁用或保护。
+
+**适用于：**
+- 前端开发和测试
+- UI/UX 更改
+- 当不需要 Rust 后端时
+
+#### 桌面 IDE 模式 (完整应用)
 
 ```powershell
 npm run tauri -- dev
 ```
+
+此模式运行带有 Rust 后端和 Tauri API 的真实桌面 IDE。
+
+**适用于：**
+- 完整应用开发
+- 测试 Agent 功能
+- 文件系统操作
+- 终端集成
+- Git 操作
+
+**注意：** 此命令需要正确安装 Rust 工具链。如果看到 `cargo: command not found` 或类似错误，请参阅下方的故障排除部分。
+
+### 故障排除
+
+#### Rust/Cargo 未找到
+
+**错误信息：**
+```
+failed to run 'cargo metadata' command to get workspace directory: failed to run command cargo metadata --no-deps --format-version 1: program not found
+```
+
+**解决方案：**
+
+1. **安装 Rust:**
+   ```powershell
+   # Windows
+   Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+   .\rustup-init.exe
+
+   # macOS/Linux
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+2. **重启终端** (重要!)
+
+3. **验证安装:**
+   ```powershell
+   rustc --version
+   cargo --version
+   ```
+
+4. **将 Cargo 添加到 PATH** (如果仍然找不到):
+
+   **Windows (PowerShell):**
+   ```powershell
+   # 添加到当前会话
+   $env:PATH += ";$env:USERPROFILE\.cargo\bin"
+
+   # 永久添加 (需要管理员权限)
+   [Environment]::SetEnvironmentVariable(
+       "Path",
+       [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.cargo\bin",
+       "User"
+   )
+   ```
+
+   **macOS/Linux:**
+   ```bash
+   # 添加到 ~/.bashrc 或 ~/.zshrc
+   echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+#### Node.js 版本问题
+
+**错误信息：**
+```
+Error: Node.js version too old. Requires v18 or higher.
+```
+
+**解决方案：**
+```powershell
+# 使用 nvm 安装 Node.js 18+ (推荐)
+# Windows: 从 https://github.com/coreybutler/nvm-windows/releases 下载
+# macOS/Linux:
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+nvm install 18
+nvm use 18
+```
+
+#### Tauri 构建错误
+
+**错误信息：**
+```
+error: failed to run custom build command for `openssl-sys`
+```
+
+**解决方案：**
+```powershell
+# Windows: 安装 OpenSSL
+# 从以下地址下载：https://slproweb.com/products/Win32OpenSSL.html
+# 安装到 C:\Program Files\OpenSSL-Win64
+
+# 设置环境变量
+$env:OPENSSL_DIR = "C:\Program Files\OpenSSL-Win64"
+```
+
+**错误信息：**
+```
+error: linker `link.exe` not found
+```
+
+**解决方案：**
+```powershell
+# 安装 Visual Studio Build Tools
+# 从以下地址下载：https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# 安装时选择"使用 C++ 的桌面开发"工作负载
+```
+
+#### 权限问题
+
+**错误信息：**
+```
+Error: EACCES: permission denied
+```
+
+**解决方案：**
+```powershell
+# macOS/Linux: 修复 npm 权限
+mkdir -p ~/.npm-global
+npm config set prefix '~/.npm-global'
+echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+#### 端口被占用
+
+**错误信息：**
+```
+Error: Port 1420 is already in use
+```
+
+**解决方案：**
+```powershell
+# Windows: 查找并终止进程
+netstat -ano | findstr :1420
+taskkill /PID <PID> /F
+
+# macOS/Linux:
+lsof -ti:1420 | xargs kill -9
+```
+
+#### Cargo 构建缓存问题
+
+**错误信息：**
+```
+error: failed to compile
+```
+
+**解决方案：**
+```powershell
+# 清理 cargo 缓存
+cargo clean
+
+# 更新 Rust 工具链
+rustup update
+
+# 重新构建
+npm run tauri -- dev
+```
+
+#### WebView2 缺失 (Windows)
+
+**错误信息：**
+```
+Error: WebView2 runtime not found
+```
+
+**解决方案：**
+```powershell
+# 下载并安装 WebView2 Runtime
+# https://developer.microsoft.com/en-us/microsoft-edge/webview2/
+
+# 或使用 Windows Update 获取最新的 WebView2
+```
+
+### 获取帮助
+
+如果遇到未涵盖的问题：
+
+1. 查看 [Tauri 文档](https://tauri.app/v1/guides/)
+2. 查看 [Rust 安装指南](https://www.rust-lang.org/tools/install)
+3. 查看 [Node.js 文档](https://nodejs.org/en/docs/)
+4. 在 GitHub 上提交问题，包含：
+   - 操作系统和版本
+   - Node.js 和 npm 版本
+   - Rust 和 Cargo 版本
+   - 完整的错误信息
+   - 重现步骤
 
 ## 验证命令
 
@@ -230,6 +538,16 @@ Agent 事件会流式回传给前端和 action log：
 ````
 
 旧的 `diff:path` 和 `new:path` 代码块仍然兼容。Schema 细节和校验行为见 [docs/agent_changes_schema.md](docs/agent_changes_schema.md)。
+
+## 项目记忆（AGENTS.md）
+
+如果 workspace 根目录存在 `AGENTS.md`，Agent IDE 会在每次 Agent 运行时将其作为项目记忆加载，桌面 IDE 与 `agent_cli` 行为一致。
+
+- 内容以有边界的 `Project memory (AGENTS.md)` 上下文 section 注入，参与所有压缩模式和 token 预算打包。
+- 默认启用。可通过每次运行的上下文源开关排除（`includeProjectMemory`），CLI 可用 `--include project-memory` 显式选择。
+- 超过 8,000 字符会被截断并附带截断标记。
+
+这样可以把项目约定、常用命令和约束随仓库版本管理，兼容跨工具的 `AGENTS.md` 通用约定。
 
 ## 配置
 

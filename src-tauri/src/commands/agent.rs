@@ -10,12 +10,15 @@ use crate::services::context::{
     AgentContext, ContextBudget, ContextBuildOptions, ContextCompressionMode,
     ContextEstimateResponse, ContextSourceOptions,
 };
-use crate::services::llm_client::{LlmClient, LlmConfig};
+use crate::services::llm_client::{
+    EnhancedLlmClientFactory, LlmClient, LlmConfig, LocalModelConfig, ModelType,
+};
 use crate::services::llm_profiles::{
     self, LlmProfileResponse, LlmProfilesConfig, LlmProfilesResponse, SaveLlmProfileRequest,
 };
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -33,6 +36,8 @@ pub struct AgentGlobalState {
     pub pipeline_stages: Arc<std::sync::Mutex<Vec<PipelineStage>>>,
     pub context_compression: Arc<std::sync::Mutex<ContextCompressionMode>>,
     pub cancel_flag: Arc<AtomicBool>,
+    pub local_engines:
+        Arc<std::sync::Mutex<HashMap<String, Arc<dyn crate::services::llm_client::ModelEngine>>>>,
 }
 
 impl AgentGlobalState {
@@ -47,12 +52,28 @@ impl AgentGlobalState {
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            local_engines: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
     /// Get a cloned LLM client.
     pub fn get_llm_client(&self, profile_id: Option<&str>) -> Result<LlmClient, String> {
-        Ok(LlmClient::new(self.get_llm_config(profile_id)?))
+        let config = self.get_llm_config(profile_id)?;
+        if let Some(local) = config.local_model_config.clone() {
+            let key = profile_id.unwrap_or("active").to_string();
+            let engine = {
+                let mut engines = self.local_engines.lock().map_err(|e| e.to_string())?;
+                if let Some(engine) = engines.get(&key) {
+                    engine.clone()
+                } else {
+                    let engine = crate::services::llm_client::create_local_model_engine(local)?;
+                    engines.insert(key, engine.clone());
+                    engine
+                }
+            };
+            return Ok(LlmClient::new(config).with_local_engine(engine));
+        }
+        Ok(LlmClient::new(config))
     }
 
     pub fn get_llm_config(&self, profile_id: Option<&str>) -> Result<LlmConfig, String> {
@@ -1054,6 +1075,7 @@ fn build_agent_context(
         project_path: workspace::workspace_root_string(),
         git_diff: None,
         project_tree: None,
+        project_memory: None,
     }
 }
 
@@ -1061,6 +1083,7 @@ fn default_context_sources() -> ContextSourceOptions {
     ContextSourceOptions {
         include_project_tree: true,
         include_git_diff: true,
+        include_project_memory: true,
     }
 }
 
@@ -1366,12 +1389,103 @@ pub fn get_workspace_path() -> Result<Option<String>, String> {
     workspace::load_workspace_path()
 }
 
+/// Runtime status of a configured local model.
+#[derive(Debug, Serialize)]
+pub struct LocalModelStatus {
+    pub profile_id: String,
+    pub model_path: String,
+    pub exists: bool,
+    pub loaded: bool,
+    pub model_type: String,
+}
+
+/// Test LLM connectivity with a small request.
+#[tauri::command]
+fn local_model_status(
+    profile_id: Option<String>,
+    agent_state: &AgentGlobalState,
+) -> Result<LocalModelStatus, String> {
+    let active_id = agent_state
+        .llm_profiles
+        .lock()
+        .map_err(|e| e.to_string())?
+        .active_profile_id
+        .clone();
+    let id = profile_id.unwrap_or(active_id);
+    let config = agent_state.get_llm_config(Some(&id))?;
+    let local = config
+        .local_model_config
+        .ok_or_else(|| "Selected profile is not local".to_string())?;
+    let path =
+        crate::agent::local_inference::expand_model_path(std::path::Path::new(&local.model_path))
+            .join(&local.model_file);
+    let loaded = agent_state
+        .local_engines
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&id)
+        .map(|e| e.is_model_loaded())
+        .unwrap_or(false);
+    Ok(LocalModelStatus {
+        profile_id: id,
+        model_path: path.to_string_lossy().to_string(),
+        exists: path.is_file(),
+        loaded,
+        model_type: local.model_type.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn get_local_model_status(
+    profile_id: Option<String>,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<LocalModelStatus, String> {
+    local_model_status(profile_id, &agent_state)
+}
+
+#[tauri::command]
+pub async fn load_local_model(
+    profile_id: Option<String>,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<LocalModelStatus, String> {
+    let status = local_model_status(profile_id.clone(), &agent_state)?;
+    let engine = agent_state
+        .local_engines
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&status.profile_id)
+        .cloned()
+        .ok_or_else(|| "Local engine is not configured".to_string())?;
+    engine.load_model().await?;
+    local_model_status(Some(status.profile_id), &agent_state)
+}
+
+#[tauri::command]
+pub async fn unload_local_model(
+    profile_id: Option<String>,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<(), String> {
+    let id = profile_id.unwrap_or_else(|| "active".to_string());
+    let engine = {
+        let engines = agent_state
+            .local_engines
+            .lock()
+            .map_err(|e| e.to_string())?;
+        engines.get(&id).cloned()
+    };
+    if let Some(engine) = engine {
+        engine.unload_model().await;
+    }
+    Ok(())
+}
+
 /// Test LLM connectivity with a small request.
 #[tauri::command]
 pub async fn test_llm_connection(
     agent_state: State<'_, AgentGlobalState>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
+    agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let llm = agent_state.get_llm_client(profile_id.as_deref())?;
 
     let messages = vec![crate::services::llm_client::ChatMessage {

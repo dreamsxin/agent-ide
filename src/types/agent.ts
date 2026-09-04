@@ -215,7 +215,9 @@ export interface ChatMessage {
 // ====== LLM 配置相关 ======
 
 /** LLM 模型提供商 */
-export type ModelProvider = "openai" | "anthropic" | "azure" | "deepseek" | "custom";
+export type ModelProvider = "openai" | "anthropic" | "azure" | "deepseek" | "local" | "custom";
+
+export type LocalModelType = "starcoder" | "codellama" | "deepseek-coder" | "codegemma";
 
 /** LLM 配置 */
 export interface LlmConfig {
@@ -223,6 +225,17 @@ export interface LlmConfig {
   endpoint: string;
   apiKey: string;
   model: string;
+  modelType?: LocalModelType;
+  modelPath?: string;
+  modelFile?: string;
+  nThreads?: number;
+  nCtx?: number;
+  nGpuLayers?: number;
+  nBatch?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
 }
 
 /** LLM 配置响应（apiKey 脱敏） */
@@ -242,6 +255,17 @@ export interface LlmProfile {
   endpoint: string;
   api_key_masked: string;
   model: string;
+  modelType?: LocalModelType;
+  modelPath?: string;
+  modelFile?: string;
+  nThreads?: number;
+  nCtx?: number;
+  nGpuLayers?: number;
+  nBatch?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
@@ -281,6 +305,17 @@ export interface SaveLlmProfileRequest {
   endpoint: string;
   apiKey?: string;
   model: string;
+  modelType?: LocalModelType;
+  modelPath?: string;
+  modelFile?: string;
+  nThreads?: number;
+  nCtx?: number;
+  nGpuLayers?: number;
+  nBatch?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;

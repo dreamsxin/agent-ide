@@ -44,9 +44,22 @@ cargo test
 
 ## Current State
 
-Status as of 2026-05-16: **Phase 7 feature-complete; Phase 8 in progress - daily IDE replacement hardening**.
+Status as of 2026-09-04: **Phase 8 daily IDE replacement hardening in progress; Phase 9.0 market-parity foundation started (AGENTS.md project memory landed)**.
 
-Reassessment as of 2026-05-16:
+Updated strategic direction (2026-09-03):
+
+- Based on analysis of Zed Editor, Comate, open-source code models (StarCoder, CodeLlama, DeepSeek Coder, CodeGemma), and DeepSeek Harness architecture.
+- Introducing Phase 9: Performance Optimization & Open-Source Model Integration.
+- New focus on incremental rendering, intelligent code completion, local model support, and plugin-based extensibility inspired by DeepSeek Harness.
+- Maintaining Phase 8 hardening work while preparing for Phase 9 architectural enhancements.
+
+Updated strategic direction (2026-09-04, competitive review):
+
+- Reviewed the 2026-09 market surface: Codex (subagents, MCP client/server, hooks, AGENTS.md, skills, agent dashboard, worktree isolation, cloud tasks), Claude Code (subagent tool scoping, hooks, SKILL.md open standard, budget caps, sandboxing), Cursor (parallel agents, deep codebase indexing, fast proprietary completion models), Windsurf/Devin Desktop (agent fleet, open Agent Client Protocol), and GitHub Copilot (cloud coding agent, agentic code review loop, enterprise governance).
+- Three standards are now must-have parity features: provider-native tool calling, AGENTS.md project memory, and MCP connectivity. Agent IDE's differentiator remains the finest-grained controllable/auditable agent surface: per-hunk review, provenance, context budget engineering, and headless run artifacts.
+- Phase 9 is restructured: new Phase 9.0 (market parity foundation) and Phase 9.5 (agent differentiation depth) bracket the existing Phase 9 work. Incremental rendering (9.1) is deferred: Monaco already virtualizes rendering, so the real performance levers are code splitting (Phase 10) and memory optimization (9.7).
+- Local open-source model integration (9.3) is re-scoped to OpenAI-compatible local runtimes first (Ollama, LM Studio, vLLM) since the existing `llm_client.rs` already speaks that protocol; native inference-engine integration moves behind that.
+- First Phase 9.0 item landed: workspace-root `AGENTS.md` project memory is loaded into `AgentContext` as a bounded section, included by default, and participates in every compression mode and budget packing.
 
 - CLI work is now intentionally scoped and first-pass complete as a headless automation runner. Do not keep expanding it into a second interactive IDE unless that becomes an explicit product goal.
 - The highest-value next work is back in the desktop IDE path: real Tauri runtime validation, Agent workflow interaction polish, LSP/workspace indexing validation, richer merge/diff review, and frontend/Tauri smoke coverage.
@@ -156,6 +169,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - CLI `problems.json` now preserves observed pre-repair Problems even when the final rerun passes, keeping failure -> repair -> rerun traceability intact.
 - Added Pipeline stage source/output visualization from Agent action logs and clearer Diff hunk review/regeneration status in the desktop UI.
 - Added a reusable Phase 8 real-runtime smoke run template and baseline notes to `docs/smoke_test.md`.
+- Added Phase 9.0 AGENTS.md project memory: workspace-root `AGENTS.md` is loaded into `AgentContext` as a bounded section, included by default in every IDE and CLI run, respects the per-run `includeProjectMemory` source toggle, and is exposed to CLI automation via `--include project-memory`.
 
 Important distinction:
 
@@ -174,6 +188,8 @@ npm test          # passes; covers path normalization and terminal problem parsi
 cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
+
+2026-09-04 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (118 tests, 0 failed), including the new AGENTS.md project-memory tests. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
 Known local worktree note:
 
@@ -583,7 +599,140 @@ Acceptance checks:
 - Ask Agent for a small change, review diff, apply one hunk.
 - Run terminal command and see output.
 
-### Phase 9: Release Readiness (Target: 3 weeks after Phase 8)
+### Phase 9.0 - Market Parity Foundation (Target: 4-6 weeks, ahead of Phase 9)
+
+Goal: close the gap to the 2026 agentic-coding standard feature surface (Codex / Claude Code / Cursor parity) without changing the product direction of a controllable, auditable agent IDE.
+
+| Task | Deliverable | Priority | Status |
+|------|-------------|----------|--------|
+| 9.0.1 Provider-Native Tool Calling | Native function-call request and streaming tool-call parsing in `services/llm_client.rs` + `agent/executor.rs`; `agent-changes` text protocol remains the fallback for local/small models | Critical | Planned |
+| 9.0.2 AGENTS.md Project Memory | Load workspace-root `AGENTS.md` into `AgentContext`; bounded size; participates in all compression modes and budget packing; CLI `--include project-memory` | Critical | **Done (2026-09-04)** |
+| 9.0.3 MCP Client | RMCP-based stdio transport with tool discovery/invocation, wired into native tool calling and the action log | High | Planned |
+| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | Planned |
+
+Exit criteria: an Agent run uses native tool calls with at least one OpenAI-compatible provider; AGENTS.md content is visible in context estimate sections; MCP tools appear in the agent tool surface; desktop runs enforce permission presets.
+
+---
+
+### Phase 9: Performance Optimization & Open-Source Model Integration (Target: 4 weeks after Phase 8)
+
+**Goal:** Enhance editor performance, intelligent code completion, and integrate open-source code models (StarCoder, CodeLlama, DeepSeek Coder, CodeGemma) while learning from Zed, Comate, and DeepSeek Harness architectures.
+
+| Task | Deliverable | Priority |
+|------|-------------|----------|
+| 9.1 Incremental Rendering Engine | Inspired by Zed: viewport-based dirty line rendering, frame-budget rendering, multi-threaded editor operations | **Deferred (2026-09-04)**: Monaco already virtualizes rendering; performance leverage is code splitting (Phase 10) and 9.7 memory optimization |
+| 9.2 Intelligent Code Completion System | Simplified scope (2026-09-04): inline LLM completion channel over the existing provider client plus per-profile language presets; no standalone completion framework | High |
+| 9.3 Open-Source Model Integration | Re-scoped (2026-09-04): first integrate OpenAI-compatible local runtimes (Ollama, LM Studio, vLLM) through `llm_client.rs` model discovery; native engines (llama-cpp-rs, candle-core) come later | Critical |
+| 9.4 Hybrid Model Strategy | Smart model selection: simple tasks → local models, complex tasks → cloud models | High |
+| 9.5 Plugin Architecture Foundation | DeepSeek Harness-inspired: model adapters, tool registry, session logs, and agent loops as replaceable plugins | Medium |
+| 9.6 Performance Profiling Tools | Flamegraph integration, real-time frame time monitoring, memory usage tracking | Medium |
+| 9.7 Editor Memory Optimization | Lazy file loading, efficient tab management, optimized Monaco model caching | High |
+| 9.8 Chinese-Optimized Prompts | Merged into 9.2 simplified scope: per-profile language presets for Chinese naming/comment conventions instead of a separate prompt-engineering layer | Medium |
+
+**Technical Implementation:**
+
+**9.1 Incremental Rendering (Zed-inspired):**
+```rust
+pub struct IncrementalRenderer {
+    viewport: Viewport,
+    dirty_lines: HashSet<LineNumber>,
+    frame_budget: Duration,
+}
+
+impl IncrementalRenderer {
+    pub fn render_with_budget(&mut self, changes: Vec<TextChange>) -> RenderResult {
+        let start = Instant::now();
+        for change in changes {
+            self.dirty_lines.extend(change.affected_lines());
+        }
+        // Render only dirty regions within frame budget
+        self.render_dirty_regions(start.elapsed() < self.frame_budget)
+    }
+}
+```
+
+**9.2 Intelligent Code Completion (Comate-inspired):**
+```typescript
+export class IntelligentCodeCompletion {
+    private contextAnalyzer: ContextAnalyzer;
+    private suggestionCache: Map<string, Suggestion[]>;
+
+    async getSuggestions(file: string, position: Position, surroundingCode: string): Promise<Suggestion[]> {
+        const context = await this.contextAnalyzer.analyze({
+            file, position, surroundingCode,
+            projectStructure: await this.getProjectContext(),
+            recentEdits: this.getRecentEdits()
+        });
+        const prompt = this.buildChineseOptimizedPrompt(context);
+        return this.generateSuggestions(prompt);
+    }
+}
+```
+
+**9.3 Open-Source Model Integration:**
+```rust
+pub struct EnhancedLlmClient {
+    openai_client: Option<LlmClient>,
+    local_models: Vec<LocalModel>,
+}
+
+pub struct LocalModel {
+    name: String,
+    model_type: ModelType, // StarCoder, CodeLlama, DeepSeekCoder, CodeGemma
+    engine: Box<dyn ModelEngine>,
+}
+
+pub enum ModelType {
+    StarCoder,      // Hugging Face open-source
+    CodeLlama,      // Meta open-source
+    DeepSeekCoder,  // DeepSeek open-source
+    CodeGemma,      // Google open-source
+}
+```
+
+**9.5 Plugin Architecture (DeepSeek Harness-inspired):**
+```typescript
+export interface Plugin {
+    name: string;
+    version: string;
+    onActivate?(context: PluginContext): void;
+    onDeactivate?(): void;
+    registerCommands?(registry: CommandRegistry): void;
+    registerLanguageSupport?(provider: LanguageProvider): void;
+    enhanceAgentPipeline?(pipeline: Pipeline): void;
+}
+
+export class PluginManager {
+    private plugins: Map<string, Plugin> = new Map();
+    async loadPlugin(pluginPath: string) {
+        const plugin = await import(pluginPath);
+        this.plugins.set(plugin.name, plugin);
+        plugin.onActivate?.(this.createContext());
+    }
+}
+```
+
+**Exit Criteria:** Editor renders >60fps with 1000+ line files; intelligent completion works for TypeScript/JavaScript/Go/Python; at least 2 open-source models integrated; plugin foundation tested.
+
+---
+
+### Phase 9.5 - Agent Differentiation Depth (Target: 3-4 weeks after Phase 9.0)
+
+Goal: deepen the controllable/auditable agent moat and adopt the multi-agent and hooks direction the market has standardized on.
+
+| Task | Deliverable | Priority | Status |
+|------|-------------|----------|--------|
+| 9.5.1 Parallel Subagents + Worktree Isolation | Upgrade the serial role pipeline to a DAG: coder steps can fan out in parallel, each in an isolated `git worktree`, with reviewer-stage merge and summary | Critical | Planned |
+| 9.5.2 Hooks Engine | User-configurable shell/MCP hooks at stage start/complete, pre-apply, and on-failure points, reusing CLI command authorization patterns | High | Planned |
+| 9.5.3 SKILL.md Skills | Lazy-loaded, bounded project skill packages compatible with the SKILL.md open standard; treat skills as code: path and command constraints apply | High | Planned |
+| 9.5.4 Semantic Index / Retrieval | tree-sitter symbol index plus local embedding retrieval feeding `budgeted` context packing | High | Planned |
+| 9.5.5 Run Artifacts Unification | IDE agent runs persist the same artifact model as `agent_cli` (run log, diffs, repair chain); replay/compare in the UI | Medium | Planned |
+
+Exit criteria: one coder fan-out runs two steps in isolated worktrees with merged review; a hook can veto a diff apply; a skill loads on demand without exceeding the context budget.
+
+---
+
+### Phase 10: Release Readiness (Target: 3 weeks after Phase 9)
 
 **Goal:** Production-quality packaging, security hardening, and CI coverage for public beta.
 
@@ -601,7 +750,7 @@ Acceptance checks:
 
 ---
 
-### Phase 10: Agent Intelligence, Plan/SDD Mode & Language Expansion (Target: 4 weeks after Phase 9)
+### Phase 11: Agent Intelligence, Plan/SDD Mode & Language Expansion (Target: 4 weeks after Phase 10)
 
 **Goal:** Expand Agent capabilities with structured design document generation, IDE planning mode, and broader language support.
 
@@ -612,7 +761,7 @@ Acceptance checks:
 | 10.3 SDD Template System | Markdown templates with frontmatter schema for SDD docs, stored in `docs/` | High |
 | 10.4 Python LSP Adapter | pylsp/pyright integration with diagnostics, completions, hover | High |
 | 10.5 Rust LSP Adapter | rust-analyzer integration | Medium |
-| 10.6 Provider-Native Tool Calls | Replace text-parsing with native function-call API for OpenAI/Anthropic/local | High |
+| 10.6 Provider-Native Tool Calls | **Moved to Phase 9.0.1** (superseded there); Phase 11 only covers provider-specific extensions beyond the shared transport | High |
 | 10.7 Agent Context Token Budget UI | Real-time token meter showing budget usage per source; warn on overflow | Medium |
 | 10.8 Ghost Mode (Background Analysis) | Lightweight background indexing producing proactive suggestions; user-dismissable | Medium |
 | 10.9 CLI Permission Model V2 | Implement `--deny-path`, `--allow-create/edit/delete`, `--allow-git` from design doc | Medium |
@@ -639,11 +788,11 @@ The Plan/SDD Mode is a dual-layer feature:
 
 5. **CLI Support:** `agent-cli plan --output docs/design/feature.md` generates SDD in headless mode.
 
-**Exit Criteria:** Plan Mode produces valid SDD documents; Python + Rust projects get full LSP; Agent uses native tool calls with at least one provider.
+**Exit Criteria:** Plan Mode produces valid SDD documents; Python + Rust projects get full LSP; native tool calling is covered by the Phase 9.0 exit criteria.
 
 ---
 
-### Phase 11: Production Polish & Ecosystem (Target: 6 weeks after Phase 10)
+### Phase 12: Production Polish & Ecosystem (Target: 6 weeks after Phase 11)
 
 **Goal:** Polish for public release; address accessibility, extensibility, and community onboarding.
 
@@ -707,15 +856,19 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
-2. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
-3. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
-4. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
-5. Expand Agent workflow UI with stage input/output source panels and explicit per-stage approve/skip controls.
-6. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
-7. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
-8. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
+1. Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback; at least one OpenAI-compatible provider covered end to end.
+2. Implement Phase 9.0.3 MCP client (RMCP stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface.
+3. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, and a per-run cost cap.
+4. Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.
+5. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
+6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
+7. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
+8. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
+9. Expand Agent workflow UI with stage input/output source panels and explicit per-stage approve/skip controls.
+10. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
+11. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
+12. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
 
 ---
 
-*Last updated: 2026-05-17 - CLI IDE-backend smoke now covers workspace resolution, package script discovery, command runner, Problems artifacts, repair prompt, diff parsing, apply, rerun, and repair-chain traceability. Full Tauri runtime smoke remains next.*
+*Last updated: 2026-09-04 - Phase 9.0 market-parity foundation started: AGENTS.md project memory landed in AgentContext (bounded, budget-aware, IDE + CLI). Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*

@@ -52,6 +52,12 @@ pub struct ContextSourceOptions {
     pub include_project_tree: bool,
     #[serde(default, rename = "includeGitDiff")]
     pub include_git_diff: bool,
+    #[serde(default = "default_true", rename = "includeProjectMemory")]
+    pub include_project_memory: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -128,6 +134,8 @@ pub struct AgentContext {
     pub git_diff: Option<String>,
     #[serde(default)]
     pub project_tree: Option<String>,
+    #[serde(default)]
+    pub project_memory: Option<String>,
 }
 
 impl AgentContext {
@@ -140,6 +148,7 @@ impl AgentContext {
             project_path: project_path.to_string(),
             git_diff: None,
             project_tree: None,
+            project_memory: None,
         }
     }
 
@@ -147,10 +156,15 @@ impl AgentContext {
         self.enrich_from_workspace_with_sources(&ContextSourceOptions {
             include_project_tree: true,
             include_git_diff: true,
+            include_project_memory: true,
         });
     }
 
     pub fn enrich_from_workspace_with_sources(&mut self, sources: &ContextSourceOptions) {
+        if sources.include_project_memory && self.project_memory.is_none() {
+            self.project_memory =
+                crate::services::project_memory::load_project_memory().ok().flatten();
+        }
         if sources.include_project_tree && self.project_tree.is_none() {
             self.project_tree = build_project_tree_summary(160, 4).ok();
         }
@@ -195,6 +209,19 @@ impl AgentContext {
                 self.project_path, mode
             ),
         }];
+
+        if let Some(ref memory) = self.project_memory {
+            if !memory.trim().is_empty() {
+                sections.push(ContextSection {
+                    id: "project_memory",
+                    label: "Project memory (AGENTS.md)",
+                    content: format!(
+                        "Project memory (AGENTS.md):\n```\n{}\n```\n",
+                        memory
+                    ),
+                });
+            }
+        }
 
         if let Some(ref file) = self.active_file {
             sections.push(ContextSection {
@@ -558,6 +585,7 @@ mod tests {
             project_path: "/workspace".to_string(),
             git_diff: None,
             project_tree: None,
+            project_memory: None,
         }
     }
 
@@ -630,10 +658,60 @@ mod tests {
         ctx.enrich_from_workspace_with_sources(&ContextSourceOptions {
             include_project_tree: false,
             include_git_diff: false,
+            include_project_memory: false,
         });
 
         assert!(ctx.project_tree.is_none());
         assert!(ctx.git_diff.is_none());
+        assert!(ctx.project_memory.is_none());
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn prompt_includes_project_memory_section_when_present() {
+        let mut ctx = sample_context("const a = 1;");
+        ctx.project_memory = Some("# Rules\n\nAlways run cargo test.".to_string());
+
+        let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Focused);
+
+        assert!(prompt.contains("Project memory (AGENTS.md)"));
+        assert!(prompt.contains("Always run cargo test."));
+    }
+
+    #[test]
+    fn project_memory_section_comes_before_active_file() {
+        let mut ctx = sample_context("const a = 1;");
+        ctx.project_memory = Some("# Rules".to_string());
+
+        let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+
+        let memory_index = prompt.find("Project memory (AGENTS.md)").expect("memory section");
+        let active_index = prompt.find("Active file:").expect("active file section");
+        assert!(memory_index < active_index);
+    }
+
+    #[test]
+    fn enrich_with_sources_loads_project_memory_by_default() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let temp = std::env::temp_dir().join(format!(
+            "agent-ide-context-memory-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_var("AGENT_IDE_CONFIG_DIR", temp.join("config"));
+        crate::services::workspace::save_workspace_path(temp.to_string_lossy().as_ref()).unwrap();
+        std::fs::write(temp.join("AGENTS.md"), "# Rules\n\nUse pnpm.").unwrap();
+
+        let mut ctx = sample_context("const a = 1;");
+        ctx.project_memory = None;
+        ctx.enrich_from_workspace_with_sources(&ContextSourceOptions {
+            include_project_tree: false,
+            include_git_diff: false,
+            include_project_memory: true,
+        });
+
+        let memory = ctx.project_memory.expect("project memory");
+        assert!(memory.contains("Use pnpm."));
         let _ = std::fs::remove_dir_all(temp);
     }
 

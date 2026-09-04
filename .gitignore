@@ -5,3 +5,6 @@ dist/
 release/
 *.tsbuildinfo
 artifacts/
+.RefImpl/
+rustup-init.exe
+

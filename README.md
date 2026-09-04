@@ -16,6 +16,7 @@ Capability snapshot:
 
 - Desktop IDE shell: Monaco editor, Explorer, Git, Terminal, Problems, Logs, Commands, and Agent panels.
 - Agent loop: role pipeline, editable plan, context preview/budgeting, structured action logs, `agent-changes` protocol, and diff review/apply/regenerate.
+- Project memory: workspace-root `AGENTS.md` is loaded into Agent context (bounded, budget-aware, IDE + CLI).
 - Semantic/runtime loop: TypeScript/JavaScript and Go LSP first pass, diagnostics to Problems/editor markers, project command run history, and terminal failure context for Agent repair.
 - Automation/release: headless `agent_cli` first pass and Windows packaging workflow.
 
@@ -39,29 +40,380 @@ Runs the real desktop IDE with the Rust backend and Tauri APIs.
 
 ## Setup
 
-Prerequisites:
+### Prerequisites
 
-- Node.js and npm
-- Rust toolchain
-- Tauri v2 prerequisites for your OS
+Before you begin, ensure you have the following installed:
 
-Install frontend dependencies:
+#### Required
+
+- **Node.js** (v18 or higher) and npm
+  - Download: https://nodejs.org/
+  - Verify: `node --version` and `npm --version`
+
+- **Rust toolchain** (latest stable)
+  - **Windows**: Download and run [rustup-init.exe](https://rustup.rs/)
+  - **macOS**: Run `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+  - **Linux**: Run `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+  - Verify: `rustc --version` and `cargo --version`
+
+#### Tauri v2 Prerequisites
+
+**Windows:**
+- Microsoft Visual C++ Build Tools 2015 or later
+- WebView2 Runtime (usually included with Windows 10/11)
+- OpenSSL (for some dependencies)
+
+**macOS:**
+- Xcode Command Line Tools: `xcode-select --install`
+- CocoaPods: `sudo gem install cocoapods`
+
+**Linux:**
+- WebKitGTK development libraries
+- libayatana-appindicator development libraries
+- OpenSSL development libraries
+
+### Installation Steps
+
+#### 1. Install Rust (if not already installed)
+
+**Windows:**
+```powershell
+# Download and run rustup installer
+# Visit: https://rustup.rs/
+# Or use PowerShell:
+Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+.\rustup-init.exe
+```
+
+**macOS/Linux:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+#### 2. Verify Rust Installation
+
+```powershell
+rustc --version
+cargo --version
+```
+
+Expected output:
+```
+rustc 1.80.0 (or later)
+cargo 1.80.0 (or later)
+```
+
+#### 3. Install Tauri Prerequisites
+
+**Windows:**
+```powershell
+# Install Visual Studio Build Tools
+# Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# Select "Desktop development with C++" workload
+
+# Install WebView2 (if not present)
+# Download from: https://developer.microsoft.com/en-us/microsoft-edge/webview2/
+```
+
+**macOS:**
+```bash
+# Install Xcode Command Line Tools
+xcode-select --install
+
+# Install CocoaPods
+sudo gem install cocoapods
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install libwebkit2gtk-4.0-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    openssl-dev \
+    libssl-dev \
+    curl \
+    wget \
+    file \
+    libxdo-dev \
+    libxcb-dev
+```
+
+#### 4. Install Frontend Dependencies
 
 ```powershell
 npm install
 ```
 
-Run the web preview:
+#### 5. Verify Installation
+
+```powershell
+# Verify Node.js and npm
+node --version
+npm --version
+
+# Verify Rust and Cargo
+rustc --version
+cargo --version
+
+# Verify Tauri CLI
+npm run tauri -- --version
+```
+
+### Running the Application
+
+#### Web Preview Mode (Frontend Only)
 
 ```powershell
 npm run dev
 ```
 
-Run the desktop app:
+This runs Vite web preview only. Tauri IPC, filesystem, terminal, Git, and Agent backend features are disabled or guarded.
+
+**Use this for:**
+- Frontend development and testing
+- UI/UX changes
+- When Rust backend is not required
+
+#### Desktop IDE Mode (Full Application)
 
 ```powershell
 npm run tauri -- dev
 ```
+
+This runs the real desktop IDE with the Rust backend and Tauri APIs.
+
+**Use this for:**
+- Full application development
+- Testing Agent functionality
+- File system operations
+- Terminal integration
+- Git operations
+
+**Note:** This command requires a properly installed Rust toolchain. If you see `cargo: command not found` or similar errors, please refer to the Troubleshooting section below.
+
+## Troubleshooting
+
+### Rust/Cargo Not Found
+
+**Error:**
+```
+failed to run 'cargo metadata' command to get workspace directory: failed to run command cargo metadata --no-deps --format-version 1: program not found
+```
+
+**Quick Fix Scripts:**
+
+We provide two automatic fix scripts:
+
+**PowerShell Version (Recommended):**
+```powershell
+.\fix-environment.ps1
+```
+
+**Batch Version (Alternative):**
+```powershell
+.\fix-environment.bat
+```
+
+These scripts will automatically:
+- Check Node.js and npm installation
+- Check Rust and Cargo installation
+- Download and install Rust if needed
+- Fix PATH configuration
+- Verify installation
+
+**Manual Solutions:**
+
+1. **Install Rust:**
+   ```powershell
+   # Windows
+   Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+   .\rustup-init.exe
+
+   # macOS/Linux
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+2. **Restart your terminal** (important!)
+
+3. **Verify installation:**
+   ```powershell
+   rustc --version
+   cargo --version
+   ```
+
+4. **Add Cargo to PATH** (if still not found):
+
+   **Windows (PowerShell):**
+   ```powershell
+   # Add to current session
+   $env:PATH += ";$env:USERPROFILE\.cargo\bin"
+
+   # Add permanently (run as Administrator)
+   [Environment]::SetEnvironmentVariable(
+       "Path",
+       [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\.cargo\bin",
+       "User"
+   )
+   ```
+
+   **macOS/Linux:**
+   ```bash
+   # Add to ~/.bashrc or ~/.zshrc
+   echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+### Node.js Version Issues
+
+**Error:**
+```
+Error: Node.js version too old. Requires v18 or higher.
+```
+
+**Solution:**
+```powershell
+# Install Node.js 18+ using nvm (recommended)
+# Windows: Download from https://github.com/coreybutler/nvm-windows/releases
+# macOS/Linux:
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+nvm install 18
+nvm use 18
+```
+
+### Tauri Build Errors
+
+**Error:**
+```
+error: failed to run custom build command for `openssl-sys`
+```
+
+**Solution:**
+```powershell
+# Windows: Install OpenSSL
+# Download from: https://slproweb.com/products/Win32OpenSSL.html
+# Install to C:\Program Files\OpenSSL-Win64
+
+# Set environment variable
+$env:OPENSSL_DIR = "C:\Program Files\OpenSSL-Win64"
+```
+
+**Error:**
+```
+error: linker `link.exe` not found
+```
+
+**Solution:**
+```powershell
+# Install Visual Studio Build Tools
+# Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+# Select "Desktop development with C++" during installation
+```
+
+### Permission Issues
+
+**Error:**
+```
+Error: EACCES: permission denied
+```
+
+**Solution:**
+```powershell
+# macOS/Linux: Fix npm permissions
+mkdir -p ~/.npm-global
+npm config set prefix '~/.npm-global'
+echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Port Already in Use
+
+**Error:**
+```
+Error: Port 1420 is already in use
+```
+
+**Solution:**
+```powershell
+# Windows: Find and kill the process
+netstat -ano | findstr :1420
+taskkill /PID <PID> /F
+
+# macOS/Linux:
+lsof -ti:1420 | xargs kill -9
+```
+
+### Cargo Build Cache Issues
+
+**Error:**
+```
+error: failed to compile
+```
+
+**Solution:**
+```powershell
+# Clean cargo cache
+cargo clean
+
+# Update Rust toolchain
+rustup update
+
+# Rebuild
+npm run tauri -- dev
+```
+
+### WebView2 Missing (Windows)
+
+**Error:**
+```
+Error: WebView2 runtime not found
+```
+
+**Solution:**
+```powershell
+# Download and install WebView2 Runtime
+# https://developer.microsoft.com/en-us/microsoft-edge/webview2/
+
+# Or use Windows Update to get the latest WebView2
+```
+
+### Development Environment Issues
+
+**Common Issues:**
+1. **Hot reload not working**: Ensure you're running `npm run tauri -- dev`, not just `npm run dev`
+2. **Styles not loading**: Clear browser cache and restart dev server
+3. **Extensions not working**: Check browser console for errors and ensure Tauri APIs are available
+
+### Getting Help
+
+If you encounter issues not covered here:
+
+**Quick Fix Scripts:**
+```powershell
+# PowerShell version (recommended)
+.\fix-environment.ps1
+
+# Or batch version
+.\fix-environment.bat
+```
+
+These scripts will automatically:
+- Check Node.js and npm installation
+- Check Rust and Cargo installation
+- Download and install Rust if needed
+- Fix PATH configuration
+- Verify installation
+
+1. Check the [Tauri documentation](https://tauri.app/v1/guides/)
+2. Review [Rust installation guide](https://www.rust-lang.org/tools/install)
+3. Check [Node.js documentation](https://nodejs.org/en/docs/)
+4. Open an issue on GitHub with:
+   - Your operating system and version
+   - Node.js and npm versions
+   - Rust and Cargo versions
+   - Complete error message
+   - Steps to reproduce
 
 ## Verification
 
@@ -232,6 +584,16 @@ Preferred structured output:
 ````
 
 Legacy `diff:path` and `new:path` code blocks are still supported. Schema details and validation behavior are documented in [docs/agent_changes_schema.md](docs/agent_changes_schema.md).
+
+## Project Memory
+
+If an `AGENTS.md` file exists at the workspace root, Agent IDE loads it as project memory for every Agent run, in both the desktop IDE and `agent_cli`.
+
+- Content is injected as a bounded `Project memory (AGENTS.md)` context section and participates in all compression modes and token budget packing.
+- It is included by default. Per-run context source controls can exclude it (`includeProjectMemory`), and the CLI can select it with `--include project-memory`.
+- Oversized files are trimmed at 8,000 characters with a truncation marker.
+
+This keeps persistent project conventions, preferred commands, and constraints versioned inside the workspace itself, following the cross-tool `AGENTS.md` convention.
 
 ## Configuration
 
