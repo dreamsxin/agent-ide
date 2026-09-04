@@ -328,6 +328,102 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// Provider 原生工具调用（由流式/非流式响应重组得到）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LlmToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// 流式/非流式请求的统一输出：文本内容 + 原生工具调用
+#[derive(Clone, Debug, Default)]
+pub struct LlmStreamOutput {
+    pub content: String,
+    pub tool_calls: Vec<LlmToolCall>,
+}
+
+/// `emit_agent_changes` 工具名：与 native_tools_schema 保持一致
+pub const NATIVE_CHANGES_TOOL: &str = "emit_agent_changes";
+
+/// 将原生工具调用合成为 ```agent-changes 围栏块，复用现有解析管线。
+/// 仅识别 `emit_agent_changes` 且参数为合法 JSON 的调用。
+pub fn synthesize_agent_changes_block(tool_calls: &[LlmToolCall]) -> Option<String> {
+    let call = tool_calls.iter().find(|call| call.name == NATIVE_CHANGES_TOOL)?;
+    let parsed: serde_json::Value = serde_json::from_str(call.arguments.trim()).ok()?;
+    if parsed.get("changes").and_then(|changes| changes.as_array()).map_or(true, |changes| changes.is_empty()) {
+        return None;
+    }
+    Some(format!(
+        "\n```agent-changes\n{}\n```\n",
+        serde_json::to_string_pretty(&parsed).ok()?
+    ))
+}
+
+/// 按流式分片重组工具调用的纯逻辑累积器
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    pending: std::collections::BTreeMap<usize, PendingToolCall>,
+}
+
+#[derive(Debug, Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn absorb(&mut self, deltas: &[StreamToolCallDelta]) {
+        for delta in deltas {
+            let entry = self.pending.entry(delta.index).or_default();
+            if let Some(id) = delta.id.as_ref() {
+                if !id.is_empty() {
+                    entry.id.push_str(id);
+                }
+            }
+            if let Some(function) = delta.function.as_ref() {
+                if let Some(name) = function.name.as_ref() {
+                    entry.name.push_str(name);
+                }
+                if let Some(arguments) = function.arguments.as_ref() {
+                    entry.arguments.push_str(arguments);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<LlmToolCall> {
+        self.pending
+            .into_iter()
+            .filter(|(_, pending)| !pending.name.is_empty())
+            .map(|(_, pending)| LlmToolCall {
+                id: pending.id,
+                name: pending.name,
+                arguments: pending.arguments,
+            })
+            .collect()
+    }
+}
+
+/// 流式响应中的工具调用分片（OpenAI 兼容 `delta.tool_calls[]`）
+#[derive(Deserialize)]
+struct StreamToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamToolCallFunction>,
+}
+
+#[derive(Deserialize)]
+struct StreamToolCallFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
 /// LLM 客户端
 #[derive(Clone)]
 pub struct LlmClient {
@@ -404,6 +500,19 @@ impl LlmClient {
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
     ) -> Result<String, String> {
+        Ok(self
+            .stream_chat_with_tools(messages, cancel_flag, tx)
+            .await?
+            .content)
+    }
+
+    /// 流式 Chat 请求并保留 provider 原生工具调用
+    pub async fn stream_chat_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        cancel_flag: Arc<AtomicBool>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<LlmStreamOutput, String> {
         // 检查是否为本地模型
         if self.config.endpoint.starts_with("local://") || self.config.provider == "local" {
             return self.stream_chat_local(messages, cancel_flag, tx).await;
@@ -411,7 +520,12 @@ impl LlmClient {
 
         // 检查是否为 Mock 模式
         if self.config.endpoint.starts_with("mock://") {
-            return stream_mock_chat(messages, cancel_flag, tx).await;
+            return stream_mock_chat(messages, cancel_flag, tx)
+                .await
+                .map(|content| LlmStreamOutput {
+                    content,
+                    tool_calls: Vec::new(),
+                });
         }
 
         // 云端模型流式请求
@@ -424,7 +538,7 @@ impl LlmClient {
         messages: Vec<ChatMessage>,
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
-    ) -> Result<String, String> {
+    ) -> Result<LlmStreamOutput, String> {
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
         }
@@ -435,7 +549,13 @@ impl LlmClient {
         // Load lazily and reuse the engine across requests.
         if let Some(ref engine) = self.local_engine {
             engine.load_model().await?;
-            return engine.generate_stream(&prompt, tx, cancel_flag).await;
+            return engine
+                .generate_stream(&prompt, tx, cancel_flag)
+                .await
+                .map(|content| LlmStreamOutput {
+                    content,
+                    tool_calls: Vec::new(),
+                });
         }
 
         // 如果没有配置本地引擎，返回错误
@@ -448,9 +568,14 @@ impl LlmClient {
         messages: Vec<ChatMessage>,
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
-    ) -> Result<String, String> {
+    ) -> Result<LlmStreamOutput, String> {
         if self.config.endpoint.starts_with("mock://") {
-            return stream_mock_chat(messages, cancel_flag, tx).await;
+            return stream_mock_chat(messages, cancel_flag, tx)
+                .await
+                .map(|content| LlmStreamOutput {
+                    content,
+                    tool_calls: Vec::new(),
+                });
         }
 
         if prefers_non_streaming(&self.config) {
@@ -472,6 +597,7 @@ impl LlmClient {
             .await?;
 
         let mut full_response = String::new();
+        let mut tool_calls = ToolCallAccumulator::default();
         let mut stream = response.bytes_stream();
         let mut sse_buf = String::new();
 
@@ -491,6 +617,8 @@ impl LlmClient {
             content: Option<String>,
             #[serde(rename = "reasoning_content")]
             reasoning_content: Option<String>,
+            #[serde(default)]
+            tool_calls: Option<Vec<StreamToolCallDelta>>,
         }
 
         loop {
@@ -541,13 +669,19 @@ impl LlmClient {
                                         .map_err(|_| "LLM stream receiver dropped".to_string())?;
                                 }
                             }
+                            if let Some(ref deltas) = choice.delta.tool_calls {
+                                tool_calls.absorb(deltas);
+                            }
                         }
                     }
                 }
             }
         }
 
-        Ok(full_response)
+        Ok(LlmStreamOutput {
+            content: full_response,
+            tool_calls: tool_calls.finish(),
+        })
     }
 
     async fn complete_chat(
@@ -555,7 +689,7 @@ impl LlmClient {
         messages: Vec<ChatMessage>,
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
-    ) -> Result<String, String> {
+    ) -> Result<LlmStreamOutput, String> {
         let url = format!(
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
@@ -583,6 +717,22 @@ impl LlmClient {
         #[derive(Deserialize)]
         struct CompletionMessage {
             content: Option<String>,
+            #[serde(default)]
+            tool_calls: Option<Vec<CompletionToolCall>>,
+        }
+
+        #[derive(Deserialize)]
+        struct CompletionToolCall {
+            #[serde(default)]
+            id: Option<String>,
+            function: CompletionToolFunction,
+        }
+
+        #[derive(Deserialize)]
+        struct CompletionToolFunction {
+            name: Option<String>,
+            #[serde(default)]
+            arguments: Option<String>,
         }
 
         let decode = response.json::<CompletionResponse>();
@@ -594,18 +744,36 @@ impl LlmClient {
                 result.map_err(|error| format!("LLM response decode failed: {}", error))?
             }
         };
+        let mut tool_calls: Vec<LlmToolCall> = Vec::new();
         let content = payload
             .choices
             .into_iter()
-            .find_map(|choice| choice.message.content)
-            .filter(|text| !text.is_empty())
-            .ok_or_else(|| "LLM response did not contain message content".to_string())?;
+            .find_map(|choice| {
+                for call in choice.message.tool_calls.unwrap_or_default() {
+                    tool_calls.push(LlmToolCall {
+                        id: call.id.unwrap_or_default(),
+                        name: call.function.name.unwrap_or_default(),
+                        arguments: call.function.arguments.unwrap_or_default(),
+                    });
+                }
+                choice.message.content
+            })
+            .filter(|text| !text.is_empty());
+
+        if content.is_none() && tool_calls.is_empty() {
+            return Err("LLM response did not contain message content".to_string());
+        }
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
         }
-        let _ = tx.send(content.clone()).await;
-        Ok(content)
+        if let Some(ref text) = content {
+            let _ = tx.send(text.clone()).await;
+        }
+        Ok(LlmStreamOutput {
+            content: content.unwrap_or_default(),
+            tool_calls,
+        })
     }
 
     async fn send_chat_request(
@@ -1165,6 +1333,129 @@ mod tests {
         assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
     }
 
+    #[test]
+    fn tool_call_accumulator_reassembles_stream_fragments() {
+        let mut accumulator = ToolCallAccumulator::default();
+        // 首个分片携带 id/name，参数随后按序分片到达
+        accumulator.absorb(&[StreamToolCallDelta {
+            index: 0,
+            id: Some("call_1".to_string()),
+            function: Some(StreamToolCallFunction {
+                name: Some(NATIVE_CHANGES_TOOL.to_string()),
+                arguments: Some("{\"version\":1,\"changes\":".to_string()),
+            }),
+        }]);
+        accumulator.absorb(&[
+            StreamToolCallDelta {
+                index: 0,
+                id: None,
+                function: Some(StreamToolCallFunction {
+                    name: None,
+                    arguments: Some("[{\"type\":\"edit\"}]}".to_string()),
+                }),
+            },
+            StreamToolCallDelta {
+                index: 1,
+                id: Some("call_2".to_string()),
+                function: Some(StreamToolCallFunction {
+                    name: Some("other_tool".to_string()),
+                    arguments: None,
+                }),
+            },
+        ]);
+
+        let calls = accumulator.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, NATIVE_CHANGES_TOOL);
+        assert_eq!(
+            calls[0].arguments,
+            "{\"version\":1,\"changes\":[{\"type\":\"edit\"}]}"
+        );
+        assert_eq!(calls[1].id, "call_2");
+        assert_eq!(calls[1].name, "other_tool");
+        assert_eq!(calls[1].arguments, "");
+    }
+
+    #[test]
+    fn tool_call_accumulator_drops_empty_name_entries() {
+        let mut accumulator = ToolCallAccumulator::default();
+        accumulator.absorb(&[StreamToolCallDelta {
+            index: 0,
+            id: Some("call_empty".to_string()),
+            function: None,
+        }]);
+
+        assert!(accumulator.finish().is_empty());
+    }
+
+    #[test]
+    fn stream_tool_call_delta_deserializes_minimal_fragments() {
+        let delta: StreamToolCallDelta = serde_json::from_str(
+            r#"{"index":2,"id":"call_abc","function":{"name":"emit_agent_changes","arguments":"{\"ver"}}"#,
+        )
+        .unwrap();
+        assert_eq!(delta.index, 2);
+        assert_eq!(delta.id.as_deref(), Some("call_abc"));
+        let function = delta.function.as_ref().unwrap();
+        assert_eq!(function.name.as_deref(), Some("emit_agent_changes"));
+        assert_eq!(function.arguments.as_deref(), Some("{\"ver"));
+
+        // OpenAI 兼容实现常省略 id/function，仅保留 index
+        let tail: StreamToolCallDelta =
+            serde_json::from_str(r#"{"index":2,"function":{"arguments":"sion\":1}"}}"#).unwrap();
+        assert!(tail.id.is_none());
+        let function = tail.function.as_ref().unwrap();
+        assert!(function.name.is_none());
+        assert_eq!(function.arguments.as_deref(), Some("sion\":1}"));
+    }
+
+    #[test]
+    fn synthesize_agent_changes_block_from_native_tool_call() {
+        let block = synthesize_agent_changes_block(&[LlmToolCall {
+            id: "call_1".to_string(),
+            name: NATIVE_CHANGES_TOOL.to_string(),
+            arguments: r#"{"version":1,"changes":[{"type":"edit","file":"src/main.rs","content":"fn main() {}"}]}"#.to_string(),
+        }])
+        .expect("native emit_agent_changes call should synthesize a block");
+
+        assert!(block.contains("```agent-changes"));
+        assert!(block.contains("\"changes\""));
+        assert!(block.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn synthesize_agent_changes_block_rejects_unusable_calls() {
+        let usable = LlmToolCall {
+            id: "call_1".to_string(),
+            name: NATIVE_CHANGES_TOOL.to_string(),
+            arguments: r#"{"version":1,"changes":[{"type":"edit"}]}"#.to_string(),
+        };
+        let empty_changes = LlmToolCall {
+            id: "call_2".to_string(),
+            name: NATIVE_CHANGES_TOOL.to_string(),
+            arguments: r#"{"version":1,"changes":[]}"#.to_string(),
+        };
+        let invalid_json = LlmToolCall {
+            id: "call_3".to_string(),
+            name: NATIVE_CHANGES_TOOL.to_string(),
+            arguments: "not-json".to_string(),
+        };
+        let unknown_tool = LlmToolCall {
+            id: "call_4".to_string(),
+            name: "other_tool".to_string(),
+            arguments: usable.arguments.clone(),
+        };
+
+        assert!(synthesize_agent_changes_block(&[empty_changes]).is_none());
+        assert!(synthesize_agent_changes_block(&[invalid_json]).is_none());
+        assert!(synthesize_agent_changes_block(&[unknown_tool.clone()]).is_none());
+        assert!(synthesize_agent_changes_block(&[]).is_none());
+        assert!(synthesize_agent_changes_block(&[usable.clone()]).is_some());
+        // 混合列表中即使存在无关调用，也应命中 emit_agent_changes
+        assert!(synthesize_agent_changes_block(&[unknown_tool, usable]).is_some());
+    }
+
     #[tokio::test]
     #[ignore = "requires DEEPSEEK_TEST_KEY and network access"]
     async fn deepseek_v4_flash_live_smoke() {
@@ -1177,6 +1468,8 @@ mod tests {
             provider: "deepseek".to_string(),
             max_output_tokens: Some(64),
             tool_call_mode: "text_protocol".to_string(),
+            model_type: ModelType::DeepSeek,
+            local_model_config: None,
         });
         let (tx, mut rx) = mpsc::channel(4);
         let response = tokio::time::timeout(
