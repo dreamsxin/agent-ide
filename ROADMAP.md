@@ -189,7 +189,7 @@ cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
-2026-09-04 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (118 tests, 0 failed), including the new AGENTS.md project-memory tests. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+2026-09-05 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (127 tests, 0 failed), including the AGENTS.md project-memory tests and the new tool-call accumulator / synthesis tests. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
 Known local worktree note:
 
@@ -605,7 +605,7 @@ Goal: close the gap to the 2026 agentic-coding standard feature surface (Codex /
 
 | Task | Deliverable | Priority | Status |
 |------|-------------|----------|--------|
-| 9.0.1 Provider-Native Tool Calling | Native function-call request and streaming tool-call parsing in `services/llm_client.rs` + `agent/executor.rs`; `agent-changes` text protocol remains the fallback for local/small models | Critical | Planned |
+| 9.0.1 Provider-Native Tool Calling | Native function-call request and streaming tool-call parsing in `services/llm_client.rs` + `agent/executor.rs`; `agent-changes` text protocol remains the fallback for local/small models | Critical | **Done (2026-09-05)** |
 | 9.0.2 AGENTS.md Project Memory | Load workspace-root `AGENTS.md` into `AgentContext`; bounded size; participates in all compression modes and budget packing; CLI `--include project-memory` | Critical | **Done (2026-09-04)** |
 | 9.0.3 MCP Client | RMCP-based stdio transport with tool discovery/invocation, wired into native tool calling and the action log | High | Planned |
 | 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | Planned |
@@ -856,7 +856,7 @@ target\release\agent_cli --help
 
 ## Next Immediate Tasks
 
-1. Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback; at least one OpenAI-compatible provider covered end to end.
+1. ~~Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback~~ **Done (2026-09-05)**: `stream_chat_with_tools` parses OpenAI-compatible `delta.tool_calls` streams and non-streaming `tool_calls`, and `merge_tool_call_output` synthesizes `agent-changes` blocks so the parse pipeline is transport-agnostic. Live provider round-trip still pending a real API key.
 2. Implement Phase 9.0.3 MCP client (RMCP stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface.
 3. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, and a per-run cost cap.
 4. Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.
@@ -871,4 +871,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-09-04 - Phase 9.0 market-parity foundation started: AGENTS.md project memory landed in AgentContext (bounded, budget-aware, IDE + CLI). Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*
+*Last updated: 2026-09-05 - Phase 9.0: AGENTS.md project memory (9.0.2) and provider-native tool calling (9.0.1) done. Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*

@@ -1,10 +1,24 @@
 use crate::agent::multi_agent::AgentRole;
 use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff, SddArtifact};
-use crate::services::llm_client::{ChatMessage, LlmClient};
+use crate::services::llm_client::{
+    synthesize_agent_changes_block, ChatMessage, LlmClient, LlmStreamOutput,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::mpsc;
+
+/// 将原生工具调用合并进响应文本：追加合成的 agent-changes 围栏块，
+/// 使下游 parse_diffs 管线无需感知传输方式。
+fn merge_tool_call_output(output: LlmStreamOutput) -> String {
+    let mut content = output.content;
+    if !output.tool_calls.is_empty() {
+        if let Some(block) = synthesize_agent_changes_block(&output.tool_calls) {
+            content.push_str(&block);
+        }
+    }
+    content
+}
 
 /// 执行步骤的系统提示词
 const EXECUTOR_PROMPT: &str = r#"You are a precise coding assistant. Your task is to implement ONE specific coding step.
@@ -56,7 +70,10 @@ pub async fn execute_step(
         },
     ];
 
-    llm.stream_chat(messages, cancel_flag, tx).await
+    let output = llm
+        .stream_chat_with_tools(messages, cancel_flag, tx)
+        .await?;
+    Ok(merge_tool_call_output(output))
 }
 
 pub async fn execute_stage(
@@ -196,7 +213,10 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
         },
     ];
 
-    llm.stream_chat(messages, cancel_flag, tx).await
+    let output = llm
+        .stream_chat_with_tools(messages, cancel_flag, tx)
+        .await?;
+    Ok(merge_tool_call_output(output))
 }
 
 /// 从 LLM 响应中解析 diff 块
@@ -913,6 +933,45 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_tool_call_output_appends_agent_changes_block() {
+        let merged = merge_tool_call_output(LlmStreamOutput {
+            content: "Applying the rename.".to_string(),
+            tool_calls: vec![crate::services::llm_client::LlmToolCall {
+                id: "call_1".to_string(),
+                name: "emit_agent_changes".to_string(),
+                arguments: r#"{"version":1,"changes":[{"type":"edit","file":"src/app.ts","hunks":[{"original":"const a = 1;","updated":"const a = 2;"}]}]}"#.to_string(),
+            }],
+        });
+
+        assert!(merged.starts_with("Applying the rename."));
+        assert!(merged.contains("```agent-changes"));
+
+        // 合成块必须能被现有 parse_diffs 管线解析（传输方式对下游透明）
+        let diffs = parse_diffs(&merged);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].file, "src/app.ts");
+    }
+
+    #[test]
+    fn merge_tool_call_output_keeps_plain_content_when_no_usable_calls() {
+        let base = LlmStreamOutput {
+            content: "Just prose.".to_string(),
+            tool_calls: vec![crate::services::llm_client::LlmToolCall {
+                id: "call_2".to_string(),
+                name: "emit_agent_changes".to_string(),
+                arguments: r#"{"version":1,"changes":[]}"#.to_string(),
+            }],
+        };
+        assert_eq!(merge_tool_call_output(base), "Just prose.");
+
+        let plain = LlmStreamOutput {
+            content: "Just prose.".to_string(),
+            tool_calls: Vec::new(),
+        };
+        assert_eq!(merge_tool_call_output(plain), "Just prose.");
+    }
 
     #[test]
     fn parse_diffs_supports_structured_agent_changes() {
