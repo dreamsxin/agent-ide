@@ -5,3 +5,6 @@ dist/
 release/
 *.tsbuildinfo
 artifacts/
+.zcode/
+rustup-init.exe
+

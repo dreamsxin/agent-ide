@@ -269,6 +269,7 @@ impl From<ContextModeArg> for ContextCompressionMode {
 enum ContextSourceArg {
     GitDiff,
     ProjectTree,
+    ProjectMemory,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1014,7 +1015,11 @@ async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (
         args.run.max_iterations = 1;
     }
     if args.run.include.is_empty() {
-        args.run.include = vec![ContextSourceArg::ProjectTree, ContextSourceArg::GitDiff];
+        args.run.include = vec![
+            ContextSourceArg::ProjectTree,
+            ContextSourceArg::GitDiff,
+            ContextSourceArg::ProjectMemory,
+        ];
     }
     if args.prompt.is_empty() {
         args.prompt = vec![
@@ -1736,10 +1741,12 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
     Ok(LlmClient::new(LlmConfig {
         endpoint,
         api_key,
-        model,
+        model: model.clone(),
         provider: "custom".to_string(),
         max_output_tokens: None,
         tool_call_mode: "text_protocol".to_string(),
+        model_type: crate::services::llm_client::ModelType::from_string(&model),
+        local_model_config: None,
     }))
 }
 
@@ -1892,9 +1899,12 @@ fn source_options(includes: &[ContextSourceArg]) -> ContextSourceOptions {
     let include_project_tree =
         includes.contains(&ContextSourceArg::ProjectTree) || includes.is_empty();
     let include_git_diff = includes.contains(&ContextSourceArg::GitDiff) || includes.is_empty();
+    let include_project_memory =
+        includes.contains(&ContextSourceArg::ProjectMemory) || includes.is_empty();
     ContextSourceOptions {
         include_project_tree,
         include_git_diff,
+        include_project_memory,
     }
 }
 

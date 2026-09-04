@@ -7,6 +7,262 @@ use std::sync::{
 };
 use tokio::sync::mpsc;
 
+// 引入 async_trait 用于异步 trait
+use async_trait::async_trait;
+
+/// 模型类型枚举
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ModelType {
+    /// OpenAI 兼容的云端模型
+    OpenAI,
+    /// DeepSeek 云端模型
+    DeepSeek,
+    /// StarCoder 本地模型 (Hugging Face)
+    StarCoder,
+    /// CodeLlama 本地模型 (Meta)
+    CodeLlama,
+    /// DeepSeek Coder 本地模型
+    DeepSeekCoder,
+    /// CodeGemma 本地模型 (Google)
+    CodeGemma,
+    /// 其他自定义模型
+    Custom(String),
+}
+
+impl ModelType {
+    /// 从字符串解析模型类型
+    pub fn from_string(s: &str) -> Self {
+        let lower = s.to_lowercase();
+        match lower.as_str() {
+            "openai" | "gpt" => ModelType::OpenAI,
+            "deepseek" | "deepseek-chat" | "deepseek-coder" => {
+                if lower.contains("coder") {
+                    ModelType::DeepSeekCoder
+                } else {
+                    ModelType::DeepSeek
+                }
+            }
+            "starcoder" | "bigcode" => ModelType::StarCoder,
+            "codellama" | "llama" => ModelType::CodeLlama,
+            "codegemma" | "gemma" => ModelType::CodeGemma,
+            _ => ModelType::Custom(s.to_string()),
+        }
+    }
+
+    /// 转换为字符串
+    pub fn to_string(&self) -> String {
+        match self {
+            ModelType::OpenAI => "openai".to_string(),
+            ModelType::DeepSeek => "deepseek".to_string(),
+            ModelType::StarCoder => "starcoder".to_string(),
+            ModelType::CodeLlama => "codellama".to_string(),
+            ModelType::DeepSeekCoder => "deepseek-coder".to_string(),
+            ModelType::CodeGemma => "codegemma".to_string(),
+            ModelType::Custom(name) => name.clone(),
+        }
+    }
+
+    /// 是否为本地模型
+    pub fn is_local(&self) -> bool {
+        matches!(
+            self,
+            ModelType::StarCoder
+                | ModelType::CodeLlama
+                | ModelType::DeepSeekCoder
+                | ModelType::CodeGemma
+        )
+    }
+
+    /// 获取默认的本地模型路径
+    pub fn default_model_path(&self) -> Option<String> {
+        match self {
+            ModelType::StarCoder => Some("~/.agent-ide/models/starcoder".to_string()),
+            ModelType::CodeLlama => Some("~/.agent-ide/models/codellama".to_string()),
+            ModelType::DeepSeekCoder => Some("~/.agent-ide/models/deepseek-coder".to_string()),
+            ModelType::CodeGemma => Some("~/.agent-ide/models/codegemma".to_string()),
+            _ => None,
+        }
+    }
+}
+
+/// 模型能力
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    /// 最大上下文长度（token数）
+    pub max_context_tokens: u32,
+    /// 支持的编程语言
+    pub supported_languages: Vec<String>,
+    /// 推理速度（毫秒/token）
+    pub inference_speed_ms: f32,
+    /// 内存需求（MB）
+    pub memory_requirement_mb: u32,
+    /// 是否支持流式输出
+    pub supports_streaming: bool,
+    /// 是否支持工具调用
+    pub supports_tool_calls: bool,
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self {
+            max_context_tokens: 4096,
+            supported_languages: vec![
+                "typescript".to_string(),
+                "javascript".to_string(),
+                "python".to_string(),
+                "rust".to_string(),
+                "go".to_string(),
+            ],
+            inference_speed_ms: 50.0,
+            memory_requirement_mb: 1024,
+            supports_streaming: true,
+            supports_tool_calls: false,
+        }
+    }
+}
+
+/// 本地模型引擎接口
+#[async_trait]
+pub trait ModelEngine: Send + Sync {
+    /// Load the model lazily before the first request.
+    async fn load_model(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn unload_model(&self) {}
+
+    fn is_model_loaded(&self) -> bool {
+        false
+    }
+
+    /// 生成文本
+    async fn generate(&self, prompt: &str) -> Result<String, String>;
+
+    /// 流式生成文本
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        tx: mpsc::Sender<String>,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<String, String>;
+
+    /// 获取模型能力
+    fn capabilities(&self) -> ModelCapabilities;
+
+    /// 获取模型类型
+    fn model_type(&self) -> ModelType;
+}
+
+/// 本地模型配置
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalModelConfig {
+    /// 模型名称
+    pub name: String,
+    /// 模型类型
+    pub model_type: ModelType,
+    /// 模型目录路径
+    pub model_path: String,
+    /// GGUF 文件名
+    #[serde(default)]
+    pub model_file: String,
+    /// 是否启用
+    pub enabled: bool,
+    #[serde(default)]
+    pub n_threads: i32,
+    #[serde(default)]
+    pub n_ctx: u32,
+    #[serde(default)]
+    pub n_gpu_layers: i32,
+    #[serde(default)]
+    pub n_batch: i32,
+    #[serde(default)]
+    pub temperature: f32,
+    #[serde(default)]
+    pub top_p: f32,
+    #[serde(default)]
+    pub top_k: i32,
+    #[serde(default)]
+    pub max_tokens: u32,
+}
+
+impl LocalModelConfig {
+    /// 创建默认配置
+    pub fn default_starcoder() -> Self {
+        Self {
+            name: "StarCoder".to_string(),
+            model_type: ModelType::StarCoder,
+            model_path: "~/.agent-ide/models/starcoder".to_string(),
+            model_file: String::new(),
+            enabled: false,
+            n_threads: 4,
+            n_ctx: 4096,
+            n_gpu_layers: 0,
+            n_batch: 512,
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 40,
+            max_tokens: 512,
+        }
+    }
+
+    /// 创建 CodeLlama 配置
+    pub fn default_codellama() -> Self {
+        Self {
+            name: "CodeLlama".to_string(),
+            model_type: ModelType::CodeLlama,
+            model_path: "~/.agent-ide/models/codellama".to_string(),
+            model_file: String::new(),
+            enabled: false,
+            n_threads: 4,
+            n_ctx: 4096,
+            n_gpu_layers: 0,
+            n_batch: 512,
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 40,
+            max_tokens: 512,
+        }
+    }
+
+    /// 创建 DeepSeek Coder 配置
+    pub fn default_deepseek_coder() -> Self {
+        Self {
+            name: "DeepSeek Coder".to_string(),
+            model_type: ModelType::DeepSeekCoder,
+            model_path: "~/.agent-ide/models/deepseek-coder".to_string(),
+            model_file: String::new(),
+            enabled: false,
+            n_threads: 4,
+            n_ctx: 4096,
+            n_gpu_layers: 0,
+            n_batch: 512,
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 40,
+            max_tokens: 512,
+        }
+    }
+
+    /// 创建 CodeGemma 配置
+    pub fn default_codegemma() -> Self {
+        Self {
+            name: "CodeGemma".to_string(),
+            model_type: ModelType::CodeGemma,
+            model_path: "~/.agent-ide/models/codegemma".to_string(),
+            model_file: String::new(),
+            enabled: false,
+            n_threads: 4,
+            n_ctx: 4096,
+            n_gpu_layers: 0,
+            n_batch: 512,
+            temperature: 0.2,
+            top_p: 0.9,
+            top_k: 40,
+            max_tokens: 512,
+        }
+    }
+}
+
 /// LLM 配置
 #[derive(Clone, Debug)]
 pub struct LlmConfig {
@@ -16,6 +272,53 @@ pub struct LlmConfig {
     pub provider: String,
     pub max_output_tokens: Option<u32>,
     pub tool_call_mode: String,
+    pub model_type: ModelType,
+    pub local_model_config: Option<LocalModelConfig>,
+}
+
+impl LlmConfig {
+    /// 创建 OpenAI 配置
+    pub fn openai(api_key: String, model: String) -> Self {
+        Self {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key,
+            model,
+            provider: "openai".to_string(),
+            max_output_tokens: Some(4096),
+            tool_call_mode: "native_tools".to_string(),
+            model_type: ModelType::OpenAI,
+            local_model_config: None,
+        }
+    }
+
+    /// 创建 DeepSeek 配置
+    pub fn deepseek(api_key: String, model: String) -> Self {
+        Self {
+            endpoint: "https://api.deepseek.com/v1".to_string(),
+            api_key,
+            model,
+            provider: "deepseek".to_string(),
+            max_output_tokens: Some(4096),
+            tool_call_mode: "native_tools".to_string(),
+            model_type: ModelType::DeepSeek,
+            local_model_config: None,
+        }
+    }
+
+    /// 创建本地模型配置
+    pub fn local_model(local_config: LocalModelConfig) -> Self {
+        let model_type = local_config.model_type.clone();
+        Self {
+            endpoint: format!("local://{}", local_config.name),
+            api_key: String::new(),
+            model: local_config.name.clone(),
+            provider: "local".to_string(),
+            max_output_tokens: Some(local_config.max_tokens.max(1)),
+            tool_call_mode: "text_protocol".to_string(),
+            model_type,
+            local_model_config: Some(local_config),
+        }
+    }
 }
 
 /// Chat 消息
@@ -30,6 +333,8 @@ pub struct ChatMessage {
 pub struct LlmClient {
     config: LlmConfig,
     client: Client,
+    /// 本地模型引擎（如果是本地模型）
+    local_engine: Option<Arc<dyn ModelEngine>>,
 }
 
 impl LlmClient {
@@ -42,11 +347,103 @@ impl LlmClient {
         } else {
             Client::new()
         };
-        Self { config, client }
+        Self {
+            config,
+            client,
+            local_engine: None, // 将在初始化时设置
+        }
+    }
+
+    /// 设置本地模型引擎
+    pub fn with_local_engine(mut self, engine: Arc<dyn ModelEngine>) -> Self {
+        self.local_engine = Some(engine);
+        self
+    }
+
+    pub fn get_capabilities(&self) -> ModelCapabilities {
+        if let Some(engine) = &self.local_engine {
+            return engine.capabilities();
+        }
+        ModelCapabilities {
+            max_context_tokens: 128000,
+            supported_languages: [
+                "typescript",
+                "javascript",
+                "python",
+                "rust",
+                "go",
+                "java",
+                "cpp",
+                "c",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            inference_speed_ms: 20.0,
+            memory_requirement_mb: 0,
+            supports_streaming: true,
+            supports_tool_calls: true,
+        }
+    }
+
+    pub fn get_model_type(&self) -> ModelType {
+        if let Some(engine) = &self.local_engine {
+            return engine.model_type();
+        }
+        ModelType::from_string(&self.config.provider)
+    }
+
+    pub fn supports_tool_calls(&self) -> bool {
+        self.get_capabilities().supports_tool_calls
     }
 
     /// 流式 Chat 请求，通过 mpsc::Sender 发送每个 token
     pub async fn stream_chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        cancel_flag: Arc<AtomicBool>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<String, String> {
+        // 检查是否为本地模型
+        if self.config.endpoint.starts_with("local://") || self.config.provider == "local" {
+            return self.stream_chat_local(messages, cancel_flag, tx).await;
+        }
+
+        // 检查是否为 Mock 模式
+        if self.config.endpoint.starts_with("mock://") {
+            return stream_mock_chat(messages, cancel_flag, tx).await;
+        }
+
+        // 云端模型流式请求
+        self.stream_chat_cloud(messages, cancel_flag, tx).await
+    }
+
+    /// 本地模型流式请求
+    async fn stream_chat_local(
+        &self,
+        messages: Vec<ChatMessage>,
+        cancel_flag: Arc<AtomicBool>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<String, String> {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err("Agent task cancelled".to_string());
+        }
+
+        // 构建提示词
+        let prompt = build_prompt_from_messages(&messages);
+
+        // Load lazily and reuse the engine across requests.
+        if let Some(ref engine) = self.local_engine {
+            engine.load_model().await?;
+            return engine.generate_stream(&prompt, tx, cancel_flag).await;
+        }
+
+        // 如果没有配置本地引擎，返回错误
+        Err("Local model engine not configured".to_string())
+    }
+
+    /// 云端模型流式请求
+    async fn stream_chat_cloud(
         &self,
         messages: Vec<ChatMessage>,
         cancel_flag: Arc<AtomicBool>,
@@ -139,7 +536,9 @@ impl LlmClient {
                                         return Err("Agent task cancelled".to_string());
                                     }
                                     full_response.push_str(text);
-                                    let _ = tx.send(text.clone()).await;
+                                    tx.send(text.clone())
+                                        .await
+                                        .map_err(|_| "LLM stream receiver dropped".to_string())?;
                                 }
                             }
                         }
@@ -277,31 +676,32 @@ async fn stream_mock_chat(
         .find(|message| message.role == "user")
         .map(|message| message.content.as_str())
         .unwrap_or_default();
-    let response = if self::is_workflow_mock(&messages) && system.contains("software engineering planner") {
-        r#"```plan
+    let response =
+        if self::is_workflow_mock(&messages) && system.contains("software engineering planner") {
+            r#"```plan
 [STEP] title="Repair workflow smoke file" type="edit"
 ```"#
-            .to_string()
-    } else if self::is_workflow_mock(&messages) && system.contains("Coder Agent") {
-        [
-            "```diff:smoke.txt",
-            "<<<<<<< ORIGINAL",
-            "broken",
-            "=======",
-            "fixed",
-            ">>>>>>> UPDATED",
-            "```",
-        ]
-        .join("\n")
-    } else if self::is_workflow_mock(&messages) && system.contains("Tester Agent") {
-        "Workflow smoke repair is testable by rerunning `npm run workflow`.".to_string()
-    } else if system.contains("software engineering planner") {
-        r#"```plan
+                .to_string()
+        } else if self::is_workflow_mock(&messages) && system.contains("Coder Agent") {
+            [
+                "```diff:smoke.txt",
+                "<<<<<<< ORIGINAL",
+                "broken",
+                "=======",
+                "fixed",
+                ">>>>>>> UPDATED",
+                "```",
+            ]
+            .join("\n")
+        } else if self::is_workflow_mock(&messages) && system.contains("Tester Agent") {
+            "Workflow smoke repair is testable by rerunning `npm run workflow`.".to_string()
+        } else if system.contains("software engineering planner") {
+            r#"```plan
 [STEP] title="Update smoke.txt" type="edit"
 ```"#
-            .to_string()
-    } else if system.contains("Designer Agent") {
-        r#"```sdd
+                .to_string()
+        } else if system.contains("Designer Agent") {
+            r#"```sdd
 ---
 type: sdd
 title: Smoke Design
@@ -322,13 +722,15 @@ Capture a lightweight design artifact before implementation.
 ## Acceptance Criteria
 - The SDD can be saved under docs/design.
 ```"#
-            .to_string()
-    } else if user.contains("Repair iteration") {
-        mock_diff_response("changed", "fixed")
-    } else {
-        mock_diff_response("initial", "changed")
-    };
-    let _ = tx.send(response.clone()).await;
+                .to_string()
+        } else if user.contains("Repair iteration") {
+            mock_diff_response("changed", "fixed")
+        } else {
+            mock_diff_response("initial", "changed")
+        };
+    tx.send(response.clone())
+        .await
+        .map_err(|_| "LLM stream receiver dropped".to_string())?;
     Ok(response)
 }
 
@@ -358,6 +760,18 @@ async fn wait_for_cancel(cancel_flag: Arc<AtomicBool>) {
     while !cancel_flag.load(Ordering::SeqCst) {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
+}
+
+fn build_prompt_from_messages(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::new();
+    for message in messages {
+        prompt.push_str(&message.role);
+        prompt.push_str(": ");
+        prompt.push_str(&message.content);
+        prompt.push('\n');
+    }
+    prompt.push_str("Assistant:");
+    prompt
 }
 
 fn build_chat_request(
@@ -471,6 +885,208 @@ fn output_token_key(config: &LlmConfig) -> &'static str {
     }
 }
 
+/// StarCoder 模型引擎
+pub struct StarCoderEngine {
+    config: LocalModelConfig,
+    capabilities: ModelCapabilities,
+}
+
+impl StarCoderEngine {
+    pub fn new(config: LocalModelConfig) -> Self {
+        let capabilities = ModelCapabilities {
+            max_context_tokens: 8192,
+            supported_languages: vec![
+                "python".to_string(),
+                "javascript".to_string(),
+                "typescript".to_string(),
+                "java".to_string(),
+                "cpp".to_string(),
+                "c".to_string(),
+                "rust".to_string(),
+                "go".to_string(),
+            ],
+            inference_speed_ms: 80.0,
+            memory_requirement_mb: 4096,
+            supports_streaming: true,
+            supports_tool_calls: false,
+        };
+
+        Self {
+            config,
+            capabilities,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelEngine for StarCoderEngine {
+    async fn generate(&self, _prompt: &str) -> Result<String, String> {
+        // 这里应该集成实际的 StarCoder 推理引擎
+        // 可以使用 llama-cpp-rs 或其他本地推理库
+        Err("StarCoder engine not yet implemented. This is a placeholder for future integration with llama-cpp-rs or candle-core.".to_string())
+    }
+
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        tx: mpsc::Sender<String>,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<String, String> {
+        let _ = (prompt, tx, cancel_flag);
+        Err(
+            "StarCoder engine is unavailable until a local inference adapter is configured"
+                .to_string(),
+        )
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.capabilities.clone()
+    }
+
+    fn model_type(&self) -> ModelType {
+        ModelType::StarCoder
+    }
+}
+
+/// CodeLlama 模型引擎
+pub struct CodeLlamaEngine {
+    config: LocalModelConfig,
+    capabilities: ModelCapabilities,
+}
+
+impl CodeLlamaEngine {
+    pub fn new(config: LocalModelConfig) -> Self {
+        let capabilities = ModelCapabilities {
+            max_context_tokens: 16384,
+            supported_languages: vec![
+                "python".to_string(),
+                "javascript".to_string(),
+                "typescript".to_string(),
+                "java".to_string(),
+                "cpp".to_string(),
+                "c".to_string(),
+                "rust".to_string(),
+                "go".to_string(),
+                "php".to_string(),
+                "ruby".to_string(),
+            ],
+            inference_speed_ms: 60.0,
+            memory_requirement_mb: 8192,
+            supports_streaming: true,
+            supports_tool_calls: false,
+        };
+
+        Self {
+            config,
+            capabilities,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelEngine for CodeLlamaEngine {
+    async fn generate(&self, _prompt: &str) -> Result<String, String> {
+        Err("CodeLlama engine not yet implemented. This is a placeholder for future integration with llama-cpp-rs.".to_string())
+    }
+
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        tx: mpsc::Sender<String>,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<String, String> {
+        let _ = (prompt, tx, cancel_flag);
+        Err(
+            "CodeLlama engine is unavailable until a local inference adapter is configured"
+                .to_string(),
+        )
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.capabilities.clone()
+    }
+
+    fn model_type(&self) -> ModelType {
+        ModelType::CodeLlama
+    }
+}
+
+/// 创建本地模型引擎
+pub fn create_local_model_engine(config: LocalModelConfig) -> Result<Arc<dyn ModelEngine>, String> {
+    if !config.model_type.is_local() {
+        return Err(format!(
+            "Unsupported local model type: {:?}",
+            config.model_type
+        ));
+    }
+    let inference_config = crate::agent::local_inference::LocalInferenceConfig {
+        model_path: std::path::PathBuf::from(config.model_path),
+        model_type: config.model_type,
+        model_file: config.model_file,
+        n_threads: config.n_threads,
+        n_ctx: config.n_ctx,
+        n_gpu_layers: config.n_gpu_layers,
+        n_batch: config.n_batch,
+        temperature: config.temperature,
+        top_p: config.top_p,
+        top_k: config.top_k,
+        max_tokens: config.max_tokens,
+    };
+    Ok(Arc::new(
+        crate::agent::local_inference::LlamaCppEngine::new(inference_config)?,
+    ))
+}
+
+/// 任务上下文
+#[derive(Clone, Debug)]
+pub struct TaskContext {
+    /// 任务复杂度
+    pub complexity: Complexity,
+    /// 目标语言
+    pub language: Option<String>,
+    /// 预期输出长度
+    pub expected_length: Option<usize>,
+}
+
+/// 任务复杂度
+#[derive(Clone, Debug, PartialEq)]
+pub enum Complexity {
+    /// 低复杂度（简单补全）
+    Low,
+    /// 中等复杂度（代码生成）
+    Medium,
+    /// 高复杂度（复杂重构）
+    High,
+}
+
+/// 增强的 LLM 客户端工厂
+pub struct EnhancedLlmClientFactory;
+
+impl EnhancedLlmClientFactory {
+    /// 创建云端 LLM 客户端
+    pub fn create_cloud_client(config: LlmConfig) -> LlmClient {
+        LlmClient::new(config)
+    }
+
+    /// 创建本地 LLM 客户端
+    pub fn create_local_client(local_config: LocalModelConfig) -> Result<LlmClient, String> {
+        let engine = create_local_model_engine(local_config.clone())?;
+        let config = LlmConfig::local_model(local_config);
+
+        Ok(LlmClient::new(config).with_local_engine(engine))
+    }
+
+    /// 获取所有可用的本地模型配置
+    pub fn get_available_local_models() -> Vec<LocalModelConfig> {
+        vec![
+            LocalModelConfig::default_starcoder(),
+            LocalModelConfig::default_codellama(),
+            LocalModelConfig::default_deepseek_coder(),
+            LocalModelConfig::default_codegemma(),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +1099,8 @@ mod tests {
             provider: provider.to_string(),
             max_output_tokens,
             tool_call_mode: "text_protocol".to_string(),
+            model_type: ModelType::from_string(provider),
+            local_model_config: None,
         }
     }
 

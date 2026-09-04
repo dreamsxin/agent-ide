@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/useAgentStore";
-import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
+import { isTauriRuntime } from "../../utils/tauri";
+import type { LocalModelType, ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
 
@@ -11,6 +13,7 @@ const providerLabels: Record<string, string> = {
   azure: "Azure OpenAI",
   deepseek: "DeepSeek",
   custom: "Custom",
+  local: "Local GGUF",
 };
 
 const PROVIDERS: ProviderPreset[] = [
@@ -66,6 +69,17 @@ const PROVIDERS: ProviderPreset[] = [
     defaultModel: "",
     models: [],
   },
+  {
+    id: "local",
+    label: "Local GGUF",
+    defaultEndpoint: "local://model",
+    defaultModel: "StarCoder",
+    models: ["StarCoder", "CodeLlama", "DeepSeek Coder", "CodeGemma"],
+    defaultMaxContextTokens: 4096,
+    defaultReservedOutputTokens: 512,
+    defaultMaxOutputTokens: 512,
+    defaultToolCallMode: "text_protocol",
+  },
 ];
 
 // ====== SettingsPanel ======
@@ -95,9 +109,18 @@ export default function SettingsPanel() {
   const [maxContextTokens, setMaxContextTokens] = useState("");
   const [reservedOutputTokens, setReservedOutputTokens] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [modelType, setModelType] = useState<LocalModelType>("starcoder");
+  const [modelPath, setModelPath] = useState("");
+  const [modelFile, setModelFile] = useState("");
+  const [nThreads, setNThreads] = useState("4");
+  const [nCtx, setNCtx] = useState("4096");
+  const [nGpuLayers, setNGpuLayers] = useState("0");
+  const [temperature, setTemperature] = useState("0.2");
   const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [localStatus, setLocalStatus] = useState<{ exists: boolean; loaded: boolean; modelPath: string } | null>(null);
+  const [loadingLocal, setLoadingLocal] = useState(false);
 
   // 初始化：从后端加载配置
   useEffect(() => {
@@ -117,6 +140,13 @@ export default function SettingsPanel() {
         setMaxContextTokens(numberToInput(active.maxContextTokens));
         setReservedOutputTokens(numberToInput(active.reservedOutputTokens));
         setMaxOutputTokens(numberToInput(active.maxOutputTokens));
+        setModelType(active.modelType ?? "starcoder");
+        setModelPath(active.modelPath ?? "");
+        setModelFile(active.modelFile ?? "");
+        setNThreads(numberToInput(active.nThreads) || "4");
+        setNCtx(numberToInput(active.nCtx) || "4096");
+        setNGpuLayers(numberToInput(active.nGpuLayers) || "0");
+        setTemperature(active.temperature !== undefined ? String(active.temperature) : "0.2");
         setToolCallMode(active.toolCallMode ?? "text_protocol");
       } else {
         setEndpoint(llmEndpoint);
@@ -147,13 +177,47 @@ export default function SettingsPanel() {
     []
   );
 
+  const refreshLocalStatus = useCallback(async () => {
+    if (provider !== "local" || !isTauriRuntime()) return;
+    try {
+      const status = await invoke<{ exists: boolean; loaded: boolean; modelPath: string }>("get_local_model_status", { profileId: profileId || null });
+      setLocalStatus(status);
+    } catch {
+      setLocalStatus(null);
+    }
+  }, [profileId, provider]);
+
+  useEffect(() => {
+    void refreshLocalStatus();
+  }, [refreshLocalStatus, modelFile, modelPath]);
+
+  const handleLocalLoad = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    setLoadingLocal(true);
+    try {
+      const status = await invoke<{ exists: boolean; loaded: boolean; modelPath: string }>("load_local_model", { profileId: profileId || null });
+      setLocalStatus(status);
+      setMessage({ type: "ok", text: "Local model loaded" });
+    } catch (error) {
+      setMessage({ type: "err", text: `Local model failed: ${error}` });
+    } finally {
+      setLoadingLocal(false);
+    }
+  }, [profileId]);
+
+  const handleLocalUnload = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    await invoke("unload_local_model", { profileId: profileId || null });
+    await refreshLocalStatus();
+  }, [profileId, refreshLocalStatus]);
+
   // 保存
   const handleSave = useCallback(async () => {
-    if (!profileName.trim() || !endpoint.trim() || !model.trim()) {
-      setMessage({ type: "err", text: "Profile name, endpoint, and model are required" });
+    if (!profileName.trim() || !model.trim() || (provider !== "local" && !endpoint.trim())) {
+      setMessage({ type: "err", text: provider === "local" ? "Profile name and model are required" : "Profile name, endpoint, and model are required" });
       return;
     }
-    if (!profileId && !apiKey.trim()) {
+    if (provider !== "local" && !profileId && !apiKey.trim()) {
       setMessage({ type: "err", text: "Secret key is required for a new profile" });
       return;
     }
@@ -171,6 +235,13 @@ export default function SettingsPanel() {
         reservedOutputTokens: inputToNumber(reservedOutputTokens),
         maxOutputTokens: inputToNumber(maxOutputTokens),
         toolCallMode,
+        modelType: provider === "local" ? modelType : undefined,
+        modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
+        modelFile: provider === "local" ? modelFile.trim() || undefined : undefined,
+        nThreads: provider === "local" ? inputToNumber(nThreads) : undefined,
+        nCtx: provider === "local" ? inputToNumber(nCtx) : undefined,
+        nGpuLayers: provider === "local" ? Number(nGpuLayers) || 0 : undefined,
+        temperature: provider === "local" ? Number(temperature) || 0.2 : undefined,
         setActive: true,
       });
       setMessage({ type: "ok", text: "Saved successfully" });
@@ -180,7 +251,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, toolCallMode]);
+  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -201,6 +272,13 @@ export default function SettingsPanel() {
           reservedOutputTokens: inputToNumber(reservedOutputTokens),
           maxOutputTokens: inputToNumber(maxOutputTokens),
           toolCallMode,
+          modelType: provider === "local" ? modelType : undefined,
+          modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
+          modelFile: provider === "local" ? modelFile.trim() || undefined : undefined,
+          nThreads: provider === "local" ? inputToNumber(nThreads) : undefined,
+          nCtx: provider === "local" ? inputToNumber(nCtx) : undefined,
+          nGpuLayers: provider === "local" ? Number(nGpuLayers) || 0 : undefined,
+          temperature: provider === "local" ? Number(temperature) || 0.2 : undefined,
           setActive: true,
         });
         setApiKey(""); // 保存后清空输入框
@@ -366,6 +444,44 @@ export default function SettingsPanel() {
         placeholder="https://api.openai.com/v1"
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
+
+      {provider === "local" && (
+        <div className="mb-3 rounded border border-accent-blue/30 bg-accent-blue/5 p-2 space-y-2">
+          <div className="text-[11px] font-semibold text-surface-muted">Local model runtime</div>
+          <label className="block text-surface-muted text-[10px]">Model type
+            <select value={modelType} onChange={(e) => setModelType(e.target.value as LocalModelType)} className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text">
+              <option value="starcoder">StarCoder</option>
+              <option value="codellama">CodeLlama</option>
+              <option value="deepseek-coder">DeepSeek Coder</option>
+              <option value="codegemma">CodeGemma</option>
+            </select>
+          </label>
+          <label className="block text-surface-muted text-[10px]">Model directory
+            <input type="text" value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="~/.agent-ide/models" className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text font-mono" />
+          </label>
+          <label className="block text-surface-muted text-[10px]">GGUF file
+            <input type="text" value={modelFile} onChange={(e) => setModelFile(e.target.value)} placeholder="model.gguf" className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text font-mono" />
+          </label>
+          <div className="grid grid-cols-3 gap-1">
+            <BudgetInput label="Threads" value={nThreads} onChange={setNThreads} placeholder="4" />
+            <BudgetInput label="Context" value={nCtx} onChange={setNCtx} placeholder="4096" />
+            <BudgetInput label="GPU layers" value={nGpuLayers} onChange={setNGpuLayers} placeholder="0" />
+          </div>
+          <BudgetInput label="Temperature" value={temperature} onChange={setTemperature} placeholder="0.2" />
+          <div className="text-[10px] leading-relaxed text-surface-muted">The model must be downloaded locally. Agent output is streamed through the same reviewable diff pipeline.</div>
+          <div className="flex items-center justify-between gap-2 border-t border-surface-border pt-2 text-[10px]">
+            <span className={localStatus?.loaded ? "text-accent-green" : "text-surface-muted"}>
+              {localStatus?.loaded ? "Loaded" : localStatus?.exists ? "Ready to load" : "Model file not found"}
+            </span>
+            <div className="flex gap-1">
+              <button type="button" onClick={refreshLocalStatus} className="rounded border border-surface-border px-2 py-1 text-surface-muted hover:text-surface-text">Refresh</button>
+              <button type="button" onClick={handleLocalLoad} disabled={loadingLocal || !localStatus?.exists} className="rounded border border-accent-green/40 px-2 py-1 text-accent-green disabled:opacity-40">{loadingLocal ? "Loading..." : "Load"}</button>
+              <button type="button" onClick={handleLocalUnload} disabled={!localStatus?.loaded} className="rounded border border-surface-border px-2 py-1 text-surface-muted disabled:opacity-40">Unload</button>
+            </div>
+          </div>
+          {localStatus?.modelPath && <div className="truncate font-mono text-[10px] text-surface-muted" title={localStatus.modelPath}>{localStatus.modelPath}</div>}
+        </div>
+      )}
 
       {/* API Key */}
       <label className="block text-surface-muted mb-1 text-[11px]">

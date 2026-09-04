@@ -24,6 +24,8 @@ import {
   ensureOpenFileModels,
 } from "../../utils/typescriptSemantic";
 import { useLspDiagnostics } from "../../hooks/useLspDiagnostics";
+import { useIncrementalRendering } from "../../hooks/useIncrementalRendering";
+import PerformanceMetricsPanel from "./PerformanceMetricsPanel";
 import {
   changeLspFile,
   getLspCodeActions,
@@ -113,6 +115,34 @@ export default function EditorContainer() {
   const lspFileVersionsRef = useRef<Map<string, number>>(new Map());
   const lspChangeTimerRef = useRef<number | null>(null);
   const [lspReady, setLspReady] = useState(false);
+
+  // 集成增量渲染引擎
+  const {
+    renderer: incrementalRenderer,
+    metrics: renderMetrics,
+    resetMetrics: resetRenderMetrics,
+  } = useIncrementalRendering(editorRef, {
+    enabled: true, // 可以通过设置控制是否启用
+    config: {
+      frameBudgetMs: 16, // 60fps 目标
+      targetFps: 60,
+      enableMultiThreading: false, // 目前不启用多线程
+      dirtyLineTtl: 1000,
+      maxRenderQueueSize: 1000,
+    },
+    onMetricsUpdate: (metrics) => {
+      // 可以在这里记录性能指标或显示给用户
+      console.log('渲染性能指标:', {
+        fps: metrics.fps.toFixed(1),
+        frameTime: metrics.frameTime.toFixed(2) + 'ms',
+        renderTime: metrics.renderTime.toFixed(2) + 'ms',
+        memoryUsage: (metrics.memoryUsage / 1024).toFixed(2) + 'KB',
+        droppedFrames: metrics.droppedFrames,
+        totalFrames: metrics.totalFrames,
+      });
+    },
+    profilingEnabled: true, // 启用性能分析
+  });
 
   const activeTab = openFiles.find((f) => f.path === activeFile);
   const currentContent = activeFile ? fileContents[activeFile] ?? "" : "";
@@ -563,6 +593,7 @@ export default function EditorContainer() {
 
       {/* Monaco 编辑器区 */}
       <div className="flex-1 relative overflow-hidden">
+        <PerformanceMetricsPanel metrics={renderMetrics} onReset={resetRenderMetrics} />
         <MonacoContext.Provider value={contextValue}>
           {activeTab ? (
             <Suspense

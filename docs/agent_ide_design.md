@@ -382,6 +382,9 @@ The current Agent prompt context includes:
 - `project_path`
 - `project_tree`
 - `git_diff`
+- `project_memory`
+
+`project_memory` is loaded from a workspace-root `AGENTS.md` when present (`services/project_memory.rs`). It is trimmed to 8,000 characters, included by default in every run, and rendered as the first content section after the project header so it survives budget trimming. Per-run source toggles can exclude it via `includeProjectMemory`; the CLI selects it with `--include project-memory`.
 
 This context is built in `send_agent_prompt` from the frontend request and the saved workspace root.
 The backend enriches it with a bounded project tree summary and, when the workspace is a Git repository, a bounded working tree diff.
@@ -538,11 +541,494 @@ Current known build note:
 
 ---
 
-## 10. Source of Truth Policy
+## 10. Performance Optimization & Open-Source Model Integration (Phase 9)
+
+### 10.1 Incremental Rendering Architecture
+
+Inspired by **Zed Editor's** high-performance rendering approach, Agent IDE implements incremental rendering to handle large files efficiently:
+
+```text
+Monaco Editor (Web Worker)
+  -> IncrementalRenderer
+    -> Viewport tracking
+      -> Dirty line detection
+        -> Frame-budget rendering
+          -> Multi-threaded text operations
+```
+
+**Key Components:**
+
+- **Viewport Management**: Track visible lines and prioritize rendering
+- **Dirty Line Detection**: Only re-render changed lines
+- **Frame Budget**: Allocate time per frame (16ms for 60fps)
+- **Multi-threading**: Offload heavy operations to worker threads
+
+```rust
+pub struct IncrementalRenderer {
+    viewport: Viewport,
+    dirty_lines: HashSet<LineNumber>,
+    frame_budget: Duration,
+    target_fps: u32,
+}
+
+impl IncrementalRenderer {
+    pub fn render_with_budget(&mut self, changes: Vec<TextChange>) -> RenderResult {
+        let start = Instant::now();
+
+        // Mark affected lines as dirty
+        for change in changes {
+            self.dirty_lines.extend(change.affected_lines());
+        }
+
+        // Render critical content first
+        let critical = self.render_critical_elements();
+
+        // Render secondary content if time allows
+        if start.elapsed() < self.frame_budget {
+            self.render_secondary_elements();
+        }
+
+        RenderResult::new(critical)
+    }
+
+    pub fn render_dirty_regions(&mut self, budget: Duration) {
+        let start = Instant::now();
+        for line in &self.dirty_lines {
+            if start.elapsed() > budget { break; }
+            self.render_line(line);
+        }
+    }
+}
+```
+
+### 10.2 Intelligent Code Completion System
+
+Inspired by **Comate's** intelligent code completion, Agent IDE provides context-aware suggestions with Chinese optimization:
+
+```text
+Code Completion Trigger
+  -> Context Analyzer
+    -> Surrounding Code Analysis
+      -> Project Structure Awareness
+        -> Recent Edits Context
+          -> Suggestion Generation
+            -> Chinese-Optimized Prompts
+              -> Local/Cloud Model Selection
+```
+
+**Components:**
+
+```typescript
+export class IntelligentCodeCompletion {
+    private contextAnalyzer: ContextAnalyzer;
+    private suggestionCache: Map<string, Suggestion[]>;
+    private modelSelector: ModelSelector;
+
+    async getSuggestions(
+        file: string,
+        position: Position,
+        surroundingCode: string
+    ): Promise<Suggestion[]> {
+        const context = await this.contextAnalyzer.analyze({
+            file,
+            position,
+            surroundingCode,
+            projectStructure: await this.getProjectContext(),
+            recentEdits: this.getRecentEdits(),
+            language: this.detectLanguage(file)
+        });
+
+        // Build Chinese-optimized prompts
+        const prompt = this.buildChineseOptimizedPrompt(context);
+
+        // Select appropriate model based on task complexity
+        const model = this.modelSelector.selectBestModel(context.complexity);
+
+        return this.generateSuggestions(model, prompt);
+    }
+
+    private buildChineseOptimizedPrompt(context: CodeContext): string {
+        // Comate-style Chinese prompt engineering
+        return `
+分析以下代码上下文，提供智能代码补全建议：
+
+文件: ${context.file}
+位置: ${context.position.line}:${context.position.character}
+语言: ${context.language}
+
+周围代码:
+${context.surroundingCode}
+
+项目结构:
+${context.projectStructure.summary}
+
+请基于中文编程习惯提供以下建议：
+1. 当前上下文最可能的代码补全
+2. 考虑项目中的相似代码模式
+3. 提供符合中文开发者习惯的命名建议
+`;
+    }
+}
+```
+
+### 10.3 Open-Source Model Integration
+
+Agent IDE supports multiple open-source code models to provide cost-effective and privacy-preserving AI assistance:
+
+```text
+EnhancedLlmClient
+  -> Cloud Models (OpenAI, DeepSeek, etc.)
+  -> Local Models
+    -> StarCoder (Hugging Face)
+    -> CodeLlama (Meta)
+    -> DeepSeek Coder (DeepSeek)
+    -> CodeGemma (Google)
+```
+
+**Architecture:**
+
+```rust
+pub struct EnhancedLlmClient {
+    openai_client: Option<LlmClient>,
+    local_models: Vec<LocalModel>,
+    model_selector: ModelSelector,
+}
+
+pub struct LocalModel {
+    name: String,
+    model_type: ModelType,
+    engine: Box<dyn ModelEngine>,
+    capabilities: ModelCapabilities,
+}
+
+pub enum ModelType {
+    StarCoder,      // Hugging Face open-source, good for Python/JS
+    CodeLlama,      // Meta open-source, strong multi-language support
+    DeepSeekCoder,  // DeepSeek open-source, optimized for code completion
+    CodeGemma,      // Google open-source, efficient inference
+}
+
+pub struct ModelCapabilities {
+    max_context_tokens: u32,
+    supported_languages: Vec<String>,
+    inference_speed_ms: u32,
+    memory_requirement_mb: u32,
+}
+
+impl EnhancedLlmClient {
+    // Local model inference
+    pub async fn generate_code_local(
+        &self,
+        prompt: &str,
+        model: &LocalModel
+    ) -> Result<String> {
+        model.engine.generate(prompt).await
+    }
+
+    // Smart model selection
+    pub async fn smart_generate(&self, prompt: &str, context: &TaskContext) -> Result<String> {
+        let model = self.model_selector.select_best_model(context);
+
+        match model {
+            ModelSource::Local(local_model) => {
+                self.generate_code_local(prompt, local_model).await
+            }
+            ModelSource::Cloud(cloud_client) => {
+                cloud_client.stream_chat(/* ... */).await
+            }
+        }
+    }
+}
+
+pub struct ModelSelector;
+
+impl ModelSelector {
+    pub fn select_best_model(&self, context: &TaskContext) -> ModelSource {
+        match context.complexity {
+            Complexity::Low => self.find_fastest_local_model(),
+            Complexity::Medium => self.find_balanced_model(),
+            Complexity::High => self.find_most_capable_cloud_model(),
+        }
+    }
+}
+```
+
+**Model Integration Benefits:**
+
+- **Cost Reduction**: Use local models for simple tasks
+- **Privacy**: Keep code on local machine
+- **Latency**: Faster responses for local inference
+- **Reliability**: Work offline with local models
+- **Hybrid Strategy**: Smart selection based on task needs
+
+### 10.4 Plugin Architecture (DeepSeek Harness Inspired)
+
+Inspired by **DeepSeek Harness's** "everything is a plugin" philosophy, Agent IDE introduces a modular plugin system:
+
+```text
+PluginManager
+  -> Model Plugins (OpenAI, Local Models)
+  -> Tool Plugins (File operations, Git, Terminal)
+  -> Skill Plugins (Code generation, Debugging, Testing)
+  -> UI Plugins (Custom panels, Commands)
+  -> Pipeline Plugins (Custom Agent roles)
+```
+
+**Plugin Interface:**
+
+```typescript
+export interface Plugin {
+    name: string;
+    version: string;
+    description?: string;
+
+    // Lifecycle hooks
+    onActivate?(context: PluginContext): void;
+    onDeactivate?(): void;
+
+    // Extension points
+    registerCommands?(registry: CommandRegistry): void;
+    registerLanguageSupport?(provider: LanguageProvider): void;
+    enhanceAgentPipeline?(pipeline: Pipeline): void;
+    registerModelProvider?(provider: ModelProvider): void;
+    registerTool?(tool: Tool): void;
+}
+
+export interface PluginContext {
+    workspace: Workspace;
+    editor: Editor;
+    agentStore: AgentStore;
+    logger: Logger;
+}
+
+export class PluginManager {
+    private plugins: Map<string, Plugin> = new Map();
+    private commandRegistry: CommandRegistry;
+    private modelProviders: ModelProviderRegistry;
+
+    async loadPlugin(pluginPath: string): Promise<void> {
+        const plugin = await import(pluginPath);
+        this.plugins.set(plugin.name, plugin);
+
+        const context = this.createContext();
+        plugin.onActivate?.(context);
+
+        plugin.registerCommands?.(this.commandRegistry);
+        plugin.registerModelProvider?.(this.modelProviders);
+    }
+
+    unloadPlugin(name: string): void {
+        const plugin = this.plugins.get(name);
+        if (plugin) {
+            plugin.onDeactivate?.();
+            this.plugins.delete(name);
+        }
+    }
+}
+```
+
+**Example Plugin: Local Model Provider**
+
+```typescript
+export class StarCoderPlugin implements Plugin {
+    name = 'starcoder-provider';
+    version = '1.0.0';
+
+    onActivate(context: PluginContext): void {
+        const provider = new StarCoderProvider({
+            modelPath: '~/.agent-ide/models/starcoder',
+            maxTokens: 4096,
+        });
+        context.modelProviders.register(provider);
+    }
+
+    registerModelProvider(registry: ModelProviderRegistry): void {
+        registry.register(new StarCoderProvider());
+    }
+}
+```
+
+### 10.5 Performance Profiling Tools
+
+Agent IDE includes comprehensive performance monitoring inspired by Zed's profiling capabilities:
+
+```rust
+pub struct PerformanceProfiler {
+    flamegraph: FlamegraphRecorder,
+    frame_times: Vec<Duration>,
+    memory_tracker: MemoryTracker,
+}
+
+impl PerformanceProfiler {
+    pub fn start_frame(&mut self) {
+        let start = Instant::now();
+        // Record frame start
+    }
+
+    pub fn end_frame(&mut self) {
+        let duration = Instant::now() - self.frame_start;
+        self.frame_times.push(duration);
+        self.check_performance_regression();
+    }
+
+    pub fn profile_function<F, R>(&mut self, name: &str, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let start = Instant::now();
+        let result = f();
+        let duration = start.elapsed();
+        self.flamegraph.record(name, duration);
+        result
+    }
+}
+```
+
+**Performance Targets:**
+
+- **Startup Time**: < 3 seconds
+- **Memory Usage**: < 300MB idle, < 1GB with 10+ files
+- **Editor Latency**: < 50ms input response
+- **Frame Rate**: > 60fps during scrolling
+- **Code Completion**: < 200ms response time
+
+### 10.6 Chinese Optimization Strategy
+
+Inspired by **Comate's** Chinese developer experience, Agent IDE includes Chinese-specific optimizations:
+
+```typescript
+export class ChinesePromptOptimizer {
+    optimizeCodeCompletion(context: CodeContext): string {
+        return `
+基于以下中文编程上下文提供代码补全：
+
+文件: ${context.file}
+语言: ${context.language}
+
+当前代码:
+${context.surroundingCode}
+
+项目结构:
+${context.projectStructure.summary}
+
+请提供符合以下要求的补全:
+1. 遵循中文变量命名习惯 (拼音 vs 英文)
+2. 考虑中文注释风格
+3. 适配中文开发者的常用模式
+4. 提供中英文双语注释建议
+`;
+    }
+
+    optimizeErrorMessage(error: Error): string {
+        return `
+错误信息: ${error.message}
+位置: ${error.location}
+
+请用中文解释:
+1. 错误的具体原因
+2. 可能的解决方案
+3. 预防类似错误的建议
+`;
+    }
+}
+```
+
+### 10.7 Hybrid Model Strategy
+
+Agent IDE implements intelligent model selection to balance cost, performance, and quality:
+
+```rust
+pub struct HybridModelStrategy {
+    local_models: Vec<LocalModel>,
+    cloud_models: Vec<CloudModel>,
+    cost_tracker: CostTracker,
+}
+
+impl HybridModelStrategy {
+    pub fn select_model_for_task(&self, task: &Task) -> ModelSelection {
+        match task.task_type {
+            TaskType::SimpleCompletion => {
+                // Use fastest local model
+                self.select_fastest_local_model(&task.language)
+            }
+            TaskType::CodeGeneration => {
+                // Use balanced model
+                self.select_balanced_model(&task.complexity)
+            }
+            TaskType::ComplexRefactoring => {
+                // Use most capable cloud model
+                self.select_cloud_model(&task.language, ModelCapability::High)
+            }
+            TaskType::OfflineTask => {
+                // Must use local model
+                self.select_best_local_model(&task.language)
+            }
+        }
+    }
+
+    pub fn estimate_cost(&self, task: &Task, model: &Model) -> CostEstimate {
+        let tokens = self.estimate_tokens(task);
+        let cost_per_token = model.cost_per_token;
+        CostEstimate {
+            estimated_tokens: tokens,
+            estimated_cost: tokens as f64 * cost_per_token,
+            latency: model.estimated_latency,
+        }
+    }
+}
+```
+
+### 10.8 Implementation Benefits
+
+These Phase 9 improvements provide:
+
+1. **Performance**: Zed-inspired incremental rendering enables handling large files smoothly
+2. **Intelligence**: Comate-style context-aware completion improves developer productivity
+3. **Cost**: Open-source models reduce dependency on expensive cloud APIs
+4. **Privacy**: Local model support keeps code on developer machines
+5. **Extensibility**: Plugin architecture allows community contributions
+6. **Localization**: Chinese optimization improves experience for Chinese developers
+7. **Reliability**: Hybrid strategy provides fallback options when cloud services fail
+
+---
+
+## 11. Future Enhancements Beyond Phase 9
+
+### 11.1 Real-time Collaboration (Zed-inspired)
+
+- Multi-user editing sessions
+- Conflict resolution UI
+- Shareable workspace states
+- Agent collaboration between users
+
+### 11.2 Advanced Code Analysis
+
+- Static analysis integration
+- Security vulnerability scanning
+- Performance bottleneck detection
+- Code smell identification
+
+### 11.3 Ecosystem Integration
+
+- Package manager integration (npm, cargo, pip)
+- CI/CD pipeline visualization
+- Project template marketplace
+- Community plugin repository
+
+### 11.4 Cross-Platform Mobile Support
+
+- Mobile-optimized interface
+- Touch gestures for code editing
+- Cloud sync for workspace state
+- Offline mode with local models
+
+---
+
+## 12. Source of Truth Policy
 
 Use the documents as follows:
 
-- `ROADMAP.md`: current implementation state, known issues, next tasks.
-- `docs/agent_ide_design.md`: detailed technical design and current workflow explanation.
+- `ROADMAP.md`: current implementation state, known issues, next tasks, and strategic direction including performance optimization and open-source model integration.
+- `docs/agent_ide_design.md`: detailed technical design including incremental rendering, intelligent completion, and plugin architecture.
 - `docs/agent_ide_ui_design.md`: product/UI target and design intent.
 - `docs/agent_ide_plan.md`: original technical plan; useful historically, but should be refreshed when major implementation milestones land.

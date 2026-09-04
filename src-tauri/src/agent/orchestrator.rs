@@ -788,8 +788,8 @@ fn format_context_budget_summary(
 
 fn format_context_sources(sources: &ContextSourceOptions) -> String {
     format!(
-        "Context sources: projectTree={}, gitDiff={}",
-        sources.include_project_tree, sources.include_git_diff
+        "Context sources: projectTree={}, gitDiff={}, projectMemory={}",
+        sources.include_project_tree, sources.include_git_diff, sources.include_project_memory
     )
 }
 
@@ -1006,8 +1006,12 @@ mod tests {
         let summary = format_context_sources(&crate::services::context::ContextSourceOptions {
             include_project_tree: true,
             include_git_diff: false,
+            include_project_memory: true,
         });
 
-        assert_eq!(summary, "Context sources: projectTree=true, gitDiff=false");
+        assert_eq!(
+            summary,
+            "Context sources: projectTree=true, gitDiff=false, projectMemory=true"
+        );
     }
 }

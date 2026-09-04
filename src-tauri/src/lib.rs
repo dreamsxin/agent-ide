@@ -76,6 +76,9 @@ pub fn run() {
             commands::agent::update_pipeline,
             commands::agent::reset_pipeline,
             commands::agent::test_llm_connection,
+            commands::agent::get_local_model_status,
+            commands::agent::load_local_model,
+            commands::agent::unload_local_model,
             commands::agent::save_workspace_path,
             commands::agent::get_workspace_path,
             // Git 命令
