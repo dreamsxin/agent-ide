@@ -1456,11 +1456,18 @@ fn validate_cli_policy(
                 ),
             ));
         }
-        let operation = diff
-            .provenance
-            .as_ref()
-            .map(|provenance| provenance.operation.as_str())
-            .unwrap_or("edit");
+        // 用 hunk 形态判定是否新建文件，而不是信 provenance.operation：
+        // `attach_step_provenance` 给后端生成的 diff 填的是 "unknown"，缺省又
+        // 回落成 "edit"，于是一个真的会创建文件的 diff 会通过 --allow-edit
+        // 检查、绕过 --allow-create。hunk 形态是 apply 真正分支的依据。
+        let operation = if crate::agent::diff_apply::is_new_file_diff(diff) {
+            "create"
+        } else {
+            diff.provenance
+                .as_ref()
+                .map(|provenance| provenance.operation.as_str())
+                .unwrap_or("edit")
+        };
         if !args.apply {
             decisions.push(format!("preview {} {}", operation, diff.file));
             continue;
@@ -2237,6 +2244,52 @@ mod tests {
             ..RunArgs::default()
         };
         assert!(validate_cli_policy(&allowed, &diffs).is_ok());
+    }
+
+    /// 回归测试：新建文件的 diff 不能因为 provenance 是 "unknown" 就被记成编辑。
+    /// `attach_step_provenance` 给后端生成的 diff 填的正是 "unknown"，所以这条
+    /// 路径在真实 CLI 运行中会被走到，而 policy.json 的决策记录是审计依据。
+    #[test]
+    fn cli_policy_labels_create_shaped_diff_as_create() {
+        let preview = RunArgs {
+            allow_edit: true,
+            ..RunArgs::default()
+        };
+        let create_shaped = vec![FileDiff {
+            id: "d1".to_string(),
+            file: "src/brand-new.ts".to_string(),
+            base_hash: None,
+            provenance: Some(crate::agent::state_machine::DiffProvenance {
+                protocol: "unknown".to_string(),
+                operation: "unknown".to_string(),
+                rationale: None,
+                schema_version: None,
+                change_index: None,
+                source_role: None,
+                source_stage: None,
+                regenerated_from_diff_id: None,
+                regenerated_from_hunk_index: None,
+            }),
+            hunks: vec![crate::agent::state_machine::DiffHunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 1,
+                content: String::new(),
+                original: String::new(),
+                updated: "export const created = true;\n".to_string(),
+                provenance: None,
+                status: None,
+            }],
+            status: "pending".to_string(),
+        }];
+
+        let decisions = validate_cli_policy(&preview, &create_shaped).unwrap();
+
+        assert_eq!(
+            decisions,
+            vec!["preview create src/brand-new.ts".to_string()]
+        );
     }
 
     #[test]
