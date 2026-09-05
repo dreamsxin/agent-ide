@@ -93,11 +93,7 @@ impl ToolInvoker for McpToolInvoker {
                 Ok(result)
             }
             Err(error) => {
-                self.log(
-                    "error",
-                    &format!("MCP tool {} failed", tool_name),
-                    &error,
-                );
+                self.log("error", &format!("MCP tool {} failed", tool_name), &error);
                 Err(error)
             }
         }
@@ -175,7 +171,9 @@ pub async fn discover_mcp_tools(
 }
 
 #[tauri::command]
-pub async fn get_mcp_tools(mcp_state: State<'_, McpState>) -> Result<Vec<McpToolDescriptor>, String> {
+pub async fn get_mcp_tools(
+    mcp_state: State<'_, McpState>,
+) -> Result<Vec<McpToolDescriptor>, String> {
     Ok(mcp_state.registry.tools().await)
 }
 

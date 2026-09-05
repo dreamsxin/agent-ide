@@ -61,8 +61,8 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
         let (a, b) = repo
             .graph_ahead_behind(local.id(), upstream_commit.id())
             .map_err(|e| e.to_string())?;
-        ahead = a as usize;
-        behind = b as usize;
+        ahead = a;
+        behind = b;
     }
 
     // 获取状态

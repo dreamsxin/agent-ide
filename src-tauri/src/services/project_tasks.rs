@@ -139,7 +139,7 @@ fn discover_package_scripts(root: &Path) -> Result<Vec<ProjectTask>, String> {
         })
         .collect();
 
-    tasks.sort_by(|a, b| score_package_script(&a.label).cmp(&score_package_script(&b.label)));
+    tasks.sort_by_key(|task| score_package_script(&task.label));
     Ok(tasks)
 }
 
@@ -205,6 +205,8 @@ fn score_package_script(name: &str) -> usize {
 }
 
 #[cfg(test)]
+// 同上：环境变量测试守卫需要跨 await 持有同步锁。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use uuid::Uuid;

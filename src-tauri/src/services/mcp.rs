@@ -79,7 +79,8 @@ pub fn load_config() -> McpConfig {
 
 pub fn save_config(config: &McpConfig) -> Result<(), String> {
     let dir = workspace::config_dir();
-    std::fs::create_dir_all(&dir).map_err(|error| format!("Create config dir failed: {}", error))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Create config dir failed: {}", error))?;
     let json = serde_json::to_string_pretty(config)
         .map_err(|error| format!("Serialize MCP config failed: {}", error))?;
     std::fs::write(config_path(), json)
@@ -374,16 +375,18 @@ fn flatten_tool_content(result: &serde_json::Value) -> String {
     };
     let parts: Vec<String> = items
         .iter()
-        .map(|item| match item.get("type").and_then(serde_json::Value::as_str) {
-            Some("text") => item
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            // 图片/音频等非文本内容只回传引用信息，避免把 base64 塞进上下文
-            Some(other) => format!("[{} content omitted]", other),
-            None => serde_json::to_string(item).unwrap_or_default(),
-        })
+        .map(
+            |item| match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => item
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                // 图片/音频等非文本内容只回传引用信息，避免把 base64 塞进上下文
+                Some(other) => format!("[{} content omitted]", other),
+                None => serde_json::to_string(item).unwrap_or_default(),
+            },
+        )
         .filter(|part| !part.is_empty())
         .collect();
     parts.join("\n")
@@ -490,8 +493,13 @@ impl McpRegistry {
     }
 
     pub async fn shutdown_all(&self) {
-        let drained: Vec<Arc<Mutex<McpConnection>>> =
-            self.connections.lock().await.drain().map(|(_, c)| c).collect();
+        let drained: Vec<Arc<Mutex<McpConnection>>> = self
+            .connections
+            .lock()
+            .await
+            .drain()
+            .map(|(_, c)| c)
+            .collect();
         self.tools.lock().await.clear();
         for connection in drained {
             if let Ok(connection) = Arc::try_unwrap(connection) {
@@ -601,7 +609,10 @@ mod tests {
             servers: vec![McpServerConfig {
                 name: "files".to_string(),
                 command: "npx".to_string(),
-                args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                ],
                 env: HashMap::new(),
                 cwd: None,
                 enabled: true,

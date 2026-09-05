@@ -75,10 +75,8 @@ mod tests {
     #[test]
     fn load_project_memory_reads_workspace_agents_md() {
         let _guard = crate::services::workspace::env_test_guard();
-        let temp = std::env::temp_dir().join(format!(
-            "agent-ide-project-memory-test-{}",
-            Uuid::new_v4()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("agent-ide-project-memory-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&temp).unwrap();
         std::env::set_var("AGENT_IDE_CONFIG_DIR", temp.join("config"));
         crate::services::workspace::save_workspace_path(temp.to_string_lossy().as_ref()).unwrap();
