@@ -50,6 +50,8 @@ pub struct AgentOrchestrator {
     pub current_run_id: Option<String>,
     pub last_run_id: Option<String>,
     pub paused_run: Option<PausedPipelineRun>,
+    /// 外部工具执行器（MCP）。None 表示本次运行不暴露外部工具。
+    pub tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +77,7 @@ impl AgentOrchestrator {
             current_run_id: None,
             last_run_id: None,
             paused_run: None,
+            tool_invoker: None,
         }
     }
 
@@ -304,6 +307,7 @@ impl AgentOrchestrator {
                 &ctx_str,
                 &prior_outputs,
                 &pending_diff_summary,
+                self.tool_invoker.as_deref(),
                 cancel_flag.clone(),
                 tx2,
             )

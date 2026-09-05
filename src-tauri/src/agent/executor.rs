@@ -1,8 +1,9 @@
 use crate::agent::multi_agent::AgentRole;
 use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff, SddArtifact};
 use crate::services::llm_client::{
-    synthesize_agent_changes_block, ChatMessage, LlmClient, LlmStreamOutput,
+    synthesize_agent_changes_block, ChatMessage, LlmClient, LlmStreamOutput, LlmToolCall,
 };
+use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -19,6 +20,96 @@ fn merge_tool_call_output(output: LlmStreamOutput) -> String {
     }
     content
 }
+
+/// 外部工具执行入口。当前唯一实现来源是 MCP server 发现的工具。
+///
+/// Agent 内置的 `emit_agent_changes` / `emit_sdd_draft` 不走这里：
+/// 它们是输出协议，而不是需要回传结果的副作用调用。
+#[async_trait]
+pub trait ToolInvoker: Send + Sync {
+    /// 该工具名是否由本 invoker 处理
+    fn handles(&self, tool_name: &str) -> bool;
+
+    /// 执行工具并返回回传给模型的文本结果
+    async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String>;
+}
+
+/// 单次 LLM 调用中允许的最大工具回合数，防止模型陷入工具循环
+pub const MAX_TOOL_ITERATIONS: usize = 4;
+
+/// 从模型返回的工具调用中挑出需要真正执行的外部工具调用。
+/// 内置输出协议工具（`emit_agent_changes` / `emit_sdd_draft`）不在其中。
+fn select_external_calls(
+    calls: &[LlmToolCall],
+    invoker: Option<&dyn ToolInvoker>,
+) -> Vec<LlmToolCall> {
+    match invoker {
+        Some(invoker) => calls
+            .iter()
+            .filter(|call| invoker.handles(&call.name))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// 带外部工具回合的 LLM 调用。
+///
+/// 每一轮：请求 → 若模型调用了外部工具则执行并把结果作为 `role: "tool"` 消息回传 → 继续请求。
+/// 未启用 invoker、或模型没有调用外部工具时，行为与单次 `stream_chat_with_tools` 完全一致。
+async fn stream_with_tool_loop(
+    llm: &LlmClient,
+    mut messages: Vec<ChatMessage>,
+    invoker: Option<&dyn ToolInvoker>,
+    cancel_flag: Arc<AtomicBool>,
+    tx: mpsc::Sender<String>,
+) -> Result<String, String> {
+    let mut merged = String::new();
+
+    for iteration in 0..=MAX_TOOL_ITERATIONS {
+        let output = llm
+            .stream_chat_with_tools(messages.clone(), cancel_flag.clone(), tx.clone())
+            .await?;
+
+        let external = select_external_calls(&output.tool_calls, invoker);
+
+        let is_last_iteration = iteration == MAX_TOOL_ITERATIONS;
+        if external.is_empty() || is_last_iteration {
+            merged.push_str(&merge_tool_call_output(output));
+            if is_last_iteration && !external.is_empty() {
+                merged.push_str(&format!(
+                    "\n\n[agent-ide] Tool loop stopped after {} rounds; remaining tool calls were not executed.\n",
+                    MAX_TOOL_ITERATIONS
+                ));
+            }
+            return Ok(merged);
+        }
+
+        // 保留本轮文本输出，模型可能同时给出解释和工具调用
+        merged.push_str(&output.content);
+        messages.push(ChatMessage::assistant_tool_calls(
+            output.content.clone(),
+            &output.tool_calls,
+        ));
+
+        let invoker = invoker.expect("external calls only collected when invoker is present");
+        for call in &external {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Agent task cancelled".to_string());
+            }
+            // 工具失败也回传给模型，让它自行降级而不是直接中断整个 stage
+            let result = match invoker.invoke(&call.name, &call.arguments).await {
+                Ok(result) => result,
+                Err(error) => format!("Tool call failed: {}", error),
+            };
+            messages.push(ChatMessage::tool_result(call.id.clone(), result));
+        }
+    }
+
+    Ok(merged)
+}
+
+
 
 /// 执行步骤的系统提示词
 const EXECUTOR_PROMPT: &str = r#"You are a precise coding assistant. Your task is to implement ONE specific coding step.
@@ -53,27 +144,19 @@ pub async fn execute_step(
     llm: &LlmClient,
     step: &str,
     context: &str,
+    invoker: Option<&dyn ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
 ) -> Result<String, String> {
     let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: EXECUTOR_PROMPT.to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: format!(
-                "Step to execute: {}\n\nContext:\n{}\n\nProvide the implementation (code/diff only):",
-                step, context
-            ),
-        },
+        ChatMessage::system(EXECUTOR_PROMPT),
+        ChatMessage::user(format!(
+            "Step to execute: {}\n\nContext:\n{}\n\nProvide the implementation (code/diff only):",
+            step, context
+        )),
     ];
 
-    let output = llm
-        .stream_chat_with_tools(messages, cancel_flag, tx)
-        .await?;
-    Ok(merge_tool_call_output(output))
+    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx).await
 }
 
 pub async fn execute_stage(
@@ -84,6 +167,7 @@ pub async fn execute_stage(
     context: &str,
     prior_outputs: &str,
     pending_diffs: &str,
+    invoker: Option<&dyn ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
 ) -> Result<String, String> {
@@ -187,36 +271,27 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
     };
 
     let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: format!("{}\n\n{}", role.system_prompt(), output_rules),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: format!(
-                "Pipeline stage: {}\nRole: {}\n\nUser task:\n{}\n\nProject context:\n{}\n\nPrior stage outputs:\n{}\n\nActual pending diffs for review:\n{}\n\nRun this stage now.",
-                stage_name,
-                role.to_string(),
-                user_prompt,
-                context,
-                if prior_outputs.trim().is_empty() {
-                    "(none)"
-                } else {
-                    prior_outputs
-                },
-                if pending_diffs.trim().is_empty() {
-                    "No pending diffs."
-                } else {
-                    pending_diffs
-                },
-            ),
-        },
+        ChatMessage::system(format!("{}\n\n{}", role.system_prompt(), output_rules)),
+        ChatMessage::user(format!(
+            "Pipeline stage: {}\nRole: {}\n\nUser task:\n{}\n\nProject context:\n{}\n\nPrior stage outputs:\n{}\n\nActual pending diffs for review:\n{}\n\nRun this stage now.",
+            stage_name,
+            role.to_string(),
+            user_prompt,
+            context,
+            if prior_outputs.trim().is_empty() {
+                "(none)"
+            } else {
+                prior_outputs
+            },
+            if pending_diffs.trim().is_empty() {
+                "No pending diffs."
+            } else {
+                pending_diffs
+            },
+        )),
     ];
 
-    let output = llm
-        .stream_chat_with_tools(messages, cancel_flag, tx)
-        .await?;
-    Ok(merge_tool_call_output(output))
+    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx).await
 }
 
 /// 从 LLM 响应中解析 diff 块
@@ -933,6 +1008,69 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RecordingInvoker {
+        prefix: &'static str,
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingInvoker {
+        fn new(prefix: &'static str) -> Self {
+            Self {
+                prefix,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ToolInvoker for RecordingInvoker {
+        fn handles(&self, tool_name: &str) -> bool {
+            tool_name.starts_with(self.prefix)
+        }
+
+        async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool_name.to_string(), arguments.to_string()));
+            Ok("ok".to_string())
+        }
+    }
+
+    fn call(name: &str) -> LlmToolCall {
+        LlmToolCall {
+            id: format!("call_{}", name),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        }
+    }
+
+    #[test]
+    fn external_calls_exclude_builtin_output_protocol_tools() {
+        let invoker = RecordingInvoker::new("mcp__");
+        let calls = vec![
+            call("emit_agent_changes"),
+            call("mcp__files__read"),
+            call("emit_sdd_draft"),
+            call("mcp__git__log"),
+        ];
+
+        let selected = select_external_calls(&calls, Some(&invoker));
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mcp__files__read", "mcp__git__log"]
+        );
+    }
+
+    #[test]
+    fn external_calls_are_empty_without_invoker() {
+        assert!(select_external_calls(&[call("mcp__files__read")], None).is_empty());
+    }
 
     #[test]
     fn merge_tool_call_output_appends_agent_changes_block() {

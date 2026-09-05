@@ -321,11 +321,67 @@ impl LlmConfig {
     }
 }
 
-/// Chat 消息
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Chat 消息。
+///
+/// `tool_calls` / `tool_call_id` 只在 provider 原生工具调用回合中出现：
+/// - assistant 回合：重放模型请求的工具调用，`content` 可为空串。
+/// - tool 回合：`role = "tool"`，`tool_call_id` 关联对应调用，`content` 为工具结果。
+///
+/// 两个字段为 None 时不参与序列化，因此普通请求体与扩展前完全一致。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<OutboundToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 重放模型在上一回合请求的原生工具调用。
+    pub fn assistant_tool_calls(content: impl Into<String>, calls: &[LlmToolCall]) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.into(),
+            tool_calls: Some(calls.iter().map(OutboundToolCall::from).collect()),
+            tool_call_id: None,
+        }
+    }
+
+    /// 单个工具的执行结果回传。
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
 }
 
 /// Provider 原生工具调用（由流式/非流式响应重组得到）
@@ -334,6 +390,61 @@ pub struct LlmToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+}
+
+/// 回传给 provider 的工具调用结构（OpenAI 兼容 `assistant.tool_calls[]`）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutboundToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: OutboundToolFunction,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutboundToolFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+impl From<&LlmToolCall> for OutboundToolCall {
+    fn from(call: &LlmToolCall) -> Self {
+        Self {
+            id: call.id.clone(),
+            call_type: "function".to_string(),
+            function: OutboundToolFunction {
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            },
+        }
+    }
+}
+
+/// 注入请求体的额外工具定义（当前来源：MCP server 发现的工具）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema 对象；非对象时回退为空 object schema
+    pub parameters: serde_json::Value,
+}
+
+impl ToolDefinition {
+    fn to_request_value(&self) -> serde_json::Value {
+        let parameters = if self.parameters.is_object() {
+            self.parameters.clone()
+        } else {
+            serde_json::json!({ "type": "object", "properties": {} })
+        };
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": parameters,
+            }
+        })
+    }
 }
 
 /// 流式/非流式请求的统一输出：文本内容 + 原生工具调用
@@ -431,6 +542,8 @@ pub struct LlmClient {
     client: Client,
     /// 本地模型引擎（如果是本地模型）
     local_engine: Option<Arc<dyn ModelEngine>>,
+    /// 额外注入的工具定义（MCP 发现的工具）
+    extra_tools: Vec<ToolDefinition>,
 }
 
 impl LlmClient {
@@ -447,6 +560,7 @@ impl LlmClient {
             config,
             client,
             local_engine: None, // 将在初始化时设置
+            extra_tools: Vec::new(),
         }
     }
 
@@ -455,6 +569,17 @@ impl LlmClient {
         self.local_engine = Some(engine);
         self
     }
+
+    /// 注入额外工具定义，仅在 `native_tools` 模式下参与请求体
+    pub fn with_extra_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.extra_tools = tools;
+        self
+    }
+
+    pub fn extra_tools(&self) -> &[ToolDefinition] {
+        &self.extra_tools
+    }
+
 
     pub fn get_capabilities(&self) -> ModelCapabilities {
         if let Some(engine) = &self.local_engine {
@@ -586,7 +711,7 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
-        let body = build_chat_request(&self.config, messages, true);
+        let body = build_chat_request(&self.config, messages, true, &self.extra_tools);
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -694,7 +819,7 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
-        let body = build_chat_request(&self.config, messages, false);
+        let body = build_chat_request(&self.config, messages, false, &self.extra_tools);
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -946,6 +1071,7 @@ fn build_chat_request(
     config: &LlmConfig,
     messages: Vec<ChatMessage>,
     stream: bool,
+    extra_tools: &[ToolDefinition],
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": config.model,
@@ -959,7 +1085,7 @@ fn build_chat_request(
             object.insert(key.to_string(), serde_json::json!(max_output_tokens));
         }
         if config.tool_call_mode == "native_tools" {
-            object.insert("tools".to_string(), native_tools_schema());
+            object.insert("tools".to_string(), native_tools_schema(extra_tools));
             object.insert("tool_choice".to_string(), serde_json::json!("auto"));
         }
     }
@@ -975,8 +1101,8 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 503)
 }
 
-fn native_tools_schema() -> serde_json::Value {
-    serde_json::json!([
+fn native_tools_schema(extra_tools: &[ToolDefinition]) -> serde_json::Value {
+    let mut tools = serde_json::json!([
         {
             "type": "function",
             "function": {
@@ -1035,7 +1161,14 @@ fn native_tools_schema() -> serde_json::Value {
                 }
             }
         }
-    ])
+    ]);
+
+    if let Some(array) = tools.as_array_mut() {
+        for tool in extra_tools {
+            array.push(tool.to_request_value());
+        }
+    }
+    tools
 }
 
 fn output_token_key(config: &LlmConfig) -> &'static str {
@@ -1274,7 +1407,7 @@ mod tests {
 
     #[test]
     fn chat_request_omits_output_limit_when_unset() {
-        let body = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), true);
+        let body = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), true, &[]);
 
         assert_eq!(body["stream"], true);
         assert!(body.get("max_tokens").is_none());
@@ -1287,6 +1420,7 @@ mod tests {
             &config("deepseek", "deepseek-chat", Some(2048)),
             Vec::new(),
             true,
+            &[],
         );
 
         assert_eq!(body["max_tokens"], 2048);
@@ -1295,7 +1429,7 @@ mod tests {
 
     #[test]
     fn chat_request_maps_output_limit_for_openai_reasoning_models() {
-        let body = build_chat_request(&config("openai", "gpt-5", Some(8192)), Vec::new(), true);
+        let body = build_chat_request(&config("openai", "gpt-5", Some(8192)), Vec::new(), true, &[]);
 
         assert_eq!(body["max_completion_tokens"], 8192);
         assert!(body.get("max_tokens").is_none());
@@ -1306,7 +1440,7 @@ mod tests {
         let mut cfg = config("openai", "gpt-4o", Some(1024));
         cfg.tool_call_mode = "native_tools".to_string();
 
-        let body = build_chat_request(&cfg, Vec::new(), true);
+        let body = build_chat_request(&cfg, Vec::new(), true, &[]);
 
         assert_eq!(body["tool_choice"], "auto");
         assert!(body["tools"]
@@ -1315,9 +1449,72 @@ mod tests {
     }
 
     #[test]
+    fn chat_request_appends_extra_tool_definitions() {
+        let mut cfg = config("openai", "gpt-4o", Some(1024));
+        cfg.tool_call_mode = "native_tools".to_string();
+        let extra = vec![
+            ToolDefinition {
+                name: "mcp__files__read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                }),
+            },
+            ToolDefinition {
+                name: "mcp__files__broken_schema".to_string(),
+                description: "Schema is not an object".to_string(),
+                parameters: serde_json::json!("nonsense"),
+            },
+        ];
+
+        let body = build_chat_request(&cfg, Vec::new(), true, &extra);
+        let tools = body["tools"].as_array().expect("tools array");
+
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[2]["type"], "function");
+        assert_eq!(tools[2]["function"]["name"], "mcp__files__read");
+        assert_eq!(
+            tools[2]["function"]["parameters"]["properties"]["path"]["type"],
+            "string"
+        );
+        // 非对象 schema 回退成空 object，避免 provider 直接 400
+        assert_eq!(tools[3]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn tool_round_trip_messages_serialize_openai_shape() {
+        let calls = vec![LlmToolCall {
+            id: "call_1".to_string(),
+            name: "mcp__files__read".to_string(),
+            arguments: "{\"path\":\"a.txt\"}".to_string(),
+        }];
+        let messages = vec![
+            ChatMessage::user("read a.txt"),
+            ChatMessage::assistant_tool_calls("", &calls),
+            ChatMessage::tool_result("call_1", "hello"),
+        ];
+
+        let body = build_chat_request(&config("openai", "gpt-4o", None), messages, true, &[]);
+        let serialized = body["messages"].as_array().expect("messages array");
+
+        assert!(serialized[0].get("tool_calls").is_none());
+        assert!(serialized[0].get("tool_call_id").is_none());
+        assert_eq!(serialized[1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(serialized[1]["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            serialized[1]["tool_calls"][0]["function"]["name"],
+            "mcp__files__read"
+        );
+        assert_eq!(serialized[2]["role"], "tool");
+        assert_eq!(serialized[2]["tool_call_id"], "call_1");
+        assert_eq!(serialized[2]["content"], "hello");
+    }
+
+    #[test]
     fn deepseek_v4_flash_uses_non_streaming_requests() {
         let cfg = config("deepseek", "deepseek-v4-flash", Some(64));
-        let body = build_chat_request(&cfg, Vec::new(), false);
+        let body = build_chat_request(&cfg, Vec::new(), false, &[]);
 
         assert!(prefers_non_streaming(&cfg));
         assert_eq!(body["stream"], false);
@@ -1475,10 +1672,7 @@ mod tests {
         let response = tokio::time::timeout(
             tokio::time::Duration::from_secs(60),
             client.stream_chat(
-                vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: "Reply with exactly AGENT_IDE_OK".to_string(),
-                }],
+                vec![ChatMessage::user("Reply with exactly AGENT_IDE_OK")],
                 Arc::new(AtomicBool::new(false)),
                 tx,
             ),

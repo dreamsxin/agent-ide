@@ -1,6 +1,7 @@
 use commands::agent::AgentGlobalState;
 use commands::fs::FileWatcherState;
 use commands::lsp::LspManager;
+use commands::mcp::McpState;
 use commands::terminal::TerminalManager;
 use tauri::Manager;
 
@@ -20,6 +21,7 @@ pub fn run() {
         .manage(TerminalManager::new())
         .manage(FileWatcherState::new())
         .manage(LspManager::new())
+        .manage(McpState::new())
         .setup(|app| {
             // 获取主窗口并设置标题
             if let Some(window) = app.get_webview_window("main") {
@@ -81,6 +83,13 @@ pub fn run() {
             commands::agent::unload_local_model,
             commands::agent::save_workspace_path,
             commands::agent::get_workspace_path,
+            // MCP 命令
+            commands::mcp::get_mcp_config,
+            commands::mcp::save_mcp_config,
+            commands::mcp::discover_mcp_tools,
+            commands::mcp::get_mcp_tools,
+            commands::mcp::call_mcp_tool,
+            commands::mcp::disconnect_mcp_servers,
             // Git 命令
             commands::git::git_status,
             commands::git::git_diff,

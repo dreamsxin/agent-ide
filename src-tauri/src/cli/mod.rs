@@ -1049,6 +1049,8 @@ async fn execute_steps(
         context_text,
         workspace_path,
         steps,
+        // CLI 暂不暴露 MCP 工具：headless 自动化的权限模型还未落地（Phase 9.0.4）
+        None,
         cancel_flag,
         |index, total, step| {
             if output_mode == OutputMode::Text {

@@ -44,7 +44,7 @@ cargo test
 
 ## Current State
 
-Status as of 2026-09-04: **Phase 8 daily IDE replacement hardening in progress; Phase 9.0 market-parity foundation started (AGENTS.md project memory landed)**.
+Status as of 2026-09-05: **Phase 8 daily IDE replacement hardening in progress; Phase 9.0 market-parity foundation mostly closed (native tool calling, AGENTS.md memory, and MCP client landed; only the permission model V2 remains)**.
 
 Updated strategic direction (2026-09-03):
 
@@ -170,6 +170,13 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added Pipeline stage source/output visualization from Agent action logs and clearer Diff hunk review/regeneration status in the desktop UI.
 - Added a reusable Phase 8 real-runtime smoke run template and baseline notes to `docs/smoke_test.md`.
 - Added Phase 9.0 AGENTS.md project memory: workspace-root `AGENTS.md` is loaded into `AgentContext` as a bounded section, included by default in every IDE and CLI run, respects the per-run `includeProjectMemory` source toggle, and is exposed to CLI automation via `--include project-memory`.
+- Added Phase 9.0.3 MCP client: `services/mcp.rs` speaks MCP stdio (line-delimited JSON-RPC 2.0) with `initialize`, `tools/list`, and `tools/call`; servers are configured in `<config_dir>/mcp.json`; discovered tools are injected into the provider-native tool list as `mcp__{server}__{tool}`.
+- Added a bounded tool-execution loop in `agent/executor.rs`: MCP tool calls are executed through a `ToolInvoker`, results are replayed as `role: "tool"` messages, and the loop stops after `MAX_TOOL_ITERATIONS` rounds. Built-in `emit_agent_changes` / `emit_sdd_draft` stay on the output-protocol path.
+- Extended `ChatMessage` with optional `tool_calls` / `tool_call_id` so assistant tool-call turns and tool results can be replayed to OpenAI-compatible providers; requests without tool rounds serialize exactly as before.
+- Added MCP Tauri commands (`get_mcp_config`, `save_mcp_config`, `discover_mcp_tools`, `get_mcp_tools`, `call_mcp_tool`, `disconnect_mcp_servers`) and a Settings-panel MCP section for server management, discovery status, and the exposed tool list.
+- MCP tool calls and discovery emit `agent-action-log` entries (`mcp_tool_call`, `mcp_discovery`) so external tool use is auditable in the Logs panel alongside diffs and stages.
+- Surfaced the AGENTS.md project-memory toggle in the ChatView context-source chips, wired to the backend `project_memory` estimate section.
+- Fixed pre-existing `npm run build` type errors in `src/hooks/useIntelligentCompletion.ts` and `src/components/editor/EditorContainer.tsx` that were blocking frontend verification.
 
 Important distinction:
 
@@ -189,7 +196,9 @@ cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
-2026-09-05 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (127 tests, 0 failed), including the AGENTS.md project-memory tests and the new tool-call accumulator / synthesis tests. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+2026-09-05 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (141 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, and the new MCP config/qualified-name/content-flattening and tool-loop selection tests. `npm run build` and `npm test` (14 tests) also pass; the build required fixing two pre-existing type errors in the Phase 9.2 intelligent-completion files. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+
+MCP runtime note: the stdio transport, discovery, and tool loop are unit-covered and type-checked, but a live round-trip against a real MCP server (e.g. `npx -y @modelcontextprotocol/server-filesystem .`) has not been run yet. That belongs in the Tauri smoke loop.
 
 Known local worktree note:
 
@@ -232,6 +241,8 @@ Known local worktree note:
 - `src-tauri/src/services/llm_client.rs`: OpenAI-compatible streaming client.
 - `src-tauri/src/services/context.rs`: AgentContext and context compression.
 - `src-tauri/src/services/workspace.rs`: config dir, workspace persistence, path resolution and workspace boundary checks.
+- `src-tauri/src/services/mcp.rs`: MCP stdio JSON-RPC client, server config persistence, and the discovered-tool registry.
+- `src-tauri/src/commands/mcp.rs`: MCP config/discovery/invocation commands and the `ToolInvoker` that runs MCP tools during an Agent run.
 - `README.md`: setup, runtime modes, verification, Agent workflow, and current limitations.
 - `README.zh-CN.md`: Chinese setup, workflow, protocol, and project status overview.
 - `docs/smoke_test.md`: manual and automated smoke checklist for daily-IDE replacement workflows.
@@ -607,8 +618,8 @@ Goal: close the gap to the 2026 agentic-coding standard feature surface (Codex /
 |------|-------------|----------|--------|
 | 9.0.1 Provider-Native Tool Calling | Native function-call request and streaming tool-call parsing in `services/llm_client.rs` + `agent/executor.rs`; `agent-changes` text protocol remains the fallback for local/small models | Critical | **Done (2026-09-05)** |
 | 9.0.2 AGENTS.md Project Memory | Load workspace-root `AGENTS.md` into `AgentContext`; bounded size; participates in all compression modes and budget packing; CLI `--include project-memory` | Critical | **Done (2026-09-04)** |
-| 9.0.3 MCP Client | RMCP-based stdio transport with tool discovery/invocation, wired into native tool calling and the action log | High | Planned |
-| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | Planned |
+| 9.0.3 MCP Client | MCP stdio (line-delimited JSON-RPC 2.0) transport in `services/mcp.rs` with tool discovery/invocation, `mcp__{server}__{tool}` injection into the native tool list, a bounded tool-execution loop in `agent/executor.rs`, and `agent-action-log` entries | High | **Done (2026-09-05)** |
+| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, per-MCP-tool approval, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | Planned |
 
 Exit criteria: an Agent run uses native tool calls with at least one OpenAI-compatible provider; AGENTS.md content is visible in context estimate sections; MCP tools appear in the agent tool surface; desktop runs enforce permission presets.
 
@@ -826,6 +837,9 @@ The Plan/SDD Mode is a dual-layer feature:
 | 2026-04-30 | Workspace path service | Centralized path resolution and workspace boundary checks |
 | 2026-04-30 | `ReactMarkdown skipHtml` for Agent output | Avoid rendering arbitrary LLM HTML |
 | 2026-04-30 | Context compression modes | Let users choose prompt context compression strategy |
+| 2026-09-05 | Hand-written MCP stdio JSON-RPC instead of the `rmcp` SDK | Only `initialize` / `tools/list` / `tools/call` are needed; ~300 lines with zero new dependencies avoids SDK version constraints against the pinned tokio/serde. Revisit if resources/prompts/sampling are needed. |
+| 2026-09-05 | MCP tools namespaced as `mcp__{server}__{tool}` | Matches the Codex/Claude Code convention, keeps built-in output-protocol tools distinguishable, and makes `ToolInvoker` dispatch a prefix check |
+| 2026-09-05 | MCP server `cwd` resolved through `workspace::resolve_existing` | Keeps spawned server processes inside the workspace boundary that already guards FS, Git, and terminal |
 
 ---
 
@@ -857,9 +871,9 @@ target\release\agent_cli --help
 ## Next Immediate Tasks
 
 1. ~~Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback~~ **Done (2026-09-05)**: `stream_chat_with_tools` parses OpenAI-compatible `delta.tool_calls` streams and non-streaming `tool_calls`, and `merge_tool_call_output` synthesizes `agent-changes` blocks so the parse pipeline is transport-agnostic. Live provider round-trip still pending a real API key.
-2. Implement Phase 9.0.3 MCP client (RMCP stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface.
-3. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, and a per-run cost cap.
-4. Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.
+2. ~~Implement Phase 9.0.3 MCP client (stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface~~ **Done (2026-09-05)**: `services/mcp.rs` + `commands/mcp.rs` + the `ToolInvoker` loop in `agent/executor.rs`. Live server round-trip still pending the Tauri smoke loop.
+3. ~~Surface the AGENTS.md project-memory toggle in the ChatView context-source chips~~ **Done (2026-09-05)**.
+4. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, per-MCP-tool approval, and a per-run cost cap. This is the last open Phase 9.0 item and gates exposing MCP tools to the CLI.
 5. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
 6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
 7. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
@@ -871,4 +885,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-09-05 - Phase 9.0: AGENTS.md project memory (9.0.2) and provider-native tool calling (9.0.1) done. Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*
+*Last updated: 2026-09-05 - Phase 9.0: provider-native tool calling (9.0.1), AGENTS.md project memory (9.0.2), and the MCP client (9.0.3) are done; only the permission model V2 (9.0.4) remains before Phase 9.0 closes.*

@@ -168,18 +168,12 @@ pub async fn plan_task(
     tx: mpsc::Sender<String>,
 ) -> Result<(Vec<TaskStep>, String), String> {
     let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: PLANNER_PROMPT.to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: if context.is_empty() {
-                format!("Task:\n{}", user_prompt)
-            } else {
-                format!("Task:\n{}\n\nProject Context:\n{}", user_prompt, context)
-            },
-        },
+        ChatMessage::system(PLANNER_PROMPT),
+        ChatMessage::user(if context.is_empty() {
+            format!("Task:\n{}", user_prompt)
+        } else {
+            format!("Task:\n{}\n\nProject Context:\n{}", user_prompt, context)
+        }),
     ];
 
     let full_response = llm.stream_chat(messages, cancel_flag, tx).await?;
