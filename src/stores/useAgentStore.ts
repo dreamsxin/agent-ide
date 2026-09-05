@@ -27,6 +27,7 @@ import type {
 } from "../types/agent";
 import {
   DEFAULT_PERMISSIONS,
+  mcpApprovalForPermissions,
   permissionsForPreset,
 } from "../types/agent";
 
@@ -508,6 +509,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           profileId: params.profileId ?? get().chatProfileId,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
+          toolApproval: mcpApprovalForPermissions(get().permissions),
           runId,
           ideMode: requestIdeMode,
         },
@@ -810,6 +812,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           profileId: params.profileId ?? get().chatProfileId,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
+          toolApproval: mcpApprovalForPermissions(get().permissions),
           extraPrompt: params.extraPrompt ?? null,
           regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
           regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,

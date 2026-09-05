@@ -184,6 +184,8 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Made the clippy gate real: reformatted with `rustfmt` and fixed 35 lint findings (unused imports/variables, unreachable feature-gated code, redundant casts and clones, derivable `Default` impls, `sort_by` → `sort_by_key`, `ModelType::to_string` → `Display`). Two crate-level allows remain with written justification in `src-tauri/src/lib.rs`; `clippy::await_holding_lock` is allowed only on the two test modules that serialize env-var mutation.
 - Added `.gitattributes` pinning `src-tauri/gen/schemas/*.json` to LF so a Windows build stops producing CRLF-only diffs on every `cargo check`.
 - Fixed the ROADMAP phase numbering: Phase 10/11/12 task ids were off by one (Phase 10 items were numbered `9.x`, colliding with real Phase 9 items).
+- Added MCP tool approval enforcement (first slice of Phase 9.0.4): `McpToolPolicy` (`deny` / `auto_approved_only` / `allow_all`) gates both which tools are injected into the model's tool list and every `tools/call` invocation. Per-server `autoApprove` lists live in `mcp.json` and are editable per tool in the Settings MCP panel. Unknown or missing policy values fall back to `auto_approved_only`, so a typo cannot open everything up.
+- Wired the policy to the existing Agent permission preset: `allowCommandRun` maps to `allow_all`, otherwise only auto-approved tools are exposed. MCP tools are external process execution, so they follow the command-execution permission rather than getting their own implicit grant.
 
 Important distinction:
 
@@ -203,7 +205,7 @@ cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
-2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (141 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, and the new MCP config/qualified-name/content-flattening and tool-loop selection tests. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (143 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, and the MCP config/qualified-name/content-flattening, tool-policy, and tool-loop selection tests. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
 MCP runtime note: the stdio transport, discovery, and tool loop are unit-covered and type-checked, but a live round-trip against a real MCP server (e.g. `npx -y @modelcontextprotocol/server-filesystem .`) has not been run yet. That belongs in the Tauri smoke loop.
 
@@ -626,7 +628,7 @@ Goal: close the gap to the 2026 agentic-coding standard feature surface (Codex /
 | 9.0.1 Provider-Native Tool Calling | Native function-call request and streaming tool-call parsing in `services/llm_client.rs` + `agent/executor.rs`; `agent-changes` text protocol remains the fallback for local/small models | Critical | **Done (2026-09-05)** |
 | 9.0.2 AGENTS.md Project Memory | Load workspace-root `AGENTS.md` into `AgentContext`; bounded size; participates in all compression modes and budget packing; CLI `--include project-memory` | Critical | **Done (2026-09-04)** |
 | 9.0.3 MCP Client | MCP stdio (line-delimited JSON-RPC 2.0) transport in `services/mcp.rs` with tool discovery/invocation, `mcp__{server}__{tool}` injection into the native tool list, a bounded tool-execution loop in `agent/executor.rs`, and `agent-action-log` entries | High | **Done (2026-09-05)** |
-| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, per-MCP-tool approval, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | Planned |
+| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, and per-run cost caps, all enforced in the backend | High | **In progress**: MCP tool approval (`McpToolPolicy` + per-server `autoApprove`) is enforced backend-side; file/command/git toggles and path deny rules are still frontend-only |
 
 Exit criteria: an Agent run uses native tool calls with at least one OpenAI-compatible provider; AGENTS.md content is visible in context estimate sections; MCP tools appear in the agent tool surface; desktop runs enforce permission presets.
 
@@ -851,6 +853,8 @@ The Plan/SDD Mode is a dual-layer feature:
 | 2026-09-05 | MCP server `cwd` resolved through `workspace::resolve_existing` | Keeps spawned server processes inside the workspace boundary that already guards FS, Git, and terminal |
 | 2026-09-05 | CI clippy gate uses `-D warnings` with two written-down crate-level allows | A gate that is warning-only gets ignored. Denying everything except `too_many_arguments` and `should_implement_trait` (both style debates on existing entry points) makes the gate real today and leaves an explicit ratchet item (10.9) |
 | 2026-09-05 | CI Rust job verifies `--no-default-features` only | The default `llama-cpp` feature needs LLVM/libclang plus a full llama.cpp native build; gating on it would make CI slow and fragile while covering no code path that ships today |
+| 2026-09-05 | MCP tool exposure defaults to `auto_approved_only` | "The user enabled this server" is not consent to run every tool in it. Defaulting to an explicit per-tool allowlist, and treating unknown policy strings as the restrictive case, keeps a config typo from silently opening all external tools |
+| 2026-09-05 | MCP policy re-checked inside `McpRegistry::call`, not only at injection time | Not injecting a tool is not an enforcement boundary: the model can name a tool from conversation history or by guessing |
 
 ---
 
@@ -885,7 +889,7 @@ target\release\agent_cli --help
 2. ~~Implement Phase 9.0.3 MCP client (stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface~~ **Done (2026-09-05)**: `services/mcp.rs` + `commands/mcp.rs` + the `ToolInvoker` loop in `agent/executor.rs`. Live server round-trip still pending the Tauri smoke loop.
 3. ~~Surface the AGENTS.md project-memory toggle in the ChatView context-source chips~~ **Done (2026-09-05)**.
 4. ~~Add a CI pipeline (Phase 10.1)~~ **Done (2026-09-05)**: `.github/workflows/ci.yml` gates frontend typecheck/build/vitest and Rust fmt/clippy/tests on every push and PR.
-5. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, per-MCP-tool approval, and a per-run cost cap. **This is now the top priority**: MCP tool calls currently execute without any per-call approval, so an enabled server's tools run whenever the model asks. It is also the last open Phase 9.0 item and gates exposing MCP tools to the CLI.
+5. Finish Phase 9.0.4 desktop permission model V2. The MCP tool approval half is done (`McpToolPolicy` + per-server `autoApprove`, enforced in `services/mcp.rs`). Still open: enforce the file-create/delete, command-run, and git toggles in the backend instead of only in `useAgentStore`, add path deny rules, and add a per-run cost cap. Then expose MCP tools to the CLI behind the same model.
 6. Harden diff application (Phase 10.7): version-aware hunk matching with file hash plus line-offset tolerance, replacing the current textual `find`. This is the remaining data-loss risk in the apply path.
 7. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair / MCP discovery and record the commit/workspace results in `docs/smoke_test.md` release notes.
 8. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
@@ -899,4 +903,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; only the permission model V2 (9.0.4) remains. Phase 10.1 CI is live and gates fmt/clippy/tests/build on every push and PR.*
+*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; permission model V2 (9.0.4) is in progress with MCP tool approval enforced backend-side. Phase 10.1 CI is live and gates fmt/clippy/tests/build on every push and PR.*

@@ -5,7 +5,7 @@ use crate::agent::orchestrator::ActionLogEntry;
 use crate::services::llm_client::LlmClient;
 use crate::services::mcp::{
     is_mcp_tool_name, load_config, save_config, McpConfig, McpDiscoveryResult, McpRegistry,
-    McpToolDescriptor,
+    McpToolDescriptor, McpToolPolicy,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -30,20 +30,23 @@ impl Default for McpState {
     }
 }
 
-/// 把 MCP 工具接到一次 Agent 运行上：注入工具定义 + 提供执行器。
-/// 没有已发现的工具时返回原样的 client 和 None，Agent 行为与未启用 MCP 时一致。
+/// 把 MCP 工具接到一次 Agent 运行上：按策略注入工具定义 + 提供执行器。
+///
+/// 策略过滤后没有可用工具时返回原样的 client 和 None，Agent 行为与未启用 MCP 时一致。
 pub async fn attach_mcp_tools(
     registry: &Arc<McpRegistry>,
     app: &AppHandle,
     llm: LlmClient,
+    policy: McpToolPolicy,
 ) -> (LlmClient, Option<Arc<dyn ToolInvoker>>) {
-    let definitions = registry.tool_definitions().await;
+    let definitions = registry.tool_definitions(policy).await;
     if definitions.is_empty() {
         return (llm, None);
     }
     let invoker: Arc<dyn ToolInvoker> = Arc::new(McpToolInvoker {
         registry: registry.clone(),
         app: app.clone(),
+        policy,
     });
     (llm.with_extra_tools(definitions), Some(invoker))
 }
@@ -51,6 +54,7 @@ pub async fn attach_mcp_tools(
 struct McpToolInvoker {
     registry: Arc<McpRegistry>,
     app: AppHandle,
+    policy: McpToolPolicy,
 }
 
 impl McpToolInvoker {
@@ -83,7 +87,7 @@ impl ToolInvoker for McpToolInvoker {
             &format!("Calling MCP tool {}", tool_name),
             &format!("Arguments:\n{}", truncate(arguments, 2000)),
         );
-        match self.registry.call(tool_name, arguments).await {
+        match self.registry.call(tool_name, arguments, self.policy).await {
             Ok(result) => {
                 self.log(
                     "success",
@@ -178,6 +182,7 @@ pub async fn get_mcp_tools(
 }
 
 /// 手动调用一个 MCP 工具，用于设置面板里验证 server 是否可用。
+/// 这是用户主动点击触发的，因此绕过按运行生效的自动批准策略。
 #[tauri::command]
 pub async fn call_mcp_tool(
     tool_name: String,
@@ -186,7 +191,11 @@ pub async fn call_mcp_tool(
 ) -> Result<String, String> {
     mcp_state
         .registry
-        .call(&tool_name, arguments.as_deref().unwrap_or("{}"))
+        .call(
+            &tool_name,
+            arguments.as_deref().unwrap_or("{}"),
+            McpToolPolicy::AllowAll,
+        )
         .await
 }
 

@@ -59,6 +59,20 @@ export function permissionsForPreset(preset: AgentPermissionPreset): AgentPermis
   }
 }
 
+/** MCP 工具放行策略，与后端 `McpToolPolicy` 一一对应 */
+export type McpToolApproval = "deny" | "auto_approved_only" | "allow_all";
+
+/**
+ * 由 Agent 权限推导 MCP 工具放行策略。
+ *
+ * MCP 工具本质上是外部进程执行（可读写文件、访问网络、跑命令），
+ * 因此跟随 `allowCommandRun`：未授予命令执行权限时，只允许用户在
+ * server 配置里显式列入 autoApprove 的工具。
+ */
+export function mcpApprovalForPermissions(permissions: AgentPermission): McpToolApproval {
+  return permissions.allowCommandRun ? "allow_all" : "auto_approved_only";
+}
+
 /** 破坏性操作类型 */
 export type DestructiveOpType = "file_delete" | "command_run" | "git_push" | "git_force";
 

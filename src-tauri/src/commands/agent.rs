@@ -115,6 +115,10 @@ pub struct SendPromptRequest {
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
     pub context_sources: Option<ContextSourceOptions>,
+    /// MCP 工具放行策略：`deny` / `auto_approved_only` / `allow_all`。
+    /// 缺省按 `auto_approved_only` 处理。
+    #[serde(default, rename = "toolApproval")]
+    pub tool_approval: Option<String>,
     #[serde(rename = "runId")]
     pub run_id: Option<String>,
     #[serde(rename = "ideMode")]
@@ -167,6 +171,9 @@ pub struct RunAgentStepRequest {
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
     pub context_sources: Option<ContextSourceOptions>,
+    /// 同 `SendPromptRequest::tool_approval`
+    #[serde(default, rename = "toolApproval")]
+    pub tool_approval: Option<String>,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -224,8 +231,13 @@ pub async fn send_agent_prompt(
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
-    let (llm, tool_invoker) =
-        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm).await;
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref()),
+    )
+    .await;
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
     let mut context = build_agent_context(
@@ -405,8 +417,13 @@ pub async fn run_agent_step(
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
-    let (llm, tool_invoker) =
-        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm).await;
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref()),
+    )
+    .await;
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
     let mut context = build_agent_context(
         request.active_file,
