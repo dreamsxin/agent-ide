@@ -206,6 +206,12 @@ pub struct AgentStateManager {
     pub state: AgentState,
 }
 
+impl Default for AgentStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentStateManager {
     pub fn new() -> Self {
         Self {

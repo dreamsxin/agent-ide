@@ -10,9 +10,7 @@ use crate::services::context::{
     AgentContext, ContextBudget, ContextBuildOptions, ContextCompressionMode,
     ContextEstimateResponse, ContextSourceOptions,
 };
-use crate::services::llm_client::{
-    EnhancedLlmClientFactory, LlmClient, LlmConfig, LocalModelConfig, ModelType,
-};
+use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::llm_profiles::{
     self, LlmProfileResponse, LlmProfilesConfig, LlmProfilesResponse, SaveLlmProfileRequest,
 };
@@ -28,7 +26,6 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 /// Global Agent state. Uses tokio::sync::Mutex for async orchestration.
-
 pub struct AgentGlobalState {
     pub orchestrator: Arc<Mutex<AgentOrchestrator>>,
     pub llm_profiles: Arc<std::sync::Mutex<LlmProfilesConfig>>,
@@ -453,8 +450,7 @@ pub async fn run_agent_step(
         let _ = app_handle.emit(
             "agent-step-update",
             serde_json::to_value(
-                &orch
-                    .steps
+                orch.steps
                     .iter()
                     .find(|item| item.id == step.id)
                     .unwrap_or(&step),

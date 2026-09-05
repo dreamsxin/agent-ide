@@ -65,6 +65,12 @@ pub struct PausedPipelineRun {
     pub ide_mode: IdeMode,
 }
 
+impl Default for AgentOrchestrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentOrchestrator {
     pub fn new() -> Self {
         Self {
@@ -340,7 +346,7 @@ impl AgentOrchestrator {
                         let mut step_diffs = parsed.diffs;
                         attach_stage_provenance(
                             &mut step_diffs,
-                            &stage.role.to_string(),
+                            stage.role.to_string(),
                             &stage.name,
                         );
                         let generated_diff_count = step_diffs.len();

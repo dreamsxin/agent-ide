@@ -610,7 +610,8 @@ fn write_message(stdin: &mut ChildStdin, message: &Value) -> Result<(), String> 
     write!(
         stdin,
         "Content-Length: {}\r\n\r\n{}",
-        body.as_bytes().len(),
+        // String::len() 已是字节长度，符合 LSP Content-Length 的要求
+        body.len(),
         body
     )
     .map_err(|e| format!("Write LSP message: {}", e))?;

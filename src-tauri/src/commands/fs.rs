@@ -148,6 +148,9 @@ pub fn reveal_in_file_explorer(path: String) -> Result<(), String> {
     reveal_path(&resolved)
 }
 
+// 每个平台分支都必须显式 return：其他平台的分支在当前 cfg 下被裁剪掉，
+// clippy 因此把最后一个分支的 return 当成多余的。
+#[allow(clippy::needless_return)]
 fn reveal_path(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

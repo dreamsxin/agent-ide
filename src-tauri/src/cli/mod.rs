@@ -1919,7 +1919,7 @@ fn make_run_id(workspace: Option<&Path>) -> String {
         "run-{}-{}-{}",
         Utc::now().format("%Y%m%d%H%M%S"),
         sanitize_run_part(name),
-        Uuid::new_v4().simple().to_string()[..8].to_string()
+        &Uuid::new_v4().simple().to_string()[..8]
     )
 }
 
@@ -1943,6 +1943,9 @@ fn default_artifact_dir(workspace_path: &Path, run_id: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+// 这些测试用同步互斥量串行化对进程级环境变量的修改，锁必须跨 await 持有；
+// 生产代码里的跨 await 持锁仍然会被 clippy 拦下。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
@@ -2500,7 +2503,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(chain_path).unwrap()).unwrap();
         assert_eq!(chain.as_array().unwrap().len(), 1);
         assert_eq!(chain[0]["checksFailedAfter"], false);
-        assert!(chain[0]["failedCommandsBefore"].as_array().unwrap().len() >= 1);
+        assert!(!chain[0]["failedCommandsBefore"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let summary_path = workspace.artifacts.join("repair-summary.json");
         assert!(summary_path.exists());
         let repair_summary: serde_json::Value =

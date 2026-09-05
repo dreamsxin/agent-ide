@@ -109,8 +109,6 @@ async fn stream_with_tool_loop(
     Ok(merged)
 }
 
-
-
 /// 执行步骤的系统提示词
 const EXECUTOR_PROMPT: &str = r#"You are a precise coding assistant. Your task is to implement ONE specific coding step.
 

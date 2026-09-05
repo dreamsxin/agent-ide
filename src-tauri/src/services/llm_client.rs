@@ -49,19 +49,6 @@ impl ModelType {
         }
     }
 
-    /// 转换为字符串
-    pub fn to_string(&self) -> String {
-        match self {
-            ModelType::OpenAI => "openai".to_string(),
-            ModelType::DeepSeek => "deepseek".to_string(),
-            ModelType::StarCoder => "starcoder".to_string(),
-            ModelType::CodeLlama => "codellama".to_string(),
-            ModelType::DeepSeekCoder => "deepseek-coder".to_string(),
-            ModelType::CodeGemma => "codegemma".to_string(),
-            ModelType::Custom(name) => name.clone(),
-        }
-    }
-
     /// 是否为本地模型
     pub fn is_local(&self) -> bool {
         matches!(
@@ -82,6 +69,21 @@ impl ModelType {
             ModelType::CodeGemma => Some("~/.agent-ide/models/codegemma".to_string()),
             _ => None,
         }
+    }
+}
+
+impl std::fmt::Display for ModelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ModelType::OpenAI => "openai",
+            ModelType::DeepSeek => "deepseek",
+            ModelType::StarCoder => "starcoder",
+            ModelType::CodeLlama => "codellama",
+            ModelType::DeepSeekCoder => "deepseek-coder",
+            ModelType::CodeGemma => "codegemma",
+            ModelType::Custom(name) => name,
+        };
+        f.write_str(name)
     }
 }
 
@@ -460,9 +462,15 @@ pub const NATIVE_CHANGES_TOOL: &str = "emit_agent_changes";
 /// 将原生工具调用合成为 ```agent-changes 围栏块，复用现有解析管线。
 /// 仅识别 `emit_agent_changes` 且参数为合法 JSON 的调用。
 pub fn synthesize_agent_changes_block(tool_calls: &[LlmToolCall]) -> Option<String> {
-    let call = tool_calls.iter().find(|call| call.name == NATIVE_CHANGES_TOOL)?;
+    let call = tool_calls
+        .iter()
+        .find(|call| call.name == NATIVE_CHANGES_TOOL)?;
     let parsed: serde_json::Value = serde_json::from_str(call.arguments.trim()).ok()?;
-    if parsed.get("changes").and_then(|changes| changes.as_array()).map_or(true, |changes| changes.is_empty()) {
+    if parsed
+        .get("changes")
+        .and_then(|changes| changes.as_array())
+        .is_none_or(|changes| changes.is_empty())
+    {
         return None;
     }
     Some(format!(
@@ -579,7 +587,6 @@ impl LlmClient {
     pub fn extra_tools(&self) -> &[ToolDefinition] {
         &self.extra_tools
     }
-
 
     pub fn get_capabilities(&self) -> ModelCapabilities {
         if let Some(engine) = &self.local_engine {
@@ -764,13 +771,12 @@ impl LlmClient {
             sse_buf.push_str(&String::from_utf8_lossy(&chunk));
 
             // 逐完整行解析（兼容 \r\n / \r / \n 各种行尾）
-            while let Some(nl) = sse_buf.find(|c| c == '\n' || c == '\r') {
+            while let Some(nl) = sse_buf.find(['\n', '\r']) {
                 let is_cr = sse_buf.as_bytes()[nl] == b'\r';
                 // 提取行内容并 trim \r 和空白
                 let line = sse_buf[..nl].trim().trim_end_matches('\r').to_string();
-                // drain: \n case drain through \n; \r case drain through \r
-                let drain_end = if is_cr { nl } else { nl };
-                sse_buf.drain(..=drain_end);
+                // 连同行尾符一起丢弃
+                sse_buf.drain(..=nl);
                 // 跳过剩余的 \n（处理 \r\n 情况）
                 if is_cr && sse_buf.starts_with('\n') {
                     sse_buf.drain(..1);
@@ -1188,6 +1194,8 @@ fn output_token_key(config: &LlmConfig) -> &'static str {
 
 /// StarCoder 模型引擎
 pub struct StarCoderEngine {
+    /// 保留以便真实推理引擎接入时读取模型路径与采样参数
+    #[allow(dead_code)]
     config: LocalModelConfig,
     capabilities: ModelCapabilities,
 }
@@ -1251,6 +1259,8 @@ impl ModelEngine for StarCoderEngine {
 
 /// CodeLlama 模型引擎
 pub struct CodeLlamaEngine {
+    /// 保留以便真实推理引擎接入时读取模型路径与采样参数
+    #[allow(dead_code)]
     config: LocalModelConfig,
     capabilities: ModelCapabilities,
 }
@@ -1429,7 +1439,12 @@ mod tests {
 
     #[test]
     fn chat_request_maps_output_limit_for_openai_reasoning_models() {
-        let body = build_chat_request(&config("openai", "gpt-5", Some(8192)), Vec::new(), true, &[]);
+        let body = build_chat_request(
+            &config("openai", "gpt-5", Some(8192)),
+            Vec::new(),
+            true,
+            &[],
+        );
 
         assert_eq!(body["max_completion_tokens"], 8192);
         assert!(body.get("max_tokens").is_none());
@@ -1646,9 +1661,9 @@ mod tests {
 
         assert!(synthesize_agent_changes_block(&[empty_changes]).is_none());
         assert!(synthesize_agent_changes_block(&[invalid_json]).is_none());
-        assert!(synthesize_agent_changes_block(&[unknown_tool.clone()]).is_none());
+        assert!(synthesize_agent_changes_block(std::slice::from_ref(&unknown_tool)).is_none());
         assert!(synthesize_agent_changes_block(&[]).is_none());
-        assert!(synthesize_agent_changes_block(&[usable.clone()]).is_some());
+        assert!(synthesize_agent_changes_block(std::slice::from_ref(&usable)).is_some());
         // 混合列表中即使存在无关调用，也应命中 emit_agent_changes
         assert!(synthesize_agent_changes_block(&[unknown_tool, usable]).is_some());
     }

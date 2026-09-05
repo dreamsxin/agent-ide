@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::services::llm_client::{LocalModelConfig, ModelCapabilities, ModelEngine, ModelType};
+use crate::services::llm_client::{ModelCapabilities, ModelEngine, ModelType};
 
 const CANCELLED: &str = "Agent task cancelled";
 const FEATURE_DISABLED: &str = "Local inference requires the `llama-cpp` feature";
@@ -141,24 +141,28 @@ impl LlamaCppEngine {
 
     pub async fn generate_text(&self, prompt: &str) -> Result<InferenceResult, String> {
         self.ensure_ready()?;
-        let start = std::time::Instant::now();
+
+        #[cfg(not(feature = "llama-cpp"))]
+        {
+            let _ = prompt;
+            Err(FEATURE_DISABLED.to_string())
+        }
 
         #[cfg(feature = "llama-cpp")]
-        let (text, tokens_generated) = {
-            let prompt = prompt.to_string();
-            let config = self.config.clone();
-            let model_path = self.model_full_path();
-            tokio::task::spawn_blocking(move || generate_with_llama(&model_path, &config, &prompt))
+        {
+            let start = std::time::Instant::now();
+            let (text, tokens_generated) = {
+                let prompt = prompt.to_string();
+                let config = self.config.clone();
+                let model_path = self.model_full_path();
+                tokio::task::spawn_blocking(move || {
+                    generate_with_llama(&model_path, &config, &prompt)
+                })
                 .await
                 .map_err(|e| format!("Inference task failed: {e}"))??
-        };
-        #[cfg(not(feature = "llama-cpp"))]
-        let (text, tokens_generated): (String, u32) = {
-            let _ = prompt;
-            return Err(FEATURE_DISABLED.to_string());
-        };
-
-        Ok(self.result(text, tokens_generated, start.elapsed()))
+            };
+            Ok(self.result(text, tokens_generated, start.elapsed()))
+        }
     }
 
     pub async fn generate_text_stream(
@@ -171,25 +175,27 @@ impl LlamaCppEngine {
         if cancel_flag.load(Ordering::Acquire) {
             return Err(CANCELLED.to_string());
         }
-        let start = std::time::Instant::now();
+
+        #[cfg(not(feature = "llama-cpp"))]
+        {
+            let _ = (prompt, tx, cancel_flag);
+            Err(FEATURE_DISABLED.to_string())
+        }
 
         #[cfg(feature = "llama-cpp")]
-        let text = generate_stream_with_llama(
-            self.model_full_path(),
-            self.config.clone(),
-            prompt.to_string(),
-            tx,
-            cancel_flag.clone(),
-        )
-        .await?;
-        #[cfg(not(feature = "llama-cpp"))]
-        let text: String = {
-            let _ = (prompt, tx, cancel_flag);
-            return Err(FEATURE_DISABLED.to_string());
-        };
-
-        let tokens_generated = text.chars().count() as u32;
-        Ok(self.result(text, tokens_generated, start.elapsed()))
+        {
+            let start = std::time::Instant::now();
+            let text = generate_stream_with_llama(
+                self.model_full_path(),
+                self.config.clone(),
+                prompt.to_string(),
+                tx,
+                cancel_flag.clone(),
+            )
+            .await?;
+            let tokens_generated = text.chars().count() as u32;
+            Ok(self.result(text, tokens_generated, start.elapsed()))
+        }
     }
 
     fn ensure_ready(&self) -> Result<(), String> {
@@ -199,6 +205,8 @@ impl LlamaCppEngine {
         Ok(())
     }
 
+    /// 仅在真实推理路径下使用；`llama-cpp` 关闭时推理直接返回错误。
+    #[cfg(feature = "llama-cpp")]
     fn result(
         &self,
         text: String,
@@ -219,6 +227,7 @@ impl LlamaCppEngine {
         }
     }
 
+    #[cfg(feature = "llama-cpp")]
     fn estimate_memory_usage(&self) -> u64 {
         2048 + (self.config.n_ctx as u64 / 2)
     }

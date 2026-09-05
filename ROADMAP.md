@@ -20,9 +20,12 @@ After any interruption, restore context in this order:
 ```powershell
 npm run build
 cd src-tauri
-cargo check
-cargo test
+cargo fmt --check
+cargo clippy --no-default-features --all-targets -- -D warnings
+cargo test --no-default-features
 ```
+
+These are the same commands CI runs (`.github/workflows/ci.yml`). If any of them fails locally, CI will fail too.
 
 ---
 
@@ -177,6 +180,10 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - MCP tool calls and discovery emit `agent-action-log` entries (`mcp_tool_call`, `mcp_discovery`) so external tool use is auditable in the Logs panel alongside diffs and stages.
 - Surfaced the AGENTS.md project-memory toggle in the ChatView context-source chips, wired to the backend `project_memory` estimate section.
 - Fixed pre-existing `npm run build` type errors in `src/hooks/useIntelligentCompletion.ts` and `src/components/editor/EditorContainer.tsx` that were blocking frontend verification.
+- Added `.github/workflows/ci.yml` (Phase 10.1): every push to `main` and every PR runs frontend typecheck/build/vitest plus Rust `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features`. This is the gate that was missing when the frontend build silently broke on `main`.
+- Made the clippy gate real: reformatted with `rustfmt` and fixed 35 lint findings (unused imports/variables, unreachable feature-gated code, redundant casts and clones, derivable `Default` impls, `sort_by` → `sort_by_key`, `ModelType::to_string` → `Display`). Two crate-level allows remain with written justification in `src-tauri/src/lib.rs`; `clippy::await_holding_lock` is allowed only on the two test modules that serialize env-var mutation.
+- Added `.gitattributes` pinning `src-tauri/gen/schemas/*.json` to LF so a Windows build stops producing CRLF-only diffs on every `cargo check`.
+- Fixed the ROADMAP phase numbering: Phase 10/11/12 task ids were off by one (Phase 10 items were numbered `9.x`, colliding with real Phase 9 items).
 
 Important distinction:
 
@@ -196,7 +203,7 @@ cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
-2026-09-05 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (141 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, and the new MCP config/qualified-name/content-flattening and tool-loop selection tests. `npm run build` and `npm test` (14 tests) also pass; the build required fixing two pre-existing type errors in the Phase 9.2 intelligent-completion files. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (141 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, and the new MCP config/qualified-name/content-flattening and tool-loop selection tests. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
 MCP runtime note: the stdio transport, discovery, and tool loop are unit-covered and type-checked, but a live round-trip against a real MCP server (e.g. `npx -y @modelcontextprotocol/server-filesystem .`) has not been run yet. That belongs in the Tauri smoke loop.
 
@@ -747,15 +754,17 @@ Exit criteria: one coder fan-out runs two steps in isolated worktrees with merge
 
 **Goal:** Production-quality packaging, security hardening, and CI coverage for public beta.
 
-| Task | Deliverable | Priority |
-|------|-------------|----------|
-| 9.1 CI Pipeline Complete | GitHub Actions: lint + typecheck + cargo check + cargo test + vitest + Tauri smoke | Critical |
-| 9.2 Code Splitting & Bundle Optimization | Monaco/xterm/markdown lazy-loaded; initial bundle < 500KB | High |
-| 9.3 Security Policy Document | Unified doc covering: workspace boundaries, credential storage, Agent approval model, data exposure limits | Critical |
-| 9.4 Cross-Platform Packaging | Windows MSI validated; macOS .dmg script; Linux AppImage/deb | High |
-| 9.5 Secret Storage Validation | Keyring tested on Windows Credential Manager, macOS Keychain, Linux Secret Service | High |
-| 9.6 Performance Baselines | Startup < 3s, memory < 300MB idle, editor input latency < 50ms; regression tests in CI | Medium |
-| 9.7 Diff Application Hardening | Version-aware hunk matching using file hash + line offset tolerance; stale rejection mandatory | High |
+| Task | Deliverable | Priority | Status |
+|------|-------------|----------|--------|
+| 10.1 CI Pipeline | GitHub Actions `ci.yml`: frontend typecheck + build + vitest, and Rust `cargo fmt --check` / `cargo clippy -D warnings` / `cargo test` on every push and PR | Critical | **Done (2026-09-05)** |
+| 10.2 Code Splitting & Bundle Optimization | Monaco/xterm/markdown lazy-loaded; initial bundle < 500KB | High | Planned |
+| 10.3 Security Policy Document | Unified doc covering: workspace boundaries, credential storage, Agent approval model, MCP tool exposure, data exposure limits | Critical | Planned |
+| 10.4 Cross-Platform Packaging | Windows MSI validated; macOS .dmg script; Linux AppImage/deb; add Linux/macOS CI jobs | High | Planned |
+| 10.5 Secret Storage Validation | Keyring tested on Windows Credential Manager, macOS Keychain, Linux Secret Service | High | Planned |
+| 10.6 Performance Baselines | Startup < 3s, memory < 300MB idle, editor input latency < 50ms; regression tests in CI | Medium | Planned |
+| 10.7 Diff Application Hardening | Version-aware hunk matching using file hash + line offset tolerance; stale rejection mandatory | High | Planned |
+| 10.8 Tauri Smoke Tests in CI | App boot, workspace open, file read/write, settings load, driven headlessly | High | Planned |
+| 10.9 Agent Entry-Point Argument Structs | Collapse the 8-11 parameter orchestration entry points into request structs and drop the crate-level `clippy::too_many_arguments` allow | Low | Planned |
 
 **Exit Criteria:** Clean CI green on Windows + macOS; installer produces working app from scratch; security doc reviewed.
 
@@ -767,16 +776,16 @@ Exit criteria: one coder fan-out runs two steps in isolated worktrees with merge
 
 | Task | Deliverable | Priority |
 |------|-------------|----------|
-| 10.1 Plan/SDD IDE Mode | IDE-level "Plan Mode" toggle: Agent produces design docs instead of code changes | Critical |
-| 10.2 SDD Pipeline Stage | New Agent pipeline role "Designer" that outputs structured SDD Markdown | Critical |
-| 10.3 SDD Template System | Markdown templates with frontmatter schema for SDD docs, stored in `docs/` | High |
-| 10.4 Python LSP Adapter | pylsp/pyright integration with diagnostics, completions, hover | High |
-| 10.5 Rust LSP Adapter | rust-analyzer integration | Medium |
-| 10.6 Provider-Native Tool Calls | **Moved to Phase 9.0.1** (superseded there); Phase 11 only covers provider-specific extensions beyond the shared transport | High |
-| 10.7 Agent Context Token Budget UI | Real-time token meter showing budget usage per source; warn on overflow | Medium |
-| 10.8 Ghost Mode (Background Analysis) | Lightweight background indexing producing proactive suggestions; user-dismissable | Medium |
-| 10.9 CLI Permission Model V2 | Implement `--deny-path`, `--allow-create/edit/delete`, `--allow-git` from design doc | Medium |
-| 10.10 Workspace Indexing Scalability | Validate on 10k+ file workspaces; implement incremental indexing if needed | High |
+| 11.1 Plan/SDD IDE Mode | IDE-level "Plan Mode" toggle: Agent produces design docs instead of code changes | Critical |
+| 11.2 SDD Pipeline Stage | New Agent pipeline role "Designer" that outputs structured SDD Markdown | Critical |
+| 11.3 SDD Template System | Markdown templates with frontmatter schema for SDD docs, stored in `docs/` | High |
+| 11.4 Python LSP Adapter | pylsp/pyright integration with diagnostics, completions, hover | High |
+| 11.5 Rust LSP Adapter | rust-analyzer integration | Medium |
+| 11.6 Provider-Specific Tool Extensions | Shared native tool transport is done in Phase 9.0.1; this covers provider-specific extensions beyond it (parallel tool calls, strict schemas, prompt caching) | High |
+| 11.7 Agent Context Token Budget UI | Real-time token meter showing budget usage per source; warn on overflow | Medium |
+| 11.8 Ghost Mode (Background Analysis) | Lightweight background indexing producing proactive suggestions; user-dismissable | Medium |
+| 11.9 CLI Permission Model V2 | Implement `--deny-path`, `--allow-create/edit/delete`, `--allow-git`, and MCP tool allowlists from design doc | Medium |
+| 11.10 Workspace Indexing Scalability | Validate on 10k+ file workspaces; implement incremental indexing if needed | High |
 
 **Plan/SDD Mode Technical Design:**
 
@@ -809,15 +818,15 @@ The Plan/SDD Mode is a dual-layer feature:
 
 | Task | Deliverable | Priority |
 |------|-------------|----------|
-| 11.1 Command Palette Enhancement | Recent commands, symbol search, workspace file search, template commands | Medium |
-| 11.2 Accessibility Audit | Keyboard navigation for all panels; ARIA labels; high-contrast theme support | Medium |
-| 11.3 Plugin/Extension API Design | Document extension points for: language adapters, Agent roles, UI panels | Low |
-| 11.4 Troubleshooting Guide | Structured guide covering common failures with solutions | Medium |
-| 11.5 Cancellation at Provider Level | Transport-abort for streaming LLM calls (where provider supports it) | Low |
-| 11.6 Agent Run History & Replay | Persist Agent runs with full action logs; replay/compare past runs | Low |
-| 11.7 Split View & Advanced Editor | Side-by-side file editing; enhanced minimap with Agent change indicators | Low |
-| 11.8 Extended Document Types | Add HLD/LLD, RFC/ADR, Test Plan templates to Plan Mode; template marketplace | Low |
-| 11.9 SDD-to-Code Pipeline | One-click "Implement from SDD" that feeds approved design tasks into Coder pipeline | Medium |
+| 12.1 Command Palette Enhancement | Recent commands, symbol search, workspace file search, template commands | Medium |
+| 12.2 Accessibility Audit | Keyboard navigation for all panels; ARIA labels; high-contrast theme support | Medium |
+| 12.3 Plugin/Extension API Design | Document extension points for: language adapters, Agent roles, UI panels | Low |
+| 12.4 Troubleshooting Guide | Structured guide covering common failures with solutions | Medium |
+| 12.5 Cancellation at Provider Level | Transport-abort for streaming LLM calls (where provider supports it) | Low |
+| 12.6 Agent Run History & Replay | Persist Agent runs with full action logs; replay/compare past runs | Low |
+| 12.7 Split View & Advanced Editor | Side-by-side file editing; enhanced minimap with Agent change indicators | Low |
+| 12.8 Extended Document Types | Add HLD/LLD, RFC/ADR, Test Plan templates to Plan Mode; template marketplace | Low |
+| 12.9 SDD-to-Code Pipeline | One-click "Implement from SDD" that feeds approved design tasks into Coder pipeline | Medium |
 
 ---
 
@@ -840,6 +849,8 @@ The Plan/SDD Mode is a dual-layer feature:
 | 2026-09-05 | Hand-written MCP stdio JSON-RPC instead of the `rmcp` SDK | Only `initialize` / `tools/list` / `tools/call` are needed; ~300 lines with zero new dependencies avoids SDK version constraints against the pinned tokio/serde. Revisit if resources/prompts/sampling are needed. |
 | 2026-09-05 | MCP tools namespaced as `mcp__{server}__{tool}` | Matches the Codex/Claude Code convention, keeps built-in output-protocol tools distinguishable, and makes `ToolInvoker` dispatch a prefix check |
 | 2026-09-05 | MCP server `cwd` resolved through `workspace::resolve_existing` | Keeps spawned server processes inside the workspace boundary that already guards FS, Git, and terminal |
+| 2026-09-05 | CI clippy gate uses `-D warnings` with two written-down crate-level allows | A gate that is warning-only gets ignored. Denying everything except `too_many_arguments` and `should_implement_trait` (both style debates on existing entry points) makes the gate real today and leaves an explicit ratchet item (10.9) |
+| 2026-09-05 | CI Rust job verifies `--no-default-features` only | The default `llama-cpp` feature needs LLVM/libclang plus a full llama.cpp native build; gating on it would make CI slow and fragile while covering no code path that ships today |
 
 ---
 
@@ -873,16 +884,19 @@ target\release\agent_cli --help
 1. ~~Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback~~ **Done (2026-09-05)**: `stream_chat_with_tools` parses OpenAI-compatible `delta.tool_calls` streams and non-streaming `tool_calls`, and `merge_tool_call_output` synthesizes `agent-changes` blocks so the parse pipeline is transport-agnostic. Live provider round-trip still pending a real API key.
 2. ~~Implement Phase 9.0.3 MCP client (stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface~~ **Done (2026-09-05)**: `services/mcp.rs` + `commands/mcp.rs` + the `ToolInvoker` loop in `agent/executor.rs`. Live server round-trip still pending the Tauri smoke loop.
 3. ~~Surface the AGENTS.md project-memory toggle in the ChatView context-source chips~~ **Done (2026-09-05)**.
-4. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, per-MCP-tool approval, and a per-run cost cap. This is the last open Phase 9.0 item and gates exposing MCP tools to the CLI.
-5. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
-6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
-7. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
-8. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
-9. Expand Agent workflow UI with stage input/output source panels and explicit per-stage approve/skip controls.
-10. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
-11. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
-12. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
+4. ~~Add a CI pipeline (Phase 10.1)~~ **Done (2026-09-05)**: `.github/workflows/ci.yml` gates frontend typecheck/build/vitest and Rust fmt/clippy/tests on every push and PR.
+5. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, per-MCP-tool approval, and a per-run cost cap. **This is now the top priority**: MCP tool calls currently execute without any per-call approval, so an enabled server's tools run whenever the model asks. It is also the last open Phase 9.0 item and gates exposing MCP tools to the CLI.
+6. Harden diff application (Phase 10.7): version-aware hunk matching with file hash plus line-offset tolerance, replacing the current textual `find`. This is the remaining data-loss risk in the apply path.
+7. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair / MCP discovery and record the commit/workspace results in `docs/smoke_test.md` release notes.
+8. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
+9. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push. Wire them into CI (Phase 10.8).
+10. Write the unified security policy document (Phase 10.3) covering workspace boundaries, credential storage, the Agent approval model, and MCP tool exposure.
+11. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
+12. Expand Agent workflow UI with stage input/output source panels and explicit per-stage approve/skip controls.
+13. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
+14. Keep Agent CLI scoped as headless automation; broaden file/Git permissions only if CLI scope is intentionally widened.
+15. Continue shared backend refactor by moving Agent run artifacts behind reusable services used by both Tauri commands and CLI without widening CLI into a second interactive IDE by default.
 
 ---
 
-*Last updated: 2026-09-05 - Phase 9.0: provider-native tool calling (9.0.1), AGENTS.md project memory (9.0.2), and the MCP client (9.0.3) are done; only the permission model V2 (9.0.4) remains before Phase 9.0 closes.*
+*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; only the permission model V2 (9.0.4) remains. Phase 10.1 CI is live and gates fmt/clippy/tests/build on every push and PR.*

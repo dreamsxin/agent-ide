@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCompressionMode {
     Full,
+    #[default]
     Focused,
     Compact,
     Budgeted,
@@ -94,12 +95,6 @@ pub struct ContextSection {
     pub content: String,
 }
 
-impl Default for ContextCompressionMode {
-    fn default() -> Self {
-        Self::Focused
-    }
-}
-
 impl std::fmt::Display for ContextCompressionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -162,8 +157,9 @@ impl AgentContext {
 
     pub fn enrich_from_workspace_with_sources(&mut self, sources: &ContextSourceOptions) {
         if sources.include_project_memory && self.project_memory.is_none() {
-            self.project_memory =
-                crate::services::project_memory::load_project_memory().ok().flatten();
+            self.project_memory = crate::services::project_memory::load_project_memory()
+                .ok()
+                .flatten();
         }
         if sources.include_project_tree && self.project_tree.is_none() {
             self.project_tree = build_project_tree_summary(160, 4).ok();
@@ -215,10 +211,7 @@ impl AgentContext {
                 sections.push(ContextSection {
                     id: "project_memory",
                     label: "Project memory (AGENTS.md)",
-                    content: format!(
-                        "Project memory (AGENTS.md):\n```\n{}\n```\n",
-                        memory
-                    ),
+                    content: format!("Project memory (AGENTS.md):\n```\n{}\n```\n", memory),
                 });
             }
         }
@@ -685,7 +678,9 @@ mod tests {
 
         let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
 
-        let memory_index = prompt.find("Project memory (AGENTS.md)").expect("memory section");
+        let memory_index = prompt
+            .find("Project memory (AGENTS.md)")
+            .expect("memory section");
         let active_index = prompt.find("Active file:").expect("active file section");
         assert!(memory_index < active_index);
     }
