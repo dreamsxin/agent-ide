@@ -10,6 +10,8 @@ type McpServerConfig = {
   env: Record<string, string>;
   cwd?: string | null;
   enabled: boolean;
+  /** server 自己的工具名，模型可自动调用 */
+  autoApprove: string[];
 };
 
 type McpConfig = {
@@ -29,6 +31,7 @@ type McpToolDescriptor = {
   tool: string;
   qualifiedName: string;
   description: string;
+  autoApproved: boolean;
 };
 
 type McpDiscoveryResult = {
@@ -71,8 +74,10 @@ export default function McpPanel() {
         config: { version: 1, servers: next },
       });
       setServers(saved.servers ?? []);
+      return true;
     } catch (err) {
       setError(String(err));
+      return false;
     }
   }, []);
 
@@ -85,7 +90,10 @@ export default function McpPanel() {
       return;
     }
     const args = draft.args.trim() ? draft.args.trim().split(/\s+/) : [];
-    await persist([...servers, { name, command, args, env: {}, cwd: null, enabled: true }]);
+    await persist([
+      ...servers,
+      { name, command, args, env: {}, cwd: null, enabled: true, autoApprove: [] },
+    ]);
     setDraft(EMPTY_DRAFT);
   }, [draft, persist, servers]);
 
@@ -102,6 +110,29 @@ export default function McpPanel() {
       setBusy(false);
     }
   }, []);
+
+  /**
+   * 切换某个工具的自动批准状态。
+   * 改完必须重新发现一次：工具描述符上的 autoApproved 是发现时从配置里算出来的。
+   */
+  const handleToggleAutoApprove = useCallback(
+    async (tool: McpToolDescriptor) => {
+      const next = servers.map((server) => {
+        if (server.name !== tool.server) return server;
+        const list = server.autoApprove ?? [];
+        return {
+          ...server,
+          autoApprove: list.includes(tool.tool)
+            ? list.filter((name) => name !== tool.tool)
+            : [...list, tool.tool],
+        };
+      });
+      if (await persist(next)) {
+        await handleDiscover();
+      }
+    },
+    [handleDiscover, persist, servers]
+  );
 
   if (!available) {
     return (
@@ -211,13 +242,27 @@ export default function McpPanel() {
       {tools.length > 0 && (
         <div className="mt-2 space-y-0.5 rounded border border-surface-border/60 bg-surface-panel/60 p-1.5">
           <div className="text-[10px] text-surface-muted">
-            {tools.length} tool(s) exposed to the Agent as native tool calls
+            {tools.filter((tool) => tool.autoApproved).length} of {tools.length} tool(s) auto-approved.
+            Only auto-approved tools are exposed to the Agent unless the permission preset grants
+            command execution.
           </div>
           {tools.map((tool) => (
-            <div key={tool.qualifiedName} className="truncate text-[10px] text-surface-text">
-              <code className="rounded bg-surface-border/50 px-1">{tool.qualifiedName}</code>{" "}
-              <span className="text-surface-muted">{tool.description}</span>
-            </div>
+            <label
+              key={tool.qualifiedName}
+              className="flex cursor-pointer items-start gap-1.5 text-[10px] text-surface-text"
+              title={`Auto-approve ${tool.tool} on server ${tool.server}`}
+            >
+              <input
+                type="checkbox"
+                checked={tool.autoApproved}
+                onChange={() => void handleToggleAutoApprove(tool)}
+                className="mt-0.5 accent-accent-purple"
+              />
+              <span className="min-w-0 flex-1 truncate">
+                <code className="rounded bg-surface-border/50 px-1">{tool.qualifiedName}</code>{" "}
+                <span className="text-surface-muted">{tool.description}</span>
+              </span>
+            </label>
           ))}
         </div>
       )}

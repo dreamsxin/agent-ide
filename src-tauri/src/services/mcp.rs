@@ -41,6 +41,44 @@ pub struct McpServerConfig {
     pub cwd: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 允许模型自动调用的工具名（server 自己的工具名，不是 `mcp__...` 限定名）。
+    /// 未列出的工具只有在策略放宽到 `allow_all` 时才可见。
+    #[serde(default)]
+    pub auto_approve: Vec<String>,
+}
+
+/// 一次 Agent 运行对 MCP 工具的放行策略。
+///
+/// 这一层是必需的：MCP server 是外部进程，其工具可以读写文件、访问网络、执行命令。
+/// 仅凭"用户启用了这个 server"不足以让模型随意调用其中的任意工具。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpToolPolicy {
+    /// 完全不向模型暴露 MCP 工具
+    Deny,
+    /// 只暴露 server 配置里 `autoApprove` 列出的工具
+    AutoApprovedOnly,
+    /// 暴露已连接 server 的全部工具
+    AllowAll,
+}
+
+impl McpToolPolicy {
+    /// 缺失或无法识别的取值一律回落到最保守的可用策略，避免打错字变成放开全部
+    pub fn from_request(value: Option<&str>) -> Self {
+        match value {
+            Some("allow_all") => Self::AllowAll,
+            Some("deny") => Self::Deny,
+            _ => Self::AutoApprovedOnly,
+        }
+    }
+
+    fn permits(&self, tool: &McpToolDescriptor) -> bool {
+        match self {
+            Self::Deny => false,
+            Self::AutoApprovedOnly => tool.auto_approved,
+            Self::AllowAll => true,
+        }
+    }
 }
 
 /// 持久化到 `<config_dir>/mcp.json` 的配置
@@ -97,6 +135,9 @@ pub struct McpToolDescriptor {
     pub qualified_name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// 该工具是否在所属 server 的 `autoApprove` 列表里
+    #[serde(default)]
+    pub auto_approved: bool,
 }
 
 impl McpToolDescriptor {
@@ -305,7 +346,10 @@ impl McpConnection {
             .await
     }
 
-    async fn list_tools(&mut self, server: &str) -> Result<Vec<McpToolDescriptor>, String> {
+    async fn list_tools(
+        &mut self,
+        server: &McpServerConfig,
+    ) -> Result<Vec<McpToolDescriptor>, String> {
         let result = self.request("tools/list", serde_json::json!({})).await?;
         let items = result
             .get("tools")
@@ -317,8 +361,9 @@ impl McpConnection {
             .filter_map(|item| {
                 let tool = item.get("name")?.as_str()?.to_string();
                 Some(McpToolDescriptor {
-                    server: server.to_string(),
-                    qualified_name: qualify_tool_name(server, &tool),
+                    server: server.name.clone(),
+                    qualified_name: qualify_tool_name(&server.name, &tool),
+                    auto_approved: server.auto_approve.iter().any(|name| name == &tool),
                     tool,
                     description: item
                         .get("description")
@@ -443,7 +488,7 @@ impl McpRegistry {
     ) -> Result<(McpConnection, Vec<McpToolDescriptor>), String> {
         let mut connection = McpConnection::spawn(server).await?;
         connection.initialize().await?;
-        let tools = connection.list_tools(&server.name).await?;
+        let tools = connection.list_tools(server).await?;
         Ok((connection, tools))
     }
 
@@ -451,25 +496,27 @@ impl McpRegistry {
         self.tools.lock().await.clone()
     }
 
-    pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+    /// 按策略过滤后注入模型的工具定义。策略拒绝的工具对模型完全不可见。
+    pub async fn tool_definitions(&self, policy: McpToolPolicy) -> Vec<ToolDefinition> {
         self.tools
             .lock()
             .await
             .iter()
+            .filter(|tool| policy.permits(tool))
             .map(McpToolDescriptor::to_tool_definition)
             .collect()
     }
 
-    pub async fn has_tool(&self, qualified_name: &str) -> bool {
-        self.tools
-            .lock()
-            .await
-            .iter()
-            .any(|tool| tool.qualified_name == qualified_name)
-    }
-
     /// 按注入模型的限定名调用工具。`arguments` 是模型生成的 JSON 字符串。
-    pub async fn call(&self, qualified_name: &str, arguments: &str) -> Result<String, String> {
+    ///
+    /// 策略在这里二次校验，而不是只依赖"没注入模型就不会被调用"：模型可能凭
+    /// 历史消息或猜测构造工具名。
+    pub async fn call(
+        &self,
+        qualified_name: &str,
+        arguments: &str,
+        policy: McpToolPolicy,
+    ) -> Result<String, String> {
         let descriptor = self
             .tools
             .lock()
@@ -478,6 +525,13 @@ impl McpRegistry {
             .find(|tool| tool.qualified_name == qualified_name)
             .cloned()
             .ok_or_else(|| format!("Unknown MCP tool '{}'", qualified_name))?;
+
+        if !policy.permits(&descriptor) {
+            return Err(format!(
+                "MCP tool '{}' is not approved for this run. Add it to the '{}' server's auto-approve list or raise the tool approval policy.",
+                qualified_name, descriptor.server
+            ));
+        }
 
         let connection = self
             .connections
@@ -527,6 +581,17 @@ fn parse_tool_arguments(arguments: &str) -> Result<serde_json::Value, String> {
 mod tests {
     use super::*;
 
+    fn descriptor(tool: &str, auto_approved: bool) -> McpToolDescriptor {
+        McpToolDescriptor {
+            server: "files".to_string(),
+            tool: tool.to_string(),
+            qualified_name: qualify_tool_name("files", tool),
+            description: format!("{} a file", tool),
+            input_schema: serde_json::json!({ "type": "object" }),
+            auto_approved,
+        }
+    }
+
     #[test]
     fn qualified_names_sanitize_unsafe_characters() {
         assert_eq!(
@@ -538,32 +603,58 @@ mod tests {
     }
 
     #[test]
-    fn tool_definition_prefixes_description_with_server() {
-        let descriptor = McpToolDescriptor {
-            server: "files".to_string(),
-            tool: "read".to_string(),
-            qualified_name: "mcp__files__read".to_string(),
-            description: "Read a file".to_string(),
-            input_schema: serde_json::json!({ "type": "object" }),
-        };
+    fn unknown_policy_values_fall_back_to_auto_approved_only() {
+        assert_eq!(
+            McpToolPolicy::from_request(None),
+            McpToolPolicy::AutoApprovedOnly
+        );
+        assert_eq!(
+            McpToolPolicy::from_request(Some("")),
+            McpToolPolicy::AutoApprovedOnly
+        );
+        assert_eq!(
+            McpToolPolicy::from_request(Some("ALLOW_ALL")),
+            McpToolPolicy::AutoApprovedOnly
+        );
+        assert_eq!(
+            McpToolPolicy::from_request(Some("allow_all")),
+            McpToolPolicy::AllowAll
+        );
+        assert_eq!(
+            McpToolPolicy::from_request(Some("deny")),
+            McpToolPolicy::Deny
+        );
+    }
 
-        let definition = descriptor.to_tool_definition();
+    #[test]
+    fn policy_gates_tools_by_auto_approval() {
+        let approved = descriptor("read", true);
+        let unapproved = descriptor("write", false);
+
+        assert!(!McpToolPolicy::Deny.permits(&approved));
+        assert!(!McpToolPolicy::Deny.permits(&unapproved));
+
+        assert!(McpToolPolicy::AutoApprovedOnly.permits(&approved));
+        assert!(!McpToolPolicy::AutoApprovedOnly.permits(&unapproved));
+
+        assert!(McpToolPolicy::AllowAll.permits(&approved));
+        assert!(McpToolPolicy::AllowAll.permits(&unapproved));
+    }
+
+    #[test]
+    fn tool_definition_prefixes_description_with_server() {
+        let definition = descriptor("read", false).to_tool_definition();
         assert_eq!(definition.name, "mcp__files__read");
-        assert_eq!(definition.description, "[files] Read a file");
+        assert_eq!(definition.description, "[files] read a file");
     }
 
     #[test]
     fn tool_definition_falls_back_when_description_missing() {
-        let descriptor = McpToolDescriptor {
-            server: "files".to_string(),
-            tool: "read".to_string(),
-            qualified_name: "mcp__files__read".to_string(),
-            description: "   ".to_string(),
-            input_schema: serde_json::json!({}),
-        };
+        let mut blank = descriptor("read", false);
+        blank.description = "   ".to_string();
 
         assert_eq!(
-            descriptor.to_tool_definition().description,
+            blank.to_tool_definition().description,
             "MCP tool read from server files"
         );
     }
@@ -616,14 +707,17 @@ mod tests {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: true,
+                auto_approve: vec!["read_file".to_string()],
             }],
         };
 
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("\"servers\""));
+        assert!(json.contains("\"autoApprove\""));
         let parsed: McpConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.servers.len(), 1);
         assert!(parsed.servers[0].enabled);
+        assert_eq!(parsed.servers[0].auto_approve, vec!["read_file"]);
     }
 
     #[test]
@@ -633,5 +727,7 @@ mod tests {
         assert_eq!(parsed.version, 1);
         assert!(parsed.servers[0].args.is_empty());
         assert!(parsed.servers[0].enabled);
+        // 缺省即"没有任何工具被自动批准"
+        assert!(parsed.servers[0].auto_approve.is_empty());
     }
 }
