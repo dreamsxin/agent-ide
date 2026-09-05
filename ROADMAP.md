@@ -192,6 +192,9 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Enforced `allowFileCreate` in the backend for Auto-mode auto-apply: new-file diffs are held as `pending` for human review instead of being written, the run ends in `waiting_user` rather than `done`, and the action log records which files were held. Editing existing files is unaffected. The permission arrives per run on `SendPromptRequest` and defaults to false when absent.
 - File-create classification uses hunk shape (all hunks have empty `original`), matching what the apply path actually does, rather than `provenance.operation` — that field is `"unknown"` for every backend-generated diff, so keying a permission check on it would leave a bypass.
 - Scoped the remaining permission toggles honestly after auditing every backend write path: `allowFileDelete`, `allowCommandRun`, and `allowGitActions` have no Agent-reachable path in the desktop app today. There is no delete code in the diff apply path at all (`executor::normalized_operation` maps `"delete"` to `"unknown"`), Agent runs never call `run_project_command`, and every mutating Git command is user-initiated UI. The Agent's only execution surface is MCP tools, already gated by `McpToolPolicy`. Adding backend checks for those three would be theater; they stay frontend UX hints until an Agent-reachable path exists.
+- Ran the first real headless end-to-end verification (not just unit tests) with `agent_cli` against a throwaway git workspace and the `mock://` provider: `doctor` reports its preconditions correctly (missing LLM env, then missing Git repo, then OK), `run --apply` planned, generated a diff, and wrote the file, `changes.json` carried a backend-stamped `baseHash` where it used to be `null`, and `--deny-path` blocked the apply and left the file untouched.
+- Fixed CLI policy classification: `validate_cli_policy` keyed create-vs-edit on `provenance.operation`, which is `"unknown"` for every backend-generated diff and falls back to `"edit"`, so a diff that actually creates a file was recorded as an edit in `policy.json`. It now uses `diff_apply::is_new_file_diff`, the same hunk-shape rule the apply path branches on. This is an auditability fix, not a privilege escalation fix — `effective_policy` already treats `--apply` as implying both create and edit.
+- Added `.agent-ide/` to `.gitignore`. `agent_cli` writes run artifacts to `<workspace>/.agent-ide/runs/<run-id>/`, so any CLI run inside this repo left untracked directories behind.
 
 Important distinction:
 
@@ -211,7 +214,16 @@ cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
-2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (151 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, the MCP config/qualified-name/content-flattening, tool-policy and tool-loop selection tests, the base-hash stamping / batch-write / restamp tests with pinned FNV-1a vectors, and the auto-apply file-creation gating tests. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (152 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, the MCP config/qualified-name/content-flattening, tool-policy and tool-loop selection tests, the base-hash stamping / batch-write / restamp tests with pinned FNV-1a vectors, the auto-apply file-creation gating tests, and the CLI create-classification regression test. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+
+2026-09-05 headless end-to-end run (real binary, not unit tests): built `agent_cli --no-default-features`, then ran it against a throwaway git workspace with `LLM_ENDPOINT=mock://smoke`:
+
+- `doctor` reported each precondition in turn — missing LLM env (exit 7), then "Git repository was not found", then `Ok` (exit 0) once the workspace was a repo.
+- `run --apply "Update smoke.txt"` planned one step, produced a `legacy-diff-block` diff, and rewrote `smoke.txt` from `initial` to `changed`.
+- `changes.json` carried `"baseHash": "7f5f002d3284b6c3"`. This field was `null` on every CLI-generated diff before the backend stamping change, so the fix is confirmed on the real path and not only in tests.
+- `run --apply --deny-path smoke.txt` failed with `Policy denied generated change for smoke.txt by --deny-path smoke.txt` and left the file at `initial`.
+
+Still unverified: everything that needs the desktop UI — per-hunk review, the Auto-mode file-creation hold, MCP discovery against a real server, and the Terminal/LSP/Git panels. Those need `npm run tauri -- dev` and a human at the window.
 
 MCP runtime note: the stdio transport, discovery, and tool loop are unit-covered and type-checked, but a live round-trip against a real MCP server (e.g. `npx -y @modelcontextprotocol/server-filesystem .`) has not been run yet. That belongs in the Tauri smoke loop.
 
@@ -794,7 +806,7 @@ Exit criteria: one coder fan-out runs two steps in isolated worktrees with merge
 | 11.6 Provider-Specific Tool Extensions | Shared native tool transport is done in Phase 9.0.1; this covers provider-specific extensions beyond it (parallel tool calls, strict schemas, prompt caching) | High |
 | 11.7 Agent Context Token Budget UI | Real-time token meter showing budget usage per source; warn on overflow | Medium |
 | 11.8 Ghost Mode (Background Analysis) | Lightweight background indexing producing proactive suggestions; user-dismissable | Medium |
-| 11.9 CLI Permission Model V2 | Implement `--deny-path`, `--allow-create/edit/delete`, `--allow-git`, and MCP tool allowlists from design doc | Medium |
+| 11.9 CLI Permission Model V2 | `--deny-path`, `--allow-create/edit/delete`, `--allow-git`, plus MCP tool allowlists | Medium | **Mostly done, was mis-tracked**: `--deny-path` (with `*` / `/**` globs), `--allow-create/edit/delete`, `--allow-git` and a `policy.json` decision record already ship and are verified end to end. Open: `--apply` implies create+edit so those two flags add no granularity in apply mode, and MCP tools are not exposed to the CLI yet |
 | 11.10 Workspace Indexing Scalability | Validate on 10k+ file workspaces; implement incremental indexing if needed | High |
 
 **Plan/SDD Mode Technical Design:**
@@ -868,7 +880,7 @@ The Plan/SDD Mode is a dual-layer feature:
 | 2026-09-05 | Base-hash check skipped for files already written in the same apply batch | Otherwise applying hunk 2 of a diff would always fail after hunk 1 landed. External edits are still caught because they happen before the batch starts |
 | 2026-09-05 | `allowFileCreate` gates auto-apply only, not explicit Apply clicks | A user clicking Apply on a reviewed diff *is* the confirmation. The gap worth closing is Auto mode writing files with no confirmation at all |
 | 2026-09-05 | Blocked new-file diffs stay `pending`, and the Auto run ends in `waiting_user` | Marking them `failed` would push the user toward "regenerate" for something that was never broken; ending in `done` would hide that changes still need review |
-| 2026-09-05 | Permission checks classify create-vs-edit by hunk shape, not `provenance.operation` | `operation` is `"unknown"` for every backend-generated diff, so a check keyed on it would be bypassable. The hunk-shape rule is exactly what the apply path branches on |
+| 2026-09-05 | Permission checks classify create-vs-edit by hunk shape, not `provenance.operation` | `operation` is `"unknown"` for every backend-generated diff, so a check keyed on it would be bypassable. The hunk-shape rule is exactly what the apply path branches on. Applied to both the desktop auto-apply gate and the CLI `policy.json` decision record |
 
 ---
 
@@ -917,4 +929,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; permission model V2 (9.0.4) enforces MCP tool approval and Auto-mode file creation backend-side. Phase 10.1 CI is live; Phase 10.7 diff staleness detection is now real (backend-stamped stable base hash).*
+*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; permission model V2 (9.0.4) enforces MCP tool approval and Auto-mode file creation backend-side. Phase 10.1 CI is live; Phase 10.7 diff staleness detection is now real and confirmed by a headless `agent_cli` end-to-end run.*

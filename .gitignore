@@ -8,3 +8,6 @@ artifacts/
 .zcode/
 rustup-init.exe
 
+# agent_cli 把每次运行的产物写进 <workspace>/.agent-ide/runs/<run-id>/，
+# 所以在本仓库里跑 CLI 会污染工作区。
+.agent-ide/
