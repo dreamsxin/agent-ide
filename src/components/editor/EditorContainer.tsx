@@ -118,7 +118,6 @@ export default function EditorContainer() {
 
   // 集成增量渲染引擎
   const {
-    renderer: incrementalRenderer,
     metrics: renderMetrics,
     resetMetrics: resetRenderMetrics,
   } = useIncrementalRendering(editorRef, {

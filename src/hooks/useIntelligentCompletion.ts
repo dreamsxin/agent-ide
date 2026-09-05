@@ -50,13 +50,10 @@ export function useIntelligentCompletion(
   monaco: typeof import("monaco-editor") | null,
   options: UseIntelligentCompletionOptions = {}
 ): UseIntelligentCompletionReturn {
-  const {
-    enabled = true,
-    cacheEnabled = true,
-    maxSuggestions = 10,
-    onSuggestionGenerated,
-    onContextAnalyzed,
-  } = options;
+  // maxSuggestions / onSuggestionGenerated 属于 Hook 的公开选项，
+  // 但要等 Monaco provider 把生成结果回填到 currentSuggestionsRef 之后才能生效，
+  // 因此这里暂不解构，避免出现未使用的绑定。
+  const { enabled = true, cacheEnabled = true, onContextAnalyzed } = options;
 
   const engineRef = useRef<IntelligentCompletionEngine | null>(null);
   const currentSuggestionsRef = useRef<CompletionSuggestion[]>([]);
@@ -66,6 +63,7 @@ export function useIntelligentCompletion(
     totalSuggestions: 0,
     cacheHits: 0,
     totalConfidence: 0,
+    averageConfidence: 0,
   });
 
   const [currentSuggestions, setCurrentSuggestions] = useState<CompletionSuggestion[]>([]);
@@ -191,6 +189,7 @@ export function useIntelligentCompletion(
       totalSuggestions: 0,
       cacheHits: 0,
       totalConfidence: 0,
+      averageConfidence: 0,
     };
   }, []);
 
@@ -285,7 +284,7 @@ export function useCompletionQualityMonitor(
     const relevanceScore = (sourceCounts.get('ai') || 0) / suggestions.length;
 
     const newQuality: CompletionQuality = {
-      averageConfidence,
+      averageConfidence: avgConfidence,
       highConfidenceCount,
       lowConfidenceCount,
       diversityScore,
