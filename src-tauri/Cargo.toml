@@ -33,7 +33,14 @@ notify = "6"
 walkdir = "2"
 git2 = "0.19"
 dirs-next = "2"
-keyring = "3"
+# keyring v3 必须显式启用平台后端；不指定 feature 时编译进去的是 mock store，
+# 它对写入返回 Ok、对读取返回 NoEntry —— 也就是所有密钥静默丢弃。
+# Linux 用 sync-secret-service 而不是 linux-native：后者基于 keyutils，进程退出即丢。
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
 async-trait = "0.1"
 
 # 本地推理引擎依赖

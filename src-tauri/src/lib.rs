@@ -81,6 +81,7 @@ pub fn run() {
             commands::agent::get_llm_config,
             commands::agent::save_llm_profile,
             commands::agent::set_active_llm_profile,
+            commands::agent::reveal_llm_api_key,
             commands::agent::delete_llm_profile,
             commands::agent::set_context_compression,
             commands::agent::set_active_role,

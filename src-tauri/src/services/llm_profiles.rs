@@ -246,10 +246,26 @@ impl LlmProfile {
         if !self.api_key.trim().is_empty() {
             return mask_api_key(&self.api_key);
         }
+        match self.credential_ref.as_deref() {
+            // 实际探测条目是否可读，而不是"有 credentialRef 就当成已保存"。
+            // 后者会在写入失败时谎报密钥已存在，用户看到 "Enter to overwrite"
+            // 于是留空保存，陷入永远修不好的循环。
+            Some(credential_ref) => match credentials::read_secret(credential_ref) {
+                Ok(secret) => mask_api_key(&secret),
+                Err(_) => "not configured".to_string(),
+            },
+            None => "not configured".to_string(),
+        }
+    }
+
+    /// 该 profile 是否真的有可读的密钥
+    pub fn has_readable_api_key(&self) -> bool {
+        if !self.api_key.trim().is_empty() {
+            return true;
+        }
         self.credential_ref
-            .as_ref()
-            .map(|_| "stored in OS credential store".to_string())
-            .unwrap_or_else(|| "not configured".to_string())
+            .as_deref()
+            .is_some_and(credentials::has_secret)
     }
 }
 
@@ -431,6 +447,24 @@ pub fn resolve_llm_config(
     profile.to_config()
 }
 
+/// 读出某个 profile 的明文密钥，供设置面板的"显示"按钮使用。
+///
+/// 刻意做成独立入口而不是塞进 `to_response()`：例行的 profile 列表响应
+/// 不应该携带明文密钥，只有用户显式点击时才取一次。
+pub fn reveal_api_key(
+    config: &LlmProfilesConfig,
+    profile_id: Option<&str>,
+) -> Result<String, String> {
+    let selected_id = profile_id.unwrap_or(&config.active_profile_id);
+    let profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == selected_id)
+        .or_else(|| config.profiles.first())
+        .ok_or_else(|| "LLM profile not configured".to_string())?;
+    profile.api_key()
+}
+
 pub fn context_budget(
     config: &LlmProfilesConfig,
     profile_id: Option<&str>,
@@ -526,14 +560,17 @@ pub fn save_profile(
         .api_key
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_default();
+    // 校验依据是"现有密钥是否真的读得出来"，而不是"credentialRef 是否存在"。
+    // 引用存在但条目不可读时必须要求重新输入，否则保存会成功但运行时永远失败。
     if !is_local
         && api_key.trim().is_empty()
-        && existing_profile
+        && !existing_profile
             .as_ref()
-            .and_then(|profile| profile.credential_ref.as_ref())
-            .is_none()
+            .is_some_and(|profile| profile.has_readable_api_key())
     {
-        return Err("API key is required for a new profile".to_string());
+        return Err(
+            "Secret key is required: no readable key is stored for this profile".to_string(),
+        );
     }
     if !api_key.trim().is_empty() {
         credentials::store_secret(&credential_ref, &api_key)?;

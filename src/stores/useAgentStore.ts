@@ -144,6 +144,7 @@ interface AgentStore {
   deleteLlmProfile: (profileId: string) => Promise<void>;
   setActiveLlmProfile: (profileId: string) => Promise<void>;
   setChatProfileId: (profileId: string | null) => void;
+  revealLlmApiKey: (profileId?: string | null) => Promise<string>;
   setChatContextCompression: (mode: ContextCompressionMode | null) => void;
   updateContextCompression: (mode: ContextCompressionMode) => Promise<void>;
 
@@ -968,6 +969,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setChatProfileId: (profileId) => set({ chatProfileId: profileId }),
   setChatContextCompression: (mode) => set({ chatContextCompression: mode }),
+
+  /** 显式取一次明文密钥，只在用户点击"显示"时调用 */
+  revealLlmApiKey: async (profileId) => {
+    if (!isTauriRuntime()) {
+      throw new Error("Reading stored secrets requires the Tauri app runtime.");
+    }
+    return invoke<string>("reveal_llm_api_key", { profileId: profileId ?? null });
+  },
+
 
   updateContextCompression: async (mode) => {
     if (!isTauriRuntime()) {

@@ -173,6 +173,7 @@ export default function ChatView() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const agentState = useAgentStore((s) => s.state);
+  const agentError = useAgentStore((s) => s.error);
   const agentMode = useAgentStore((s) => s.mode);
   const ideMode = useAgentStore((s) => s.ideMode);
   const streamContent = useAgentStore((s) => s.streamContent);
@@ -621,6 +622,20 @@ export default function ChatView() {
             </div>
           )}
         </div>
+
+        {/* 运行失败原因 — 没有这块的话，用户只能看到一个 Retry 按钮，
+            完全不知道失败在哪。错误文本一直存在 store 里，之前没有任何地方渲染。 */}
+        {agentError && (
+          <div
+            data-testid="agent-error-banner"
+            className="mb-2 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1.5"
+          >
+            <div className="mb-0.5 text-[10px] font-medium text-diff-remove">Agent run failed</div>
+            <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-surface-text">
+              {agentError}
+            </pre>
+          </div>
+        )}
 
         {/* 输入 + 按钮 */}
         <div className="flex gap-2">
