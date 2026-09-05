@@ -32,6 +32,20 @@ fn apply_diff_to_path_inner(
     Ok(true)
 }
 
+/// 该 diff 是否会创建一个新文件。
+///
+/// 判定依据是 hunk 形态（全部 hunk 的 original 为空、updated 非空），
+/// 与 `build_updated_content` 实际走的分支完全一致。刻意不看
+/// `provenance.operation`：那个字段可能是 `"unknown"`（后端生成的 diff 就是），
+/// 用它做权限判断会留下绕过口子。
+pub fn is_new_file_diff(diff: &FileDiff) -> bool {
+    !diff.hunks.is_empty()
+        && diff
+            .hunks
+            .iter()
+            .all(|hunk| hunk.original.is_empty() && !hunk.updated.is_empty())
+}
+
 fn build_updated_content(
     file_path: &std::path::Path,
     diff: &FileDiff,
@@ -43,12 +57,7 @@ fn build_updated_content(
         return Ok(None);
     }
 
-    let is_new_file = diff
-        .hunks
-        .iter()
-        .all(|hunk| hunk.original.is_empty() && !hunk.updated.is_empty());
-
-    if is_new_file {
+    if is_new_file_diff(diff) {
         if file_path.exists() {
             return Err(format!(
                 "Refusing to overwrite existing file: {}",
@@ -466,6 +475,40 @@ mod tests {
         assert!(written);
         assert_eq!(content, "const value = 2;\n");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_new_file_diff_classifies_by_hunk_shape() {
+        assert!(is_new_file_diff(&make_diff(
+            "new.ts",
+            "",
+            "export const created = true;\n"
+        )));
+        assert!(!is_new_file_diff(&make_diff(
+            "edit.ts",
+            "const value = 1;",
+            "const value = 2;"
+        )));
+
+        // provenance 说的是 create，但 hunk 形态是编辑：按实际写盘行为判定，
+        // 否则权限检查会和真实行为脱节
+        let mut mislabeled = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        mislabeled.provenance = Some(crate::agent::state_machine::DiffProvenance {
+            protocol: "agent-changes".to_string(),
+            operation: "create".to_string(),
+            rationale: None,
+            schema_version: None,
+            change_index: None,
+            source_role: None,
+            source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
+        });
+        assert!(!is_new_file_diff(&mislabeled));
+
+        let mut empty = make_diff("edit.ts", "", "");
+        empty.hunks.clear();
+        assert!(!is_new_file_diff(&empty));
     }
 
     /// 这些是 FNV-1a 64 的标准测试向量。它们被钉死是为了保证 baseHash 在

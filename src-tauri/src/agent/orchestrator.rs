@@ -52,6 +52,11 @@ pub struct AgentOrchestrator {
     pub paused_run: Option<PausedPipelineRun>,
     /// 外部工具执行器（MCP）。None 表示本次运行不暴露外部工具。
     pub tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
+    /// Auto 模式自动应用时是否允许创建新文件。
+    ///
+    /// 保守默认 false：请求没带这个权限时，新建文件的 diff 留给人工审查，
+    /// 而不是被静默写盘。编辑已有文件不受影响。
+    pub allow_file_create: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +89,7 @@ impl AgentOrchestrator {
             last_run_id: None,
             paused_run: None,
             tool_invoker: None,
+            allow_file_create: false,
         }
     }
 
@@ -483,20 +489,46 @@ impl AgentOrchestrator {
 
         if self.mode == AgentMode::Auto {
             // Auto mode applies diffs immediately.
-            self.apply_diffs_to_fs()?;
+            let blocked = self.apply_diffs_to_fs()?;
+            let (level, summary, details) = if blocked.is_empty() {
+                (
+                    "success",
+                    "Auto mode applied pending diffs".to_string(),
+                    "Agent auto mode completed filesystem apply.".to_string(),
+                )
+            } else {
+                (
+                    "warn",
+                    format!(
+                        "Auto mode applied edits but held {} new file{} for review",
+                        blocked.len(),
+                        if blocked.len() == 1 { "" } else { "s" }
+                    ),
+                    format!(
+                        "File creation is not permitted for this run, so these stay pending:\n{}",
+                        blocked.join("\n")
+                    ),
+                )
+            };
             self.emit_action_log(
                 &app,
-                "success",
+                level,
                 "auto_apply",
                 None,
                 None,
-                "Auto mode applied pending diffs",
-                "Agent auto mode completed filesystem apply.",
+                &summary,
+                &details,
                 Some(context_summary.clone()),
                 Some(self.summarize_pending_diffs()),
             );
-            self.state_mgr
-                .set(crate::agent::state_machine::AgentState::Done);
+            // 还有被拦下的新建文件时不能算 Done，否则用户看不到需要审查的内容
+            if blocked.is_empty() {
+                self.state_mgr
+                    .set(crate::agent::state_machine::AgentState::Done);
+            } else {
+                self.state_mgr
+                    .set(crate::agent::state_machine::AgentState::WaitingUser);
+            }
         } else {
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
@@ -507,8 +539,26 @@ impl AgentOrchestrator {
     }
 
     /// Apply pending diffs to the workspace filesystem.
-    pub fn apply_diffs_to_fs(&mut self) -> Result<(), String> {
-        let result = apply_pending_diffs(&self.diffs);
+    ///
+    /// 返回被权限拦下、仍保持 pending 的文件路径。这不是失败：新建文件的
+    /// diff 在未授权时留给人工审查，编辑已有文件照常应用。
+    pub fn apply_diffs_to_fs(&mut self) -> Result<Vec<String>, String> {
+        let mut blocked: Vec<String> = Vec::new();
+        let applicable: Vec<crate::agent::state_machine::FileDiff> = self
+            .diffs
+            .iter()
+            .filter(|diff| diff.status == "pending")
+            .filter(|diff| {
+                if self.allow_file_create || !crate::agent::diff_apply::is_new_file_diff(diff) {
+                    return true;
+                }
+                blocked.push(diff.file.clone());
+                false
+            })
+            .cloned()
+            .collect();
+
+        let result = apply_pending_diffs(&applicable);
 
         for diff in &mut self.diffs {
             if result.applied.iter().any(|item| item.id == diff.id) {
@@ -527,7 +577,7 @@ impl AgentOrchestrator {
                 .join("; "));
         }
 
-        Ok(())
+        Ok(blocked)
     }
 
     fn handle_plan_stage_response(
@@ -938,6 +988,52 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(env.root.join("fail.ts")).unwrap(),
             "const other = 1;\n"
+        );
+    }
+
+    #[test]
+    fn auto_apply_holds_new_files_when_file_creation_is_not_permitted() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("edit.ts", "const value = 1;\n");
+
+        let edit = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        let create = make_diff("created.ts", "", "export const created = true;\n");
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.allow_file_create = false;
+        orchestrator.diffs = vec![edit, create];
+
+        let blocked = orchestrator.apply_diffs_to_fs().unwrap();
+
+        assert_eq!(blocked, vec!["created.ts".to_string()]);
+        // 编辑已有文件照常应用
+        assert_eq!(orchestrator.diffs[0].status, "applied");
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("edit.ts")).unwrap(),
+            "const value = 2;\n"
+        );
+        // 新建文件既没写盘，也没被标记失败——它留待人工审查
+        assert_eq!(orchestrator.diffs[1].status, "pending");
+        assert!(!env.root.join("created.ts").exists());
+    }
+
+    #[test]
+    fn auto_apply_creates_new_files_once_permitted() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+
+        let create = make_diff("created.ts", "", "export const created = true;\n");
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.allow_file_create = true;
+        orchestrator.diffs = vec![create];
+
+        let blocked = orchestrator.apply_diffs_to_fs().unwrap();
+
+        assert!(blocked.is_empty());
+        assert_eq!(orchestrator.diffs[0].status, "applied");
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("created.ts")).unwrap(),
+            "export const created = true;\n"
         );
     }
 

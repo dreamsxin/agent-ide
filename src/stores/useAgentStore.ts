@@ -510,6 +510,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
           toolApproval: mcpApprovalForPermissions(get().permissions),
+          allowFileCreate: get().permissions.allowFileCreate,
           runId,
           ideMode: requestIdeMode,
         },
