@@ -119,6 +119,10 @@ pub struct SendPromptRequest {
     /// 缺省按 `auto_approved_only` 处理。
     #[serde(default, rename = "toolApproval")]
     pub tool_approval: Option<String>,
+    /// Auto 模式自动应用时是否允许创建新文件。缺省 false：
+    /// 未显式授权时，新建文件的 diff 留给人工审查而不是静默写盘。
+    #[serde(default, rename = "allowFileCreate")]
+    pub allow_file_create: bool,
     #[serde(rename = "runId")]
     pub run_id: Option<String>,
     #[serde(rename = "ideMode")]
@@ -269,6 +273,7 @@ pub async fn send_agent_prompt(
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
     orch.tool_invoker = tool_invoker;
+    orch.allow_file_create = request.allow_file_create;
     orch.begin_run(request.run_id.clone());
     match orch
         .run(
