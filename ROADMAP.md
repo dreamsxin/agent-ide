@@ -195,6 +195,12 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Ran the first real headless end-to-end verification (not just unit tests) with `agent_cli` against a throwaway git workspace and the `mock://` provider: `doctor` reports its preconditions correctly (missing LLM env, then missing Git repo, then OK), `run --apply` planned, generated a diff, and wrote the file, `changes.json` carried a backend-stamped `baseHash` where it used to be `null`, and `--deny-path` blocked the apply and left the file untouched.
 - Fixed CLI policy classification: `validate_cli_policy` keyed create-vs-edit on `provenance.operation`, which is `"unknown"` for every backend-generated diff and falls back to `"edit"`, so a diff that actually creates a file was recorded as an edit in `policy.json`. It now uses `diff_apply::is_new_file_diff`, the same hunk-shape rule the apply path branches on. This is an auditability fix, not a privilege escalation fix — `effective_policy` already treats `--apply` as implying both create and edit.
 - Added `.agent-ide/` to `.gitignore`. `agent_cli` writes run artifacts to `<workspace>/.agent-ide/runs/<run-id>/`, so any CLI run inside this repo left untracked directories behind.
+- **Fixed silent credential loss (`keyring` had no platform backend).** `Cargo.toml` declared `keyring = "3"` with no features. keyring v3 requires an explicit store feature; without one it compiles the mock store, which returns `Ok` from writes and `NoEntry` from reads. Every API key on every platform was discarded, `Failed to store credential` could never fire, and the failure surfaced as `Credential not found or inaccessible` — blaming the OS. Now declares `apple-native` / `windows-native` / `sync-secret-service`. Verified on Windows: a real `LegacyGeneric:target=llm-profile:default.agent-ide` entry appears, survives an app restart, and the Agent reads it back.
+- Added a credential round-trip test (`services::credentials`) covering store → read → overwrite → delete. This is the Phase 10.5 secret-storage validation and it fails loudly on a mock backend, so the regression cannot return silently.
+- Stopped the UI from claiming a key is stored when it is not: `masked_api_key()` now probes the credential store instead of assuming `credentialRef.is_some()` means "saved", `save_profile` requires a key when no readable one exists (new `has_readable_api_key()`), and the frontend `(saved)` badge no longer treats the literal string `"not configured"` as truthy. Before this, the panel showed "stored in OS credential store", the user left the field blank, the save succeeded, and every run failed — with no way out through the UI.
+- Added a masked "Stored:" readout with an eye toggle in Settings, backed by a dedicated `reveal_llm_api_key` command. Plaintext is never included in the routine profile-list response; it is fetched only on an explicit click.
+- **Rendered the Agent error message.** `useAgentStore.error` was set on failure, persisted, and read by nothing — a failed run showed only a `Retry` button with no explanation. ChatView now shows the message above the input. This is what turned an opaque failure into the keyring root cause during the smoke run.
+- Documented that the desktop app cannot be launched with the documented command on a machine without LLVM: `npm run tauri -- dev` (and `start.ps1`) build with the default `llama-cpp` feature, which needs libclang. The working invocation is `npm run tauri -- dev -- --no-default-features` (two `--`: the second marks cargo passthrough).
 
 Important distinction:
 
@@ -224,6 +230,16 @@ cargo test        # passes; includes context, workspace, diff apply, orchestrato
 - `run --apply --deny-path smoke.txt` failed with `Policy denied generated change for smoke.txt by --deny-path smoke.txt` and left the file at `initial`.
 
 Still unverified: everything that needs the desktop UI — per-hunk review, the Auto-mode file-creation hold, MCP discovery against a real server, and the Terminal/LSP/Git panels. Those need `npm run tauri -- dev` and a human at the window.
+
+2026-09-05 desktop smoke run (real app window, `npm run tauri -- dev -- --no-default-features`, `mock://` provider, throwaway workspace `D:\work\agent-ide-smoke` with a hand-written zero-dependency MCP stdio server):
+
+- **MCP discovery**: `Discover Tools` listed 2 tools with only the `autoApprove`-listed one checked. Verified from the backend that the `node` child process was spawned and held open, so the hand-rolled `initialize` / `tools/list` round-trip works against a real server.
+- **MCP auto-approve toggle**: ticking a tool wrote `autoApprove: ["echo","danger_wipe"]` to `mcp.json` at 01:46:40.045 and respawned the server 20ms later, confirming the save → re-discover path.
+- **`shutdown_all` reclaims children**: a second `Discover Tools` replaced PID 15068 with 36368 and left exactly one process, so connections are not leaked.
+- **AGENTS.md context chip**: showed 63 tokens, which matches exactly — the section wrapper is 37 chars, the file is 214 chars, and `estimate_tokens(251) = (251+3)/4 = 63`.
+- **Agent run + per-hunk apply**: after the credential fix, a prompt produced a diff and clicking a single hunk's apply rewrote `smoke.txt` from `initial` to `changed` with no errors. This is the first end-to-end verification of the desktop diff-apply path, including the backend-stamped `baseHash` and post-apply restamping.
+
+Still unverified after this run: Auto-mode file-creation hold (the bundled mock only emits an edit diff, never a create), Terminal/LSP/Git panels, and the Commands → Problems parsing path.
 
 MCP runtime note: the stdio transport, discovery, and tool loop are unit-covered and type-checked, but a live round-trip against a real MCP server (e.g. `npx -y @modelcontextprotocol/server-filesystem .`) has not been run yet. That belongs in the Tauri smoke loop.
 
@@ -782,7 +798,7 @@ Exit criteria: one coder fan-out runs two steps in isolated worktrees with merge
 | 10.2 Code Splitting & Bundle Optimization | Monaco/xterm/markdown lazy-loaded; initial bundle < 500KB | High | Planned |
 | 10.3 Security Policy Document | Unified doc covering: workspace boundaries, credential storage, Agent approval model, MCP tool exposure, data exposure limits | Critical | Planned |
 | 10.4 Cross-Platform Packaging | Windows MSI validated; macOS .dmg script; Linux AppImage/deb; add Linux/macOS CI jobs | High | Planned |
-| 10.5 Secret Storage Validation | Keyring tested on Windows Credential Manager, macOS Keychain, Linux Secret Service | High | Planned |
+| 10.5 Secret Storage Validation | Keyring tested on Windows Credential Manager, macOS Keychain, Linux Secret Service | High | **Windows done (2026-09-05)**: platform backends enabled, round-trip test added, verified in the running app including across restart. macOS/Linux still unverified |
 | 10.6 Performance Baselines | Startup < 3s, memory < 300MB idle, editor input latency < 50ms; regression tests in CI | Medium | Planned |
 | 10.7 Diff Application Hardening | Version-aware hunk matching using file hash + line offset tolerance; stale rejection mandatory | High | **In progress**: backend-stamped `baseHash` (stable FNV-1a) now makes stale detection real, with intra-batch write tracking and post-apply restamping. Still open: line-offset tolerance, and rejecting edit diffs that carry no stamp at all |
 | 10.8 Tauri Smoke Tests in CI | App boot, workspace open, file read/write, settings load, driven headlessly | High | Planned |
@@ -880,7 +896,9 @@ The Plan/SDD Mode is a dual-layer feature:
 | 2026-09-05 | Base-hash check skipped for files already written in the same apply batch | Otherwise applying hunk 2 of a diff would always fail after hunk 1 landed. External edits are still caught because they happen before the batch starts |
 | 2026-09-05 | `allowFileCreate` gates auto-apply only, not explicit Apply clicks | A user clicking Apply on a reviewed diff *is* the confirmation. The gap worth closing is Auto mode writing files with no confirmation at all |
 | 2026-09-05 | Blocked new-file diffs stay `pending`, and the Auto run ends in `waiting_user` | Marking them `failed` would push the user toward "regenerate" for something that was never broken; ending in `done` would hide that changes still need review |
-| 2026-09-05 | Permission checks classify create-vs-edit by hunk shape, not `provenance.operation` | `operation` is `"unknown"` for every backend-generated diff, so a check keyed on it would be bypassable. The hunk-shape rule is exactly what the apply path branches on. Applied to both the desktop auto-apply gate and the CLI `policy.json` decision record |
+| 2026-09-05 | `keyring` must declare platform store features explicitly | v3 silently compiles a mock store when no store feature is enabled: writes return `Ok`, reads return `NoEntry`. A dependency line that looks complete had disabled all secret storage. Any future keyring upgrade must re-check this |
+| 2026-09-05 | "Is a secret stored?" is answered by reading the store, never by the presence of a reference | The old `credentialRef.is_some()` check made the UI assert a key was saved when nothing was, producing a save/fail loop with no UI escape |
+| 2026-09-05 | Plaintext secrets are exposed only through a dedicated reveal command | Keeps the routine profile-list response free of secrets while still allowing the standard eye-toggle affordance in settings |
 
 ---
 

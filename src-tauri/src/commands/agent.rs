@@ -1373,6 +1373,16 @@ pub async fn save_llm_profile(
     llm_profiles::save_profile(&mut config, request)
 }
 
+/// 读出当前（或指定）profile 的明文密钥，供设置面板的"显示"按钮使用。
+#[tauri::command]
+pub async fn reveal_llm_api_key(
+    profile_id: Option<String>,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
+    let config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
+    llm_profiles::reveal_api_key(&config, profile_id.as_deref())
+}
+
 #[tauri::command]
 pub async fn set_active_llm_profile(
     profile_id: String,

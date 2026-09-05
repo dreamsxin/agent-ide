@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
@@ -93,6 +94,7 @@ export default function SettingsPanel() {
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
   const saveLlmProfile = useAgentStore((s) => s.saveLlmProfile);
+  const revealLlmApiKey = useAgentStore((s) => s.revealLlmApiKey);
   const deleteLlmProfile = useAgentStore((s) => s.deleteLlmProfile);
   const setActiveLlmProfile = useAgentStore((s) => s.setActiveLlmProfile);
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
@@ -102,6 +104,8 @@ export default function SettingsPanel() {
   const togglePermission = useAgentStore((s) => s.togglePermission);
 
   const [profileId, setProfileId] = useState("");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState("");
   const [profileName, setProfileName] = useState("Default");
   const [provider, setProvider] = useState<ModelProvider>("openai");
   const [endpoint, setEndpoint] = useState("");
@@ -119,6 +123,8 @@ export default function SettingsPanel() {
   const [temperature, setTemperature] = useState("0.2");
   const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
   const [saving, setSaving] = useState(false);
+  // 后端探测不到可读条目时会返回 "not configured"，那不算已保存
+  const hasSavedKey = Boolean(apiKeyMasked) && apiKeyMasked !== "not configured";
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [localStatus, setLocalStatus] = useState<{ exists: boolean; loaded: boolean; modelPath: string } | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
@@ -213,12 +219,28 @@ export default function SettingsPanel() {
   }, [profileId, refreshLocalStatus]);
 
   // 保存
+  /** 眼睛图标：显示时向后端取一次明文，隐藏时只清本地状态 */
+  const handleToggleReveal = useCallback(async () => {
+    setRevealError("");
+    if (revealedKey !== null) {
+      setRevealedKey(null);
+      return;
+    }
+    try {
+      setRevealedKey(await revealLlmApiKey(profileId || null));
+    } catch (e) {
+      setRevealError(`Cannot read stored key: ${e}`);
+    }
+  }, [profileId, revealLlmApiKey, revealedKey]);
+
   const handleSave = useCallback(async () => {
     if (!profileName.trim() || !model.trim() || (provider !== "local" && !endpoint.trim())) {
       setMessage({ type: "err", text: provider === "local" ? "Profile name and model are required" : "Profile name, endpoint, and model are required" });
       return;
     }
-    if (provider !== "local" && !profileId && !apiKey.trim()) {
+    // 判断依据是"是否已有可读密钥"，而不是"是否是新 profile"：
+    // 引导出来的 profile 有 id 但密钥可能从未真正存进凭据存储。
+    if (provider !== "local" && !hasSavedKey && !apiKey.trim()) {
       setMessage({ type: "err", text: "Secret key is required for a new profile" });
       return;
     }
@@ -247,6 +269,7 @@ export default function SettingsPanel() {
       });
       setMessage({ type: "ok", text: "Saved successfully" });
       setApiKey(""); // 保存后清空输入框中的 key
+      setRevealedKey(null); // 明文回显必须重新点一次才显示，避免展示过期值
     } catch (e) {
       setMessage({ type: "err", text: `Save failed: ${e}` });
     } finally {
@@ -486,15 +509,45 @@ export default function SettingsPanel() {
 
       {/* API Key */}
       <label className="block text-surface-muted mb-1 text-[11px]">
-        Secret Key {apiKeyMasked && <span className="text-[10px] text-accent-green">(saved)</span>}
+        Secret Key {hasSavedKey && <span className="text-[10px] text-accent-green">(saved)</span>}
       </label>
       <input
         type="password"
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
-        placeholder={apiKeyMasked ? "Enter to overwrite..." : "sk-..."}
-        className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
+        placeholder={hasSavedKey ? "Enter to overwrite..." : "sk-..."}
+        className="w-full mb-1 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
+
+      {/* 已保存的密钥回显：默认掩码，点眼睛取一次明文。
+          apiKeyMasked 现在由后端实际探测凭据存储得出，所以这里显示
+          "not configured" 就意味着真的没存上，而不是界面猜的。 */}
+      <div className="mb-3 flex items-center gap-1.5 text-[10px]">
+        <span className="text-surface-muted">Stored:</span>
+        <code
+          data-testid="settings-stored-key"
+          className="min-w-0 flex-1 truncate rounded bg-surface-border/40 px-1 py-0.5 font-mono text-surface-text"
+        >
+          {revealedKey ?? apiKeyMasked ?? "not configured"}
+        </code>
+        {hasSavedKey && (
+          <button
+            type="button"
+            onClick={handleToggleReveal}
+            title={revealedKey ? "Hide secret key" : "Show secret key"}
+            aria-label={revealedKey ? "Hide secret key" : "Show secret key"}
+            className="flex-shrink-0 rounded border border-surface-border px-1 py-0.5 text-surface-muted hover:text-surface-text"
+          >
+            {revealedKey ? <EyeOff size={11} /> : <Eye size={11} />}
+          </button>
+        )}
+      </div>
+      {revealError && (
+        <div className="mb-3 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1 text-[10px] text-diff-remove">
+          {revealError}
+        </div>
+      )}
+
 
       {/* Model */}
       <label className="block text-surface-muted mb-1 text-[11px]">Model Name</label>
