@@ -224,8 +224,11 @@ pub async fn send_agent_prompt(
     request: SendPromptRequest,
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let (llm, tool_invoker) =
+        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm).await;
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
     let mut context = build_agent_context(
@@ -256,6 +259,7 @@ pub async fn send_agent_prompt(
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
+    orch.tool_invoker = tool_invoker;
     orch.begin_run(request.run_id.clone());
     match orch
         .run(
@@ -401,8 +405,11 @@ pub async fn run_agent_step(
     request: RunAgentStepRequest,
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let (llm, tool_invoker) =
+        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm).await;
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
     let mut context = build_agent_context(
         request.active_file,
@@ -468,8 +475,15 @@ pub async fn run_agent_step(
         );
     }
 
-    let response =
-        crate::agent::executor::execute_step(&llm, &step_prompt, &ctx_str, cancel_flag, tx).await;
+    let response = crate::agent::executor::execute_step(
+        &llm,
+        &step_prompt,
+        &ctx_str,
+        tool_invoker.as_deref(),
+        cancel_flag,
+        tx,
+    )
+    .await;
     let mut orch = agent_state.orchestrator.lock().await;
     match response {
         Ok(response) => {
@@ -1488,10 +1502,7 @@ pub async fn test_llm_connection(
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let llm = agent_state.get_llm_client(profile_id.as_deref())?;
 
-    let messages = vec![crate::services::llm_client::ChatMessage {
-        role: "user".to_string(),
-        content: "Hi".to_string(),
-    }];
+    let messages = vec![crate::services::llm_client::ChatMessage::user("Hi")];
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
     let handle = tokio::spawn(async move {

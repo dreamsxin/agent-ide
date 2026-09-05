@@ -3,6 +3,7 @@ pub mod context;
 pub mod credentials;
 pub mod llm_client;
 pub mod llm_profiles;
+pub mod mcp;
 pub mod problem_parser;
 pub mod project_memory;
 pub mod project_tasks;

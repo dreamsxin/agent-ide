@@ -23,6 +23,7 @@ type ChatContextOptions = {
   logs: boolean;
   gitDiff: boolean;
   projectTree: boolean;
+  projectMemory: boolean;
 };
 
 const DEFAULT_CONTEXT_OPTIONS: ChatContextOptions = {
@@ -35,6 +36,7 @@ const DEFAULT_CONTEXT_OPTIONS: ChatContextOptions = {
   logs: true,
   gitDiff: true,
   projectTree: true,
+  projectMemory: true,
 };
 
 const CONTEXT_OPTIONS_KEY = "agent-ide-chat-context-options";
@@ -228,6 +230,7 @@ export default function ChatView() {
     contextOptions.logs && warningLogCount > 0 ? `${warningLogCount} warning/error log${warningLogCount === 1 ? "" : "s"}` : null,
     contextOptions.gitDiff ? "git diff" : null,
     contextOptions.projectTree ? "project tree" : null,
+    contextOptions.projectMemory ? "AGENTS.md" : null,
   ].filter(Boolean);
   const estimatedSelectedTokens = contextEstimate?.estimatedTokens ?? 0;
 
@@ -286,6 +289,7 @@ export default function ChatView() {
         contextSources: {
           includeGitDiff: contextOptions.gitDiff,
           includeProjectTree: contextOptions.projectTree,
+          includeProjectMemory: contextOptions.projectMemory,
         },
       }).then((estimate) => {
         if (!cancelled) setContextEstimate(estimate);
@@ -295,7 +299,7 @@ export default function ChatView() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree]);
+  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || isActing) return;
@@ -323,6 +327,7 @@ export default function ChatView() {
       contextSources: {
         includeGitDiff: contextOptions.gitDiff,
         includeProjectTree: contextOptions.projectTree,
+        includeProjectMemory: contextOptions.projectMemory,
       },
       ...ctx,
     });
@@ -589,6 +594,12 @@ export default function ChatView() {
                   detail={formatEstimateDetail(contextEstimate, "project_tree", "summary")}
                   checked={contextOptions.projectTree}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectTree: checked }))}
+                />
+                <ContextToggle
+                  label="AGENTS.md"
+                  detail={formatEstimateDetail(contextEstimate, "project_memory", "project memory")}
+                  checked={contextOptions.projectMemory}
+                  onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectMemory: checked }))}
                 />
               </div>
               {contextEstimate && (

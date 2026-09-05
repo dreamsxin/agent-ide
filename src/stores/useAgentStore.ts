@@ -115,6 +115,7 @@ interface AgentStore {
     contextSources?: {
       includeProjectTree?: boolean;
       includeGitDiff?: boolean;
+      includeProjectMemory?: boolean;
     };
     ideMode?: IdeMode;
   }) => Promise<void>;
@@ -174,6 +175,7 @@ interface AgentContextParams {
   contextSources?: {
     includeProjectTree?: boolean;
     includeGitDiff?: boolean;
+    includeProjectMemory?: boolean;
   };
   ideMode?: IdeMode;
 }

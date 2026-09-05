@@ -19,6 +19,7 @@ pub async fn execute_agent_steps<FStart, FFinish, FToken>(
     context_text: &str,
     workspace_path: &Path,
     steps: &[TaskStep],
+    invoker: Option<&dyn executor::ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     mut on_step_started: FStart,
     mut on_step_finished: FFinish,
@@ -39,6 +40,7 @@ where
             llm,
             &step.title,
             &step_context,
+            invoker,
             cancel_flag.clone(),
             token_sender(step),
         )

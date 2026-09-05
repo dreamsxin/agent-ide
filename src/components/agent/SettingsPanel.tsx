@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import McpPanel from "./McpPanel";
 import type { LocalModelType, ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
@@ -691,6 +692,8 @@ export default function SettingsPanel() {
           <code className="bg-surface-border/50 px-1 rounded">LLM_MODEL</code> env vars for default values.
         </div>
       </div>
+
+      <McpPanel />
     </div>
   );
 }
