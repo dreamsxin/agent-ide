@@ -186,6 +186,9 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fixed the ROADMAP phase numbering: Phase 10/11/12 task ids were off by one (Phase 10 items were numbered `9.x`, colliding with real Phase 9 items).
 - Added MCP tool approval enforcement (first slice of Phase 9.0.4): `McpToolPolicy` (`deny` / `auto_approved_only` / `allow_all`) gates both which tools are injected into the model's tool list and every `tools/call` invocation. Per-server `autoApprove` lists live in `mcp.json` and are editable per tool in the Settings MCP panel. Unknown or missing policy values fall back to `auto_approved_only`, so a typo cannot open everything up.
 - Wired the policy to the existing Agent permission preset: `allowCommandRun` maps to `allow_all`, otherwise only auto-approved tools are exposed. MCP tools are external process execution, so they follow the command-execution permission rather than getting their own implicit grant.
+- Made diff staleness detection actually work (Phase 10.7 first slice). `baseHash` was previously supplied only by the model, which cannot know Agent IDE's hash function — so the check was effectively dead: either absent (no protection) or wrong (always rejected). The backend now stamps `baseHash` from the real file content at diff-generation time and discards the model-supplied value.
+- Replaced `DefaultHasher` with a hand-written FNV-1a 64 for `content_hash`, pinned by standard test vectors. The standard library explicitly does not guarantee `DefaultHasher` stability across Rust releases, and these hashes are persisted per workspace and re-validated after restart — an unstable hash would have silently marked every saved diff as stale after a toolchain upgrade.
+- Kept sequential review working alongside mandatory stamping: `apply_pending_diffs` tracks the files it wrote within one batch and skips the base-hash check for them (the change came from us, not from outside), and `restamp_applied_files` refreshes the stamp on still-pending/partial diffs for files that were just written. External edits between generation and apply are still rejected.
 
 Important distinction:
 
@@ -205,7 +208,7 @@ cargo check       # passes
 cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
 ```
 
-2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (143 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, and the MCP config/qualified-name/content-flattening, tool-policy, and tool-loop selection tests. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
+2026-09-05 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (148 tests, 0 failed), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, the MCP config/qualified-name/content-flattening, tool-policy and tool-loop selection tests, and the new base-hash stamping / batch-write / restamp tests with pinned FNV-1a vectors. `npm ci`, `npm run build`, and `npm test` (14 tests) also pass. All five commands now run in CI on every push and PR. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
 MCP runtime note: the stdio transport, discovery, and tool loop are unit-covered and type-checked, but a live round-trip against a real MCP server (e.g. `npx -y @modelcontextprotocol/server-filesystem .`) has not been run yet. That belongs in the Tauri smoke loop.
 
@@ -365,9 +368,11 @@ Current limitation: diff application still uses textual `find` replacement. It n
 ### High Priority
 
 1. **Diff application still lacks version-aware hunks**
-   - Current behavior still depends on exact or trimmed textual hunk content.
+   - Current behavior still depends on exact or trimmed textual hunk content; no line-offset tolerance yet.
    - Now rejects ambiguous matches and refuses to overwrite existing files for new-file hunks.
-   - Missing file hash/version checks.
+   - `baseHash` is now stamped by the backend at generation time from real file content (stable FNV-1a), so stale detection actually works. It used to be model-supplied and therefore either absent or wrong.
+   - Sequential review still works: writes within one apply batch skip their own base-hash check, and still-pending diffs on a just-written file are restamped.
+   - Remaining gap: an edit diff that carries no stamp at all (e.g. restored from a pre-2026-09-05 session) is still applied without a staleness check. Making that a hard rejection needs the real Tauri smoke loop first.
    - Partial apply errors are returned structurally and shown inline on failed diff cards.
    - Per-file and per-hunk apply/reject are now wired in the backend and Diff view.
    - Mixed applied/rejected hunk state currently closes the file diff; add clearer partial status next.
@@ -764,7 +769,7 @@ Exit criteria: one coder fan-out runs two steps in isolated worktrees with merge
 | 10.4 Cross-Platform Packaging | Windows MSI validated; macOS .dmg script; Linux AppImage/deb; add Linux/macOS CI jobs | High | Planned |
 | 10.5 Secret Storage Validation | Keyring tested on Windows Credential Manager, macOS Keychain, Linux Secret Service | High | Planned |
 | 10.6 Performance Baselines | Startup < 3s, memory < 300MB idle, editor input latency < 50ms; regression tests in CI | Medium | Planned |
-| 10.7 Diff Application Hardening | Version-aware hunk matching using file hash + line offset tolerance; stale rejection mandatory | High | Planned |
+| 10.7 Diff Application Hardening | Version-aware hunk matching using file hash + line offset tolerance; stale rejection mandatory | High | **In progress**: backend-stamped `baseHash` (stable FNV-1a) now makes stale detection real, with intra-batch write tracking and post-apply restamping. Still open: line-offset tolerance, and rejecting edit diffs that carry no stamp at all |
 | 10.8 Tauri Smoke Tests in CI | App boot, workspace open, file read/write, settings load, driven headlessly | High | Planned |
 | 10.9 Agent Entry-Point Argument Structs | Collapse the 8-11 parameter orchestration entry points into request structs and drop the crate-level `clippy::too_many_arguments` allow | Low | Planned |
 
@@ -855,6 +860,9 @@ The Plan/SDD Mode is a dual-layer feature:
 | 2026-09-05 | CI Rust job verifies `--no-default-features` only | The default `llama-cpp` feature needs LLVM/libclang plus a full llama.cpp native build; gating on it would make CI slow and fragile while covering no code path that ships today |
 | 2026-09-05 | MCP tool exposure defaults to `auto_approved_only` | "The user enabled this server" is not consent to run every tool in it. Defaulting to an explicit per-tool allowlist, and treating unknown policy strings as the restrictive case, keeps a config typo from silently opening all external tools |
 | 2026-09-05 | MCP policy re-checked inside `McpRegistry::call`, not only at injection time | Not injecting a tool is not an enforcement boundary: the model can name a tool from conversation history or by guessing |
+| 2026-09-05 | `baseHash` is computed by the backend, never taken from the model | The model cannot know Agent IDE's hash function, so a model-supplied value is a guess. Trusting it made the staleness check dead code in both directions |
+| 2026-09-05 | Hand-written FNV-1a instead of `DefaultHasher` for `content_hash` | `DefaultHasher` output is explicitly not stable across Rust releases, and these hashes are persisted per workspace and re-validated after restart. Pinned test vectors keep it honest |
+| 2026-09-05 | Base-hash check skipped for files already written in the same apply batch | Otherwise applying hunk 2 of a diff would always fail after hunk 1 landed. External edits are still caught because they happen before the batch starts |
 
 ---
 
@@ -890,7 +898,7 @@ target\release\agent_cli --help
 3. ~~Surface the AGENTS.md project-memory toggle in the ChatView context-source chips~~ **Done (2026-09-05)**.
 4. ~~Add a CI pipeline (Phase 10.1)~~ **Done (2026-09-05)**: `.github/workflows/ci.yml` gates frontend typecheck/build/vitest and Rust fmt/clippy/tests on every push and PR.
 5. Finish Phase 9.0.4 desktop permission model V2. The MCP tool approval half is done (`McpToolPolicy` + per-server `autoApprove`, enforced in `services/mcp.rs`). Still open: enforce the file-create/delete, command-run, and git toggles in the backend instead of only in `useAgentStore`, add path deny rules, and add a per-run cost cap. Then expose MCP tools to the CLI behind the same model.
-6. Harden diff application (Phase 10.7): version-aware hunk matching with file hash plus line-offset tolerance, replacing the current textual `find`. This is the remaining data-loss risk in the apply path.
+6. Finish Phase 10.7 diff hardening: add line-offset tolerance to hunk matching, and reject edit diffs that carry no `baseHash` at all (only safe once the Tauri smoke loop confirms per-hunk review still works end to end).
 7. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair / MCP discovery and record the commit/workspace results in `docs/smoke_test.md` release notes.
 8. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
 9. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push. Wire them into CI (Phase 10.8).
@@ -903,4 +911,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; permission model V2 (9.0.4) is in progress with MCP tool approval enforced backend-side. Phase 10.1 CI is live and gates fmt/clippy/tests/build on every push and PR.*
+*Last updated: 2026-09-05 - Phase 9.0: native tool calling (9.0.1), AGENTS.md memory (9.0.2), and the MCP client (9.0.3) are done; permission model V2 (9.0.4) is in progress with MCP tool approval enforced backend-side. Phase 10.1 CI is live; Phase 10.7 diff staleness detection is now real (backend-stamped stable base hash).*

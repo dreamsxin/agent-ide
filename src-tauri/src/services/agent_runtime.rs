@@ -45,7 +45,9 @@ where
             token_sender(step),
         )
         .await?;
-        let diffs = executor::parse_diffs_with_diagnostics(&response).diffs;
+        let mut diffs = executor::parse_diffs_with_diagnostics(&response).diffs;
+        // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
+        crate::agent::diff_apply::stamp_base_hashes(&mut diffs);
         on_step_finished(step, &response, &diffs);
         results.push(AgentStepExecution {
             step: step.clone(),
