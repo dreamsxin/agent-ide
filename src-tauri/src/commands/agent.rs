@@ -515,6 +515,8 @@ pub async fn run_agent_step(
                 request.regenerated_from_diff_id.as_deref(),
                 request.regenerated_from_hunk_index,
             );
+            // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
+            crate::agent::diff_apply::stamp_base_hashes(&mut diffs);
             orch.diffs.extend(diffs);
             if !parsed.diagnostics.is_empty() {
                 orch.emit_review_action_log(
@@ -790,6 +792,8 @@ pub async fn apply_diff(
             item.status = "failed".to_string();
         }
     }
+    // 该文件内容已前进，其余待审查 diff 必须以新内容为基准重新记录指纹
+    crate::agent::diff_apply::restamp_applied_files(&mut orch.diffs, &result.applied);
 
     set_review_state_after_single_diff(&mut orch);
     let _ = app_handle.emit(
@@ -866,6 +870,8 @@ pub async fn apply_diff_hunk(
             let _ = failure;
         }
     }
+    // 逐 hunk 应用会推进文件内容，后续 hunk 必须以新内容为基准，否则会被误判 stale
+    crate::agent::diff_apply::restamp_applied_files(&mut orch.diffs, &result.applied);
 
     set_review_state_after_single_diff(&mut orch);
     let _ = app_handle.emit(

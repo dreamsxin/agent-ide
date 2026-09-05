@@ -349,6 +349,8 @@ impl AgentOrchestrator {
                             stage.role.to_string(),
                             &stage.name,
                         );
+                        // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
+                        crate::agent::diff_apply::stamp_base_hashes(&mut step_diffs);
                         let generated_diff_count = step_diffs.len();
                         self.diffs.extend(step_diffs);
                         if !parsed.diagnostics.is_empty() {

@@ -1,14 +1,25 @@
 use crate::agent::state_machine::{ApplyDiffError, ApplyDiffsResult, FileDiff};
 use crate::services::workspace;
-use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
-pub(crate) fn apply_diff_to_path(
+/// 单文件应用的便捷入口，仅测试使用。
+/// 生产路径一律走 `apply_pending_diffs`，因为它还要负责同批次内的写入追踪。
+#[cfg(test)]
+fn apply_diff_to_path(file_path: &std::path::Path, diff: &FileDiff) -> Result<bool, String> {
+    apply_diff_to_path_inner(file_path, diff, false)
+}
+
+/// `skip_base_hash` 只在同一批 apply 中该文件已被我们自己写过时为 true：
+/// 此时内容变化来自上一个 hunk/diff，而不是外部改动，baseHash 必然不匹配。
+fn apply_diff_to_path_inner(
     file_path: &std::path::Path,
     diff: &FileDiff,
+    skip_base_hash: bool,
 ) -> Result<bool, String> {
     use std::fs;
 
-    let Some(updated_content) = build_updated_content(file_path, diff)? else {
+    let Some(updated_content) = build_updated_content(file_path, diff, skip_base_hash)? else {
         return Ok(false);
     };
 
@@ -24,6 +35,7 @@ pub(crate) fn apply_diff_to_path(
 fn build_updated_content(
     file_path: &std::path::Path,
     diff: &FileDiff,
+    skip_base_hash: bool,
 ) -> Result<Option<String>, String> {
     use std::fs;
 
@@ -54,7 +66,9 @@ fn build_updated_content(
 
     let mut content = fs::read_to_string(file_path)
         .map_err(|_| format!("File not found: {}", file_path.display()))?;
-    validate_base_hash(&content, diff, file_path)?;
+    if !skip_base_hash {
+        validate_base_hash(&content, diff, file_path)?;
+    }
 
     for hunk in &diff.hunks {
         if hunk.original.is_empty() {
@@ -97,15 +111,65 @@ fn validate_base_hash(
     }
 }
 
+/// 内容指纹，用于检测 diff 生成之后文件是否被改动。
+///
+/// 这里刻意手写 FNV-1a 而不是用 `DefaultHasher`：标准库明确不保证
+/// `DefaultHasher` 的结果在 Rust 版本之间稳定，而这个哈希会随待审查的 diff
+/// 一起按 workspace 持久化、重启后再校验。用不稳定的哈希意味着升级工具链
+/// 之后所有已保存的 diff 都会被误判为 stale。
 pub fn content_hash(content: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:016x}", hash)
+}
+
+/// 读取目标文件当前内容的哈希；文件不存在或不可读时返回 None。
+fn current_content_hash(file: &str) -> Option<String> {
+    let path = workspace::resolve_for_write(file).ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(content_hash(&content))
+}
+
+/// 在生成 diff 时记录目标文件的当前内容哈希，供 apply 时检测外部改动。
+///
+/// 模型在 `agent-changes` 里给出的 `baseHash` 一律被覆盖：模型无从知道
+/// Agent IDE 的哈希函数，它填的值只能是猜的。只有后端算出的哈希可信。
+/// 新建文件（目标不存在）保持 None——没有可比较的基准内容。
+pub fn stamp_base_hashes(diffs: &mut [FileDiff]) {
+    for diff in diffs.iter_mut() {
+        diff.base_hash = current_content_hash(&diff.file);
+    }
+}
+
+/// apply 之后刷新仍待审查的 diff 的 baseHash。
+///
+/// 逐 hunk 审查会让文件内容前进，后续 hunk 必须以新内容为基准，否则第二个
+/// hunk 会被误判为 stale。只刷新我们刚成功写过的文件：写入失败的情况下
+/// 原有的 stale 判定必须保留。
+///
+/// 只处理 `pending` / `partial`：`failed` 的 diff 应当走"基于当前文件重新生成"
+/// 的流程，而不是被悄悄改基准。
+pub fn restamp_applied_files(diffs: &mut [FileDiff], applied: &[FileDiff]) {
+    let written: HashSet<&str> = applied.iter().map(|diff| diff.file.as_str()).collect();
+    for diff in diffs.iter_mut() {
+        let has_remaining_work = diff.status == "pending" || diff.status == "partial";
+        if has_remaining_work && written.contains(diff.file.as_str()) {
+            diff.base_hash = current_content_hash(&diff.file);
+        }
+    }
 }
 
 pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
     let mut applied: Vec<FileDiff> = Vec::new();
     let mut failed: Vec<ApplyDiffError> = Vec::new();
+    // 本批次内已写过的文件：它们的内容变化来自我们自己，不该再按 baseHash 判 stale
+    let mut written: HashSet<PathBuf> = HashSet::new();
 
     for diff in diffs {
         if diff.status != "pending" {
@@ -124,8 +188,12 @@ pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
             }
         };
 
-        match apply_diff_to_path(&file_path, diff) {
-            Ok(true) => applied.push(diff.clone()),
+        let skip_base_hash = written.contains(&file_path);
+        match apply_diff_to_path_inner(&file_path, diff, skip_base_hash) {
+            Ok(true) => {
+                written.insert(file_path);
+                applied.push(diff.clone());
+            }
             Ok(false) => {}
             Err(message) => failed.push(ApplyDiffError {
                 diff_id: diff.id.clone(),
@@ -398,5 +466,115 @@ mod tests {
         assert!(written);
         assert_eq!(content, "const value = 2;\n");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 这些是 FNV-1a 64 的标准测试向量。它们被钉死是为了保证 baseHash 在
+    /// Rust 版本升级后仍然一致——已持久化的待审查 diff 依赖这一点。
+    #[test]
+    fn content_hash_matches_pinned_fnv1a_vectors() {
+        assert_eq!(content_hash(""), "cbf29ce484222325");
+        assert_eq!(content_hash("a"), "af63dc4c8601ec8c");
+        assert_eq!(content_hash("foobar"), "85944171f73967e8");
+        assert_eq!(content_hash("abc").len(), 16);
+        assert_ne!(content_hash("abc"), content_hash("abd"));
+    }
+
+    #[test]
+    fn stamp_base_hashes_replaces_model_supplied_values() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/edit.ts", "const value = 1;\n");
+
+        let mut edit = make_diff("src/edit.ts", "const value = 1;", "const value = 2;");
+        // 模型只能猜 baseHash，这个值必须被后端算出的值覆盖
+        edit.base_hash = Some("model-invented-hash".to_string());
+        let mut create = make_diff("src/brand-new.ts", "", "export const created = true;\n");
+        create.base_hash = Some("also-invented".to_string());
+        let mut diffs = vec![edit, create];
+
+        stamp_base_hashes(&mut diffs);
+
+        assert_eq!(
+            diffs[0].base_hash.as_deref(),
+            Some(content_hash("const value = 1;\n").as_str())
+        );
+        // 目标文件还不存在，没有可比较的基准内容
+        assert!(diffs[1].base_hash.is_none());
+    }
+
+    #[test]
+    fn apply_pending_diffs_allows_two_diffs_on_the_same_file() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/seq.ts", "const first = 1;\nconst second = 1;\n");
+
+        let mut diffs = vec![
+            make_diff("src/seq.ts", "const first = 1;", "const first = 2;"),
+            make_diff("src/seq.ts", "const second = 1;", "const second = 2;"),
+        ];
+        stamp_base_hashes(&mut diffs);
+
+        let result = apply_pending_diffs(&diffs);
+        let content = std::fs::read_to_string(env.root.join("src/seq.ts")).unwrap();
+
+        // 第二个 diff 的 baseHash 记录的是第一个写入之前的内容；
+        // 同批次内的改动来自我们自己，不应被判为 stale
+        assert_eq!(result.applied.len(), 2, "failed: {:?}", result.failed);
+        assert!(result.failed.is_empty());
+        assert_eq!(content, "const first = 2;\nconst second = 2;\n");
+    }
+
+    #[test]
+    fn apply_pending_diffs_still_rejects_externally_changed_file() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/edit.ts", "const value = 1;\n");
+
+        let mut diffs = vec![make_diff(
+            "src/edit.ts",
+            "const value = 1;",
+            "const value = 2;",
+        )];
+        stamp_base_hashes(&mut diffs);
+        // 生成之后、应用之前，文件被外部改动
+        env.write_file("src/edit.ts", "const value = 1;\n// touched\n");
+
+        let result = apply_pending_diffs(&diffs);
+
+        assert!(result.applied.is_empty());
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0]
+            .message
+            .contains("File changed since diff was generated"));
+    }
+
+    #[test]
+    fn restamp_applied_files_only_refreshes_written_files() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/written.ts", "const written = 1;\n");
+        env.write_file("src/untouched.ts", "const untouched = 1;\n");
+
+        let mut diffs = vec![
+            make_diff("src/written.ts", "const written = 1;", "const written = 2;"),
+            make_diff(
+                "src/untouched.ts",
+                "const untouched = 1;",
+                "const untouched = 2;",
+            ),
+        ];
+        stamp_base_hashes(&mut diffs);
+        let stale_stamp = diffs[1].base_hash.clone();
+
+        // 模拟 written.ts 刚被应用过一个 hunk，文件内容已前进
+        env.write_file("src/written.ts", "const written = 2;\n");
+        let applied = vec![diffs[0].clone()];
+        restamp_applied_files(&mut diffs, &applied);
+
+        assert_eq!(
+            diffs[0].base_hash.as_deref(),
+            Some(content_hash("const written = 2;\n").as_str())
+        );
+        assert_eq!(diffs[1].base_hash, stale_stamp);
     }
 }
