@@ -23,6 +23,9 @@ pub struct LlmProfile {
     pub reserved_output_tokens: Option<u32>,
     #[serde(default, rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    /// 单次运行允许消耗的总 token 上限（prompt + completion）。None 表示不限制。
+    #[serde(default, rename = "maxRunTokens")]
+    pub max_run_tokens: Option<u64>,
     #[serde(default = "default_tool_call_mode", rename = "toolCallMode")]
     pub tool_call_mode: String,
     #[serde(default, rename = "modelType")]
@@ -70,6 +73,8 @@ pub struct LlmProfileResponse {
     pub reserved_output_tokens: Option<u32>,
     #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    #[serde(rename = "maxRunTokens")]
+    pub max_run_tokens: Option<u64>,
     #[serde(rename = "effectiveInputTokens")]
     pub effective_input_tokens: Option<u32>,
     #[serde(rename = "toolCallMode")]
@@ -119,6 +124,8 @@ pub struct SaveLlmProfileRequest {
     pub reserved_output_tokens: Option<u32>,
     #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    #[serde(rename = "maxRunTokens")]
+    pub max_run_tokens: Option<u64>,
     #[serde(rename = "toolCallMode")]
     pub tool_call_mode: Option<String>,
     #[serde(rename = "setActive")]
@@ -204,6 +211,7 @@ impl LlmProfile {
             max_context_tokens: self.max_context_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
             max_output_tokens: self.max_output_tokens,
+            max_run_tokens: self.max_run_tokens,
             effective_input_tokens: self.effective_input_tokens(),
             tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
             model_type: self.model_type.clone(),
@@ -318,6 +326,7 @@ fn default_config_from_env() -> LlmProfilesConfig {
             max_context_tokens: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
+            max_run_tokens: None,
             tool_call_mode: default_tool_call_mode(),
             model_type: None,
             model_path: None,
@@ -386,6 +395,7 @@ fn parse_llm_profiles_config_with_migration(
         max_context_tokens: None,
         reserved_output_tokens: None,
         max_output_tokens: None,
+        max_run_tokens: None,
         tool_call_mode: default_tool_call_mode(),
         model_type: None,
         model_path: None,
@@ -484,6 +494,19 @@ pub fn context_budget(
     })
 }
 
+/// 单次运行的 token 上限。未配置时返回 None（不限流）。
+pub fn run_token_cap(config: &LlmProfilesConfig, profile_id: Option<&str>) -> Option<u64> {
+    let selected_id = profile_id.unwrap_or(&config.active_profile_id);
+    config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == selected_id)
+        .or_else(|| config.profiles.first())
+        .and_then(|profile| profile.max_run_tokens)
+        // 0 当作"没设置"，避免手写配置时一个 0 把所有运行直接锁死
+        .filter(|cap| *cap > 0)
+}
+
 pub fn update_default_profile(
     config: &mut LlmProfilesConfig,
     endpoint: String,
@@ -502,6 +525,7 @@ pub fn update_default_profile(
         max_context_tokens: None,
         reserved_output_tokens: None,
         max_output_tokens: None,
+        max_run_tokens: None,
         tool_call_mode: default_tool_call_mode(),
         model_type: None,
         model_path: None,
@@ -586,6 +610,7 @@ pub fn save_profile(
         max_context_tokens: request.max_context_tokens,
         reserved_output_tokens: request.reserved_output_tokens,
         max_output_tokens: request.max_output_tokens,
+        max_run_tokens: request.max_run_tokens,
         tool_call_mode: request
             .tool_call_mode
             .as_deref()
@@ -771,6 +796,7 @@ mod tests {
             max_context_tokens: Some(128000),
             reserved_output_tokens: Some(4096),
             max_output_tokens: Some(4096),
+            max_run_tokens: Some(250_000),
             tool_call_mode: "native_tools".to_string(),
             model_type: None,
             model_path: None,
@@ -803,6 +829,7 @@ mod tests {
             max_context_tokens: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
+            max_run_tokens: None,
             tool_call_mode: default_tool_call_mode(),
             model_type: None,
             model_path: None,
@@ -822,6 +849,37 @@ mod tests {
         assert_eq!(serialized["credentialRef"], "llm-profile:p1");
         assert_eq!(serialized["toolCallMode"], "text_protocol");
         assert!(serialized.get("api_key").is_none());
+    }
+
+    #[test]
+    fn run_token_cap_reads_the_selected_profile_and_ignores_zero() {
+        let profile: LlmProfile = serde_json::from_value(serde_json::json!({
+            "id": "capped",
+            "name": "Capped",
+            "provider": "openai",
+            "endpoint": "https://api.openai.com/v1",
+            "model": "gpt-4o",
+            "maxRunTokens": 120000
+        }))
+        .expect("profile");
+        let mut zeroed = profile.clone();
+        zeroed.id = "zeroed".to_string();
+        // 手写配置里一个 0 不该把所有运行直接锁死
+        zeroed.max_run_tokens = Some(0);
+        let mut unset = profile.clone();
+        unset.id = "unset".to_string();
+        unset.max_run_tokens = None;
+
+        let config = LlmProfilesConfig {
+            profiles: vec![profile, zeroed, unset],
+            active_profile_id: "capped".to_string(),
+            context_compression: ContextCompressionMode::default(),
+        };
+
+        assert_eq!(run_token_cap(&config, None), Some(120_000));
+        assert_eq!(run_token_cap(&config, Some("capped")), Some(120_000));
+        assert_eq!(run_token_cap(&config, Some("zeroed")), None);
+        assert_eq!(run_token_cap(&config, Some("unset")), None);
     }
 
     #[test]
