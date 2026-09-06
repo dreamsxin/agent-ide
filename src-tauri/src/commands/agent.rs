@@ -305,6 +305,9 @@ pub async fn send_agent_prompt(
     orch.allow_file_create = request.allow_file_create;
     orch.begin_run(request.run_id.clone());
     orch.start_usage_accounting(usage_meter.clone());
+    // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
+    context.conversation = orch.conversation_digest();
+    let prompt_for_history = request.prompt.clone();
     match orch
         .run(
             request.prompt,
@@ -322,6 +325,7 @@ pub async fn send_agent_prompt(
     {
         Ok(()) => {
             orch.finish_run();
+            orch.record_conversation_turn(&prompt_for_history);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
         }
@@ -1058,6 +1062,7 @@ fn build_agent_context(
         git_diff: None,
         project_tree: None,
         project_memory: None,
+        conversation: None,
     }
 }
 
@@ -1555,4 +1560,16 @@ pub async fn reset_pipeline(
         .map_err(|e| e.to_string())?;
     *pipe = default_pipeline();
     Ok(pipe.clone())
+}
+
+/// 开始一个不相关的新任务时清空对话历史。
+///
+/// 不清的话上一件事的摘要会继续被喂进新任务的上下文，既浪费预算也会误导模型。
+#[tauri::command]
+pub async fn clear_agent_conversation(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<(), String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    orch.clear_conversation();
+    Ok(())
 }
