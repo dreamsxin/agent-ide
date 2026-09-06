@@ -283,6 +283,8 @@ export interface LlmProfile {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  /** 单次运行的 token 上限；未设置或 0 表示不限制 */
+  maxRunTokens?: number;
   effectiveInputTokens?: number;
   toolCallMode?: "text_protocol" | "native_tools";
 }
@@ -333,6 +335,7 @@ export interface SaveLlmProfileRequest {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  maxRunTokens?: number;
   toolCallMode?: "text_protocol" | "native_tools";
   setActive?: boolean;
 }
