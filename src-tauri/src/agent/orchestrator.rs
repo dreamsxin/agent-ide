@@ -57,6 +57,12 @@ pub struct AgentOrchestrator {
     /// 保守默认 false：请求没带这个权限时，新建文件的 diff 留给人工审查，
     /// 而不是被静默写盘。编辑已有文件不受影响。
     pub allow_file_create: bool,
+    /// 本次运行的 token 记账器。
+    ///
+    /// 存在 orchestrator 上而不是只存在命令的局部变量里，是为了让 `continue_agent_pipeline`
+    /// 恢复暂停的运行时能接着用同一个额度：否则续跑会重新从 0 记账，配置的
+    /// 单次运行上限只要中途暂停一次就形同虚设。
+    pub run_usage: Option<Arc<crate::services::llm_client::RunUsageMeter>>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,12 +96,27 @@ impl AgentOrchestrator {
             paused_run: None,
             tool_invoker: None,
             allow_file_create: false,
+            run_usage: None,
         }
     }
 
+    /// 开始一次新运行：换 run id
     pub fn begin_run(&mut self, run_id: Option<String>) {
         self.current_run_id = run_id.clone();
         self.last_run_id = run_id;
+    }
+
+    /// 开启一个新的用量记账周期（一次全新运行）
+    pub fn start_usage_accounting(
+        &mut self,
+        meter: Arc<crate::services::llm_client::RunUsageMeter>,
+    ) {
+        self.run_usage = Some(meter);
+    }
+
+    /// 恢复暂停的运行时沿用的记账器；没有可沿用的就返回 None
+    pub fn resumed_usage_meter(&self) -> Option<Arc<crate::services::llm_client::RunUsageMeter>> {
+        self.run_usage.clone()
     }
 
     pub fn finish_run(&mut self) {
@@ -1899,6 +1920,37 @@ mod tests {
             orchestrator.state_mgr.state,
             crate::agent::state_machine::AgentState::WaitingUser
         );
+    }
+
+    /// 单次运行上限只要中途暂停一次就归零重算的话就形同虚设，所以
+    /// `begin_run` 不能清掉记账器，`resumed_usage_meter` 必须返回同一个实例。
+    #[test]
+    fn token_accounting_survives_a_pause_and_resume() {
+        let meter = std::sync::Arc::new(crate::services::llm_client::RunUsageMeter::new(Some(100)));
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.start_usage_accounting(meter.clone());
+
+        meter.record_usage(Some(&crate::services::llm_client::LlmUsage {
+            prompt_tokens: Some(60),
+            completion_tokens: Some(10),
+            total_tokens: None,
+        }));
+
+        // 恢复时 run id 会重新写入，但额度必须接着算
+        orchestrator.begin_run(Some("run-1".to_string()));
+        let resumed = orchestrator
+            .resumed_usage_meter()
+            .expect("paused run should hand its meter back");
+
+        assert_eq!(resumed.snapshot().total_tokens, 70);
+        resumed.record_usage(Some(&crate::services::llm_client::LlmUsage {
+            prompt_tokens: Some(40),
+            completion_tokens: None,
+            total_tokens: None,
+        }));
+        // 续跑的消耗算在同一个额度里，因此这里已经越线
+        assert!(resumed.check_budget().is_err());
+        assert_eq!(meter.snapshot().total_tokens, 110);
     }
 
     #[test]

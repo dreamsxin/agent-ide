@@ -298,6 +298,7 @@ pub async fn send_agent_prompt(
     orch.tool_invoker = tool_invoker;
     orch.allow_file_create = request.allow_file_create;
     orch.begin_run(request.run_id.clone());
+    orch.start_usage_accounting(usage_meter.clone());
     match orch
         .run(
             request.prompt,
@@ -533,6 +534,7 @@ pub async fn run_agent_step(
     {
         let mut orch = agent_state.orchestrator.lock().await;
         orch.begin_run(request.run_id.clone());
+        orch.start_usage_accounting(usage_meter.clone());
         let started = orch.begin_step(&step, "Single step execution started");
         let _ = app_handle.emit(
             "agent-step-update",
@@ -662,13 +664,18 @@ pub async fn continue_agent_pipeline(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<String, String> {
-    let (llm, _usage_meter) = agent_state.get_llm_client(None)?;
+    let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
     let Some(paused) = orch.paused_run.take() else {
         return Err("No paused Agent pipeline to continue.".to_string());
     };
+    // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
+    // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
+    let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
+    orch.start_usage_accounting(usage_meter.clone());
+    let llm = llm.with_usage_meter(usage_meter.clone());
     let run_id = orch.last_run_id.clone();
     orch.begin_run(run_id);
     orch.emit_review_action_log(
@@ -696,10 +703,12 @@ pub async fn continue_agent_pipeline(
     {
         Ok(()) => {
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             Ok("Agent pipeline continued".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
             let ide_mode = orch.ide_mode;
             let _ = app_handle.emit(
@@ -716,6 +725,7 @@ pub async fn continue_agent_pipeline(
         }
         Err(err) => {
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             Err(err)
         }
     }
