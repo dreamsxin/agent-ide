@@ -98,7 +98,40 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-pub struct WorkspaceToolInvoker;
+/// 工具调用日志回调：`(level, summary, details)`。
+///
+/// agent 层不认识 Tauri —— 发事件是命令层的事。之前这里直接持有 `AppHandle`，
+/// 结果把 Tauri runtime 拖进了 lib 测试二进制，整个测试套件在加载时就
+/// STATUS_ENTRYPOINT_NOT_FOUND 起不来。用回调把边界划回去，和 orchestrator
+/// 只做状态、命令层负责发事件的分法一致。
+pub type ToolCallLogger = std::sync::Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+pub struct WorkspaceToolInvoker {
+    logger: Option<ToolCallLogger>,
+}
+
+impl WorkspaceToolInvoker {
+    pub fn new(logger: ToolCallLogger) -> Self {
+        Self {
+            logger: Some(logger),
+        }
+    }
+
+    /// 不写日志的构造方式（测试路径）
+    pub fn without_logging() -> Self {
+        Self { logger: None }
+    }
+
+    /// 每次工具调用都记一条。
+    ///
+    /// 不记的话这些工具是完全不透明的：Agent 读了哪些文件、搜了什么，用户
+    /// 无从得知，而 MCP 工具是有记录的 —— 内置工具不该比外部工具更不可审计。
+    fn log(&self, level: &str, summary: &str, details: &str) {
+        if let Some(ref logger) = self.logger {
+            logger(level, summary, details);
+        }
+    }
+}
 
 #[async_trait]
 impl ToolInvoker for WorkspaceToolInvoker {
@@ -109,7 +142,13 @@ impl ToolInvoker for WorkspaceToolInvoker {
     async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String> {
         let args: serde_json::Value = serde_json::from_str(arguments.trim())
             .map_err(|error| format!("Tool arguments are not valid JSON: {}", error))?;
-        match tool_name {
+        // 参数里只有路径和查询串，没有机密可言，可以原样记录
+        self.log(
+            "info",
+            &format!("Agent called {}", tool_name),
+            &format!("Arguments:\n{}", arguments.trim()),
+        );
+        let result = match tool_name {
             READ_FILE => read_file_tool(string_arg(&args, "path").ok_or("Missing 'path'")?),
             SEARCH_TEXT => search_text_tool(
                 string_arg(&args, "query").ok_or("Missing 'query'")?,
@@ -117,7 +156,16 @@ impl ToolInvoker for WorkspaceToolInvoker {
             ),
             LIST_FILES => list_files_tool(string_arg(&args, "path").unwrap_or(".")),
             other => Err(format!("Unknown workspace tool: {}", other)),
+        };
+        match &result {
+            Ok(output) => self.log(
+                "success",
+                &format!("{} returned {} chars", tool_name, output.len()),
+                output,
+            ),
+            Err(error) => self.log("warn", &format!("{} failed", tool_name), error),
         }
+        result
     }
 }
 
@@ -287,6 +335,7 @@ impl ToolInvoker for CompositeToolInvoker {
 pub fn attach_workspace_tools(
     llm: crate::services::llm_client::LlmClient,
     existing: Option<std::sync::Arc<dyn ToolInvoker>>,
+    logger: Option<ToolCallLogger>,
 ) -> (
     crate::services::llm_client::LlmClient,
     Option<std::sync::Arc<dyn ToolInvoker>>,
@@ -294,8 +343,11 @@ pub fn attach_workspace_tools(
     let mut definitions = llm.extra_tools().to_vec();
     definitions.extend(tool_definitions());
 
-    let mut invokers: Vec<std::sync::Arc<dyn ToolInvoker>> =
-        vec![std::sync::Arc::new(WorkspaceToolInvoker)];
+    let invoker = match logger {
+        Some(logger) => WorkspaceToolInvoker::new(logger),
+        None => WorkspaceToolInvoker::without_logging(),
+    };
+    let mut invokers: Vec<std::sync::Arc<dyn ToolInvoker>> = vec![std::sync::Arc::new(invoker)];
     if let Some(existing) = existing {
         invokers.push(existing);
     }
@@ -422,7 +474,7 @@ mod tests {
 
     #[test]
     fn tool_names_do_not_collide_with_mcp_routing() {
-        let invoker = WorkspaceToolInvoker;
+        let invoker = WorkspaceToolInvoker::without_logging();
         for definition in tool_definitions() {
             assert!(definition.name.starts_with(WORKSPACE_TOOL_PREFIX));
             assert!(invoker.handles(&definition.name));
