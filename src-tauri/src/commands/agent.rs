@@ -881,21 +881,9 @@ pub async fn reject_diff(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<FileDiff, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let Some(diff) = orch.diffs.iter_mut().find(|item| item.id == diff_id) else {
-        return Err(format!("Diff not found: {}", diff_id));
-    };
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let rejected = orch.reject_diff(&diff_id)?;
 
-    if diff.status != "pending" {
-        return Err(format!(
-            "Diff {} is not pending; current status is {}",
-            diff_id, diff.status
-        ));
-    }
-
-    diff.status = "rejected".to_string();
-    let rejected = diff.clone();
-
-    orch.refresh_review_state();
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
@@ -920,25 +908,9 @@ pub async fn reject_diff_hunk(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<FileDiff, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let Some(diff) = orch.diffs.iter_mut().find(|item| item.id == diff_id) else {
-        return Err(format!("Diff not found: {}", diff_id));
-    };
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let updated = orch.reject_diff_hunk(&diff_id, hunk_index)?;
 
-    if diff.status != "pending" && diff.status != "partial" && diff.status != "failed" {
-        return Err(format!(
-            "Diff {} cannot reject hunks while status is {}",
-            diff_id, diff.status
-        ));
-    }
-
-    let Some(hunk) = diff.hunks.get_mut(hunk_index) else {
-        return Err(format!("Hunk {} not found in diff {}", hunk_index, diff_id));
-    };
-    hunk.status = Some("rejected".to_string());
-    diff.status = crate::agent::orchestrator::status_from_hunks(&diff.hunks);
-    let updated = diff.clone();
-
-    orch.refresh_review_state();
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
