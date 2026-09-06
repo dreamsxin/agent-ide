@@ -1045,22 +1045,64 @@ impl AgentOrchestrator {
         Ok(())
     }
 
-    /// Mark all pending diffs as applied.
-    pub fn apply_diffs(&mut self) {
-        for diff in &mut self.diffs {
-            if diff.status == "pending" {
-                diff.status = "applied".to_string();
+    /// 批量应用所有还可审查的 diff（界面上的 Apply all）。
+    ///
+    /// 逐文件复用 `apply_diff`，而不是把 `self.diffs` 整个交给
+    /// `apply_pending_diffs`：后者只处理 `pending`，所以任何逐 hunk 审查过的
+    /// 文件都会被整批跳过 —— 不报错、不落地、汇总里也看不出来。复用还顺带
+    /// 保证被拒绝的 hunk 不会被批量应用重新写回去，并让 hunk 级状态和文件
+    /// 状态保持一致（旧实现只改文件状态，hunk 状态留空）。
+    pub fn apply_all_diffs(&mut self) -> crate::agent::state_machine::ApplyDiffsResult {
+        let mut applied = Vec::new();
+        let mut failed = Vec::new();
+
+        for (id, file) in self.reviewable_diff_targets() {
+            match self.apply_diff(&id) {
+                Ok(result) => {
+                    applied.extend(result.applied);
+                    failed.extend(result.failed);
+                }
+                // 已经按 undecided 过滤过，走到这里说明状态机自身不一致，
+                // 报出来而不是静默跳过
+                Err(message) => failed.push(crate::agent::state_machine::ApplyDiffError {
+                    diff_id: id,
+                    file,
+                    message,
+                }),
             }
         }
+
+        self.refresh_review_state();
+        crate::agent::state_machine::ApplyDiffsResult { applied, failed }
     }
 
-    /// Mark all pending diffs as rejected.
-    pub fn reject_diffs(&mut self) {
-        for diff in &mut self.diffs {
-            if diff.status == "pending" {
-                diff.status = "rejected".to_string();
+    /// 批量拒绝所有还可审查的 diff（界面上的 Reject all）。
+    ///
+    /// 返回的是本次真正改动过的 diff。旧实现返回所有 status == "rejected" 的
+    /// diff，会把上一轮拒绝的也算进来，action log 的条数因此偏大。
+    pub fn reject_all_diffs(&mut self) -> Vec<crate::agent::state_machine::FileDiff> {
+        let mut rejected = Vec::new();
+        for (id, _) in self.reviewable_diff_targets() {
+            if let Ok(diff) = self.reject_diff(&id) {
+                rejected.push(diff);
             }
         }
+        self.refresh_review_state();
+        rejected
+    }
+
+    /// 还有未决 hunk、因而值得批量处理的 diff：(id, file)
+    fn reviewable_diff_targets(&self) -> Vec<(String, String)> {
+        self.diffs
+            .iter()
+            .filter(|diff| is_reviewable_diff_status(&diff.status))
+            .filter(|diff| {
+                diff.hunks.iter().any(|hunk| {
+                    !matches!(hunk.status.as_deref(), Some("applied") | Some("rejected"))
+                })
+            })
+            .map(|diff| (diff.id.clone(), diff.file.clone()))
+            .collect()
     }
 }
 
@@ -1586,6 +1628,135 @@ mod tests {
             orchestrator.diffs[0].hunks[0].status.as_deref(),
             Some("applied")
         );
+    }
+
+    /// Apply all 以前直接把 `self.diffs` 交给 `apply_pending_diffs`，而后者只处理
+    /// `pending` —— 逐 hunk 审查过的文件会被整批静默跳过。
+    #[test]
+    fn apply_all_diffs_includes_partially_reviewed_files() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("multi.ts", "const first = 1;\nconst second = 1;\n");
+        env.write_file("other.ts", "const other = 1;\n");
+
+        let mut multi = make_diff("multi.ts", "const first = 1;", "const first = 2;");
+        multi.hunks.push(crate::agent::state_machine::DiffHunk {
+            old_start: 2,
+            old_lines: 1,
+            new_start: 2,
+            new_lines: 1,
+            content: String::new(),
+            original: "const second = 1;".to_string(),
+            updated: "const second = 2;".to_string(),
+            provenance: None,
+            status: None,
+        });
+        let multi_id = multi.id.clone();
+        let other = make_diff("other.ts", "const other = 1;", "const other = 2;");
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![multi, other];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
+
+        orchestrator.apply_diff_hunk(&multi_id, 0).unwrap();
+        assert_eq!(orchestrator.diffs[0].status, "partial");
+
+        let result = orchestrator.apply_all_diffs();
+
+        assert!(result.failed.is_empty(), "failed: {:?}", result.failed);
+        // partial 的文件也被收尾，而不是被跳过
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("multi.ts")).unwrap(),
+            "const first = 2;\nconst second = 2;\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("other.ts")).unwrap(),
+            "const other = 2;\n"
+        );
+        assert_eq!(orchestrator.diffs[0].status, "applied");
+        assert_eq!(orchestrator.diffs[1].status, "applied");
+        // hunk 级状态也要跟上，否则界面上的逐 hunk 标记会是空的
+        assert!(orchestrator.diffs[0]
+            .hunks
+            .iter()
+            .all(|hunk| hunk.status.as_deref() == Some("applied")));
+        assert_eq!(
+            orchestrator.state_mgr.state,
+            crate::agent::state_machine::AgentState::Done
+        );
+    }
+
+    #[test]
+    fn apply_all_diffs_does_not_resurrect_rejected_hunks() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("multi.ts", "const first = 1;\nconst second = 1;\n");
+
+        let mut diff = make_diff("multi.ts", "const first = 1;", "const first = 2;");
+        diff.hunks.push(crate::agent::state_machine::DiffHunk {
+            old_start: 2,
+            old_lines: 1,
+            new_start: 2,
+            new_lines: 1,
+            content: String::new(),
+            original: "const second = 1;".to_string(),
+            updated: "const second = 2;".to_string(),
+            provenance: None,
+            status: None,
+        });
+        let diff_id = diff.id.clone();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![diff];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
+
+        orchestrator.reject_diff_hunk(&diff_id, 0).unwrap();
+        let result = orchestrator.apply_all_diffs();
+
+        assert!(result.failed.is_empty(), "failed: {:?}", result.failed);
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("multi.ts")).unwrap(),
+            "const first = 1;\nconst second = 2;\n"
+        );
+        assert_eq!(orchestrator.diffs[0].status, "partial");
+    }
+
+    /// Reject all 以前只处理 `pending`，并且把所有历史 rejected diff 都算作本次
+    /// 结果 —— action log 因此虚报条数。
+    #[test]
+    fn reject_all_diffs_reports_only_what_it_changed() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("a.ts", "const a = 1;\n");
+        env.write_file("b.ts", "const b = 1;\n");
+
+        let a = make_diff("a.ts", "const a = 1;", "const a = 2;");
+        let a_id = a.id.clone();
+        let b = make_diff("b.ts", "const b = 1;", "const b = 2;");
+        let b_id = b.id.clone();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![a, b];
+
+        let first = orchestrator.reject_all_diffs();
+        assert_eq!(first.len(), 2);
+
+        // 第二轮新来一个 diff：只应报告这一个，而不是连上一轮的两个
+        orchestrator
+            .diffs
+            .push(make_diff("c.ts", "const c = 1;", "const c = 2;"));
+        let second = orchestrator.reject_all_diffs();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].file, "c.ts");
+
+        assert!(orchestrator
+            .diffs
+            .iter()
+            .all(|diff| diff.status == "rejected"));
+        // 拒绝不写盘
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("a.ts")).unwrap(),
+            "const a = 1;\n"
+        );
+        assert!(orchestrator.diffs.iter().any(|diff| diff.id == a_id));
+        assert!(orchestrator.diffs.iter().any(|diff| diff.id == b_id));
     }
 
     #[test]
