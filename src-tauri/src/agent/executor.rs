@@ -1079,6 +1079,7 @@ mod tests {
                 name: "emit_agent_changes".to_string(),
                 arguments: r#"{"version":1,"changes":[{"type":"edit","file":"src/app.ts","hunks":[{"original":"const a = 1;","updated":"const a = 2;"}]}]}"#.to_string(),
             }],
+            usage: None,
         });
 
         assert!(merged.starts_with("Applying the rename."));
@@ -1099,12 +1100,14 @@ mod tests {
                 name: "emit_agent_changes".to_string(),
                 arguments: r#"{"version":1,"changes":[]}"#.to_string(),
             }],
+            usage: None,
         };
         assert_eq!(merge_tool_call_output(base), "Just prose.");
 
         let plain = LlmStreamOutput {
             content: "Just prose.".to_string(),
             tool_calls: Vec::new(),
+            usage: None,
         };
         assert_eq!(merge_tool_call_output(plain), "Just prose.");
     }

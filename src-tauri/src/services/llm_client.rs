@@ -449,11 +449,60 @@ impl ToolDefinition {
     }
 }
 
-/// 流式/非流式请求的统一输出：文本内容 + 原生工具调用
+/// 供应商回报的 token 用量。
+///
+/// 字段可缺失：不是所有 OpenAI 兼容实现都返回 `usage`，本地 runtime 尤其常常不返回。
+/// 因此这里全部是 `Option`，调用方必须能处理"拿不到用量"这种情况，而不是把缺失
+/// 当成 0 —— 后者会让基于用量的上限形同虚设。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LlmUsage {
+    #[serde(default, rename = "prompt_tokens")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, rename = "completion_tokens")]
+    pub completion_tokens: Option<u64>,
+    #[serde(default, rename = "total_tokens")]
+    pub total_tokens: Option<u64>,
+}
+
+impl LlmUsage {
+    /// 优先用供应商给的 total，缺失时退回 prompt + completion
+    pub fn resolved_total(&self) -> Option<u64> {
+        if let Some(total) = self.total_tokens {
+            return Some(total);
+        }
+        match (self.prompt_tokens, self.completion_tokens) {
+            (None, None) => None,
+            (prompt, completion) => {
+                Some(prompt.unwrap_or_default() + completion.unwrap_or_default())
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.prompt_tokens.is_none()
+            && self.completion_tokens.is_none()
+            && self.total_tokens.is_none()
+    }
+}
+
+/// 流式/非流式请求的统一输出：文本内容 + 原生工具调用 + token 用量
 #[derive(Clone, Debug, Default)]
 pub struct LlmStreamOutput {
     pub content: String,
     pub tool_calls: Vec<LlmToolCall>,
+    /// 供应商未回报用量时为 None
+    pub usage: Option<LlmUsage>,
+}
+
+impl LlmStreamOutput {
+    /// 只有文本、拿不到用量的来源（mock、本地 runtime）
+    pub fn from_content(content: String) -> Self {
+        Self {
+            content,
+            tool_calls: Vec::new(),
+            usage: None,
+        }
+    }
 }
 
 /// `emit_agent_changes` 工具名：与 native_tools_schema 保持一致
@@ -654,10 +703,7 @@ impl LlmClient {
         if self.config.endpoint.starts_with("mock://") {
             return stream_mock_chat(messages, cancel_flag, tx)
                 .await
-                .map(|content| LlmStreamOutput {
-                    content,
-                    tool_calls: Vec::new(),
-                });
+                .map(LlmStreamOutput::from_content);
         }
 
         // 云端模型流式请求
@@ -684,10 +730,7 @@ impl LlmClient {
             return engine
                 .generate_stream(&prompt, tx, cancel_flag)
                 .await
-                .map(|content| LlmStreamOutput {
-                    content,
-                    tool_calls: Vec::new(),
-                });
+                .map(LlmStreamOutput::from_content);
         }
 
         // 如果没有配置本地引擎，返回错误
@@ -704,10 +747,7 @@ impl LlmClient {
         if self.config.endpoint.starts_with("mock://") {
             return stream_mock_chat(messages, cancel_flag, tx)
                 .await
-                .map(|content| LlmStreamOutput {
-                    content,
-                    tool_calls: Vec::new(),
-                });
+                .map(LlmStreamOutput::from_content);
         }
 
         if prefers_non_streaming(&self.config) {
@@ -730,12 +770,18 @@ impl LlmClient {
 
         let mut full_response = String::new();
         let mut tool_calls = ToolCallAccumulator::default();
+        let mut usage: Option<LlmUsage> = None;
         let mut stream = response.bytes_stream();
         let mut sse_buf = String::new();
 
         #[derive(Deserialize)]
         struct StreamChunk {
+            // 用量块的 choices 是空数组，某些实现干脆省略该字段；
+            // 没有 default 时整块会解析失败并被静默丢弃，用量也就永远拿不到
+            #[serde(default)]
             choices: Vec<StreamChoice>,
+            #[serde(default)]
+            usage: Option<LlmUsage>,
         }
 
         #[derive(Deserialize)]
@@ -787,6 +833,11 @@ impl LlmClient {
                 }
                 if let Some(json_str) = line.strip_prefix("data: ") {
                     if let Ok(parsed) = serde_json::from_str::<StreamChunk>(json_str) {
+                        if let Some(chunk_usage) = parsed.usage {
+                            if !chunk_usage.is_empty() {
+                                usage = Some(chunk_usage);
+                            }
+                        }
                         for choice in &parsed.choices {
                             // 仅取 content，跳过 reasoning_content（推理内容）
                             if let Some(ref text) = choice.delta.content {
@@ -812,6 +863,7 @@ impl LlmClient {
         Ok(LlmStreamOutput {
             content: full_response,
             tool_calls: tool_calls.finish(),
+            usage,
         })
     }
 
@@ -838,6 +890,8 @@ impl LlmClient {
         #[derive(Deserialize)]
         struct CompletionResponse {
             choices: Vec<CompletionChoice>,
+            #[serde(default)]
+            usage: Option<LlmUsage>,
         }
 
         #[derive(Deserialize)]
@@ -876,6 +930,8 @@ impl LlmClient {
             }
         };
         let mut tool_calls: Vec<LlmToolCall> = Vec::new();
+        // choices 会被 into_iter 消耗，用量要先取出来
+        let payload_usage = payload.usage.filter(|usage| !usage.is_empty());
         let content = payload
             .choices
             .into_iter()
@@ -904,6 +960,7 @@ impl LlmClient {
         Ok(LlmStreamOutput {
             content: content.unwrap_or_default(),
             tool_calls,
+            usage: payload_usage,
         })
     }
 
@@ -1086,6 +1143,13 @@ fn build_chat_request(
     });
 
     if let Some(object) = body.as_object_mut() {
+        if stream {
+            // 没有这个开关，OpenAI 兼容实现不会在流末尾发送用量块
+            object.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
+        }
         if let Some(max_output_tokens) = config.max_output_tokens {
             let key = output_token_key(config);
             object.insert(key.to_string(), serde_json::json!(max_output_tokens));
@@ -1448,6 +1512,51 @@ mod tests {
 
         assert_eq!(body["max_completion_tokens"], 8192);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    /// 不带 include_usage 的话 OpenAI 兼容实现不会在流末尾发送用量块，
+    /// 任何基于用量的统计和上限都会永远读不到数
+    #[test]
+    fn streaming_requests_ask_for_usage_and_non_streaming_does_not() {
+        let streamed = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), true, &[]);
+        assert_eq!(streamed["stream_options"]["include_usage"], true);
+
+        let once = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), false, &[]);
+        assert!(once.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn usage_chunk_without_choices_still_parses() {
+        #[derive(Deserialize)]
+        struct StreamChunk {
+            #[serde(default)]
+            choices: Vec<serde_json::Value>,
+            #[serde(default)]
+            usage: Option<LlmUsage>,
+        }
+
+        // 用量块没有 choices 字段；缺少 serde(default) 时整块会解析失败并被丢弃
+        let chunk: StreamChunk = serde_json::from_str(
+            r#"{"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}"#,
+        )
+        .unwrap();
+
+        assert!(chunk.choices.is_empty());
+        assert_eq!(chunk.usage.unwrap().resolved_total(), Some(18));
+    }
+
+    #[test]
+    fn resolved_total_falls_back_to_prompt_plus_completion() {
+        let split = LlmUsage {
+            prompt_tokens: Some(30),
+            completion_tokens: Some(12),
+            total_tokens: None,
+        };
+        assert_eq!(split.resolved_total(), Some(42));
+
+        // 供应商完全不报用量时必须是 None，而不是 0 —— 否则上限判断会形同虚设
+        assert_eq!(LlmUsage::default().resolved_total(), None);
+        assert!(LlmUsage::default().is_empty());
     }
 
     #[test]
