@@ -751,8 +751,17 @@ fn chrono_like_timestamp() -> u128 {
         .unwrap_or(0)
 }
 
+/// 云端 profile 的默认工具模式。
+///
+/// 从 `text_protocol` 改成 `native_tools`：内置的只读工作区工具只在原生工具
+/// 模式下才会被声明，而默认关着的话，Agent 只能吃运行开始时打包的上下文，
+/// 遇到没预选的文件就只能猜 —— 这正是"文本协议默认"在今天的真实代价。
+///
+/// 之所以现在敢翻默认：`send_chat_request` 会在供应商明确拒绝 `tools` 时摘掉
+/// 参数重试一次，不支持工具的端点会降级而不是整次运行失败。本地 profile 仍然
+/// 由 `save_profile` 显式写成 `text_protocol`。
 fn default_tool_call_mode() -> String {
-    "text_protocol".to_string()
+    "native_tools".to_string()
 }
 
 fn normalized_tool_call_mode(value: &str) -> String {
@@ -847,7 +856,7 @@ mod tests {
         let serialized = serde_json::to_value(&profile).expect("serialize profile");
 
         assert_eq!(serialized["credentialRef"], "llm-profile:p1");
-        assert_eq!(serialized["toolCallMode"], "text_protocol");
+        assert_eq!(serialized["toolCallMode"], "native_tools");
         assert!(serialized.get("api_key").is_none());
     }
 
@@ -882,8 +891,10 @@ mod tests {
         assert_eq!(run_token_cap(&config, Some("unset")), None);
     }
 
+    /// 云端 profile 默认走原生工具，否则内置的工作区读取工具永远不会被声明。
+    /// 供应商不支持时由 `send_chat_request` 摘掉参数降级，而不是整次失败。
     #[test]
-    fn profile_deserialization_defaults_to_text_protocol_tools() {
+    fn cloud_profile_deserialization_defaults_to_native_tools() {
         let profile: LlmProfile = serde_json::from_value(serde_json::json!({
             "id": "p1",
             "name": "Work",
@@ -893,6 +904,6 @@ mod tests {
         }))
         .expect("profile");
 
-        assert_eq!(profile.tool_call_mode, "text_protocol");
+        assert_eq!(profile.tool_call_mode, "native_tools");
     }
 }

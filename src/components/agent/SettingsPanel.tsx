@@ -639,8 +639,9 @@ export default function SettingsPanel() {
           Native tools is required for the Agent to read the workspace during a run
           (read file, search text, list files) and for MCP tools. Without it the Agent only sees
           the context bundle assembled when the run starts, and has to guess file contents it was
-          not given. Text protocol remains the fallback for endpoints that reject a{" "}
-          <span className="font-mono">tools</span> parameter.
+          not given. If an endpoint rejects the <span className="font-mono">tools</span> parameter,
+          the request is retried without it and the run is flagged in the action log; pick text
+          protocol to skip that failed attempt.
         </div>
       </div>
 

@@ -320,6 +320,7 @@ pub async fn send_agent_prompt(
         Ok(()) => {
             orch.finish_run();
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            emit_tool_degradation_log(&orch, &app_handle, &llm);
         }
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
@@ -345,6 +346,29 @@ pub async fn send_agent_prompt(
     }
 
     Ok("Agent task completed".to_string())
+}
+
+/// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
+///
+/// 不说的话这是一次静默降级：运行看起来正常完成，但 Agent 其实没有工具可用，
+/// 只能靠运行开始时打包的上下文，而用户无从得知。
+fn emit_tool_degradation_log(
+    orch: &AgentOrchestrator,
+    app_handle: &AppHandle,
+    llm: &crate::services::llm_client::LlmClient,
+) {
+    if !llm.tools_were_rejected() {
+        return;
+    }
+    orch.emit_review_action_log(
+        app_handle,
+        "warn",
+        "tool_capability_degraded",
+        "Provider rejected tool calling; this run fell back to the text protocol",
+        "The endpoint returned a client error naming the 'tools' parameter, so it was dropped and \
+         the request retried. Workspace read tools and MCP tools were unavailable for this run. \
+         Set Tool Call Mode to 'Text protocol' for this profile to skip the failed attempt.",
+    );
 }
 
 /// 把本次运行的 token 用量写进 action log。
@@ -599,6 +623,7 @@ pub async fn run_agent_step(
             );
             orch.finish_run();
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            emit_tool_degradation_log(&orch, &app_handle, &llm);
             let _ = app_handle.emit(
                 "agent-state-changed",
                 serde_json::json!({
