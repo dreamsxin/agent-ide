@@ -131,6 +131,13 @@ pub struct AgentContext {
     pub project_tree: Option<String>,
     #[serde(default)]
     pub project_memory: Option<String>,
+    /// 之前几轮的对话摘要。
+    ///
+    /// 每次运行原本都是冷启动：跟进一句"再处理下错误分支"没有任何上文，
+    /// 模型只能重新猜上一轮做了什么。这一段由 orchestrator 维护，并且作为
+    /// 普通上下文段落参与预算裁剪，而不是绕过预算直接塞进提示词。
+    #[serde(default)]
+    pub conversation: Option<String>,
 }
 
 impl AgentContext {
@@ -144,6 +151,7 @@ impl AgentContext {
             git_diff: None,
             project_tree: None,
             project_memory: None,
+            conversation: None,
         }
     }
 
@@ -212,6 +220,19 @@ impl AgentContext {
                     id: "project_memory",
                     label: "Project memory (AGENTS.md)",
                     content: format!("Project memory (AGENTS.md):\n```\n{}\n```\n", memory),
+                });
+            }
+        }
+
+        if let Some(ref conversation) = self.conversation {
+            if !conversation.trim().is_empty() {
+                sections.push(ContextSection {
+                    id: "conversation",
+                    label: "Earlier turns",
+                    content: format!(
+                        "Earlier turns in this session (most recent last):\n{}\n",
+                        conversation
+                    ),
                 });
             }
         }
@@ -639,6 +660,7 @@ mod tests {
             git_diff: None,
             project_tree: None,
             project_memory: None,
+            conversation: None,
         }
     }
 
@@ -665,6 +687,30 @@ mod tests {
         let prompt = normal.to_prompt_context_with_mode(&ContextCompressionMode::Full);
         assert!(prompt.contains("const a = 1;"));
         assert!(prompt.contains("const selected = true;"));
+    }
+
+    /// 历史作为普通上下文段落参与预算裁剪，而不是绕过预算直接拼进提示词
+    #[test]
+    fn conversation_history_becomes_a_trimmable_prompt_section() {
+        let ctx = AgentContext {
+            conversation: Some(
+                "1. asked: rename the value\n   result: awaiting review: src/app.ts".to_string(),
+            ),
+            ..sample_context("const a = 1;")
+        };
+
+        let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+        assert!(prompt.contains("Earlier turns"), "{}", prompt);
+        assert!(prompt.contains("rename the value"));
+
+        let sections = ctx.build_prompt_sections(&ContextCompressionMode::Full);
+        assert!(sections.iter().any(|section| section.id == "conversation"));
+
+        // 没有历史时不该多出一个空段落
+        let fresh = sample_context("const a = 1;");
+        assert!(!fresh
+            .to_prompt_context_with_mode(&ContextCompressionMode::Full)
+            .contains("Earlier turns"));
     }
 
     #[test]

@@ -63,7 +63,26 @@ pub struct AgentOrchestrator {
     /// 恢复暂停的运行时能接着用同一个额度：否则续跑会重新从 0 记账，配置的
     /// 单次运行上限只要中途暂停一次就形同虚设。
     pub run_usage: Option<Arc<crate::services::llm_client::RunUsageMeter>>,
+    /// 本会话里已经完成的几轮对话，最新的在最后。
+    ///
+    /// 没有它的话每次 prompt 都是冷启动 —— 跟进一句"再处理下错误分支"读不到
+    /// 上一轮做了什么。只保留末尾若干轮并且每条都截断：这里要的是"上次干了啥"
+    /// 的线索，不是完整逐字记录，后者会把上下文预算吃光。
+    pub conversation: Vec<ConversationTurn>,
 }
+
+/// 一轮已完成的对话：用户说了什么，以及那一轮的结果
+#[derive(Clone, Debug, Serialize)]
+pub struct ConversationTurn {
+    pub prompt: String,
+    pub outcome: String,
+}
+
+/// 保留的对话轮数
+const MAX_CONVERSATION_TURNS: usize = 6;
+/// 每轮 prompt / 结果各自的字符上限
+const MAX_TURN_PROMPT_CHARS: usize = 400;
+const MAX_TURN_OUTCOME_CHARS: usize = 300;
 
 #[derive(Debug, Clone)]
 pub struct PausedPipelineRun {
@@ -97,7 +116,73 @@ impl AgentOrchestrator {
             tool_invoker: None,
             allow_file_create: false,
             run_usage: None,
+            conversation: Vec::new(),
         }
+    }
+
+    /// 之前几轮的摘要，喂回下一次运行的上下文；没有历史时返回 None
+    pub fn conversation_digest(&self) -> Option<String> {
+        if self.conversation.is_empty() {
+            return None;
+        }
+        let digest = self
+            .conversation
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                format!(
+                    "{}. asked: {}\n   result: {}",
+                    index + 1,
+                    turn.prompt,
+                    turn.outcome
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(digest)
+    }
+
+    /// 记一轮已完成的对话。结果由当前状态推导，命令层不需要拼摘要。
+    pub fn record_conversation_turn(&mut self, prompt: &str) {
+        let reviewable: Vec<&str> = self
+            .diffs
+            .iter()
+            .filter(|diff| is_reviewable_diff_status(&diff.status))
+            .map(|diff| diff.file.as_str())
+            .collect();
+        let applied = self
+            .diffs
+            .iter()
+            .filter(|diff| diff.status == "applied")
+            .count();
+
+        let outcome = if reviewable.is_empty() && applied == 0 {
+            "no file changes produced".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if applied > 0 {
+                parts.push(format!("{} file(s) applied", applied));
+            }
+            if !reviewable.is_empty() {
+                parts.push(format!("awaiting review: {}", reviewable.join(", ")));
+            }
+            parts.join("; ")
+        };
+
+        self.conversation.push(ConversationTurn {
+            prompt: summarize_text(prompt.trim(), MAX_TURN_PROMPT_CHARS),
+            outcome: summarize_text(&outcome, MAX_TURN_OUTCOME_CHARS),
+        });
+        // 只留末尾若干轮：早期的轮次对"接着上一句"没什么帮助，却一直占预算
+        if self.conversation.len() > MAX_CONVERSATION_TURNS {
+            let excess = self.conversation.len() - MAX_CONVERSATION_TURNS;
+            self.conversation.drain(..excess);
+        }
+    }
+
+    /// 开始新任务时清空对话历史
+    pub fn clear_conversation(&mut self) {
+        self.conversation.clear();
     }
 
     /// 开始一次新运行：换 run id
@@ -1951,6 +2036,45 @@ mod tests {
         // 续跑的消耗算在同一个额度里，因此这里已经越线
         assert!(resumed.check_budget().is_err());
         assert_eq!(meter.snapshot().total_tokens, 110);
+    }
+
+    /// 每次运行原本都是冷启动，跟进一句"再处理下错误分支"读不到上一轮做了什么。
+    #[test]
+    fn conversation_turns_carry_forward_and_stay_bounded() {
+        let mut orchestrator = AgentOrchestrator::new();
+        assert!(orchestrator.conversation_digest().is_none());
+
+        orchestrator
+            .diffs
+            .push(make_diff("src/app.ts", "const a = 1;", "const a = 2;"));
+        orchestrator.record_conversation_turn("rename the value");
+
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(digest.contains("rename the value"), "{}", digest);
+        // 结果里要说清上一轮留下了什么，否则"接着上一句"仍然无从下手
+        assert!(digest.contains("src/app.ts"), "{}", digest);
+        assert!(digest.contains("awaiting review"), "{}", digest);
+
+        // 只保留末尾若干轮：早期轮次对"接着上一句"没帮助，却一直占预算
+        for index in 0..MAX_CONVERSATION_TURNS * 2 {
+            orchestrator.record_conversation_turn(&format!("turn {}", index));
+        }
+        assert_eq!(orchestrator.conversation.len(), MAX_CONVERSATION_TURNS);
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(!digest.contains("rename the value"), "{}", digest);
+
+        orchestrator.clear_conversation();
+        assert!(orchestrator.conversation_digest().is_none());
+    }
+
+    #[test]
+    fn a_run_without_changes_is_recorded_as_such() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("explain the build pipeline");
+
+        let digest = orchestrator.conversation_digest().expect("digest");
+        // 不能记成"改了文件"，否则下一轮模型会以为已经动过代码
+        assert!(digest.contains("no file changes produced"), "{}", digest);
     }
 
     #[test]
