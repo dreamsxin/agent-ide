@@ -419,7 +419,10 @@ pub fn build_git_diff_summary(max_chars: usize) -> Result<String, String> {
     let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
     let tree = head.peel_to_tree().map_err(|e| format!("Tree: {}", e))?;
     let diff = repo
-        .diff_tree_to_workdir_with_index(Some(&tree), None)
+        .diff_tree_to_workdir_with_index(
+            Some(&tree),
+            Some(&mut diff_options_scoped_to(&repo, &root)),
+        )
         .map_err(|e| format!("Diff: {}", e))?;
 
     let mut output = String::new();
@@ -465,6 +468,28 @@ pub fn build_git_diff_summary(max_chars: usize) -> Result<String, String> {
         ));
     }
     Ok(output)
+}
+
+/// 把 diff 限定在工作区目录内。
+///
+/// `Repository::discover` 是向上找仓库根的：工作区只是大仓库的一个子目录时，
+/// 不加 pathspec 会把兄弟目录的改动也塞进发给模型的上下文 —— 那些文件根本
+/// 不在用户打开的工作区里。算不出相对路径时保持原样（不限定），以免误伤。
+fn diff_options_scoped_to(repo: &git2::Repository, root: &Path) -> git2::DiffOptions {
+    let mut options = git2::DiffOptions::new();
+    let Some(workdir) = repo.workdir() else {
+        return options;
+    };
+    let workdir = workdir
+        .canonicalize()
+        .map(crate::services::workspace::shell_compatible_path)
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    if let Ok(relative) = root.strip_prefix(&workdir) {
+        if !relative.as_os_str().is_empty() {
+            options.pathspec(relative);
+        }
+    }
+    options
 }
 
 fn collect_tree_entries(

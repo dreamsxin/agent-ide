@@ -26,7 +26,7 @@ Surfaces that enforce the workspace boundary:
 
 Surfaces that do **not** fully enforce it:
 
-- **Repository-wide Git operations.** Every Git command starts with `git2::Repository::discover`, which walks *upward*. If the workspace root is a subdirectory of a larger repository, the repository working directory is an ancestor of the workspace root, and worktree-wide operations — `checkout_head` (branch checkout, pull, discard) and `git_commit` with no explicit file list, which does `index.add_all(["*"])` — act on files outside the workspace. The same upward walk means the git-diff context section can include changes from sibling directories above the workspace root.
+- **Repository-wide Git operations.** Every Git command starts with `git2::Repository::discover`, which walks *upward*. If the workspace root is a subdirectory of a larger repository, the repository working directory is an ancestor of the workspace root, and worktree-wide operations — `checkout_head` (branch checkout, pull, discard) and `git_commit` with no explicit file list, which does `index.add_all(["*"])` — act on files outside the workspace. The git-diff *context* section is scoped back to the workspace with a pathspec, so it no longer leaks sibling directories to the model, but the write-side operations remain unscoped.
 - **Recursive traversal.** `search_recursive` and `copy_dir_recursive` check the root once and then descend without re-checking each entry, so a symlinked directory inside the tree is followed.
 - **Language servers.** `find_language_server` prefers `<workspace_root>/node_modules/.bin/...` before anything on `PATH`. Opening an untrusted repository therefore executes a binary that repository supplies. There is no signature check.
 - **MCP tools.** See the MCP section — entirely unchecked.
@@ -249,10 +249,10 @@ Ordered by how much they would matter to an operator. Each was confirmed by read
 
 1. **MCP tools are unconstrained.** They bypass the workspace boundary, the Agent write deny list, and the diff-review UI entirely. Adding an MCP server is equivalent to granting arbitrary code execution. This is the single largest gap.
 2. **A plaintext API key can persist in `~/.agent-ide/config.json`** if keyring migration ever fails, and it is then preferred over the keyring entry. No file-permission hardening.
-3. **Repository-wide Git operations escape the workspace boundary** when the workspace root is a subdirectory of a larger repository, because `Repository::discover` walks upward. Affects `checkout_head`, `git_commit` with no file list, and the git-diff context section.
+3. **Repository-wide Git write operations escape the workspace boundary** when the workspace root is a subdirectory of a larger repository, because `Repository::discover` walks upward. Affects `checkout_head` and `git_commit` with no file list. The git-diff context section is now pathspec-scoped and no longer affected.
 4. **Workspace-local language server binaries are executed in preference to `PATH`**, so opening an untrusted repository runs code it supplies.
 5. **MCP tool arguments are logged and emitted unredacted.**
-6. **`shell:allow-spawn` and `shell:allow-execute` are granted with no scope** in `capabilities/default.json`, along with broad `fs:allow-read` / `fs:allow-write` / `fs:allow-mkdir`. No first-party frontend code imports `plugin-shell`, so narrowing or removing these would reduce the blast radius of a WebView compromise at no functional cost.
+6. **Broad `fs:allow-read` / `fs:allow-write` / `fs:allow-mkdir`** remain in `capabilities/default.json`. The unscoped `shell:allow-spawn` and `shell:allow-execute` have been removed — no first-party frontend code imports `plugin-shell`, so they were pure attack surface. `shell:allow-open` is retained for opening external links.
 7. **`run_project_command` passes the command string to `cmd /C` or `sh -lc`** with no allow-list and no escaping. It is user-initiated in the GUI, but the CLI runs commands from the workspace's own `package.json` scripts autonomously.
 8. **Recursive traversal follows symlinks.** `search_recursive` and `copy_dir_recursive` re-check nothing per entry.
 9. **`resolve_for_write` does not canonicalize the final component** when the target does not exist, so a symlink created between check and write is not caught (TOCTOU). Not tested.
