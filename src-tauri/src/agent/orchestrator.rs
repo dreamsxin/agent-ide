@@ -1,4 +1,3 @@
-use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::executor;
 use crate::agent::multi_agent::{
     default_pipeline, mark_pipeline_stage, plan_pipeline, reset_pipeline_status, AgentRole,
@@ -69,7 +68,41 @@ pub struct AgentOrchestrator {
     /// 上一轮做了什么。只保留末尾若干轮并且每条都截断：这里要的是"上次干了啥"
     /// 的线索，不是完整逐字记录，后者会把上下文预算吃光。
     pub conversation: Vec<ConversationTurn>,
+    /// 已应用批次的撤销栈，最新的在最后。
+    ///
+    /// diff 应用之前是单向的：一旦落盘就只能靠用户自己 git。审查界面能拒绝
+    /// 还没应用的改动，却对已经应用的无能为力 —— 而"应用了才发现不对"恰恰是
+    /// 最需要退路的时刻。
+    undo_stack: Vec<ApplyCheckpoint>,
 }
+
+/// 一次应用操作的回滚点
+#[derive(Clone, Debug)]
+pub struct ApplyCheckpoint {
+    /// 触发这次应用的操作，用于告诉用户将要撤销什么
+    pub label: String,
+    snapshots: Vec<crate::agent::diff_apply::FileSnapshot>,
+}
+
+impl ApplyCheckpoint {
+    pub fn files(&self) -> Vec<String> {
+        self.snapshots
+            .iter()
+            .map(|snapshot| snapshot.file.clone())
+            .collect()
+    }
+}
+
+/// 撤销结果
+#[derive(Clone, Debug, Serialize)]
+pub struct UndoResult {
+    pub label: String,
+    pub restored: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// 保留的撤销层数
+const MAX_UNDO_CHECKPOINTS: usize = 20;
 
 /// 一轮已完成的对话：用户说了什么，以及那一轮的结果
 #[derive(Clone, Debug, Serialize)]
@@ -117,7 +150,66 @@ impl AgentOrchestrator {
             allow_file_create: false,
             run_usage: None,
             conversation: Vec::new(),
+            undo_stack: Vec::new(),
         }
+    }
+
+    /// 记一个回滚点。空快照不记：撤销一个什么都没写的操作会让栈顶失真。
+    fn push_undo_checkpoint(
+        &mut self,
+        label: &str,
+        snapshots: Vec<crate::agent::diff_apply::FileSnapshot>,
+    ) {
+        if snapshots.is_empty() {
+            return;
+        }
+        self.undo_stack.push(ApplyCheckpoint {
+            label: label.to_string(),
+            snapshots,
+        });
+        if self.undo_stack.len() > MAX_UNDO_CHECKPOINTS {
+            let excess = self.undo_stack.len() - MAX_UNDO_CHECKPOINTS;
+            self.undo_stack.drain(..excess);
+        }
+    }
+
+    /// 栈顶回滚点的描述，供界面显示"将要撤销什么"
+    pub fn pending_undo(&self) -> Option<(String, Vec<String>)> {
+        self.undo_stack
+            .last()
+            .map(|checkpoint| (checkpoint.label.clone(), checkpoint.files()))
+    }
+
+    /// 撤销最近一次应用：把文件恢复到那次应用之前。
+    ///
+    /// 恢复完成后把受影响的 diff 退回 `pending`，这样它们重新回到审查区，
+    /// 而不是留在"已应用"却和磁盘不一致的状态。
+    pub fn undo_last_apply(&mut self) -> Result<UndoResult, String> {
+        let Some(checkpoint) = self.undo_stack.pop() else {
+            return Err("Nothing to undo: no applied change is recorded".to_string());
+        };
+        let (restored, failed) = crate::agent::diff_apply::restore_snapshots(&checkpoint.snapshots);
+
+        for diff in &mut self.diffs {
+            if !restored.contains(&diff.file) {
+                continue;
+            }
+            for hunk in &mut diff.hunks {
+                if hunk.status.as_deref() == Some("applied") {
+                    hunk.status = None;
+                }
+            }
+            diff.status = status_from_hunks(&diff.hunks);
+        }
+        // 文件内容变回去了，baseHash 必须跟着变，否则重新应用会被误判 stale
+        crate::agent::diff_apply::stamp_base_hashes(&mut self.diffs);
+        self.refresh_review_state();
+
+        Ok(UndoResult {
+            label: checkpoint.label,
+            restored,
+            failed,
+        })
     }
 
     /// 之前几轮的摘要，喂回下一次运行的上下文；没有历史时返回 None
@@ -664,7 +756,9 @@ impl AgentOrchestrator {
             .cloned()
             .collect();
 
-        let result = apply_pending_diffs(&applicable);
+        let (result, snapshots) =
+            crate::agent::diff_apply::apply_pending_diffs_with_snapshots(&applicable);
+        self.push_undo_checkpoint("Auto-apply", snapshots);
 
         for diff in &mut self.diffs {
             if result.applied.iter().any(|item| item.id == diff.id) {
@@ -808,7 +902,9 @@ impl AgentOrchestrator {
             status: "pending".to_string(),
             ..diff.clone()
         };
-        let result = apply_pending_diffs(&[synthetic]);
+        let (result, snapshots) =
+            crate::agent::diff_apply::apply_pending_diffs_with_snapshots(&[synthetic]);
+        self.push_undo_checkpoint(&format!("Apply file {}", diff.file), snapshots);
 
         if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
             let applied = result.applied.iter().any(|entry| entry.id == item.id);
@@ -872,7 +968,12 @@ impl AgentOrchestrator {
             status: "pending".to_string(),
             ..diff.clone()
         };
-        let result = apply_pending_diffs(&[single_hunk_diff]);
+        let (result, snapshots) =
+            crate::agent::diff_apply::apply_pending_diffs_with_snapshots(&[single_hunk_diff]);
+        self.push_undo_checkpoint(
+            &format!("Apply hunk {} in {}", hunk_index + 1, diff.file),
+            snapshots,
+        );
 
         if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
             if result.applied.iter().any(|applied| applied.id == item.id) {
@@ -2075,6 +2176,86 @@ mod tests {
         let digest = orchestrator.conversation_digest().expect("digest");
         // 不能记成"改了文件"，否则下一轮模型会以为已经动过代码
         assert!(digest.contains("no file changes produced"), "{}", digest);
+    }
+
+    /// 应用之前是单向的：落盘之后审查界面就无能为力了，而"应用了才发现不对"
+    /// 恰恰最需要退路。撤销后还必须能重新应用，否则只是把问题换了个形状。
+    #[test]
+    fn undo_restores_the_file_and_lets_the_diff_be_applied_again() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("multi.ts", "const first = 1;\nconst second = 1;\n");
+
+        let mut diff = make_diff("multi.ts", "const first = 1;", "const first = 2;");
+        diff.hunks.push(crate::agent::state_machine::DiffHunk {
+            old_start: 2,
+            old_lines: 1,
+            new_start: 2,
+            new_lines: 1,
+            content: String::new(),
+            original: "const second = 1;".to_string(),
+            updated: "const second = 2;".to_string(),
+            provenance: None,
+            status: None,
+        });
+        let diff_id = diff.id.clone();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![diff];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
+
+        orchestrator.apply_diff_hunk(&diff_id, 0).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("multi.ts")).unwrap(),
+            "const first = 2;\nconst second = 1;\n"
+        );
+        let (label, files) = orchestrator.pending_undo().expect("undo available");
+        assert!(label.contains("Apply hunk 1"), "{}", label);
+        assert_eq!(files, vec!["multi.ts".to_string()]);
+
+        let undone = orchestrator.undo_last_apply().unwrap();
+
+        assert_eq!(undone.restored, vec!["multi.ts".to_string()]);
+        assert!(undone.failed.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("multi.ts")).unwrap(),
+            "const first = 1;\nconst second = 1;\n"
+        );
+        // 改动退回审查区，而不是留在"已应用"却和磁盘不一致
+        assert_eq!(orchestrator.diffs[0].status, "pending");
+        assert_eq!(orchestrator.diffs[0].hunks[0].status, None);
+
+        // baseHash 必须跟着回退，否则重新应用会被误判 stale
+        let result = orchestrator.apply_diff_hunk(&diff_id, 0).unwrap();
+        assert_eq!(result.applied.len(), 1, "failed: {:?}", result.failed);
+
+        // 栈已空
+        assert!(orchestrator.pending_undo().is_some());
+        orchestrator.undo_last_apply().unwrap();
+        assert!(orchestrator.pending_undo().is_none());
+        assert!(orchestrator
+            .undo_last_apply()
+            .unwrap_err()
+            .contains("Nothing to undo"));
+    }
+
+    #[test]
+    fn undoing_a_created_file_removes_it() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+
+        let create = make_diff("created.ts", "", "export const created = true;\n");
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.allow_file_create = true;
+        orchestrator.diffs = vec![create];
+
+        orchestrator.apply_diffs_to_fs().unwrap();
+        assert!(env.root.join("created.ts").exists());
+
+        let undone = orchestrator.undo_last_apply().unwrap();
+
+        assert_eq!(undone.restored, vec!["created.ts".to_string()]);
+        // 原本不存在的文件，撤销就是删掉它，而不是留下一个空文件
+        assert!(!env.root.join("created.ts").exists());
     }
 
     #[test]

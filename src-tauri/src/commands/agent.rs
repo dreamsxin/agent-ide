@@ -921,6 +921,50 @@ pub async fn apply_diff_hunk(
     Ok(result)
 }
 
+/// 撤销最近一次应用，把文件恢复到那次应用之前。
+///
+/// 审查界面只能拒绝还没应用的改动；应用之后此前是单向的，用户只能自己 git。
+/// "应用了才发现不对"恰恰是最需要退路的时刻。
+#[tauri::command]
+pub async fn undo_last_apply(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<crate::agent::orchestrator::UndoResult, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let result = orch.undo_last_apply()?;
+
+    let _ = app_handle.emit(
+        "agent-diff-ready",
+        serde_json::to_value(&orch.diffs).unwrap_or_default(),
+    );
+    let _ = app_handle.emit(
+        "agent-state-changed",
+        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
+    );
+    orch.emit_review_action_log(
+        &app_handle,
+        if result.failed.is_empty() {
+            "success"
+        } else {
+            "warn"
+        },
+        "diff_undo",
+        &format!(
+            "Undid {}: restored {} file(s)",
+            result.label,
+            result.restored.len()
+        ),
+        &format!(
+            "Restored: {}\nFailed: {}",
+            result.restored.join(", "),
+            result.failed.join(", ")
+        ),
+    );
+
+    Ok(result)
+}
+
 fn is_cancelled_error(err: &str) -> bool {
     err == "Agent task cancelled"
 }

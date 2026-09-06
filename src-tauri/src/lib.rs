@@ -90,6 +90,7 @@ pub fn run() {
             commands::agent::update_pipeline,
             commands::agent::reset_pipeline,
             commands::agent::clear_agent_conversation,
+            commands::agent::undo_last_apply,
             commands::agent::test_llm_connection,
             commands::agent::get_local_model_status,
             commands::agent::load_local_model,

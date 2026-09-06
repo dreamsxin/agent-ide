@@ -168,6 +168,7 @@ Which permission toggles are actually enforced in the backend:
 - **Batch**: Apply All / Reject All
 - **Per-file**: Apply or reject individual file diffs
 - **Per-hunk**: Apply or reject individual hunks within a file diff
+- **Undo**: `Undo Apply` restores every file touched by the most recent apply to its pre-apply content, up to 20 levels. Files that did not exist before are deleted rather than left empty. The affected diffs return to `pending` with a re-stamped `baseHash`, so they re-enter the review queue and can be applied again. Snapshots live only in backend memory — they are not persisted and do not survive an app restart, and they are never sent over IPC.
 
 Safety mechanisms during diff application:
 
