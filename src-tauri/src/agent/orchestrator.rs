@@ -580,6 +580,118 @@ impl AgentOrchestrator {
         Ok(blocked)
     }
 
+    /// 逐 hunk 应用一个待审查 diff。
+    ///
+    /// 这里是纯状态操作 + 文件写入，不碰 IPC：Tauri 命令层只负责加锁、
+    /// 发事件和写 action log。这样这条链路（含 baseHash 重新盖章）可以直接
+    /// 用单测覆盖，而不必靠人点界面。
+    pub fn apply_diff_hunk(
+        &mut self,
+        diff_id: &str,
+        hunk_index: usize,
+    ) -> Result<crate::agent::state_machine::ApplyDiffsResult, String> {
+        let Some(diff) = self.diffs.iter().find(|item| item.id == diff_id).cloned() else {
+            return Err(format!("Diff not found: {}", diff_id));
+        };
+
+        if diff.status != "pending" && diff.status != "partial" && diff.status != "failed" {
+            return Err(format!(
+                "Diff {} cannot apply hunks while status is {}",
+                diff_id, diff.status
+            ));
+        }
+
+        let Some(hunk) = diff.hunks.get(hunk_index).cloned() else {
+            return Err(format!("Hunk {} not found in diff {}", hunk_index, diff_id));
+        };
+
+        if hunk.status.as_deref() == Some("applied") || hunk.status.as_deref() == Some("rejected") {
+            return Err(format!(
+                "Hunk {} in diff {} is already {}",
+                hunk_index,
+                diff_id,
+                hunk.status.unwrap_or_default()
+            ));
+        }
+
+        let single_hunk_diff = crate::agent::state_machine::FileDiff {
+            hunks: vec![hunk],
+            // 必须显式置为 pending：`apply_pending_diffs` 会跳过非 pending 的 diff，
+            // 而这里继承来的状态在应用过第一个 hunk 之后是 "partial"。
+            // 不重置的话第二个 hunk 会被静默跳过 —— applied 和 failed 都为空，
+            // 命令返回 Ok，用户既看不到变更也看不到错误。
+            status: "pending".to_string(),
+            ..diff.clone()
+        };
+        let result = apply_pending_diffs(&[single_hunk_diff]);
+
+        if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
+            if result.applied.iter().any(|applied| applied.id == item.id) {
+                if let Some(hunk) = item.hunks.get_mut(hunk_index) {
+                    hunk.status = Some("applied".to_string());
+                }
+                item.status = status_from_hunks(&item.hunks);
+            } else if result
+                .failed
+                .iter()
+                .any(|failure| failure.diff_id == item.id)
+            {
+                if let Some(hunk) = item.hunks.get_mut(hunk_index) {
+                    hunk.status = Some("failed".to_string());
+                }
+                item.status = "failed".to_string();
+            }
+        }
+        // 逐 hunk 应用会推进文件内容，后续 hunk 必须以新内容为基准，否则会被误判 stale
+        crate::agent::diff_apply::restamp_applied_files(&mut self.diffs, &result.applied);
+        self.refresh_review_state();
+
+        Ok(result)
+    }
+
+    /// 还有待处理的 diff 时留在 WaitingUser，否则收尾为 Done
+    pub fn refresh_review_state(&mut self) {
+        let has_open_work = self.diffs.iter().any(|diff| {
+            diff.status == "pending" || diff.status == "partial" || diff.status == "failed"
+        });
+        if has_open_work {
+            self.state_mgr
+                .set(crate::agent::state_machine::AgentState::WaitingUser);
+        } else {
+            self.state_mgr
+                .set(crate::agent::state_machine::AgentState::Done);
+        }
+    }
+}
+
+/// 由各 hunk 的状态推导整个文件 diff 的状态
+pub fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> String {
+    let all_match = |expected: &str| {
+        !hunks.is_empty()
+            && hunks
+                .iter()
+                .all(|hunk| hunk.status.as_deref() == Some(expected))
+    };
+    let any_match = |expected: &str| {
+        hunks
+            .iter()
+            .any(|hunk| hunk.status.as_deref() == Some(expected))
+    };
+
+    if all_match("applied") {
+        "applied".to_string()
+    } else if all_match("rejected") {
+        "rejected".to_string()
+    } else if any_match("failed") {
+        "failed".to_string()
+    } else if any_match("applied") || any_match("rejected") {
+        "partial".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+impl AgentOrchestrator {
     fn handle_plan_stage_response(
         &mut self,
         app: &AppHandle,
@@ -1035,6 +1147,89 @@ mod tests {
             std::fs::read_to_string(env.root.join("created.ts")).unwrap(),
             "export const created = true;\n"
         );
+    }
+
+    /// 今天靠人点界面验证的那条路径，现在是自动测试：逐 hunk 应用会推进文件
+    /// 内容，第二个 hunk 必须仍能应用 —— 如果 restamp 没生效，它会因为
+    /// baseHash 不匹配被误判为 stale。
+    #[test]
+    fn applying_hunks_one_by_one_keeps_the_rest_appliable() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("multi.ts", "const first = 1;\nconst second = 1;\n");
+
+        let mut diff = make_diff("multi.ts", "const first = 1;", "const first = 2;");
+        diff.hunks.push(crate::agent::state_machine::DiffHunk {
+            old_start: 2,
+            old_lines: 1,
+            new_start: 2,
+            new_lines: 1,
+            content: String::new(),
+            original: "const second = 1;".to_string(),
+            updated: "const second = 2;".to_string(),
+            provenance: None,
+            status: None,
+        });
+        let diff_id = diff.id.clone();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![diff];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
+
+        let first = orchestrator.apply_diff_hunk(&diff_id, 0).unwrap();
+        assert_eq!(first.applied.len(), 1, "failed: {:?}", first.failed);
+        assert_eq!(orchestrator.diffs[0].status, "partial");
+        assert_eq!(
+            orchestrator.state_mgr.state,
+            crate::agent::state_machine::AgentState::WaitingUser
+        );
+
+        let second = orchestrator.apply_diff_hunk(&diff_id, 1).unwrap();
+        assert_eq!(
+            second.applied.len(),
+            1,
+            "second hunk was rejected: {:?}",
+            second.failed
+        );
+
+        assert_eq!(orchestrator.diffs[0].status, "applied");
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("multi.ts")).unwrap(),
+            "const first = 2;\nconst second = 2;\n"
+        );
+        // 全部 hunk 落地后审查结束
+        assert_eq!(
+            orchestrator.state_mgr.state,
+            crate::agent::state_machine::AgentState::Done
+        );
+    }
+
+    #[test]
+    fn apply_diff_hunk_rejects_unknown_ids_and_repeated_hunks() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("edit.ts", "const value = 1;\n");
+
+        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        let diff_id = diff.id.clone();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![diff];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
+
+        assert!(orchestrator
+            .apply_diff_hunk("missing", 0)
+            .unwrap_err()
+            .contains("Diff not found"));
+        assert!(orchestrator
+            .apply_diff_hunk(&diff_id, 9)
+            .unwrap_err()
+            .contains("Hunk 9 not found"));
+
+        orchestrator.apply_diff_hunk(&diff_id, 0).unwrap();
+        // 单 hunk 全部应用后整个 diff 变成 applied，此时不允许再次应用
+        assert!(orchestrator
+            .apply_diff_hunk(&diff_id, 0)
+            .unwrap_err()
+            .contains("cannot apply hunks while status is applied"));
     }
 
     #[test]

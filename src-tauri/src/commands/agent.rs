@@ -800,7 +800,7 @@ pub async fn apply_diff(
     // 该文件内容已前进，其余待审查 diff 必须以新内容为基准重新记录指纹
     crate::agent::diff_apply::restamp_applied_files(&mut orch.diffs, &result.applied);
 
-    set_review_state_after_single_diff(&mut orch);
+    orch.refresh_review_state();
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
@@ -830,55 +830,10 @@ pub async fn apply_diff_hunk(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<ApplyDiffsResult, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let Some(diff) = orch.diffs.iter().find(|item| item.id == diff_id).cloned() else {
-        return Err(format!("Diff not found: {}", diff_id));
-    };
-
-    if diff.status != "pending" && diff.status != "partial" && diff.status != "failed" {
-        return Err(format!(
-            "Diff {} cannot apply hunks while status is {}",
-            diff_id, diff.status
-        ));
-    }
-
-    let Some(hunk) = diff.hunks.get(hunk_index).cloned() else {
-        return Err(format!("Hunk {} not found in diff {}", hunk_index, diff_id));
-    };
-
-    if hunk.status.as_deref() == Some("applied") || hunk.status.as_deref() == Some("rejected") {
-        return Err(format!(
-            "Hunk {} in diff {} is already {}",
-            hunk_index,
-            diff_id,
-            hunk.status.unwrap_or_default()
-        ));
-    }
-
-    let single_hunk_diff = FileDiff {
-        hunks: vec![hunk],
-        ..diff.clone()
-    };
-    let result = apply_pending_diffs(&[single_hunk_diff]);
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let result = orch.apply_diff_hunk(&diff_id, hunk_index)?;
     let failed = result.failed.clone();
 
-    if let Some(item) = orch.diffs.iter_mut().find(|item| item.id == diff_id) {
-        if result.applied.iter().any(|applied| applied.id == item.id) {
-            if let Some(hunk) = item.hunks.get_mut(hunk_index) {
-                hunk.status = Some("applied".to_string());
-            }
-            item.status = status_from_hunks(&item.hunks);
-        } else if let Some(failure) = failed.iter().find(|failure| failure.diff_id == item.id) {
-            if let Some(hunk) = item.hunks.get_mut(hunk_index) {
-                hunk.status = Some("failed".to_string());
-            }
-            item.status = "failed".to_string();
-            let _ = failure;
-        }
-    }
-    // 逐 hunk 应用会推进文件内容，后续 hunk 必须以新内容为基准，否则会被误判 stale
-    crate::agent::diff_apply::restamp_applied_files(&mut orch.diffs, &result.applied);
-
-    set_review_state_after_single_diff(&mut orch);
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
@@ -963,7 +918,7 @@ pub async fn reject_diff(
     diff.status = "rejected".to_string();
     let rejected = diff.clone();
 
-    set_review_state_after_single_diff(&mut orch);
+    orch.refresh_review_state();
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
@@ -1003,10 +958,10 @@ pub async fn reject_diff_hunk(
         return Err(format!("Hunk {} not found in diff {}", hunk_index, diff_id));
     };
     hunk.status = Some("rejected".to_string());
-    diff.status = status_from_hunks(&diff.hunks);
+    diff.status = crate::agent::orchestrator::status_from_hunks(&diff.hunks);
     let updated = diff.clone();
 
-    set_review_state_after_single_diff(&mut orch);
+    orch.refresh_review_state();
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
@@ -1057,46 +1012,6 @@ fn format_diff_list_details(diffs: &[FileDiff]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> String {
-    if !hunks.is_empty()
-        && hunks
-            .iter()
-            .all(|hunk| matches!(hunk.status.as_deref(), Some("applied")))
-    {
-        "applied".to_string()
-    } else if !hunks.is_empty()
-        && hunks
-            .iter()
-            .all(|hunk| matches!(hunk.status.as_deref(), Some("rejected")))
-    {
-        "rejected".to_string()
-    } else if hunks
-        .iter()
-        .any(|hunk| matches!(hunk.status.as_deref(), Some("failed")))
-    {
-        "failed".to_string()
-    } else if hunks
-        .iter()
-        .any(|hunk| matches!(hunk.status.as_deref(), Some("applied") | Some("rejected")))
-    {
-        "partial".to_string()
-    } else {
-        "pending".to_string()
-    }
-}
-
-fn set_review_state_after_single_diff(orch: &mut AgentOrchestrator) {
-    if orch
-        .diffs
-        .iter()
-        .any(|diff| diff.status == "pending" || diff.status == "partial" || diff.status == "failed")
-    {
-        orch.state_mgr.set(AgentState::WaitingUser);
-    } else {
-        orch.state_mgr.set(AgentState::Done);
-    }
 }
 
 fn build_agent_context(
@@ -1157,6 +1072,8 @@ fn upsert_step_status(steps: &mut Vec<TaskStep>, step: &TaskStep, status: &str, 
 #[cfg(test)]
 mod llm_profile_tests {
     use super::*;
+    // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
+    use crate::agent::orchestrator::status_from_hunks;
 
     fn test_hunk(status: Option<&str>) -> crate::agent::state_machine::DiffHunk {
         crate::agent::state_machine::DiffHunk {
