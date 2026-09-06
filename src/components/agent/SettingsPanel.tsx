@@ -114,6 +114,7 @@ export default function SettingsPanel() {
   const [maxContextTokens, setMaxContextTokens] = useState("");
   const [reservedOutputTokens, setReservedOutputTokens] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [maxRunTokens, setMaxRunTokens] = useState("");
   const [modelType, setModelType] = useState<LocalModelType>("starcoder");
   const [modelPath, setModelPath] = useState("");
   const [modelFile, setModelFile] = useState("");
@@ -147,6 +148,7 @@ export default function SettingsPanel() {
         setMaxContextTokens(numberToInput(active.maxContextTokens));
         setReservedOutputTokens(numberToInput(active.reservedOutputTokens));
         setMaxOutputTokens(numberToInput(active.maxOutputTokens));
+        setMaxRunTokens(numberToInput(active.maxRunTokens));
         setModelType(active.modelType ?? "starcoder");
         setModelPath(active.modelPath ?? "");
         setModelFile(active.modelFile ?? "");
@@ -257,6 +259,7 @@ export default function SettingsPanel() {
         maxContextTokens: inputToNumber(maxContextTokens),
         reservedOutputTokens: inputToNumber(reservedOutputTokens),
         maxOutputTokens: inputToNumber(maxOutputTokens),
+        maxRunTokens: inputToNumber(maxRunTokens),
         toolCallMode,
         modelType: provider === "local" ? modelType : undefined,
         modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
@@ -275,7 +278,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
+  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, maxRunTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -295,6 +298,7 @@ export default function SettingsPanel() {
           maxContextTokens: inputToNumber(maxContextTokens),
           reservedOutputTokens: inputToNumber(reservedOutputTokens),
           maxOutputTokens: inputToNumber(maxOutputTokens),
+          maxRunTokens: inputToNumber(maxRunTokens),
           toolCallMode,
           modelType: provider === "local" ? modelType : undefined,
           modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
@@ -319,7 +323,7 @@ export default function SettingsPanel() {
     } finally {
       setTesting(false);
     }
-  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
+  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, maxRunTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
 
   const handleProfileSelect = useCallback((id: string) => {
     const profile = llmProfiles.find((item) => item.id === id);
@@ -332,6 +336,7 @@ export default function SettingsPanel() {
     setMaxContextTokens(numberToInput(profile.maxContextTokens));
     setReservedOutputTokens(numberToInput(profile.reservedOutputTokens));
     setMaxOutputTokens(numberToInput(profile.maxOutputTokens));
+    setMaxRunTokens(numberToInput(profile.maxRunTokens));
     setToolCallMode(profile.toolCallMode ?? "text_protocol");
     setApiKey("");
   }, [llmProfiles]);
@@ -601,6 +606,12 @@ export default function SettingsPanel() {
             onChange={setMaxOutputTokens}
             placeholder="4096"
           />
+          <BudgetInput
+            label="Per-run cap"
+            value={maxRunTokens}
+            onChange={setMaxRunTokens}
+            placeholder="no limit"
+          />
         </div>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
           Effective input estimate:{" "}
@@ -608,6 +619,7 @@ export default function SettingsPanel() {
             {formatTokenBudget(estimateInputTokens(maxContextTokens, reservedOutputTokens, maxOutputTokens))}
           </span>
           . This is model metadata for budgeting; current context modes still control compression strategy.
+          Per-run cap stops a run once the provider-reported total tokens reach it; leave it empty for no limit.
         </div>
       </div>
 
