@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use tokio::sync::mpsc;
@@ -485,6 +485,99 @@ impl LlmUsage {
     }
 }
 
+/// 一次运行内的累计 token 用量，以及可选的用量上限。
+///
+/// 放在 `LlmClient` 上而不是让 `execute_stage` / `execute_step` 把用量层层返回：
+/// 一次运行会经过 planner、每个 pipeline stage、以及每个 stage 内最多 5 轮工具回合，
+/// 这些路径的返回类型各不相同（planner 走的 `stream_chat` 只返回 `String`）。
+/// 挂在客户端上意味着**所有**入口都会被记账，也没法绕过上限。
+#[derive(Debug, Default)]
+pub struct RunUsageMeter {
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
+    /// 发出去的供应商请求数
+    calls: AtomicU64,
+    /// 其中供应商回报了用量的请求数
+    reported_calls: AtomicU64,
+    max_total_tokens: Option<u64>,
+}
+
+/// 某一时刻的用量快照
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunUsageSnapshot {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub calls: u64,
+    pub reported_calls: u64,
+    pub max_total_tokens: Option<u64>,
+}
+
+impl RunUsageSnapshot {
+    /// 有请求发出但没有一次回报用量：此时 total 是 0，但那代表"不知道"而不是"没花"
+    pub fn usage_is_unknown(&self) -> bool {
+        self.calls > 0 && self.reported_calls == 0
+    }
+}
+
+impl RunUsageMeter {
+    pub fn new(max_total_tokens: Option<u64>) -> Self {
+        Self {
+            max_total_tokens,
+            ..Default::default()
+        }
+    }
+
+    /// 发请求前检查上限。超了就直接拒绝，而不是等这次请求也花完再说。
+    pub fn check_budget(&self) -> Result<(), String> {
+        let Some(limit) = self.max_total_tokens else {
+            return Ok(());
+        };
+        let snapshot = self.snapshot();
+        if snapshot.total_tokens >= limit {
+            return Err(format!(
+                "Run token cap reached: {} of {} tokens used across {} LLM call(s). Raise the per-run cap or start a new run.",
+                snapshot.total_tokens, limit, snapshot.calls
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_call(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 记录一次调用回报的用量。供应商没报用量时只记调用数，不把缺失当成 0。
+    pub fn record_usage(&self, usage: Option<&LlmUsage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        if usage.is_empty() {
+            return;
+        }
+        self.reported_calls.fetch_add(1, Ordering::SeqCst);
+        self.prompt_tokens
+            .fetch_add(usage.prompt_tokens.unwrap_or_default(), Ordering::SeqCst);
+        self.completion_tokens.fetch_add(
+            usage.completion_tokens.unwrap_or_default(),
+            Ordering::SeqCst,
+        );
+    }
+
+    pub fn snapshot(&self) -> RunUsageSnapshot {
+        let prompt_tokens = self.prompt_tokens.load(Ordering::SeqCst);
+        let completion_tokens = self.completion_tokens.load(Ordering::SeqCst);
+        RunUsageSnapshot {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            calls: self.calls.load(Ordering::SeqCst),
+            reported_calls: self.reported_calls.load(Ordering::SeqCst),
+            max_total_tokens: self.max_total_tokens,
+        }
+    }
+}
+
 /// 流式/非流式请求的统一输出：文本内容 + 原生工具调用 + token 用量
 #[derive(Clone, Debug, Default)]
 pub struct LlmStreamOutput {
@@ -601,6 +694,8 @@ pub struct LlmClient {
     local_engine: Option<Arc<dyn ModelEngine>>,
     /// 额外注入的工具定义（MCP 发现的工具）
     extra_tools: Vec<ToolDefinition>,
+    /// 本次运行的用量记账与上限；未设置时不记账也不限流
+    usage_meter: Option<Arc<RunUsageMeter>>,
 }
 
 impl LlmClient {
@@ -618,7 +713,14 @@ impl LlmClient {
             client,
             local_engine: None, // 将在初始化时设置
             extra_tools: Vec::new(),
+            usage_meter: None,
         }
+    }
+
+    /// 挂上本次运行的用量记账器（同一个 Arc 可以跨 stage / 工具回合共享）
+    pub fn with_usage_meter(mut self, meter: Arc<RunUsageMeter>) -> Self {
+        self.usage_meter = Some(meter);
+        self
     }
 
     /// 设置本地模型引擎
@@ -860,6 +962,9 @@ impl LlmClient {
             }
         }
 
+        if let Some(ref meter) = self.usage_meter {
+            meter.record_usage(usage.as_ref());
+        }
         Ok(LlmStreamOutput {
             content: full_response,
             tool_calls: tool_calls.finish(),
@@ -957,6 +1062,9 @@ impl LlmClient {
         if let Some(ref text) = content {
             let _ = tx.send(text.clone()).await;
         }
+        if let Some(ref meter) = self.usage_meter {
+            meter.record_usage(payload_usage.as_ref());
+        }
         Ok(LlmStreamOutput {
             content: content.unwrap_or_default(),
             tool_calls,
@@ -971,6 +1079,13 @@ impl LlmClient {
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<reqwest::Response, String> {
         const MAX_ATTEMPTS: usize = 3;
+
+        // 所有真正打到供应商的请求都经过这里，所以上限检查放在这里就绕不过去。
+        // 重试不重复计数：计一次逻辑调用。
+        if let Some(ref meter) = self.usage_meter {
+            meter.check_budget()?;
+            meter.record_call();
+        }
 
         for attempt in 0..MAX_ATTEMPTS {
             let request = self
@@ -1557,6 +1672,73 @@ mod tests {
         // 供应商完全不报用量时必须是 None，而不是 0 —— 否则上限判断会形同虚设
         assert_eq!(LlmUsage::default().resolved_total(), None);
         assert!(LlmUsage::default().is_empty());
+    }
+
+    #[test]
+    fn usage_meter_accumulates_across_calls_and_stops_at_the_cap() {
+        let meter = RunUsageMeter::new(Some(100));
+
+        assert!(meter.check_budget().is_ok());
+        meter.record_call();
+        meter.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(40),
+            completion_tokens: Some(20),
+            total_tokens: Some(60),
+        }));
+
+        // 还没到上限：下一次调用要放行
+        assert!(meter.check_budget().is_ok());
+        meter.record_call();
+        meter.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(30),
+            completion_tokens: Some(15),
+            total_tokens: None,
+        }));
+
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.prompt_tokens, 70);
+        assert_eq!(snapshot.completion_tokens, 35);
+        assert_eq!(snapshot.total_tokens, 105);
+        assert_eq!(snapshot.calls, 2);
+        assert_eq!(snapshot.reported_calls, 2);
+
+        let err = meter.check_budget().unwrap_err();
+        assert!(err.contains("105 of 100 tokens"), "{}", err);
+    }
+
+    /// 供应商不报用量（本地 runtime、mock）时 total 是 0。这不能被当成"没花"，
+    /// 否则上限看起来生效、实际永远不会触发 —— 调用方必须能区分这两种情况。
+    #[test]
+    fn unreported_usage_is_distinguishable_from_zero_usage() {
+        let meter = RunUsageMeter::new(Some(10));
+        meter.record_call();
+        meter.record_usage(None);
+        meter.record_usage(Some(&LlmUsage::default()));
+
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.total_tokens, 0);
+        assert_eq!(snapshot.calls, 1);
+        assert_eq!(snapshot.reported_calls, 0);
+        assert!(snapshot.usage_is_unknown());
+        // 用量未知时不会误伤：上限不会凭空触发
+        assert!(meter.check_budget().is_ok());
+
+        // 一次都没调用过，就不算"未知"
+        assert!(!RunUsageMeter::new(None).snapshot().usage_is_unknown());
+    }
+
+    #[test]
+    fn usage_meter_without_a_cap_never_blocks() {
+        let meter = RunUsageMeter::new(None);
+        meter.record_call();
+        meter.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(u32::MAX as u64),
+            completion_tokens: Some(1),
+            total_tokens: None,
+        }));
+
+        assert!(meter.check_budget().is_ok());
+        assert_eq!(meter.snapshot().max_total_tokens, None);
     }
 
     #[test]
