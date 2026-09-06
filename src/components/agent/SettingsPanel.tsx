@@ -636,7 +636,11 @@ export default function SettingsPanel() {
           <option value="native_tools">Provider-native tools</option>
         </select>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
-          Native tools advertises Agent changes and SDD drafts as provider tool schemas; text protocol remains the fallback path.
+          Native tools is required for the Agent to read the workspace during a run
+          (read file, search text, list files) and for MCP tools. Without it the Agent only sees
+          the context bundle assembled when the run starts, and has to guess file contents it was
+          not given. Text protocol remains the fallback for endpoints that reject a{" "}
+          <span className="font-mono">tools</span> parameter.
         </div>
       </div>
 
