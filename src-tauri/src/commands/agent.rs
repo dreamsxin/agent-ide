@@ -773,32 +773,9 @@ pub async fn apply_diff(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<ApplyDiffsResult, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let Some(diff) = orch.diffs.iter().find(|item| item.id == diff_id).cloned() else {
-        return Err(format!("Diff not found: {}", diff_id));
-    };
-
-    if diff.status != "pending" {
-        return Err(format!(
-            "Diff {} is not pending; current status is {}",
-            diff_id, diff.status
-        ));
-    }
-
-    let result = apply_pending_diffs(&[diff]);
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let result = orch.apply_diff(&diff_id)?;
     let failed = result.failed.clone();
-
-    for item in &mut orch.diffs {
-        if item.id != diff_id {
-            continue;
-        }
-        if result.applied.iter().any(|applied| applied.id == item.id) {
-            item.status = "applied".to_string();
-        } else if failed.iter().any(|failure| failure.diff_id == item.id) {
-            item.status = "failed".to_string();
-        }
-    }
-    // 该文件内容已前进，其余待审查 diff 必须以新内容为基准重新记录指纹
-    crate::agent::diff_apply::restamp_applied_files(&mut orch.diffs, &result.applied);
 
     orch.refresh_review_state();
     let _ = app_handle.emit(
