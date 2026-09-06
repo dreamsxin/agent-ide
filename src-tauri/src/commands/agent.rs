@@ -1,4 +1,3 @@
-use crate::agent::diff_apply::apply_pending_diffs;
 use crate::agent::executor;
 use crate::agent::multi_agent::{default_pipeline, AgentRole, PipelineStage};
 use crate::agent::orchestrator::AgentOrchestrator;
@@ -725,20 +724,10 @@ pub async fn apply_diffs(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<ApplyDiffsResult, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    let result = apply_pending_diffs(&orch.diffs);
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let result = orch.apply_all_diffs();
     let applied = result.applied.clone();
     let failed = result.failed.clone();
-
-    for diff in &mut orch.diffs {
-        if diff.status != "pending" {
-            continue;
-        }
-        if applied.iter().any(|item| item.id == diff.id) {
-            diff.status = "applied".to_string();
-        } else if failed.iter().any(|item| item.diff_id == diff.id) {
-            diff.status = "failed".to_string();
-        }
-    }
 
     if failed.is_empty() {
         orch.state_mgr
@@ -843,7 +832,8 @@ pub async fn reject_diffs(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<Vec<FileDiff>, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    orch.reject_diffs();
+    // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+    let rejected = orch.reject_all_diffs();
 
     orch.state_mgr
         .transition(&crate::agent::state_machine::AgentEvent::UserReject);
@@ -852,12 +842,6 @@ pub async fn reject_diffs(
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
     );
 
-    let rejected: Vec<FileDiff> = orch
-        .diffs
-        .iter()
-        .filter(|d| d.status == "rejected")
-        .cloned()
-        .collect();
     orch.emit_review_action_log(
         &app_handle,
         "info",
