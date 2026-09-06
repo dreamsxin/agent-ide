@@ -83,6 +83,18 @@ Known limitations:
 - Git HTTPS credentials are passed as plaintext over IPC by design, and persisted (when the user opts in) as `"{user}\n{pass}"` in the OS store. `GIT_USERNAME` / `GIT_PASSWORD` are accepted as an environment fallback.
 - macOS Keychain and Linux Secret Service backends are enabled but have not been runtime-validated. Windows Credential Manager has been verified end to end, including across an app restart.
 
+## Built-in Workspace Tools
+
+The Agent has three built-in read-only tools — `workspace_read_file`, `workspace_search_text`, `workspace_list_files` — so it can decide what to read instead of relying only on the pre-assembled context bundle. Unlike MCP tools, these are constrained:
+
+- Every path goes through `resolve_existing`, so reads are confined to the workspace.
+- Credential files are refused outright, matching the context egress rule. Without that they would be a bypass: the model could simply call the read tool to get the `.env` contents the prompt builder withholds.
+- Traversal skips `.git`, `node_modules`, `target`, `dist`, `build`, `.agent-ide`.
+- Output is capped (64 KB per file read, 60 search hits, 200 directory entries).
+- They cannot write, delete, move, or execute anything.
+
+They are advertised only when the profile's `toolCallMode` is `native_tools`. The tool loop is bounded at 12 rounds per stage, with the per-run token cap as the real cost limit.
+
 ## MCP Tool Exposure
 
 Model Context Protocol servers are the largest privilege surface in the product, and the one with the fewest backend guarantees. This section states plainly what is and is not enforced.

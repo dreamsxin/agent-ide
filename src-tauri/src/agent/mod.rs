@@ -6,3 +6,4 @@ pub mod multi_agent;
 pub mod orchestrator;
 pub mod planner;
 pub mod state_machine;
+pub mod workspace_tools;

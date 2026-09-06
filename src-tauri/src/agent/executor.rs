@@ -34,8 +34,13 @@ pub trait ToolInvoker: Send + Sync {
     async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String>;
 }
 
-/// 单次 LLM 调用中允许的最大工具回合数，防止模型陷入工具循环
-pub const MAX_TOOL_ITERATIONS: usize = 4;
+/// 单次 LLM 调用中允许的最大工具回合数。
+///
+/// 从 4 提到 12：以前唯一的工具来源是 MCP，回合数少无所谓；现在内置了只读的
+/// 工作区工具，"搜索 → 读几个文件 → 再改" 是常规流程，4 回合会在探索途中被
+/// 截断，模型只能靠猜写 ORIGINAL 段。真正的成本闸门是 per-run token 上限
+/// （`RunUsageMeter`），这个常量只是防死循环的兜底。
+pub const MAX_TOOL_ITERATIONS: usize = 12;
 
 /// 从模型返回的工具调用中挑出需要真正执行的外部工具调用。
 /// 内置输出协议工具（`emit_agent_changes` / `emit_sdd_draft`）不在其中。
@@ -130,10 +135,13 @@ file content here
 ```
 
 ## Rules
-1. Output ONLY code and diffs — no explanations unless no code change is needed
-2. Each diff block must have exactly one ORIGINAL and one UPDATED section
-3. For edits: show EXACT original code that needs to be replaced
-4. Be precise — copy the original code exactly as it appears
+1. If a tool for reading or searching the workspace is available, use it to read the exact
+   current text of any file you intend to edit before writing a diff. Never guess an ORIGINAL
+   section — a mismatch makes the change unappliable.
+2. Output ONLY code and diffs — no explanations unless no code change is needed
+3. Each diff block must have exactly one ORIGINAL and one UPDATED section
+4. For edits: show EXACT original code that needs to be replaced
+5. Be precise — copy the original code exactly as it appears
 
 Respond now with the implementation."#;
 
