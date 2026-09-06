@@ -696,6 +696,8 @@ pub struct LlmClient {
     extra_tools: Vec<ToolDefinition>,
     /// 本次运行的用量记账与上限；未设置时不记账也不限流
     usage_meter: Option<Arc<RunUsageMeter>>,
+    /// 供应商明确拒绝过 `tools` 参数：后续请求不再附带，避免每次都白撞一次 400
+    tools_rejected: Arc<AtomicBool>,
 }
 
 impl LlmClient {
@@ -714,7 +716,13 @@ impl LlmClient {
             local_engine: None, // 将在初始化时设置
             extra_tools: Vec::new(),
             usage_meter: None,
+            tools_rejected: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// 这次运行里供应商是否拒绝过 `tools`（即工具能力已被降级掉）
+    pub fn tools_were_rejected(&self) -> bool {
+        self.tools_rejected.load(Ordering::SeqCst)
     }
 
     /// 挂上本次运行的用量记账器（同一个 Arc 可以跨 stage / 工具回合共享）
@@ -860,7 +868,13 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
-        let body = build_chat_request(&self.config, messages, true, &self.extra_tools);
+        let body = build_chat_request(
+            &self.config,
+            messages,
+            true,
+            &self.extra_tools,
+            !self.tools_were_rejected(),
+        );
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -982,7 +996,13 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
-        let body = build_chat_request(&self.config, messages, false, &self.extra_tools);
+        let body = build_chat_request(
+            &self.config,
+            messages,
+            false,
+            &self.extra_tools,
+            !self.tools_were_rejected(),
+        );
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -1087,13 +1107,16 @@ impl LlmClient {
             meter.record_call();
         }
 
+        let mut body = body.clone();
+        let mut dropped: Vec<&'static str> = Vec::new();
+
         for attempt in 0..MAX_ATTEMPTS {
             let request = self
                 .client
                 .post(url)
                 .header("Authorization", format!("Bearer {}", self.config.api_key))
                 .header("Content-Type", "application/json")
-                .json(body)
+                .json(&body)
                 .send();
 
             let response = tokio::select! {
@@ -1111,6 +1134,20 @@ impl LlmClient {
 
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
+
+            // 能力协商：供应商明确说不认某个可选参数时，摘掉它再试一次，
+            // 而不是让整次运行直接失败。丢掉 tools 会降级成纯文本协议，
+            // 所以要记在 client 上，供命令层结束后写进 action log。
+            if let Some(parameter) = unsupported_parameter(status, &text) {
+                if !dropped.contains(&parameter) && strip_parameter(&mut body, parameter) {
+                    dropped.push(parameter);
+                    if parameter == "tools" {
+                        self.tools_rejected.store(true, Ordering::SeqCst);
+                    }
+                    continue;
+                }
+            }
+
             let retryable = is_retryable_status(status);
             if !retryable || attempt + 1 == MAX_ATTEMPTS {
                 return Err(format!("LLM API error {}: {}", status, text));
@@ -1127,6 +1164,41 @@ impl LlmClient {
 
         Err("LLM request failed after retries".to_string())
     }
+}
+
+/// 供应商是否明确拒绝了某个可选请求参数。
+///
+/// 只在客户端错误上判定，并且要求错误正文点名了该参数——避免把别的 400
+/// 误判成"不支持 tools"，那样会把功能静默降级掉。
+fn unsupported_parameter(status: reqwest::StatusCode, text: &str) -> Option<&'static str> {
+    if !matches!(status.as_u16(), 400 | 404 | 422 | 501) {
+        return None;
+    }
+    let lowered = text.to_lowercase();
+    if lowered.contains("stream_options") {
+        return Some("stream_options");
+    }
+    if lowered.contains("tool_choice")
+        || lowered.contains("\"tools\"")
+        || lowered.contains("'tools'")
+        || lowered.contains("function call")
+        || lowered.contains("function_call")
+    {
+        return Some("tools");
+    }
+    None
+}
+
+/// 摘掉一个可选参数；`tools` 连带 `tool_choice` 一起摘，留着它必然再被拒
+fn strip_parameter(body: &mut serde_json::Value, parameter: &str) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let mut removed = object.remove(parameter).is_some();
+    if parameter == "tools" {
+        removed |= object.remove("tool_choice").is_some();
+    }
+    removed
 }
 
 async fn stream_mock_chat(
@@ -1250,6 +1322,7 @@ fn build_chat_request(
     messages: Vec<ChatMessage>,
     stream: bool,
     extra_tools: &[ToolDefinition],
+    include_tools: bool,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": config.model,
@@ -1269,7 +1342,7 @@ fn build_chat_request(
             let key = output_token_key(config);
             object.insert(key.to_string(), serde_json::json!(max_output_tokens));
         }
-        if config.tool_call_mode == "native_tools" {
+        if config.tool_call_mode == "native_tools" && include_tools {
             object.insert("tools".to_string(), native_tools_schema(extra_tools));
             object.insert("tool_choice".to_string(), serde_json::json!("auto"));
         }
@@ -1596,7 +1669,13 @@ mod tests {
 
     #[test]
     fn chat_request_omits_output_limit_when_unset() {
-        let body = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), true, &[]);
+        let body = build_chat_request(
+            &config("openai", "gpt-4o", None),
+            Vec::new(),
+            true,
+            &[],
+            true,
+        );
 
         assert_eq!(body["stream"], true);
         assert!(body.get("max_tokens").is_none());
@@ -1610,6 +1689,7 @@ mod tests {
             Vec::new(),
             true,
             &[],
+            true,
         );
 
         assert_eq!(body["max_tokens"], 2048);
@@ -1623,6 +1703,7 @@ mod tests {
             Vec::new(),
             true,
             &[],
+            true,
         );
 
         assert_eq!(body["max_completion_tokens"], 8192);
@@ -1633,10 +1714,22 @@ mod tests {
     /// 任何基于用量的统计和上限都会永远读不到数
     #[test]
     fn streaming_requests_ask_for_usage_and_non_streaming_does_not() {
-        let streamed = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), true, &[]);
+        let streamed = build_chat_request(
+            &config("openai", "gpt-4o", None),
+            Vec::new(),
+            true,
+            &[],
+            true,
+        );
         assert_eq!(streamed["stream_options"]["include_usage"], true);
 
-        let once = build_chat_request(&config("openai", "gpt-4o", None), Vec::new(), false, &[]);
+        let once = build_chat_request(
+            &config("openai", "gpt-4o", None),
+            Vec::new(),
+            false,
+            &[],
+            true,
+        );
         assert!(once.get("stream_options").is_none());
     }
 
@@ -1741,12 +1834,77 @@ mod tests {
         assert_eq!(meter.snapshot().max_total_tokens, None);
     }
 
+    /// 供应商不支持 tools 时整次运行不该直接失败：摘掉参数重试一次，
+    /// 代价是降级成纯文本协议。判定必须点名参数，否则别的 400 会被误判成
+    /// "不支持 tools"，功能被静默降级掉。
+    #[test]
+    fn unsupported_parameter_detection_requires_the_parameter_to_be_named() {
+        use reqwest::StatusCode;
+
+        assert_eq!(
+            unsupported_parameter(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"message":"Unsupported parameter: 'tools'"}}"#
+            ),
+            Some("tools")
+        );
+        assert_eq!(
+            unsupported_parameter(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"message":"model does not support function calling"}}"#
+            ),
+            Some("tools")
+        );
+        assert_eq!(
+            unsupported_parameter(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"message":"stream_options is not supported"}}"#
+            ),
+            Some("stream_options")
+        );
+
+        // 无关的 400 不能触发降级
+        assert_eq!(
+            unsupported_parameter(
+                StatusCode::BAD_REQUEST,
+                r#"{"error":{"message":"context length exceeded"}}"#
+            ),
+            None
+        );
+        // 5xx 交给普通重试逻辑处理
+        assert_eq!(
+            unsupported_parameter(StatusCode::INTERNAL_SERVER_ERROR, "tools exploded"),
+            None
+        );
+    }
+
+    #[test]
+    fn stripping_tools_also_removes_tool_choice() {
+        let mut cfg = config("openai", "gpt-4o", None);
+        cfg.tool_call_mode = "native_tools".to_string();
+        let mut body = build_chat_request(&cfg, Vec::new(), true, &[], true);
+        assert!(body.get("tools").is_some());
+        assert!(body.get("tool_choice").is_some());
+
+        assert!(strip_parameter(&mut body, "tools"));
+        assert!(body.get("tools").is_none());
+        // 留着 tool_choice 必然被再拒一次
+        assert!(body.get("tool_choice").is_none());
+        // 已经摘干净了，再摘一次要返回 false，否则重试循环会空转
+        assert!(!strip_parameter(&mut body, "tools"));
+
+        // 记住降级结果后，后续请求根本不再附带 tools
+        let degraded = build_chat_request(&cfg, Vec::new(), true, &[], false);
+        assert!(degraded.get("tools").is_none());
+        assert!(degraded.get("tool_choice").is_none());
+    }
+
     #[test]
     fn chat_request_includes_native_tools_when_enabled() {
         let mut cfg = config("openai", "gpt-4o", Some(1024));
         cfg.tool_call_mode = "native_tools".to_string();
 
-        let body = build_chat_request(&cfg, Vec::new(), true, &[]);
+        let body = build_chat_request(&cfg, Vec::new(), true, &[], true);
 
         assert_eq!(body["tool_choice"], "auto");
         assert!(body["tools"]
@@ -1774,7 +1932,7 @@ mod tests {
             },
         ];
 
-        let body = build_chat_request(&cfg, Vec::new(), true, &extra);
+        let body = build_chat_request(&cfg, Vec::new(), true, &extra, true);
         let tools = body["tools"].as_array().expect("tools array");
 
         assert_eq!(tools.len(), 4);
@@ -1801,7 +1959,7 @@ mod tests {
             ChatMessage::tool_result("call_1", "hello"),
         ];
 
-        let body = build_chat_request(&config("openai", "gpt-4o", None), messages, true, &[]);
+        let body = build_chat_request(&config("openai", "gpt-4o", None), messages, true, &[], true);
         let serialized = body["messages"].as_array().expect("messages array");
 
         assert!(serialized[0].get("tool_calls").is_none());
@@ -1820,7 +1978,7 @@ mod tests {
     #[test]
     fn deepseek_v4_flash_uses_non_streaming_requests() {
         let cfg = config("deepseek", "deepseek-v4-flash", Some(64));
-        let body = build_chat_request(&cfg, Vec::new(), false, &[]);
+        let body = build_chat_request(&cfg, Vec::new(), false, &[], true);
 
         assert!(prefers_non_streaming(&cfg));
         assert_eq!(body["stream"], false);
