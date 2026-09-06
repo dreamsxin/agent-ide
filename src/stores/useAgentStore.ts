@@ -123,6 +123,8 @@ interface AgentStore {
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
   applyAllDiffs: () => Promise<DiffEntry[]>;
+  /** 撤销最近一次应用，把文件恢复到那次应用之前；返回是否全部恢复成功 */
+  undoLastApply: () => Promise<boolean>;
   applyDiff: (diffId: string) => Promise<DiffEntry[]>;
   applyDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry[]>;
   clearApplyResult: () => void;
@@ -593,6 +595,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch (err: unknown) {
       console.warn("[AgentStore] apply_diffs failed:", err);
       return [];
+    }
+  },
+
+  undoLastApply: async () => {
+    try {
+      if (!isTauriRuntime()) return false;
+      const result = await invoke<{ label: string; restored: string[]; failed: string[] }>(
+        "undo_last_apply",
+      );
+      // 后端会重发 agent-diff-ready，diff 列表由事件刷新；这里只负责反馈
+      set({
+        error:
+          result.failed.length > 0
+            ? `Undo restored ${result.restored.length} file(s); ${result.failed.length} could not be restored.`
+            : null,
+      });
+      return result.failed.length === 0;
+    } catch (err: unknown) {
+      // "没有可撤销的操作"也走这里，作为提示展示出来是合理反馈
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return false;
     }
   },
 

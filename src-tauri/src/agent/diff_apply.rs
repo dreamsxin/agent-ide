@@ -174,9 +174,30 @@ pub fn restamp_applied_files(diffs: &mut [FileDiff], applied: &[FileDiff]) {
     }
 }
 
+/// 一个文件在被写入之前的内容。
+///
+/// `previous` 为 None 表示这个文件当时并不存在，撤销就意味着把它删掉。
+#[derive(Clone, Debug)]
+pub struct FileSnapshot {
+    pub file: String,
+    pub path: PathBuf,
+    pub previous: Option<String>,
+}
+
 pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
+    apply_pending_diffs_with_snapshots(diffs).0
+}
+
+/// 应用 diff，并返回写入前的文件内容快照供撤销使用。
+///
+/// 快照不进 `ApplyDiffsResult`：那个结构要跨 IPC 回前端，把整份文件内容塞进去
+/// 等于每次应用都往 webview 传一遍源码。撤销栈留在后端。
+pub fn apply_pending_diffs_with_snapshots(
+    diffs: &[FileDiff],
+) -> (ApplyDiffsResult, Vec<FileSnapshot>) {
     let mut applied: Vec<FileDiff> = Vec::new();
     let mut failed: Vec<ApplyDiffError> = Vec::new();
+    let mut snapshots: Vec<FileSnapshot> = Vec::new();
     // 本批次内已写过的文件：它们的内容变化来自我们自己，不该再按 baseHash 判 stale
     let mut written: HashSet<PathBuf> = HashSet::new();
 
@@ -198,9 +219,21 @@ pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
             }
         };
 
-        let skip_base_hash = written.contains(&file_path);
+        // 写之前先取一份原文。同一批次里同一个文件可能被写多次，只留第一次的
+        // 快照 —— 撤销要回到"这一批开始之前"，不是回到上一个 hunk 之前。
+        let previous = std::fs::read_to_string(&file_path).ok();
+        let already_snapshotted = written.contains(&file_path);
+
+        let skip_base_hash = already_snapshotted;
         match apply_diff_to_path_inner(&file_path, diff, skip_base_hash) {
             Ok(true) => {
+                if !already_snapshotted {
+                    snapshots.push(FileSnapshot {
+                        file: diff.file.clone(),
+                        path: file_path.clone(),
+                        previous,
+                    });
+                }
                 written.insert(file_path);
                 applied.push(diff.clone());
             }
@@ -213,7 +246,33 @@ pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
         }
     }
 
-    ApplyDiffsResult { applied, failed }
+    (ApplyDiffsResult { applied, failed }, snapshots)
+}
+
+/// 把快照写回磁盘，返回实际恢复的文件名。
+///
+/// 原本不存在的文件会被删除。单个文件恢复失败不影响其它文件：撤销一半也比
+/// 完全不撤销好，失败的部分照实回报。
+pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> (Vec<String>, Vec<String>) {
+    let mut restored = Vec::new();
+    let mut failed = Vec::new();
+    for snapshot in snapshots {
+        let outcome = match snapshot.previous {
+            Some(ref content) => std::fs::write(&snapshot.path, content)
+                .map_err(|error| format!("{}: {}", snapshot.file, error)),
+            None => match std::fs::remove_file(&snapshot.path) {
+                Ok(()) => Ok(()),
+                // 已经不在了就算撤销成功，不必报错
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(format!("{}: {}", snapshot.file, error)),
+            },
+        };
+        match outcome {
+            Ok(()) => restored.push(snapshot.file.clone()),
+            Err(message) => failed.push(message),
+        }
+    }
+    (restored, failed)
 }
 
 fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, String> {

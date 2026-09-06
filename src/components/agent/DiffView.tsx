@@ -186,6 +186,7 @@ export default function DiffView() {
   const applyDiff = useAgentStore((s) => s.applyDiff);
   const applyDiffHunk = useAgentStore((s) => s.applyDiffHunk);
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
+  const undoLastApply = useAgentStore((s) => s.undoLastApply);
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
   const rejectDiffHunk = useAgentStore((s) => s.rejectDiffHunk);
   const regenerateDiff = useAgentStore((s) => s.regenerateDiff);
@@ -207,6 +208,11 @@ export default function DiffView() {
   const handleRejectAll = useCallback(async () => {
     await rejectAllDiffs();
   }, [rejectAllDiffs]);
+
+  // 应用之后此前没有退路：只能靠用户自己 git 回滚
+  const handleUndoLastApply = useCallback(async () => {
+    await undoLastApply();
+  }, [undoLastApply]);
 
   const handleApplyDiff = useCallback(
     async (diffId: string) => {
@@ -280,6 +286,13 @@ export default function DiffView() {
             className="flex-1 rounded border border-diff-remove/40 bg-diff-remove/20 px-2 py-1 text-xs text-diff-remove transition-colors hover:bg-diff-remove/30"
           >
             Reject All
+          </button>
+          <button
+            onClick={handleUndoLastApply}
+            title="Restore files to their state before the most recent apply"
+            className="rounded border border-surface-border bg-surface-border/20 px-2 py-1 text-xs text-surface-muted transition-colors hover:bg-surface-border/40"
+          >
+            Undo Apply
           </button>
         </div>
       )}
