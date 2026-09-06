@@ -92,6 +92,7 @@ The Agent has three built-in read-only tools — `workspace_read_file`, `workspa
 - Traversal skips `.git`, `node_modules`, `target`, `dist`, `build`, `.agent-ide`.
 - Output is capped (64 KB per file read, 60 search hits, 200 directory entries).
 - They cannot write, delete, move, or execute anything.
+- Every call is written to the action log as a `workspace_tool_call` entry, so what the Agent read is auditable.
 
 They are advertised when the profile's `toolCallMode` is `native_tools`, which is the default for cloud profiles. If the endpoint rejects a `tools` parameter the client drops it, retries once, and writes a `tool_capability_degraded` warning to the action log — so a run without tools is visible rather than silent. The tool loop is bounded at 12 rounds per stage, with the per-run token cap as the real cost limit.
 

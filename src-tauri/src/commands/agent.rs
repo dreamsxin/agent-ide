@@ -266,8 +266,11 @@ pub async fn send_agent_prompt(
     )
     .await;
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
-    let (llm, tool_invoker) =
-        crate::agent::workspace_tools::attach_workspace_tools(llm, tool_invoker);
+    let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        tool_invoker,
+        Some(workspace_tool_logger(&app_handle)),
+    );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
     let mut context = build_agent_context(
@@ -346,6 +349,29 @@ pub async fn send_agent_prompt(
     }
 
     Ok("Agent task completed".to_string())
+}
+
+/// 内置工作区工具的 action log 回调。
+///
+/// 发事件的责任留在命令层：agent 层直接持有 `AppHandle` 会把 Tauri runtime
+/// 拖进 lib 测试二进制，整个测试套件会在加载阶段就起不来。
+fn workspace_tool_logger(app_handle: &AppHandle) -> crate::agent::workspace_tools::ToolCallLogger {
+    let app = app_handle.clone();
+    std::sync::Arc::new(move |level: &str, summary: &str, details: &str| {
+        let entry = crate::agent::orchestrator::ActionLogEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: level.to_string(),
+            phase: "workspace_tool_call".to_string(),
+            role: None,
+            stage: Some("Tool Call".to_string()),
+            summary: summary.to_string(),
+            details: details.to_string(),
+            context_summary: None,
+            diff_summary: None,
+        };
+        let _ = app.emit("agent-action-log", entry);
+    })
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -528,8 +554,11 @@ pub async fn run_agent_step(
     )
     .await;
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
-    let (llm, tool_invoker) =
-        crate::agent::workspace_tools::attach_workspace_tools(llm, tool_invoker);
+    let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        tool_invoker,
+        Some(workspace_tool_logger(&app_handle)),
+    );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
     let mut context = build_agent_context(
         request.active_file,
@@ -697,7 +726,11 @@ pub async fn continue_agent_pipeline(
 ) -> Result<String, String> {
     let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
     // 续跑同样要带上内置工作区工具，否则恢复后的 stage 看不到这些工具存在
-    let (llm, _) = crate::agent::workspace_tools::attach_workspace_tools(llm, None);
+    let (llm, _) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        None,
+        Some(workspace_tool_logger(&app_handle)),
+    );
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
