@@ -78,7 +78,7 @@ Implementation details:
 Known limitations:
 
 - **A plaintext key can persist on disk.** `skip_serializing` prevents *writing* one, but not reading one. A legacy or hand-edited `config.json` containing `api_key` is read on load, and `migrate_profile_credentials` then tries to move it into the keyring. If that store operation fails the file is deliberately left unrewritten so the key is not lost — meaning the plaintext stays on disk and is preferred over the keyring entry in memory. There is no file-permission hardening on `~/.agent-ide`.
-- **MCP tool arguments are logged unredacted.** Tool calls are written to the action log and emitted as events (truncated to 2000 chars) with no redaction filter. A secret passed as a tool argument lands in the log.
+- **MCP tool arguments are logged with secret-looking keys redacted.** Values under keys containing `token`, `secret`, `password`, `passwd`, `apikey`, `api_key`, `authorization`, or `credential` are replaced with `[redacted]` before the argument JSON reaches the action log; arguments that are not valid JSON are not logged verbatim at all. Redaction keys on the field *name*, so a secret passed under an innocuous key is still logged.
 - `reveal_llm_api_key` has no confirmation prompt, rate limit, or audit entry.
 - Git HTTPS credentials are passed as plaintext over IPC by design, and persisted (when the user opts in) as `"{user}\n{pass}"` in the OS store. `GIT_USERNAME` / `GIT_PASSWORD` are accepted as an environment fallback.
 - macOS Keychain and Linux Secret Service backends are enabled but have not been runtime-validated. Windows Credential Manager has been verified end to end, including across an app restart.
@@ -251,7 +251,7 @@ Ordered by how much they would matter to an operator. Each was confirmed by read
 2. **A plaintext API key can persist in `~/.agent-ide/config.json`** if keyring migration ever fails, and it is then preferred over the keyring entry. No file-permission hardening.
 3. **Repository-wide Git write operations escape the workspace boundary** when the workspace root is a subdirectory of a larger repository, because `Repository::discover` walks upward. Affects `checkout_head` and `git_commit` with no file list. The git-diff context section is now pathspec-scoped and no longer affected.
 4. **Workspace-local language server binaries are executed in preference to `PATH`**, so opening an untrusted repository runs code it supplies.
-5. **MCP tool arguments are logged and emitted unredacted.**
+5. **MCP argument redaction keys on field names**, so a secret passed under a key that does not look secret is still written to the action log. Tool *results* are logged without redaction.
 6. **Broad `fs:allow-read` / `fs:allow-write` / `fs:allow-mkdir`** remain in `capabilities/default.json`. The unscoped `shell:allow-spawn` and `shell:allow-execute` have been removed — no first-party frontend code imports `plugin-shell`, so they were pure attack surface. `shell:allow-open` is retained for opening external links.
 7. **`run_project_command` passes the command string to `cmd /C` or `sh -lc`** with no allow-list and no escaping. It is user-initiated in the GUI, but the CLI runs commands from the workspace's own `package.json` scripts autonomously.
 8. **Recursive traversal follows symlinks.** `search_recursive` and `copy_dir_recursive` re-check nothing per entry.

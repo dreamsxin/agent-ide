@@ -85,7 +85,10 @@ impl ToolInvoker for McpToolInvoker {
         self.log(
             "info",
             &format!("Calling MCP tool {}", tool_name),
-            &format!("Arguments:\n{}", truncate(arguments, 2000)),
+            &format!(
+                "Arguments:\n{}",
+                truncate(&redact_arguments(arguments), 2000)
+            ),
         );
         match self.registry.call(tool_name, arguments, self.policy).await {
             Ok(result) => {
@@ -101,6 +104,52 @@ impl ToolInvoker for McpToolInvoker {
                 Err(error)
             }
         }
+    }
+}
+
+/// 遮蔽工具参数里疑似机密的字段值，再写进 action log。
+///
+/// 按**键名**判断而不是按值的形态：值形态匹配（比如"看起来像 token 的长字符串"）
+/// 既会漏掉短密钥，也会把正常的 hash、id 一起打码。参数不是合法 JSON 时整体
+/// 打码 —— 宁可少一条日志，也不要把一段没解析过的文本原样落到日志里。
+fn redact_arguments(arguments: &str) -> String {
+    const SECRET_KEY_HINTS: [&str; 8] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "api_key",
+        "authorization",
+        "credential",
+    ];
+
+    fn redact(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, entry) in map.iter_mut() {
+                    let normalized = key.to_lowercase().replace(['-', ' '], "_");
+                    let looks_secret = SECRET_KEY_HINTS.iter().any(|hint| {
+                        normalized.contains(hint) || normalized.replace('_', "") == *hint
+                    });
+                    if looks_secret && !entry.is_object() && !entry.is_array() {
+                        *entry = serde_json::Value::String("[redacted]".to_string());
+                    } else {
+                        redact(entry);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(redact),
+            _ => {}
+        }
+    }
+
+    match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(mut parsed) => {
+            redact(&mut parsed);
+            serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| "[redacted]".to_string())
+        }
+        Err(_) => "[unparsable arguments redacted]".to_string(),
     }
 }
 
@@ -207,7 +256,29 @@ pub async fn disconnect_mcp_servers(mcp_state: State<'_, McpState>) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
+    use super::{redact_arguments, truncate};
+
+    /// MCP 工具参数会进 action log。模型把密钥当参数传进来时，日志不能原样留存。
+    #[test]
+    fn secret_looking_argument_keys_are_redacted() {
+        let logged = redact_arguments(
+            r#"{"path":"src/app.ts","apiKey":"sk-live-deadbeef","nested":{"Auth-Token":"t0k3n","count":3}}"#,
+        );
+
+        assert!(!logged.contains("sk-live-deadbeef"), "{}", logged);
+        assert!(!logged.contains("t0k3n"), "{}", logged);
+        // 非机密字段照常保留，否则日志失去排查价值
+        assert!(logged.contains("src/app.ts"));
+        assert!(logged.contains("\"count\": 3"));
+    }
+
+    #[test]
+    fn unparsable_arguments_are_not_logged_verbatim() {
+        let logged = redact_arguments("apiKey=sk-live-deadbeef");
+
+        assert!(!logged.contains("sk-live-deadbeef"));
+        assert!(logged.contains("redacted"));
+    }
 
     #[test]
     fn truncate_keeps_short_values_untouched() {
