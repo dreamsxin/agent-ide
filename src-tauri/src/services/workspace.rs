@@ -122,10 +122,6 @@ pub fn resolve_for_agent_write(path: &str) -> Result<PathBuf, String> {
 fn agent_write_denial(path: &Path) -> Option<String> {
     /// 目录名：出现在路径任意一层都拒绝（子模块的 `.git`、嵌套的 node_modules）
     const DENIED_DIRS: [&str; 3] = [".git", ".agent-ide", "node_modules"];
-    /// 文件名整体匹配
-    const DENIED_FILES: [&str; 5] = [".env", ".npmrc", ".netrc", "id_rsa", "id_ed25519"];
-    /// 扩展名匹配
-    const DENIED_EXTENSIONS: [&str; 4] = ["pem", "key", "p12", "pfx"];
 
     // 大小写不敏感比较：Windows 上 `.GIT/hooks/pre-commit` 指向同一个文件
     let components: Vec<String> = path
@@ -151,22 +147,44 @@ fn agent_write_denial(path: &Path) -> Option<String> {
     }
 
     // `.env` 本身以及 `.env.local` / `.env.production` 这类变体
-    if DENIED_FILES.contains(&file_name.as_str()) || file_name.starts_with(".env.") {
+    if is_credential_file_name(file_name) {
         return Some(format!(
             "Agent writes to credential file {} are not allowed",
             file_name
         ));
     }
-    if let Some((_, extension)) = file_name.rsplit_once('.') {
-        if DENIED_EXTENSIONS.contains(&extension) {
-            return Some(format!(
-                "Agent writes to credential file {} are not allowed",
-                file_name
-            ));
-        }
-    }
 
     None
+}
+
+/// 凭据类文件名（传入的必须已小写）
+fn is_credential_file_name(file_name: &str) -> bool {
+    /// 文件名整体匹配
+    const DENIED_FILES: [&str; 5] = [".env", ".npmrc", ".netrc", "id_rsa", "id_ed25519"];
+    /// 扩展名匹配
+    const DENIED_EXTENSIONS: [&str; 4] = ["pem", "key", "p12", "pfx"];
+
+    if DENIED_FILES.contains(&file_name) || file_name.starts_with(".env.") {
+        return true;
+    }
+    file_name
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| DENIED_EXTENSIONS.contains(&extension))
+}
+
+/// 这个路径是否是凭据类文件，因而不该被送进发给模型的上下文。
+///
+/// 和写入拒绝清单共用同一份文件名规则，但刻意不含 `.git` / `node_modules`：
+/// 那两个是完整性和噪音问题，不是外泄问题。这里只接受路径字符串（可以是
+/// 相对路径或纯文件名），因为上下文里的条目不一定落在磁盘上。
+pub fn is_credential_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let file_name = normalized
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(&normalized)
+        .to_lowercase();
+    is_credential_file_name(&file_name)
 }
 
 pub fn ensure_within_workspace(path: &Path) -> Result<(), String> {
@@ -388,6 +406,38 @@ mod tests {
         // 目录名叫 env、文件名含 key 都不该误伤
         assert!(resolve_for_agent_write("src/keyboard.ts").is_ok());
         assert!(resolve_for_agent_write("src/environment.ts").is_ok());
+    }
+
+    /// 出网方向复用同一份凭据文件规则，但不含 `.git` / `node_modules`：
+    /// 后两者是完整性和噪音问题，不是泄漏问题。
+    #[test]
+    fn credential_paths_are_recognized_for_context_exclusion() {
+        for path in [
+            ".env",
+            ".env.production",
+            "config/.ENV.local",
+            "keys/id_rsa",
+            "certs/server.pem",
+            "a\\b\\api.key",
+            ".npmrc",
+        ] {
+            assert!(is_credential_path(path), "{} should be credential", path);
+        }
+
+        for path in [
+            "src/env/loader.ts",
+            "src/keyboard.ts",
+            "src/environment.ts",
+            ".git/config",
+            "node_modules/pkg/index.js",
+            "README.md",
+        ] {
+            assert!(
+                !is_credential_path(path),
+                "{} should not be credential",
+                path
+            );
+        }
     }
 
     #[test]

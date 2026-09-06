@@ -223,37 +223,50 @@ impl AgentContext {
                 content: format!("Active file: {}\n", file),
             });
         }
-        if let Some(ref selection) = self.selection {
-            sections.push(ContextSection {
-                id: "selection",
-                label: "Selection",
-                content: format!("Selected code:\n```\n{}\n```\n", selection),
-            });
+        // 打开的是凭据文件时，正文和选区都不能进上下文。写入侧的拒绝清单只管
+        // 落盘，没有对应的出网约束 —— 而把 .env 全文发给供应商是不可撤销的泄漏。
+        // 只挡这两段：目录树、打开文件列表、git diff 仍然照常提供。
+        let active_file_is_credential = self
+            .active_file
+            .as_deref()
+            .is_some_and(crate::services::workspace::is_credential_path);
+        if !active_file_is_credential {
+            if let Some(ref selection) = self.selection {
+                sections.push(ContextSection {
+                    id: "selection",
+                    label: "Selection",
+                    content: format!("Selected code:\n```\n{}\n```\n", selection),
+                });
+            }
         }
         if let Some(ref content) = self.active_file_content {
-            let section_content = match mode {
-                ContextCompressionMode::Full => {
-                    format!("Current file content:\n```\n{}\n```\n", content)
-                }
-                ContextCompressionMode::Budgeted => {
-                    format!(
-                        "Current file budgeted content:\n```\n{}\n```\n",
-                        excerpt_text(content, 24_000)
-                    )
-                }
-                ContextCompressionMode::Focused => {
-                    format!(
-                        "Current file excerpt:\n```\n{}\n```\n",
-                        excerpt_text(content, 16_000)
-                    )
-                }
-                ContextCompressionMode::Compact => {
-                    format!(
-                        "Current file summary: {} bytes, {} lines.\nCurrent file outline:\n```\n{}\n```\n",
-                        content.len(),
-                        content.lines().count(),
-                        outline_text(content, 80)
-                    )
+            let section_content = if active_file_is_credential {
+                "Current file content withheld: the active file looks like a credential file, so its contents are not sent to the model.\n".to_string()
+            } else {
+                match mode {
+                    ContextCompressionMode::Full => {
+                        format!("Current file content:\n```\n{}\n```\n", content)
+                    }
+                    ContextCompressionMode::Budgeted => {
+                        format!(
+                            "Current file budgeted content:\n```\n{}\n```\n",
+                            excerpt_text(content, 24_000)
+                        )
+                    }
+                    ContextCompressionMode::Focused => {
+                        format!(
+                            "Current file excerpt:\n```\n{}\n```\n",
+                            excerpt_text(content, 16_000)
+                        )
+                    }
+                    ContextCompressionMode::Compact => {
+                        format!(
+                            "Current file summary: {} bytes, {} lines.\nCurrent file outline:\n```\n{}\n```\n",
+                            content.len(),
+                            content.lines().count(),
+                            outline_text(content, 80)
+                        )
+                    }
                 }
             };
             sections.push(ContextSection {
@@ -410,9 +423,25 @@ pub fn build_git_diff_summary(max_chars: usize) -> Result<String, String> {
         .map_err(|e| format!("Diff: {}", e))?;
 
     let mut output = String::new();
-    diff.print(git2::DiffFormat::Patch, |_, _, line| {
+    let mut withheld: Vec<String> = Vec::new();
+    diff.print(git2::DiffFormat::Patch, |delta, _, line| {
         if output.len() >= max_chars {
             return false;
+        }
+        // 改动过的 .env / 私钥，其内容会整段出现在 patch 里。写入侧挡住了 Agent
+        // 改这些文件，但 diff 是出网方向，必须单独挡一次。
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .map(|path| path.to_string_lossy().to_string());
+        if let Some(path) = path {
+            if crate::services::workspace::is_credential_path(&path) {
+                if !withheld.contains(&path) {
+                    withheld.push(path);
+                }
+                return true;
+            }
         }
         let origin = match line.origin() {
             '+' => '+',
@@ -428,6 +457,12 @@ pub fn build_git_diff_summary(max_chars: usize) -> Result<String, String> {
 
     if output.len() >= max_chars {
         output.push_str("\n/* ... git diff truncated ... */\n");
+    }
+    if !withheld.is_empty() {
+        output.push_str(&format!(
+            "\n/* diff withheld for credential files: {} */\n",
+            withheld.join(", ")
+        ));
     }
     Ok(output)
 }
@@ -580,6 +615,31 @@ mod tests {
             project_tree: None,
             project_memory: None,
         }
+    }
+
+    /// 写入侧的拒绝清单只管落盘，没有出网方向的对应约束：打开 `.env` 时
+    /// 它的全文会被送给供应商，而这种泄漏是不可撤销的。
+    #[test]
+    fn credential_files_are_withheld_from_the_prompt() {
+        let ctx = AgentContext {
+            active_file: Some(".env.production".to_string()),
+            active_file_content: Some("STRIPE_SECRET_KEY=sk_live_deadbeef".to_string()),
+            selection: Some("sk_live_deadbeef".to_string()),
+            ..sample_context("unused")
+        };
+
+        let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+
+        assert!(!prompt.contains("sk_live_deadbeef"), "{}", prompt);
+        assert!(prompt.contains("withheld"));
+        // 路径本身仍然告知模型，只是内容不发
+        assert!(prompt.contains(".env.production"));
+
+        // 普通源码文件不受影响
+        let normal = sample_context("const a = 1;");
+        let prompt = normal.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+        assert!(prompt.contains("const a = 1;"));
+        assert!(prompt.contains("const selected = true;"));
     }
 
     #[test]
