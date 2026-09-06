@@ -265,6 +265,9 @@ pub async fn send_agent_prompt(
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref()),
     )
     .await;
+    // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
+    let (llm, tool_invoker) =
+        crate::agent::workspace_tools::attach_workspace_tools(llm, tool_invoker);
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
     let mut context = build_agent_context(
@@ -500,6 +503,9 @@ pub async fn run_agent_step(
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref()),
     )
     .await;
+    // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
+    let (llm, tool_invoker) =
+        crate::agent::workspace_tools::attach_workspace_tools(llm, tool_invoker);
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
     let mut context = build_agent_context(
         request.active_file,
@@ -665,6 +671,8 @@ pub async fn continue_agent_pipeline(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<String, String> {
     let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
+    // 续跑同样要带上内置工作区工具，否则恢复后的 stage 看不到这些工具存在
+    let (llm, _) = crate::agent::workspace_tools::attach_workspace_tools(llm, None);
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
