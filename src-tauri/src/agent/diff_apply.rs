@@ -185,7 +185,8 @@ pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
             continue;
         }
 
-        let file_path = match workspace::resolve_for_write(&diff.file) {
+        // Agent 产出的写入要额外过一遍路径拒绝清单（.git/、凭据文件等）
+        let file_path = match workspace::resolve_for_agent_write(&diff.file) {
             Ok(path) => path,
             Err(err) => {
                 failed.push(ApplyDiffError {

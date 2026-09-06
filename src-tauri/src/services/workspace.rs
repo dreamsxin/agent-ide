@@ -95,6 +95,80 @@ pub fn resolve_for_write(path: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Agent 生成的写入：先过工作区边界，再过拒绝清单。
+///
+/// `resolve_for_write` 只保证"在工作区内"，但工作区内本身就有几类"写进去等于
+/// 拿到执行权或碰到密钥"的路径：
+/// - `.git/`：写 `.git/hooks/pre-commit` 等于在下一次 commit 时获得任意代码执行，
+///   写 `.git/config` 可以改 remote 或插入 `core.fsmonitor`。
+/// - 凭据文件（`.env*`、`*.pem`、`id_rsa` 等）：改写它们造成的泄漏或覆盖不可逆。
+/// - `.agent-ide/`、`node_modules/`：工具自身的状态和依赖树，不是源码。
+///
+/// 用户在文件浏览器里手动编辑这些文件仍然允许 —— 这条规则只约束 Agent 产出的
+/// diff，所以它是独立函数，而不是塞进 `resolve_for_write`。
+pub fn resolve_for_agent_write(path: &str) -> Result<PathBuf, String> {
+    let resolved = resolve_for_write(path)?;
+    // 只检查工作区内部的相对路径：工作区自己可能就放在
+    // `D:\work\node_modules\demo` 这种目录下，用绝对路径判断会把一切都拒掉
+    let root = workspace_root()?;
+    let relative = resolved.strip_prefix(&root).unwrap_or(&resolved);
+    if let Some(reason) = agent_write_denial(relative) {
+        return Err(reason);
+    }
+    Ok(resolved)
+}
+
+/// 命中拒绝清单时返回具体原因，否则返回 None
+fn agent_write_denial(path: &Path) -> Option<String> {
+    /// 目录名：出现在路径任意一层都拒绝（子模块的 `.git`、嵌套的 node_modules）
+    const DENIED_DIRS: [&str; 3] = [".git", ".agent-ide", "node_modules"];
+    /// 文件名整体匹配
+    const DENIED_FILES: [&str; 5] = [".env", ".npmrc", ".netrc", "id_rsa", "id_ed25519"];
+    /// 扩展名匹配
+    const DENIED_EXTENSIONS: [&str; 4] = ["pem", "key", "p12", "pfx"];
+
+    // 大小写不敏感比较：Windows 上 `.GIT/hooks/pre-commit` 指向同一个文件
+    let components: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect();
+
+    let (file_name, dirs) = components.split_last()?;
+
+    if let Some(dir) = dirs.iter().find(|dir| DENIED_DIRS.contains(&dir.as_str())) {
+        return Some(format!(
+            "Agent writes into {}/ are not allowed: {}",
+            dir,
+            path.display()
+        ));
+    }
+    if DENIED_DIRS.contains(&file_name.as_str()) {
+        return Some(format!(
+            "Agent writes into {}/ are not allowed: {}",
+            file_name,
+            path.display()
+        ));
+    }
+
+    // `.env` 本身以及 `.env.local` / `.env.production` 这类变体
+    if DENIED_FILES.contains(&file_name.as_str()) || file_name.starts_with(".env.") {
+        return Some(format!(
+            "Agent writes to credential file {} are not allowed",
+            file_name
+        ));
+    }
+    if let Some((_, extension)) = file_name.rsplit_once('.') {
+        if DENIED_EXTENSIONS.contains(&extension) {
+            return Some(format!(
+                "Agent writes to credential file {} are not allowed",
+                file_name
+            ));
+        }
+    }
+
+    None
+}
+
 pub fn ensure_within_workspace(path: &Path) -> Result<(), String> {
     let root = workspace_root()?;
     let normalized_path = shell_compatible_path(path.to_path_buf());
@@ -266,6 +340,54 @@ mod tests {
         let err = resolve_for_write(outside.to_string_lossy().as_ref()).unwrap_err();
 
         assert!(err.contains("outside workspace"));
+    }
+
+    /// 写 `.git/hooks/pre-commit` 等于在下一次 commit 时拿到任意代码执行，
+    /// 而 `resolve_for_write` 只检查"在工作区内"，是允许的。
+    #[test]
+    fn agent_writes_into_dot_git_are_denied() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+        env.create_file(".git/hooks/pre-commit", "#!/bin/sh\n");
+
+        let err = resolve_for_agent_write(".git/hooks/pre-commit").unwrap_err();
+        assert!(err.contains(".git/"), "{}", err);
+
+        // 用户自己在文件浏览器里编辑仍然允许 —— 拒绝清单只约束 Agent
+        assert!(resolve_for_write(".git/hooks/pre-commit").is_ok());
+    }
+
+    #[test]
+    fn agent_writes_to_credential_files_are_denied() {
+        let _guard = env_test_guard();
+        let _env = TestEnv::new();
+
+        for path in [
+            ".env",
+            ".env.production",
+            "config/id_rsa",
+            "certs/server.pem",
+            "secrets/api.key",
+            "node_modules/pkg/index.js",
+            ".agent-ide/state.json",
+        ] {
+            let err = resolve_for_agent_write(path)
+                .expect_err(&format!("expected {} to be denied", path));
+            assert!(err.contains("not allowed"), "{}: {}", path, err);
+        }
+    }
+
+    #[test]
+    fn agent_writes_to_ordinary_source_files_are_allowed() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+
+        let resolved = resolve_for_agent_write("src/env/loader.ts").unwrap();
+
+        assert!(resolved.starts_with(&env.root));
+        // 目录名叫 env、文件名含 key 都不该误伤
+        assert!(resolve_for_agent_write("src/keyboard.ts").is_ok());
+        assert!(resolve_for_agent_write("src/environment.ts").is_ok());
     }
 
     #[test]
