@@ -1104,6 +1104,77 @@ impl AgentOrchestrator {
             .map(|diff| (diff.id.clone(), diff.file.clone()))
             .collect()
     }
+
+    /// 单步开始：把步骤登记为 doing，返回登记后的副本供命令层发事件
+    pub fn begin_step(&mut self, step: &TaskStep, log: &str) -> TaskStep {
+        self.record_step_status(step, "doing", log)
+    }
+
+    /// 更新（必要时插入）某个步骤的状态，返回登记后的副本
+    pub fn record_step_status(&mut self, step: &TaskStep, status: &str, log: &str) -> TaskStep {
+        let mut updated = step.clone();
+        updated.status = status.to_string();
+        updated.logs.push(log.to_string());
+        self.upsert_step(updated.clone());
+        updated
+    }
+
+    /// 单步成功：登记响应里的 diff 并收敛审查状态。
+    ///
+    /// 这里刻意用 `refresh_review_state` 而不是硬置 `WaitingUser`：一个只返回
+    /// 文字、没有产出 diff 的步骤以前也会把界面留在"需要处理"，而审查区里
+    /// 什么都没有，用户只能靠重跑脱身。
+    pub fn record_step_success(
+        &mut self,
+        step: &TaskStep,
+        response: &str,
+        regenerated_from_diff_id: Option<&str>,
+        regenerated_from_hunk_index: Option<usize>,
+    ) -> StepRunOutcome {
+        let mut step = step.clone();
+        step.status = "done".to_string();
+        step.logs.push(format!(
+            "Single step response: {}...",
+            response.chars().take(200).collect::<String>()
+        ));
+        self.upsert_step(step.clone());
+
+        let parsed = executor::parse_diffs_with_diagnostics(response);
+        let mut diffs = parsed.diffs;
+        crate::services::agent_runtime::attach_step_provenance(
+            &mut diffs,
+            &step,
+            regenerated_from_diff_id,
+            regenerated_from_hunk_index,
+        );
+        // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
+        crate::agent::diff_apply::stamp_base_hashes(&mut diffs);
+        let new_diffs = diffs.len();
+        self.diffs.extend(diffs);
+        self.refresh_review_state();
+
+        StepRunOutcome {
+            step,
+            new_diffs,
+            diagnostics: parsed.diagnostics,
+        }
+    }
+
+    fn upsert_step(&mut self, step: TaskStep) {
+        if let Some(existing) = self.steps.iter_mut().find(|item| item.id == step.id) {
+            *existing = step;
+        } else {
+            self.steps.push(step);
+        }
+    }
+}
+
+/// 单步执行的结果摘要，供命令层发事件和写 action log
+pub struct StepRunOutcome {
+    pub step: TaskStep,
+    /// 本次步骤新产出的 diff 数量（不含此前遗留的）
+    pub new_diffs: usize,
+    pub diagnostics: Vec<String>,
 }
 
 fn is_reviewable_diff_status(status: &str) -> bool {
@@ -1757,6 +1828,77 @@ mod tests {
         );
         assert!(orchestrator.diffs.iter().any(|diff| diff.id == a_id));
         assert!(orchestrator.diffs.iter().any(|diff| diff.id == b_id));
+    }
+
+    fn make_step(id: &str) -> TaskStep {
+        TaskStep {
+            id: id.to_string(),
+            title: format!("Step {}", id),
+            step_type: "code".to_string(),
+            status: "todo".to_string(),
+            logs: Vec::new(),
+            scope: None,
+            execution_mode: None,
+        }
+    }
+
+    /// 一个只返回文字、没有产出 diff 的步骤以前会把状态硬置成 WaitingUser，
+    /// 界面显示"需要处理"但审查区是空的，用户只能靠重跑脱身。
+    #[test]
+    fn a_step_without_diffs_does_not_park_the_ui_in_waiting_user() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+
+        let step = make_step("s1");
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.begin_step(&step, "started");
+        assert_eq!(orchestrator.steps[0].status, "doing");
+
+        let outcome =
+            orchestrator.record_step_success(&step, "s1 done, nothing to change.", None, None);
+
+        assert_eq!(outcome.new_diffs, 0);
+        assert_eq!(outcome.step.status, "done");
+        assert_eq!(orchestrator.steps.len(), 1, "步骤应被就地更新而不是追加");
+        assert_eq!(orchestrator.steps[0].status, "done");
+        assert_eq!(
+            orchestrator.state_mgr.state,
+            crate::agent::state_machine::AgentState::Done
+        );
+    }
+
+    #[test]
+    fn a_step_with_diffs_stamps_base_hashes_and_waits_for_review() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/app.ts", "const value = 1;\n");
+
+        let step = make_step("s1");
+        let mut orchestrator = AgentOrchestrator::new();
+        // 上一轮遗留的一个 diff：new_diffs 只应统计本次新增的
+        orchestrator
+            .diffs
+            .push(make_diff("old.ts", "const old = 1;", "const old = 2;"));
+
+        let response = "```diff:src/app.ts\n<<<<<<< ORIGINAL\nconst value = 1;\n=======\nconst value = 2;\n>>>>>>> UPDATED\n```";
+        let outcome = orchestrator.record_step_success(&step, response, None, None);
+
+        assert_eq!(outcome.new_diffs, 1);
+        assert_eq!(orchestrator.diffs.len(), 2);
+        // baseHash 必须在生成时盖章，否则 apply 时无法识别期间的外部改动
+        assert!(orchestrator.diffs[1].base_hash.is_some());
+        assert_eq!(
+            orchestrator.diffs[1]
+                .provenance
+                .as_ref()
+                .unwrap()
+                .source_stage,
+            Some("Step s1".to_string())
+        );
+        assert_eq!(
+            orchestrator.state_mgr.state,
+            crate::agent::state_machine::AgentState::WaitingUser
+        );
     }
 
     #[test]

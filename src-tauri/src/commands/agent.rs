@@ -445,7 +445,7 @@ pub async fn run_agent_step(
         compression.clone(),
         context_budget,
     ));
-    let mut step = request.step;
+    let step = request.step;
     let step_prompt =
         agent_runtime::format_single_step_prompt(&step, request.extra_prompt.as_deref());
 
@@ -462,21 +462,10 @@ pub async fn run_agent_step(
     {
         let mut orch = agent_state.orchestrator.lock().await;
         orch.begin_run(request.run_id.clone());
-        upsert_step_status(
-            &mut orch.steps,
-            &step,
-            "doing",
-            "Single step execution started",
-        );
+        let started = orch.begin_step(&step, "Single step execution started");
         let _ = app_handle.emit(
             "agent-step-update",
-            serde_json::to_value(
-                orch.steps
-                    .iter()
-                    .find(|item| item.id == step.id)
-                    .unwrap_or(&step),
-            )
-            .unwrap_or_default(),
+            serde_json::to_value(&started).unwrap_or_default(),
         );
         orch.emit_review_action_log(
             &app_handle,
@@ -504,42 +493,31 @@ pub async fn run_agent_step(
     let mut orch = agent_state.orchestrator.lock().await;
     match response {
         Ok(response) => {
-            step.status = "done".to_string();
-            step.logs.push(format!(
-                "Single step response: {}...",
-                response.chars().take(200).collect::<String>()
-            ));
-            upsert_step(&mut orch.steps, step.clone());
-
-            let parsed = crate::agent::executor::parse_diffs_with_diagnostics(&response);
-            let mut diffs = parsed.diffs;
-            agent_runtime::attach_step_provenance(
-                &mut diffs,
+            // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
+            let outcome = orch.record_step_success(
                 &step,
+                &response,
                 request.regenerated_from_diff_id.as_deref(),
                 request.regenerated_from_hunk_index,
             );
-            // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
-            crate::agent::diff_apply::stamp_base_hashes(&mut diffs);
-            orch.diffs.extend(diffs);
-            if !parsed.diagnostics.is_empty() {
+
+            if !outcome.diagnostics.is_empty() {
                 orch.emit_review_action_log(
                     &app_handle,
                     "warn",
                     "agent_changes_validation",
                     "Agent changes validation reported issues",
-                    &parsed.diagnostics.join("\n"),
+                    &outcome.diagnostics.join("\n"),
                 );
             }
             let _ = app_handle.emit(
                 "agent-step-update",
-                serde_json::to_value(&step).unwrap_or_default(),
+                serde_json::to_value(&outcome.step).unwrap_or_default(),
             );
             let _ = app_handle.emit(
                 "agent-diff-ready",
                 serde_json::to_value(&orch.diffs).unwrap_or_default(),
             );
-            orch.state_mgr.set(AgentState::WaitingUser);
             orch.finish_run();
             let _ = app_handle.emit(
                 "agent-state-changed",
@@ -555,28 +533,9 @@ pub async fn run_agent_step(
                 "success",
                 "plan_run_step",
                 &format!(
-                    "Step completed with {} pending diff{}",
-                    orch.diffs
-                        .iter()
-                        .filter(|diff| matches!(
-                            diff.status.as_str(),
-                            "pending" | "partial" | "failed"
-                        ))
-                        .count(),
-                    if orch
-                        .diffs
-                        .iter()
-                        .filter(|diff| matches!(
-                            diff.status.as_str(),
-                            "pending" | "partial" | "failed"
-                        ))
-                        .count()
-                        == 1
-                    {
-                        ""
-                    } else {
-                        "s"
-                    }
+                    "Step completed with {} new diff{}",
+                    outcome.new_diffs,
+                    if outcome.new_diffs == 1 { "" } else { "s" }
                 ),
                 &response,
             );
@@ -584,12 +543,7 @@ pub async fn run_agent_step(
         }
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
-            upsert_step_status(
-                &mut orch.steps,
-                &step,
-                "todo",
-                "Single step execution cancelled",
-            );
+            orch.record_step_status(&step, "todo", "Single step execution cancelled");
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
                 "agent-state-changed",
@@ -604,16 +558,10 @@ pub async fn run_agent_step(
         }
         Err(err) => {
             orch.finish_run();
-            upsert_step_status(&mut orch.steps, &step, "error", &format!("Error: {}", err));
+            let failed = orch.record_step_status(&step, "error", &format!("Error: {}", err));
             let _ = app_handle.emit(
                 "agent-step-update",
-                serde_json::to_value(
-                    orch.steps
-                        .iter()
-                        .find(|item| item.id == step.id)
-                        .unwrap_or(&step),
-                )
-                .unwrap_or_default(),
+                serde_json::to_value(&failed).unwrap_or_default(),
             );
             orch.state_mgr.set(AgentState::Error(err.clone()));
             let _ = app_handle.emit(
@@ -985,21 +933,6 @@ fn resolve_context_compression(
             .map_err(|e| e.to_string())
             .map(|mode| mode.clone()),
     }
-}
-
-fn upsert_step(steps: &mut Vec<TaskStep>, step: TaskStep) {
-    if let Some(existing) = steps.iter_mut().find(|item| item.id == step.id) {
-        *existing = step;
-    } else {
-        steps.push(step);
-    }
-}
-
-fn upsert_step_status(steps: &mut Vec<TaskStep>, step: &TaskStep, status: &str, log: &str) {
-    let mut updated = step.clone();
-    updated.status = status.to_string();
-    updated.logs.push(log.to_string());
-    upsert_step(steps, updated);
 }
 
 #[cfg(test)]
