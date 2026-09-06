@@ -52,9 +52,20 @@ impl AgentGlobalState {
         }
     }
 
-    /// Get a cloned LLM client.
-    pub fn get_llm_client(&self, profile_id: Option<&str>) -> Result<LlmClient, String> {
+    /// Get a cloned LLM client plus a fresh per-run usage meter.
+    ///
+    /// 每次取客户端都新建一个 meter，等价于"每次运行一个记账周期"。上限在
+    /// `send_chat_request` 里强制，所以只要客户端是从这里拿的，就一定被记账、
+    /// 也一定受上限约束。已知取舍：`continue_agent_pipeline` 恢复暂停的运行时
+    /// 会重新开始记账，续跑的部分不计入上一段的额度。
+    pub fn get_llm_client(
+        &self,
+        profile_id: Option<&str>,
+    ) -> Result<(LlmClient, Arc<crate::services::llm_client::RunUsageMeter>), String> {
         let config = self.get_llm_config(profile_id)?;
+        let meter = Arc::new(crate::services::llm_client::RunUsageMeter::new(
+            self.get_run_token_cap(profile_id),
+        ));
         if let Some(local) = config.local_model_config.clone() {
             let key = profile_id.unwrap_or("active").to_string();
             let engine = {
@@ -67,9 +78,22 @@ impl AgentGlobalState {
                     engine
                 }
             };
-            return Ok(LlmClient::new(config).with_local_engine(engine));
+            return Ok((
+                LlmClient::new(config)
+                    .with_local_engine(engine)
+                    .with_usage_meter(meter.clone()),
+                meter,
+            ));
         }
-        Ok(LlmClient::new(config))
+        Ok((
+            LlmClient::new(config).with_usage_meter(meter.clone()),
+            meter,
+        ))
+    }
+
+    pub fn get_run_token_cap(&self, profile_id: Option<&str>) -> Option<u64> {
+        let profiles = self.llm_profiles.lock().ok()?;
+        llm_profiles::run_token_cap(&profiles, profile_id)
     }
 
     pub fn get_llm_config(&self, profile_id: Option<&str>) -> Result<LlmConfig, String> {
@@ -233,7 +257,7 @@ pub async fn send_agent_prompt(
     agent_state: State<'_, AgentGlobalState>,
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
         &app_handle,
@@ -291,9 +315,11 @@ pub async fn send_agent_prompt(
     {
         Ok(()) => {
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
         }
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
                 "agent-state-changed",
@@ -309,11 +335,56 @@ pub async fn send_agent_prompt(
         }
         Err(err) => {
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             return Err(err);
         }
     }
 
     Ok("Agent task completed".to_string())
+}
+
+/// 把本次运行的 token 用量写进 action log。
+///
+/// 用量未知（供应商没回报）时明说 "not reported"，而不是打印 0 —— 后者会让人
+/// 以为这次运行是免费的。
+fn emit_usage_action_log(
+    orch: &AgentOrchestrator,
+    app_handle: &AppHandle,
+    meter: &crate::services::llm_client::RunUsageMeter,
+) {
+    let snapshot = meter.snapshot();
+    if snapshot.calls == 0 {
+        return;
+    }
+    let summary = if snapshot.usage_is_unknown() {
+        format!(
+            "Token usage not reported by provider across {} LLM call(s)",
+            snapshot.calls
+        )
+    } else {
+        format!(
+            "Run used {} tokens across {} LLM call(s)",
+            snapshot.total_tokens, snapshot.calls
+        )
+    };
+    let cap = match snapshot.max_total_tokens {
+        Some(cap) => format!("{}", cap),
+        None => "not set".to_string(),
+    };
+    orch.emit_review_action_log(
+        app_handle,
+        "info",
+        "run_token_usage",
+        &summary,
+        &format!(
+            "Prompt tokens: {}\nCompletion tokens: {}\nCalls with reported usage: {} of {}\nPer-run cap: {}",
+            snapshot.prompt_tokens,
+            snapshot.completion_tokens,
+            snapshot.reported_calls,
+            snapshot.calls,
+            cap
+        ),
+    );
 }
 
 /// Stop the current Agent task.
@@ -420,7 +491,7 @@ pub async fn run_agent_step(
     agent_state: State<'_, AgentGlobalState>,
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
         &app_handle,
@@ -519,6 +590,7 @@ pub async fn run_agent_step(
                 serde_json::to_value(&orch.diffs).unwrap_or_default(),
             );
             orch.finish_run();
+            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             let _ = app_handle.emit(
                 "agent-state-changed",
                 serde_json::json!({
@@ -590,7 +662,7 @@ pub async fn continue_agent_pipeline(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client(None)?;
+    let (llm, _usage_meter) = agent_state.get_llm_client(None)?;
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
@@ -1317,7 +1389,7 @@ pub async fn test_llm_connection(
     profile_id: Option<String>,
 ) -> Result<String, String> {
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
-    let llm = agent_state.get_llm_client(profile_id.as_deref())?;
+    let (llm, _usage_meter) = agent_state.get_llm_client(profile_id.as_deref())?;
 
     let messages = vec![crate::services::llm_client::ChatMessage::user("Hi")];
 
