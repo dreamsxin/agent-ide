@@ -978,7 +978,9 @@ pub async fn apply_diff(
     let result = orch.apply_diff(&diff_id)?;
     let failed = result.failed.clone();
 
-    orch.refresh_review_state();
+    // 审查区状态由 `orch.apply_diff` 自己刷新（`apply_diff_hunk` 同理）。这里
+    // 以前又调了一次：无害，但它暗示 orchestrator 不刷新，读的人会照抄到别的
+    // 命令里，或者反过来以为这个不变量是命令层维持的。
     let _ = app_handle.emit(
         "agent-state-changed",
         serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
