@@ -243,7 +243,25 @@ cargo test        # passes; includes context, workspace, diff apply, orchestrato
 
 2026-09-06 verification note: `cargo fmt --check`, `cargo clippy --no-default-features --all-targets -- -D warnings`, and `cargo test --no-default-features` all pass on Windows (200 tests, 0 failed, 1 ignored), including the AGENTS.md project-memory tests, the tool-call accumulator / synthesis tests, the MCP config/qualified-name/content-flattening, tool-policy and tool-loop selection tests, the base-hash stamping / batch-write / restamp tests with pinned FNV-1a vectors, the auto-apply file-creation gating tests, the per-hunk apply/reject review-flow tests extracted out of the IPC layer, and the CLI create-classification regression test. `npm ci`, `npm run build`, and `npm test` (32 tests) also pass. All five commands now run in CI on every push and PR. (The `llama-cpp` note that used to close this paragraph is obsolete as of 2026-09-07: the feature and the dependency are gone, and CI no longer passes `--no-default-features`.)
 
-2026-09-07 Retry was a dead button (`npx tsc --noEmit` + `npm run build` clean, `npm test` 39 passed).
+2026-09-07 credential storage: what the `sk-test` investigation actually established, and a design decision.
+
+Evidence gathered from the live machine: `~/.agent-ide/config.json` contains **no** plaintext `api_key`, its `credential_ref` field is **empty**, and its hash was byte-identical before and after every `cargo test` run today. Settings nevertheless displayed `Stored: sk-test`.
+
+**My first conclusion from that was wrong and is corrected here.** I read the empty `credential_ref` as "the backend cannot produce any key, so the display must be a stale frontend snapshot". But `credentials::llm_credential_ref` *derives* the reference from the profile id — `format!("llm-profile:{}", profile_id)` — it is not read from the config field. So an empty `credential_ref` says nothing about whether a keyring entry exists. Checking the config hash was verifying the wrong artefact entirely: the key never lived in that file.
+
+Leading explanation now: a keyring entry under service `agent-ide`, account `llm-profile:default`, holding the literal string `sk-test` — a value that appears only in test code. Until `04933ec` earlier today, tests used the **same** service name as production, so a test run overwriting a real credential is consistent with every observation, including the config hash never changing. Still not proven; the one unverified link is whether `llm_profiles` reads the derived ref or the stored field.
+
+**Design decision — the answer to "why not just put the key in `config.json`":** not moving to plaintext. The reason is specific to this product rather than generic security advice: this is an agent that reads the filesystem and ships context to a third-party LLM. `~/.agent-ide/config.json` is a fixed, well-known path, and the codebase already carries `is_credential_path` filtering precisely to keep files like `.env` out of prompts. Putting our own key in a fixed plaintext path creates a new target for our own context collector. On Windows that path also sits inside a directory commonly synced by OneDrive, and users routinely zip or commit config directories.
+
+The complexity complaint is nonetheless earned, because the damage today came from the keyring, not from a file. What is actually wrong is how the keyring is used, and that is what should be fixed:
+
+1. **Store the credential reference explicitly instead of deriving it.** Deriving it makes the `credential_ref` field decorative and lets the two representations disagree — which is what made this so hard to diagnose.
+2. **Surface which reference was read and whether the read succeeded.** `Stored:` currently shows a value with no provenance, so a wrong value is indistinguishable from a wrong lookup.
+3. **Remove the silent plaintext fallback.** SECURITY.md already records that a plaintext `api_key` can persist in `config.json` when keyring migration fails. That fallback voids the guarantee the keyring exists to provide, leaving the worst of both storage models. Failing loudly and asking the user to re-enter is better.
+
+If plaintext is genuinely acceptable on a given machine, the right shape is an explicit opt-in (an environment variable) plus a visible "stored in plaintext" indicator — the difference that matters is whether the user knows.
+
+ (`npx tsc --noEmit` + `npm run build` clean, `npm test` 39 passed).
 
 The user asked whether Retry should re-send the prompt that failed. Reading it found worse than a placement problem: `onClick={handleSend}` with `disabled={!input.trim()}`, and `handleSend` clears the input box on submit. So after a failed run the input is empty, the red Retry button is permanently disabled, and there is nothing to click. It also would have re-sent whatever the user happened to type next rather than the failed prompt.
 
