@@ -1022,11 +1022,17 @@ impl LlmClient {
         #[derive(Deserialize)]
         struct CompletionChoice {
             message: CompletionMessage,
+            /// 空响应最关键的一条线索：`length` 说明被输出上限截断了
+            #[serde(default)]
+            finish_reason: Option<String>,
         }
 
         #[derive(Deserialize)]
         struct CompletionMessage {
             content: Option<String>,
+            /// 推理模型把思考放这里；正文为空时它的长度能说明预算烧在哪了
+            #[serde(default)]
+            reasoning_content: Option<String>,
             #[serde(default)]
             tool_calls: Option<Vec<CompletionToolCall>>,
         }
@@ -1058,6 +1064,38 @@ impl LlmClient {
         // choices 会被 into_iter 消耗，用量和条数要先取出来
         let payload_usage = payload.usage.filter(|usage| !usage.is_empty());
         let choice_count = payload.choices.len();
+        // 失败时唯一能重现问题的东西就是这几个字段，必须在 choices 被消耗前留下来
+        let choice_diagnostics = payload
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                format!(
+                    "choice {}: finish_reason={}, content_chars={}, reasoning_chars={}, tool_calls={}",
+                    index,
+                    choice.finish_reason.as_deref().unwrap_or("none"),
+                    choice
+                        .message
+                        .content
+                        .as_deref()
+                        .map(|text| text.chars().count())
+                        .unwrap_or(0),
+                    choice
+                        .message
+                        .reasoning_content
+                        .as_deref()
+                        .map(|text| text.chars().count())
+                        .unwrap_or(0),
+                    choice
+                        .message
+                        .tool_calls
+                        .as_ref()
+                        .map(|calls| calls.len())
+                        .unwrap_or(0),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         let content = payload
             .choices
             .into_iter()
@@ -1083,10 +1121,16 @@ impl LlmClient {
 
         if content.is_none() && tool_calls.is_empty() {
             return Err(format!(
-                "LLM response had no message content and no tool calls ({} choice(s) returned). \
-                 The usual causes are the output being cut off at the configured max output tokens, \
-                 or a reasoning model spending the whole output budget before emitting content.",
-                choice_count
+                "LLM response had no message content and no tool calls. {} choice(s) returned [{}]. \
+                 finish_reason=length means the output was cut off at max output tokens; a large \
+                 reasoning_chars with empty content means the model spent the whole output budget \
+                 on reasoning.",
+                choice_count,
+                if choice_diagnostics.is_empty() {
+                    "no choices".to_string()
+                } else {
+                    choice_diagnostics
+                }
             ));
         }
 
