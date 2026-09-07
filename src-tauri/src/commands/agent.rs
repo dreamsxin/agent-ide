@@ -1126,6 +1126,86 @@ pub async fn verify_workspace(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RepairWorkspaceRequest {
+    /// 要跑的检查命令
+    pub commands: Vec<String>,
+    /// 迭代预算；不给按 1 轮。上限 3 —— 再多几乎只是把预算烧完，
+    /// 而每一轮都是一次真实的模型调用加一次落盘。
+    #[serde(default)]
+    pub max_iterations: Option<u8>,
+    /// 原始任务描述；不给就用最近一轮对话的 prompt
+    #[serde(default)]
+    pub original_prompt: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairWorkspaceReport {
+    pub iterations: u8,
+    /// 为什么停：checks passed / iteration budget exhausted / diffs could not be applied
+    pub stop_reason: String,
+    pub checks_failed: bool,
+    pub results: Vec<crate::services::project_tasks::RunProjectTaskResult>,
+}
+
+/// 有界修复循环：跑检查 → 失败让模型改 → 落盘 → 再跑检查，直到通过或预算用完。
+///
+/// 只在 Auto 模式下可用。这不是新的权限层级：Auto 本来就会不经点击直接落盘，
+/// 而修复循环的每一轮必须落盘才有意义 —— 改动不进工作区，重跑检查看的还是
+/// 原来的代码。suggest / edit 模式承诺"改动先进审查区"，在那里自动落盘会打破
+/// 这个承诺，所以直接拒掉而不是悄悄降级成单轮。
+#[tauri::command]
+pub async fn repair_workspace(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+    request: RepairWorkspaceRequest,
+) -> Result<RepairWorkspaceReport, String> {
+    let (commands, _skipped) = crate::services::verification::prepare_commands(request.commands)?;
+    let max_iterations = request.max_iterations.unwrap_or(1).clamp(1, 3);
+    let (llm, usage_meter) = agent_state.get_llm_client(None)?;
+    agent_state.cancel_flag.store(false, Ordering::SeqCst);
+    let cancel_flag = agent_state.cancel_flag.clone();
+
+    let mut orch = agent_state.orchestrator.lock().await;
+    if !matches!(orch.mode, AgentMode::Auto) {
+        return Err(
+            "Automatic repair applies its own fixes, so it requires Auto mode.".to_string(),
+        );
+    }
+    let original_prompt = match request.original_prompt {
+        Some(prompt) if !prompt.trim().is_empty() => prompt,
+        _ => orch
+            .conversation
+            .last()
+            .map(|turn| turn.prompt.clone())
+            .unwrap_or_else(|| "(original task not recorded)".to_string()),
+    };
+    orch.start_usage_accounting(usage_meter.clone());
+
+    let outcome = orch
+        .repair_until_checks_pass(
+            &original_prompt,
+            commands,
+            crate::services::verification::RepairPolicy::new(max_iterations, true),
+            cancel_flag,
+            &llm,
+            std::sync::Arc::new(app_handle.clone()),
+        )
+        .await;
+    // 记账写在两条路径上：修复轮次花掉的 token 和别的运行一样要能查到
+    emit_usage_action_log(&orch, &app_handle, &usage_meter);
+    let outcome = outcome?;
+
+    Ok(RepairWorkspaceReport {
+        iterations: outcome.iterations,
+        stop_reason: outcome.stop.reason().to_string(),
+        checks_failed: outcome.checks_failed,
+        results: outcome.results,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RepairPromptRequest {
     pub command: String,
     #[serde(default)]

@@ -37,7 +37,8 @@ npm test
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, repositories with no commits, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/agent.rs` | Context-compression precedence (request override vs stored default, unknown mode rejected). This file is the IPC boundary and most of it still needs a running app; logic is being pulled out into services rather than tested in place — see below |
-| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary), a full `run` against a `mock://` provider asserting the plan / state / pipeline events reach the frontend |
+| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary), a full `run` against a `mock://` provider asserting the plan / state / pipeline events reach the frontend, the bounded repair loop (no model call when checks already pass; gives up at its budget and logs every iteration) |
+
 
 | `services/verification.rs` | Repair-prompt construction, output truncation, `--allow-run` pattern matching, long-running command detection, verification candidate preparation (blank trimming, long-running partition, the two distinct failure messages), batch check execution when one command cannot run, action-log level/summary/detail rendering, bounded repair loop policy (iteration numbering, budget exhaustion, apply failure, repair-requires-apply) |
 

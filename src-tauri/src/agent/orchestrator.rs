@@ -39,6 +39,21 @@ pub struct ActionLogEntry {
     pub diff_summary: Option<String>,
 }
 
+/// 有界修复循环的结果。
+///
+/// `stop` 说明为什么停：检查通过、预算耗尽、diff 落不了盘、没开启。四种情况
+/// 对调用方的意义不同，所以不压缩成一个 bool。
+#[derive(Debug)]
+pub struct RepairLoopOutcome {
+    /// 实际跑完的修复轮数
+    pub iterations: u8,
+    pub stop: crate::services::verification::RepairStop,
+    /// 最后一次检查是否仍然失败
+    pub checks_failed: bool,
+    /// 最后一次检查的完整结果，供调用方展示或落成 artifact
+    pub results: Vec<crate::services::project_tasks::RunProjectTaskResult>,
+}
+
 /// Agent orchestrator - main flow controller.
 pub struct AgentOrchestrator {
     pub state_mgr: AgentStateManager,
@@ -1433,6 +1448,134 @@ impl AgentOrchestrator {
         rejected
     }
 
+    /// 有界修复循环：跑检查 → 失败就让模型改 → 落盘 → 再跑检查。
+    ///
+    /// CLI 早就有这套（`--max-iterations`），桌面端一直只有单轮：`Verify All` /
+    /// `Fix with Agent` 各自跑一次，失败之后要人再点一遍。停止规则和 CLI 共用
+    /// `verification::RepairPolicy`，所以两个入口对"什么时候该放弃"的判断不会
+    /// 各自漂移。
+    ///
+    /// 修复必须落盘，否则重跑检查看的还是原来的代码。这里走 `apply_all_diffs`
+    /// —— 逐文件、带 base hash 校验和回滚点 —— 而不是绕过审查区直接写文件：
+    /// 循环结束后每一轮的改动仍然可以 Undo Apply。
+    pub async fn repair_until_checks_pass(
+        &mut self,
+        original_prompt: &str,
+        commands: Vec<String>,
+        policy: crate::services::verification::RepairPolicy,
+        cancel_flag: Arc<AtomicBool>,
+        llm: &LlmClient,
+        events: Arc<dyn RunEvents>,
+    ) -> Result<RepairLoopOutcome, String> {
+        use crate::services::verification::{
+            build_repair_prompt, collect_command_problems, failed_command_results, run_checks,
+            RepairDecision,
+        };
+
+        let root = crate::services::workspace::workspace_root()?;
+        let mut results = run_checks(commands.clone(), root.clone()).await;
+        let mut checks_failed = !failed_command_results(&results).is_empty();
+        let mut completed = 0u8;
+        let mut apply_failed = false;
+
+        loop {
+            let iteration = match policy.next(completed, checks_failed, apply_failed) {
+                RepairDecision::Repair { iteration } => iteration,
+                RepairDecision::Stop(stop) => {
+                    // 一轮都没修过就不写这条记录：一次检查全过的运行里，
+                    // "repair not enabled" 只是噪音
+                    if completed > 0 {
+                        self.emit_action_log(
+                            events.as_ref(),
+                            if checks_failed { "warn" } else { "success" },
+                            "repair_loop",
+                            None,
+                            Some("Repair"),
+                            &format!(
+                                "Repair stopped after {} iteration(s): {}",
+                                completed,
+                                stop.reason()
+                            ),
+                            &format!("Checks still failing: {}", checks_failed),
+                            None,
+                            None,
+                        );
+                    }
+                    return Ok(RepairLoopOutcome {
+                        iterations: completed,
+                        stop,
+                        checks_failed,
+                        results,
+                    });
+                }
+            };
+
+            self.ensure_not_cancelled(&cancel_flag, events.as_ref())?;
+            let problems = collect_command_problems(&results);
+            let repair_prompt =
+                build_repair_prompt(original_prompt, iteration, &results, &problems);
+            let step = TaskStep {
+                id: format!("repair-{}-{}", iteration, uuid::Uuid::new_v4()),
+                title: format!("Repair failed checks ({})", iteration),
+                step_type: "edit".to_string(),
+                status: "todo".to_string(),
+                logs: Vec::new(),
+                scope: Some("workspace".to_string()),
+                execution_mode: Some("fix".to_string()),
+            };
+            self.begin_step(&step, "Repair iteration started");
+            self.emit_step(events.as_ref(), self.steps.len().saturating_sub(1));
+
+            let (tx, mut rx) = mpsc::channel::<String>(32);
+            let events_clone = events.clone();
+            tokio::spawn(async move {
+                while let Some(token) = rx.recv().await {
+                    events_clone.emit_json("agent-stream-token", serde_json::json!(token));
+                }
+            });
+            let response = executor::execute_step(
+                llm,
+                &repair_prompt,
+                "",
+                self.tool_invoker.as_deref(),
+                cancel_flag.clone(),
+                tx,
+            )
+            .await?;
+
+            self.record_step_success(&step, &response, None, None);
+            let applied = self.apply_all_diffs();
+            apply_failed = !applied.failed.is_empty();
+            results = run_checks(commands.clone(), root.clone()).await;
+            checks_failed = !failed_command_results(&results).is_empty();
+            completed = iteration;
+
+            self.emit_action_log(
+                events.as_ref(),
+                if checks_failed { "warn" } else { "success" },
+                "repair_iteration",
+                None,
+                Some("Repair"),
+                &format!(
+                    "Repair iteration {}: checks {}",
+                    iteration,
+                    if checks_failed {
+                        "still failing"
+                    } else {
+                        "pass"
+                    }
+                ),
+                &format!(
+                    "Applied {} file(s), {} failed to apply",
+                    applied.applied.len(),
+                    applied.failed.len()
+                ),
+                None,
+                None,
+            );
+        }
+    }
+
     /// 还有未决 hunk、因而值得批量处理的 diff：(id, file)
     fn reviewable_diff_targets(&self) -> Vec<(String, String)> {
         self.diffs
@@ -2376,6 +2519,108 @@ mod tests {
             names.iter().any(|name| name == "agent-pipeline-update"),
             "{:?}",
             names
+        );
+    }
+
+    /// 检查一开始就全过时，修复循环不该问模型任何东西。
+    ///
+    /// 这条看着简单，但它是"自动修复"能不能默认开着的前提：每次运行结束都白跑
+    /// 一轮模型，既费钱又会在通过的代码上乱改。
+    #[test]
+    fn repair_loop_does_not_call_the_model_when_checks_already_pass() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        // endpoint 故意指向一个不存在的地址：真去调用就会失败，测试也就失败
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "http://127.0.0.1:1/never-called".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "unused".to_string(),
+                provider: "openai".to_string(),
+                max_output_tokens: None,
+                tool_call_mode: "text_protocol".to_string(),
+                model_type: crate::services::llm_client::ModelType::from_string("openai"),
+                local_model_config: None,
+            });
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let outcome = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(orchestrator.repair_until_checks_pass(
+                "keep the build green".to_string().as_str(),
+                vec!["cargo --version".to_string()],
+                crate::services::verification::RepairPolicy::new(2, true),
+                Arc::new(AtomicBool::new(false)),
+                &llm,
+                events.clone(),
+            ))
+            .expect("repair loop");
+
+        assert_eq!(outcome.iterations, 0);
+        assert_eq!(
+            outcome.stop,
+            crate::services::verification::RepairStop::ChecksPassed
+        );
+        assert!(!outcome.checks_failed);
+        // 没修过就不该往 action log 里写"停下来了"，那是纯噪音
+        assert_eq!(events.count("agent-action-log"), 0);
+    }
+
+    /// 修不好的时候：预算用完就停，并且每一轮都留下记录。
+    #[test]
+    fn repair_loop_gives_up_and_records_each_iteration() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/app.ts", "const value = 1;\n");
+
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "mock://repair-loop".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "mock-model".to_string(),
+                provider: "openai".to_string(),
+                max_output_tokens: None,
+                tool_call_mode: "text_protocol".to_string(),
+                model_type: crate::services::llm_client::ModelType::from_string("openai"),
+                local_model_config: None,
+            });
+        // mock 不会让这条命令通过，所以循环一定会用完预算
+        let check = if cfg!(windows) {
+            "findstr never-appears src/app.ts"
+        } else {
+            "grep never-appears src/app.ts"
+        };
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let outcome = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(orchestrator.repair_until_checks_pass(
+                "make the check pass",
+                vec![check.to_string()],
+                crate::services::verification::RepairPolicy::new(2, true),
+                Arc::new(AtomicBool::new(false)),
+                &llm,
+                events.clone(),
+            ))
+            .expect("repair loop");
+
+        assert!(outcome.iterations >= 1, "至少修过一轮");
+        assert!(outcome.iterations <= 2, "不能超过预算");
+        assert!(outcome.checks_failed, "检查始终没过");
+        assert_ne!(
+            outcome.stop,
+            crate::services::verification::RepairStop::ChecksPassed
+        );
+        // 每一轮 + 最后的停止说明都要进 action log，否则用户只看到工作区变了
+        // 却不知道 Agent 试了几次、为什么放弃
+        assert!(
+            events.count("agent-action-log") > outcome.iterations as usize,
+            "iterations={} logs={}",
+            outcome.iterations,
+            events.count("agent-action-log")
         );
     }
 
