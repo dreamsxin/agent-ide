@@ -103,6 +103,16 @@ export default function App() {
     return () => window.removeEventListener("toggle-command-palette", handler);
   }, []);
 
+  // 启动时加载 LLM 配置。
+  //
+  // 和工作区恢复分开、也不受"有没有保存过工作区"影响：LLM 配置是全局的。
+  // 之前只有 Agent 设置面板挂载时才拉一次，于是启动后 TopBar 指示灯一直红着
+  // 报 "LLM Not Configured"、ChatView 的 profile 下拉一直是空的 —— 配置好着，
+  // 只是界面没问过后端。
+  useEffect(() => {
+    void useAgentStore.getState().fetchLlmConfig();
+  }, []);
+
   // 启动时恢复上次的工作目录
   useEffect(() => {
     if (!isTauriRuntime()) return;
