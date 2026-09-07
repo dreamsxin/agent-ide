@@ -950,75 +950,94 @@ async fn run_agent_command(
         .any(|result| result.exit_code.unwrap_or(-1) != 0);
     let mut repair_chain = Vec::new();
 
-    if args.apply && checks_failed && args.max_iterations > 0 {
-        for iteration in 1..=args.max_iterations {
-            let command_problems = collect_command_problems(&command_results);
-            let failed_commands_before = failed_command_results(&command_results);
-            output.event(CliEvent::RepairIterationStarted {
-                iteration,
-                max_iterations: args.max_iterations,
-                problem_count: command_problems.len(),
-            });
-            output.text(format!(
-                "--- Repair iteration {}/{} ---",
-                iteration, args.max_iterations
-            ));
-            let repair_prompt =
-                build_repair_prompt(&prompt, iteration, &command_results, &command_problems);
-            let repair_steps = vec![TaskStep {
-                id: format!("repair-{}-{}", iteration, Uuid::new_v4()),
-                title: format!("Repair failed checks iteration {}", iteration),
-                step_type: "edit".to_string(),
-                status: "todo".to_string(),
-                logs: Vec::new(),
-                scope: Some("workspace".to_string()),
-                execution_mode: Some("fix".to_string()),
-            }];
-            let repair_diffs = execute_steps(
-                &llm,
-                &repair_prompt,
-                &context_text,
-                &workspace_path,
-                &repair_steps,
-                &mut output,
-                Arc::new(AtomicBool::new(false)),
-                args.timeout_seconds,
-                tool_invoker.clone(),
-            )
-            .await?;
-            validate_diff_limit(&repair_diffs, args.max_diff_files)?;
-            let _ = validate_cli_policy(&args, &repair_diffs)?;
-            let repair_apply = apply_pending_diffs(&repair_diffs);
-            output.event(CliEvent::ApplyFinished {
-                applied_count: repair_apply.applied.len(),
-                failed_count: repair_apply.failed.len(),
-            });
-            diffs.extend(repair_diffs.clone());
-            apply_results.push(repair_apply.clone());
-            command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
-            trim_command_outputs(&mut command_results, args.max_output_bytes);
-            checks_failed = command_results
-                .iter()
-                .any(|result| result.exit_code.unwrap_or(-1) != 0);
-            repair_chain.push(RepairIterationRecord {
-                iteration,
-                prompt: repair_prompt,
-                failed_commands_before,
-                problems_before: command_problems,
-                diffs: repair_diffs,
-                apply_result: repair_apply.clone(),
-                commands_after: command_results.clone(),
-                checks_failed_after: checks_failed,
-            });
-            output.event(CliEvent::RepairIterationFinished {
-                iteration,
-                diff_count: diffs.len(),
-                checks_failed,
-            });
-            if !repair_apply.failed.is_empty() || !checks_failed {
+    // 循环的准入和退出规则现在归 `verification::RepairPolicy`，桌面端要走同一套
+    // （9.0.10）。这里只剩调用序列。
+    let repair_policy =
+        crate::services::verification::RepairPolicy::new(args.max_iterations, args.apply);
+    let mut completed_iterations = 0u8;
+    let mut repair_apply_failed = false;
+    loop {
+        let decision = repair_policy.next(completed_iterations, checks_failed, repair_apply_failed);
+        let iteration = match decision {
+            crate::services::verification::RepairDecision::Repair { iteration } => iteration,
+            crate::services::verification::RepairDecision::Stop(stop) => {
+                // 只在真的修过的时候说明为什么停：一次没修过的运行里，
+                // "repair not enabled" 是噪音
+                if completed_iterations > 0 {
+                    output.text(format!(
+                        "--- Repair stopped after {} iteration(s): {} ---",
+                        completed_iterations,
+                        stop.reason()
+                    ));
+                }
                 break;
             }
-        }
+        };
+        let command_problems = collect_command_problems(&command_results);
+        let failed_commands_before = failed_command_results(&command_results);
+        output.event(CliEvent::RepairIterationStarted {
+            iteration,
+            max_iterations: args.max_iterations,
+            problem_count: command_problems.len(),
+        });
+        output.text(format!(
+            "--- Repair iteration {}/{} ---",
+            iteration, args.max_iterations
+        ));
+        let repair_prompt =
+            build_repair_prompt(&prompt, iteration, &command_results, &command_problems);
+        let repair_steps = vec![TaskStep {
+            id: format!("repair-{}-{}", iteration, Uuid::new_v4()),
+            title: format!("Repair failed checks iteration {}", iteration),
+            step_type: "edit".to_string(),
+            status: "todo".to_string(),
+            logs: Vec::new(),
+            scope: Some("workspace".to_string()),
+            execution_mode: Some("fix".to_string()),
+        }];
+        let repair_diffs = execute_steps(
+            &llm,
+            &repair_prompt,
+            &context_text,
+            &workspace_path,
+            &repair_steps,
+            &mut output,
+            Arc::new(AtomicBool::new(false)),
+            args.timeout_seconds,
+            tool_invoker.clone(),
+        )
+        .await?;
+        validate_diff_limit(&repair_diffs, args.max_diff_files)?;
+        let _ = validate_cli_policy(&args, &repair_diffs)?;
+        let repair_apply = apply_pending_diffs(&repair_diffs);
+        output.event(CliEvent::ApplyFinished {
+            applied_count: repair_apply.applied.len(),
+            failed_count: repair_apply.failed.len(),
+        });
+        diffs.extend(repair_diffs.clone());
+        apply_results.push(repair_apply.clone());
+        command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+        trim_command_outputs(&mut command_results, args.max_output_bytes);
+        checks_failed = command_results
+            .iter()
+            .any(|result| result.exit_code.unwrap_or(-1) != 0);
+        repair_chain.push(RepairIterationRecord {
+            iteration,
+            prompt: repair_prompt,
+            failed_commands_before,
+            problems_before: command_problems,
+            diffs: repair_diffs,
+            apply_result: repair_apply.clone(),
+            commands_after: command_results.clone(),
+            checks_failed_after: checks_failed,
+        });
+        output.event(CliEvent::RepairIterationFinished {
+            iteration,
+            diff_count: diffs.len(),
+            checks_failed,
+        });
+        repair_apply_failed = !repair_apply.failed.is_empty();
+        completed_iterations = iteration;
     }
 
     let command_problems = collect_all_observed_problems(&command_results, &repair_chain);

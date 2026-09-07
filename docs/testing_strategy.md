@@ -37,7 +37,8 @@ npm test
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, repositories with no commits, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/agent.rs` | Context-compression precedence (request override vs stored default, unknown mode rejected). This file is the IPC boundary and most of it still needs a running app; logic is being pulled out into services rather than tested in place — see below |
-| `services/verification.rs` | Repair-prompt construction, output truncation, `--allow-run` pattern matching, long-running command detection, verification candidate preparation (blank trimming, long-running partition, the two distinct failure messages), batch check execution when one command cannot run, action-log level/summary/detail rendering |
+| `services/verification.rs` | Repair-prompt construction, output truncation, `--allow-run` pattern matching, long-running command detection, verification candidate preparation (blank trimming, long-running partition, the two distinct failure messages), batch check execution when one command cannot run, action-log level/summary/detail rendering, bounded repair loop policy (iteration numbering, budget exhaustion, apply failure, repair-requires-apply) |
+
 | `services/llm_client.rs` | Provider request shaping, mock provider tool calls, run token accounting, usage action-log wording for unknown / partially reported / fully reported usage |
 
 | `commands/lsp.rs` | LSP file URI encoding/decoding, Windows verbatim path normalization, indexing-state detection |

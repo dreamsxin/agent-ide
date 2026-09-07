@@ -308,9 +308,135 @@ pub fn format_report_log(report: &VerificationReport) -> (&'static str, String, 
     (level, summary, details)
 }
 
+/// 有界修复循环为什么停下来。四种原因不是同一件事，所以不合成一个 bool：
+/// 检查通过是成功；预算耗尽是"还没修好，但不再试了"；落盘失败是"再问模型也没用，
+/// 问题不在模型那边"；没开启则是根本没试过。把它们混成"修复失败"会让读日志的人
+/// 分不出该改代码、该加预算，还是该看文件权限。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairStop {
+    /// 没有授权修复（没给 `--apply`，或者迭代预算是 0）
+    Disabled,
+    /// 检查全过，没有要修的东西
+    ChecksPassed,
+    /// 上一轮的 diff 落不了盘
+    ApplyFailed,
+    /// 迭代预算用完，检查仍然失败
+    BudgetExhausted,
+}
+
+impl RepairStop {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            RepairStop::Disabled => "repair not enabled",
+            RepairStop::ChecksPassed => "checks passed",
+            RepairStop::ApplyFailed => "diffs could not be applied",
+            RepairStop::BudgetExhausted => "iteration budget exhausted",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairDecision {
+    /// 再跑一轮修复，迭代号从 1 开始
+    Repair {
+        iteration: u8,
+    },
+    Stop(RepairStop),
+}
+
+/// 有界修复循环的准入规则。
+///
+/// 这条决策以前是 `cli/mod.rs` 里的一个三元 if 加一个 `break` 表达式，分散在
+/// 循环体两头。抽出来有两个原因：桌面端要走同一套规则（9.0.10），以及"什么时候
+/// 该停"是这个循环唯一容易搞错的地方 —— 循环体本身只是调用序列。
+#[derive(Clone, Copy, Debug)]
+pub struct RepairPolicy {
+    max_iterations: u8,
+    /// 修复必须能落盘才有意义：改完不写进工作区，检查重跑的还是原来的代码
+    apply_allowed: bool,
+}
+
+impl RepairPolicy {
+    pub fn new(max_iterations: u8, apply_allowed: bool) -> Self {
+        Self {
+            max_iterations,
+            apply_allowed,
+        }
+    }
+
+    /// `completed` 是已经跑完的轮数，`checks_failed` / `apply_failed` 是最近一次的结果。
+    ///
+    /// 判定顺序是有意的：落盘失败排在"检查通过"之前，因为两者都会停，但落盘失败
+    /// 是需要人去看的那一种，报出来的原因应该是它。
+    pub fn next(&self, completed: u8, checks_failed: bool, apply_failed: bool) -> RepairDecision {
+        if self.max_iterations == 0 || !self.apply_allowed {
+            return RepairDecision::Stop(RepairStop::Disabled);
+        }
+        if apply_failed {
+            return RepairDecision::Stop(RepairStop::ApplyFailed);
+        }
+        if !checks_failed {
+            return RepairDecision::Stop(RepairStop::ChecksPassed);
+        }
+        if completed >= self.max_iterations {
+            return RepairDecision::Stop(RepairStop::BudgetExhausted);
+        }
+        RepairDecision::Repair {
+            iteration: completed + 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 预算是"最多几轮"，不是"至少几轮"：两轮预算下第三次询问必须停。
+    #[test]
+    fn repair_policy_counts_iterations_from_one_and_stops_at_the_budget() {
+        let policy = RepairPolicy::new(2, true);
+
+        assert_eq!(
+            policy.next(0, true, false),
+            RepairDecision::Repair { iteration: 1 }
+        );
+        assert_eq!(
+            policy.next(1, true, false),
+            RepairDecision::Repair { iteration: 2 }
+        );
+        assert_eq!(
+            policy.next(2, true, false),
+            RepairDecision::Stop(RepairStop::BudgetExhausted)
+        );
+    }
+
+    /// 四种停止原因要能分辨。混成一个 bool 的话，读日志的人分不出
+    /// 该改代码、该加预算，还是该去看文件权限。
+    #[test]
+    fn repair_policy_reports_why_it_stopped() {
+        let policy = RepairPolicy::new(3, true);
+
+        assert_eq!(
+            policy.next(0, false, false),
+            RepairDecision::Stop(RepairStop::ChecksPassed)
+        );
+        // 落盘失败时检查大概也还是失败的，但报出来的原因应该是落盘：
+        // 那是需要人去看的那一种
+        assert_eq!(
+            policy.next(1, true, true),
+            RepairDecision::Stop(RepairStop::ApplyFailed)
+        );
+        assert_eq!(
+            RepairPolicy::new(0, true).next(0, true, false),
+            RepairDecision::Stop(RepairStop::Disabled)
+        );
+        // 预览运行不许修复：改完不落盘，重跑检查看的还是原来的代码，
+        // 循环会一直"失败"到预算耗尽却什么都没验证
+        assert_eq!(
+            RepairPolicy::new(3, false).next(0, true, false),
+            RepairDecision::Stop(RepairStop::Disabled)
+        );
+    }
 
     /// 候选整理：空白项丢掉，长驻命令进 skipped 而不是进执行队列。
     #[test]
