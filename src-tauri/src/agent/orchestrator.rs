@@ -650,7 +650,7 @@ impl AgentOrchestrator {
                 }
             });
 
-            let prior_outputs = stage_outputs.join("\n\n---\n\n");
+            let prior_outputs = executor::join_prior_outputs(&stage_outputs);
             let pending_diff_summary = self.summarize_pending_diffs();
 
             match executor::execute_stage(
