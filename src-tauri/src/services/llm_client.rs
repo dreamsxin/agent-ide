@@ -1587,28 +1587,6 @@ pub fn create_local_model_engine(config: LocalModelConfig) -> Result<Arc<dyn Mod
     ))
 }
 
-/// 任务上下文
-#[derive(Clone, Debug)]
-pub struct TaskContext {
-    /// 任务复杂度
-    pub complexity: Complexity,
-    /// 目标语言
-    pub language: Option<String>,
-    /// 预期输出长度
-    pub expected_length: Option<usize>,
-}
-
-/// 任务复杂度
-#[derive(Clone, Debug, PartialEq)]
-pub enum Complexity {
-    /// 低复杂度（简单补全）
-    Low,
-    /// 中等复杂度（代码生成）
-    Medium,
-    /// 高复杂度（复杂重构）
-    High,
-}
-
 /// 增强的 LLM 客户端工厂
 pub struct EnhancedLlmClientFactory;
 

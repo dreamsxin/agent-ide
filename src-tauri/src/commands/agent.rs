@@ -419,6 +419,13 @@ fn emit_usage_action_log(
             "Token usage not reported by provider across {} LLM call(s)",
             snapshot.calls
         )
+    } else if snapshot.reported_calls < snapshot.calls {
+        // 部分回报比完全不回报更危险：总数看起来正常，但漏掉的调用不进账，
+        // per-run cap 因此偏松。以前这种情况和 5/5 显示同一句话。
+        format!(
+            "Run used at least {} tokens; only {} of {} LLM call(s) reported usage, so the per-run cap undercounts",
+            snapshot.total_tokens, snapshot.reported_calls, snapshot.calls
+        )
     } else {
         format!(
             "Run used {} tokens across {} LLM call(s)",
