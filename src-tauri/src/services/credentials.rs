@@ -1,3 +1,17 @@
+/// 测试构建用独立的 service 名。
+///
+/// 凭据条目按 (service, ref) 索引，跟配置目录无关，所以 `AGENT_IDE_CONFIG_DIR`
+/// 那套隔离对它完全无效：一个保存 profile 的测试会直接覆盖开发者真实的
+/// `llm-profile:default` 条目 —— 保存好的 API key 被测试里的占位值顶掉就是这么
+/// 发生的。
+///
+/// 这里刻意不换成内存实现：`secret_round_trips_through_os_credential_store` 的
+/// 全部价值就在于它真的走一遍 Windows Credential Manager / macOS Keychain /
+/// Linux Secret Service。换成 HashMap 之后它验证的就只是那个 HashMap 了。
+/// 换 service 名既保留了真实往返验证，又让测试写不到生产条目上。
+#[cfg(test)]
+const SERVICE_NAME: &str = "agent-ide-test";
+#[cfg(not(test))]
 const SERVICE_NAME: &str = "agent-ide";
 const LLM_PREFIX: &str = "llm-profile";
 const GIT_PREFIX: &str = "git-remote";

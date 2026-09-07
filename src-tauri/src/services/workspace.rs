@@ -11,15 +11,11 @@ pub fn config_dir() -> PathBuf {
     // 这个变量；而多个测试模块在 teardown 里 `remove_var`，`set_var` 又是进程
     // 全局的。所以任何自己没设变量的测试都曾经会读写开发者真实的 ~/.agent-ide
     // 和 OS 凭据库 —— 实际后果是保存好的 API key 被测试里的占位值覆盖。
-    #[cfg(test)]
-    {
+    if cfg!(test) {
         return std::env::temp_dir().join("agent-ide-test-config-fallback");
     }
-    #[cfg(not(test))]
-    {
-        let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".agent-ide")
-    }
+    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".agent-ide")
 }
 
 pub fn save_workspace_path(path: &str) -> Result<(), String> {
