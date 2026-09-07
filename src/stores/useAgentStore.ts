@@ -88,7 +88,7 @@ interface AgentStore {
   promoteSddToCodePrompt: () => void;
   setGhostSuggestions: (suggestions: GhostSuggestion[]) => void;
   dismissGhostSuggestion: (id: string) => void;
-  restoreDiffs: (workspacePath?: string) => void;
+  restoreDiffs: (workspacePath?: string) => Promise<void>;
   restoreAgentSession: (workspacePath?: string) => void;
   reconcileBackendRun: () => Promise<void>;
   clearAgentSession: () => void;
@@ -354,7 +354,29 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((state) => ({
       ghostSuggestions: state.ghostSuggestions.filter((item) => item.id !== id),
     })),
-  restoreDiffs: (workspacePath) => set({ diffs: loadDiffs(workspacePath), lastApplyResult: null }),
+  restoreDiffs: async (workspacePath) => {
+    const persisted = loadDiffs(workspacePath);
+    set({ diffs: persisted, lastApplyResult: null });
+    if (!isTauriRuntime()) return;
+    try {
+      // 后端 orchestrator 的 diff 只在内存里，重启后必然是空的；前端却从
+      // localStorage 恢复。不对账的话界面会摆出一排点了没反应的 Apply 按钮。
+      const backend = await invoke<DiffEntry[]>("get_agent_diffs");
+      if (backend.length > 0) {
+        set({ diffs: backend });
+        persistDiffs(backend);
+        return;
+      }
+      const orphaned = persisted.filter(isReviewableDiff);
+      if (orphaned.length > 0) {
+        set({
+          error: `${orphaned.length} restored change(s) are no longer known to the backend and cannot be applied. Re-run the task to regenerate them.`,
+        });
+      }
+    } catch (err: unknown) {
+      console.warn("[AgentStore] get_agent_diffs failed:", err);
+    }
+  },
   restoreAgentSession: (workspacePath) => {
     const restored = loadAgentSession(workspacePath);
     if (!restored) return;
@@ -568,9 +590,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   applyAllDiffs: async () => {
+    const reviewable = get().diffs.filter(isReviewableDiff);
+    if (!isTauriRuntime()) {
+      set({ error: "Applying diffs needs the desktop runtime (npm run tauri -- dev)." });
+      return [];
+    }
     try {
-      if (!isTauriRuntime()) return [];
       const result = await invoke<ApplyDiffsResult>("apply_diffs");
+      // 后端的 diff 只活在内存里，前端却把它们写进了 localStorage。重启之后界面
+      // 还显示 N 条待处理，后端手上是空的，apply 就成了静默空操作 —— 按钮点了
+      // 没反应、文件没变、也没有任何提示。这里把这种不一致明确报出来。
+      if (result.applied.length === 0 && result.failed.length === 0) {
+        set({
+          lastApplyResult: result,
+          error:
+            reviewable.length > 0
+              ? `Nothing was applied: the backend has no pending diffs for this review list. It was restored from an earlier session, so re-run the task to regenerate the changes.`
+              : null,
+        });
+        return [];
+      }
       set((s) => {
         const diffs = s.diffs.map((d) => {
           if (result.applied.some((a) => a.id === d.id)) {
@@ -594,6 +633,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return result.applied;
     } catch (err: unknown) {
       console.warn("[AgentStore] apply_diffs failed:", err);
+      set({ error: `Apply all diffs failed: ${describeError(err)}` });
       return [];
     }
   },
@@ -688,9 +728,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   rejectAllDiffs: async () => {
+    const reviewable = get().diffs.filter(isReviewableDiff);
+    if (!isTauriRuntime()) {
+      set({ error: "Rejecting diffs needs the desktop runtime (npm run tauri -- dev)." });
+      return [];
+    }
     try {
-      if (!isTauriRuntime()) return [];
       const rejected = await invoke<DiffEntry[]>("reject_diffs");
+      if (rejected.length === 0) {
+        set({
+          lastApplyResult: null,
+          error:
+            reviewable.length > 0
+              ? `Nothing was rejected: the backend has no pending diffs for this review list. It was restored from an earlier session, so re-run the task to regenerate the changes.`
+              : null,
+        });
+        return [];
+      }
       set((s) => {
         const diffs = s.diffs.map((d) =>
           rejected.some((r) => r.id === d.id)
@@ -703,6 +757,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return rejected;
     } catch (err: unknown) {
       console.warn("[AgentStore] reject_diffs failed:", err);
+      set({ error: `Reject all diffs failed: ${describeError(err)}` });
       return [];
     }
   },
@@ -1109,6 +1164,20 @@ function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
 
 const AGENT_DIFFS_STORAGE_KEY = "agent-ide-agent-diffs";
 const AGENT_SESSION_STORAGE_KEY = "agent-ide-agent-session";
+
+/// 对应后端 `is_reviewable_diff_status`：还能被 Apply/Reject 处理的状态。
+const REVIEWABLE_DIFF_STATUSES = new Set(["pending", "partial", "failed"]);
+
+export function isReviewableDiff(diff: DiffEntry): boolean {
+  return REVIEWABLE_DIFF_STATUSES.has(diff.status);
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  return JSON.stringify(err);
+}
+
 
 interface PersistedAgentSession {
   workspacePath: string;

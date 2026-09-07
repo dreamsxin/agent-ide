@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { useAgentStore } from "../../stores/useAgentStore";
+import { isReviewableDiff, useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
@@ -195,7 +195,9 @@ export default function DiffView() {
   const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
 
-  const pendingDiffs = diffs.filter((d) => d.status === "pending");
+  // 和后端 `reviewable_diff_targets` 对齐：Apply All 也会收尾 partial / failed 的
+  // 文件，只数 pending 会少报。
+  const pendingDiffs = diffs.filter(isReviewableDiff);
   const hasPending = pendingDiffs.length > 0;
   const failedMessages = new Map(
     (lastApplyResult?.failed ?? []).map((item) => [item.diffId, item.message])

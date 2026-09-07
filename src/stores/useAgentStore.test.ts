@@ -185,3 +185,73 @@ describe("undoLastApply", () => {
     expect(useAgentStore.getState().error).toContain("Nothing to undo");
   });
 });
+
+describe("applyAllDiffs", () => {
+  const pendingDiff = {
+    id: "diff-1",
+    file: "smoke.txt",
+    status: "pending" as const,
+    hunks: [],
+  };
+
+  it("explains the empty result instead of looking like a dead button", async () => {
+    // 后端的 diff 只在内存里，前端从 localStorage 恢复。重启后界面还显示
+    // Apply All (N)，后端手上是空的，apply 返回 0/0 —— 以前这里什么都不做。
+    useAgentStore.setState({ diffs: [pendingDiff], error: null });
+    invokeMock.mockResolvedValueOnce({ applied: [], failed: [] });
+
+    const applied = await useAgentStore.getState().applyAllDiffs();
+
+    expect(applied).toEqual([]);
+    const error = useAgentStore.getState().error ?? "";
+    expect(error).toContain("Nothing was applied");
+    expect(error).toContain("re-run");
+    // 状态不能被谎报成 applied
+    expect(useAgentStore.getState().diffs[0].status).toBe("pending");
+  });
+
+  it("stays quiet when there was nothing to apply in the first place", async () => {
+    useAgentStore.setState({ diffs: [], error: null });
+    invokeMock.mockResolvedValueOnce({ applied: [], failed: [] });
+
+    await useAgentStore.getState().applyAllDiffs();
+
+    expect(useAgentStore.getState().error).toBeNull();
+  });
+
+  it("surfaces a rejected invoke instead of swallowing it", async () => {
+    useAgentStore.setState({ diffs: [pendingDiff], error: null });
+    invokeMock.mockRejectedValueOnce("Diff is stale: smoke.txt changed on disk");
+
+    await useAgentStore.getState().applyAllDiffs();
+
+    expect(useAgentStore.getState().error).toContain("changed on disk");
+  });
+});
+
+describe("restoreDiffs", () => {
+  it("prefers the backend list over the persisted one", async () => {
+    const backendDiff = { id: "diff-backend", file: "a.ts", status: "pending", hunks: [] };
+    invokeMock.mockResolvedValueOnce([backendDiff]);
+
+    await useAgentStore.getState().restoreDiffs("/tmp/ws");
+
+    expect(invokeMock).toHaveBeenCalledWith("get_agent_diffs");
+    expect(useAgentStore.getState().diffs).toEqual([backendDiff]);
+  });
+
+  it("warns when restored changes are orphaned by an empty backend", async () => {
+    localStorage.setItem(
+      "agent-ide-agent-diffs",
+      JSON.stringify({
+        workspacePath: "/tmp/ws",
+        diffs: [{ id: "diff-1", file: "smoke.txt", status: "pending", hunks: [] }],
+      })
+    );
+    invokeMock.mockResolvedValueOnce([]);
+
+    await useAgentStore.getState().restoreDiffs("/tmp/ws");
+
+    expect(useAgentStore.getState().error).toContain("cannot be applied");
+  });
+});
