@@ -304,6 +304,9 @@ mod tests {
         assert!(resolved.ends_with(Path::new("src").join("main.ts")));
     }
 
+    // `\\?\` 是 Windows 独有的 verbatim 前缀。在 Unix 上它只是普通文件名字符，
+    // 拼出来的路径必然不存在，所以这两个断言只在 Windows 上成立。
+    #[cfg(target_os = "windows")]
     #[test]
     fn resolve_existing_allows_windows_verbatim_path_inside_workspace() {
         let _guard = env_test_guard();
@@ -317,6 +320,7 @@ mod tests {
         assert!(resolved.ends_with(Path::new("src").join("main.ts")));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn ensure_within_workspace_allows_windows_verbatim_workspace_root() {
         let _guard = env_test_guard();

@@ -248,11 +248,24 @@ fn find_failed_test_files(output: &str) -> Vec<String> {
 }
 
 fn normalize_file(file: &str) -> String {
-    percent_decode(file.trim())
-        .trim_start_matches("file:///")
-        .trim_start_matches("file://")
-        .trim_start_matches('/')
-        .replace('\\', "/")
+    let decoded = percent_decode(file.trim());
+    let without_scheme = decoded.strip_prefix("file://").unwrap_or(&decoded);
+    strip_uri_slash_before_drive(without_scheme).replace('\\', "/")
+}
+
+/// `file:///D:/repo/test.js` 去掉 scheme 后是 `/D:/repo/test.js`，那个前导斜杠
+/// 属于 URI 而不属于路径，必须去掉。但 Unix 绝对路径 `/tmp/repo/test.js` 的前导
+/// 斜杠就是路径本体 —— 一起去掉会把绝对路径变成相对路径，问题面板就再也跳不到
+/// 文件了。所以只在后面紧跟盘符时才去掉。
+fn strip_uri_slash_before_drive(path: &str) -> &str {
+    let Some(rest) = path.strip_prefix('/') else {
+        return path;
+    };
+    let mut chars = rest.chars();
+    match (chars.next(), chars.next()) {
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => rest,
+        _ => path,
+    }
 }
 
 fn percent_decode(value: &str) -> String {
@@ -370,6 +383,33 @@ mod tests {
         assert_eq!(problems[0].column, 1);
         assert_eq!(problems[0].severity, "error");
         assert_eq!(problems[0].source, "test");
+    }
+
+    #[test]
+    fn keeps_the_leading_slash_of_unix_absolute_paths() {
+        // 之前无条件 trim_start_matches('/')，Linux/macOS 上绝对路径会被削成相对
+        // 路径，问题面板点进去就跳不到文件。
+        let output = "/tmp/repo/src/main.rs:12:4: error: expected expression";
+
+        let problems = parse_terminal_problems(output, "task");
+
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].file, "/tmp/repo/src/main.rs");
+    }
+
+    #[test]
+    fn strips_only_the_uri_slash_that_precedes_a_drive_letter() {
+        let problems = parse_terminal_problems(
+            "ReferenceError: boom\n    at file:///D:/repo/test.js:18:1",
+            "test",
+        );
+        assert_eq!(problems[0].file, "D:/repo/test.js");
+
+        let problems = parse_terminal_problems(
+            "ReferenceError: boom\n    at file:///tmp/repo/test.js:18:1",
+            "test",
+        );
+        assert_eq!(problems[0].file, "/tmp/repo/test.js");
     }
 
     #[test]
