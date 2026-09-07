@@ -108,6 +108,7 @@ export function useFixWithAgent() {
 
   return {
     isAgentBusy,
+    sendFixPrompt,
     explainProblem,
     fixProblem,
     fixTaskFailure,

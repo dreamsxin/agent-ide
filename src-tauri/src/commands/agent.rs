@@ -996,6 +996,18 @@ pub async fn verify_workspace(
         return Err("No verification commands were provided.".to_string());
     }
 
+    // 长驻命令一律挡掉。验证是逐条跑完再看结果，混进一个 `npm run dev`
+    // 就永远卡住 —— 这是安全不变量，不是可配置的偏好。
+    let (commands, skipped): (Vec<String>, Vec<String>) = commands
+        .into_iter()
+        .partition(|command| !crate::services::verification::is_long_running_command(command));
+    if commands.is_empty() {
+        return Err(format!(
+            "Every candidate looks long-running, so nothing could be verified: {}",
+            skipped.join(", ")
+        ));
+    }
+
     let root = workspace::workspace_root()?;
     // 没给原始任务描述时退回最近一轮对话，这样修复提示里带着用户真正的诉求，
     // 而不是只有一堆报错
@@ -1029,7 +1041,7 @@ pub async fn verify_workspace(
         }
     }
 
-    let report = crate::services::verification::summarize(&original_prompt, results);
+    let report = crate::services::verification::summarize(&original_prompt, results, skipped);
 
     let orch = agent_state.orchestrator.lock().await;
     orch.emit_review_action_log(
