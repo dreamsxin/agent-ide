@@ -1,4 +1,6 @@
 import { useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "../utils/tauri";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useEditorStore } from "../stores/useEditorStore";
 import { useLayoutStore } from "../stores/useLayoutStore";
@@ -82,7 +84,24 @@ export function useFixWithAgent() {
 
   const fixTaskFailure = useCallback(
     async (task: ProjectTaskRunState) => {
-      await sendFixPrompt(buildTaskFailureFixPrompt(task));
+      // 提示词以后端那份为准。同一段提示曾在 Rust 和 TypeScript 各存一份，
+      // 两边对"输出太长时保哪一半"给出过相反答案（CLI 用的那半是错的）。
+      // TS 版本现在只在非 Tauri 环境或 IPC 失败时兜底。
+      let prompt: string | null = null;
+      if (isTauriRuntime()) {
+        try {
+          prompt = await invoke<string>("agent_repair_prompt", {
+            request: {
+              command: task.command,
+              exitCode: task.exitCode ?? null,
+              output: task.output ?? "",
+            },
+          });
+        } catch {
+          prompt = null;
+        }
+      }
+      await sendFixPrompt(prompt ?? buildTaskFailureFixPrompt(task));
     },
     [sendFixPrompt]
   );
