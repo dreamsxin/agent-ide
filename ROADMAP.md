@@ -258,7 +258,10 @@ The empty-content error also carried no evidence — it named neither the choice
 Two honest caveats:
 
 - **The fallback directory was never created during that run**, which means no test actually reached `config_dir()` unisolated this time. So the mechanical hole was real but it is *not* proven to be what reverted the key. That question is still open.
-- **The OS credential store is not covered.** `keyring` entries are keyed by service name, not by config directory, so a test that saves a profile credential can still write the developer's real credential store. For an *API key* specifically that is the more likely path, since the key lives in the keyring rather than in `config.json`. Isolating it needs a test-only credential backend, not a path change.
+- **The OS credential store is not covered.** `keyring` entries are keyed by service name, not by config directory, so a test that saves a profile credential can still write the developer's real credential store. For an *API key* specifically that is the more likely path, since the key lives in the keyring rather than in `config.json`. **Closed next:** all keyring access is confined to `services/credentials.rs`, and `SERVICE_NAME` is now `agent-ide-test` under `#[cfg(test)]` and `agent-ide` otherwise. Deliberately *not* an in-memory backend — the whole value of `secret_round_trips_through_os_credential_store` is that it really exercises Windows Credential Manager / macOS Keychain / Linux Secret Service, and a `HashMap` would only prove the `HashMap` works. A separate service name keeps that real round trip while making it impossible for a test to overwrite a production `llm-profile:*` entry.
+
+Remaining gap in this area: `cfg!(test)` is false when the library is compiled for an integration test in `tests/`, so a future Rust integration test would see the real paths again. There are no Rust integration tests today, only the TypeScript IPC contract test, so nothing is exposed right now.
+
 
 
 
