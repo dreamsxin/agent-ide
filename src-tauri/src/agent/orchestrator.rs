@@ -1,3 +1,4 @@
+use crate::agent::events::RunEvents;
 use crate::agent::executor;
 use crate::agent::multi_agent::{
     default_pipeline, mark_pipeline_stage, plan_pipeline, reset_pipeline_status, AgentRole,
@@ -19,6 +20,7 @@ use std::sync::{
     Arc,
 };
 use tauri::AppHandle;
+
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
@@ -763,6 +765,7 @@ impl AgentOrchestrator {
                     "agent-sdd-ready",
                     serde_json::to_value(artifact).unwrap_or_default(),
                 );
+
                 self.emit_action_log(
                     &app,
                     "info",
@@ -1172,7 +1175,7 @@ pub fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> Str
 impl AgentOrchestrator {
     fn handle_plan_stage_response(
         &mut self,
-        app: &AppHandle,
+        events: &dyn RunEvents,
         stage: &PipelineStage,
         response: &str,
         prompt: &str,
@@ -1187,12 +1190,12 @@ impl AgentOrchestrator {
                     .or_else(|| self.current_run_id.clone()),
             );
             self.sdd_artifacts.push(artifact.clone());
-            let _ = app.emit(
+            events.emit_json(
                 "agent-sdd-ready",
                 serde_json::to_value(&artifact).unwrap_or_default(),
             );
             self.emit_action_log(
-                app,
+                events,
                 "success",
                 "sdd_draft",
                 Some(stage.role.to_string()),
@@ -1209,7 +1212,7 @@ impl AgentOrchestrator {
                 if let Some(artifact) = self.sdd_artifacts.last_mut() {
                     artifact.review_findings.extend(findings);
                     artifact.status = "reviewed".to_string();
-                    let _ = app.emit(
+                    events.emit_json(
                         "agent-sdd-ready",
                         serde_json::to_value(artifact).unwrap_or_default(),
                     );
@@ -1222,25 +1225,25 @@ impl AgentOrchestrator {
     }
 
     /// Emit the current state to the frontend.
-    fn emit_state(&self, app: &AppHandle) {
+    fn emit_state(&self, events: &dyn RunEvents) {
         let payload = serde_json::json!({
             "state": self.state_mgr.state.to_string(),
             "mode": self.mode.to_string(),
             "ideMode": self.ide_mode.to_string(),
         });
-        let _ = app.emit("agent-state-changed", payload);
+        events.emit_json("agent-state-changed", payload);
     }
 
-    fn emit_pipeline(&self, app: &AppHandle, pipeline: &[PipelineStage]) {
-        let _ = app.emit(
+    fn emit_pipeline(&self, events: &dyn RunEvents, pipeline: &[PipelineStage]) {
+        events.emit_json(
             "agent-pipeline-update",
             serde_json::to_value(pipeline).unwrap_or_default(),
         );
     }
 
-    fn emit_step(&self, app: &AppHandle, step_index: usize) {
+    fn emit_step(&self, events: &dyn RunEvents, step_index: usize) {
         if let Some(step) = self.steps.get(step_index) {
-            let _ = app.emit(
+            events.emit_json(
                 "agent-step-update",
                 serde_json::to_value(step).unwrap_or_default(),
             );
@@ -1250,7 +1253,8 @@ impl AgentOrchestrator {
     #[allow(clippy::too_many_arguments)]
     fn emit_action_log(
         &self,
-        app: &AppHandle,
+        events: &dyn RunEvents,
+
         level: &str,
         phase: &str,
         role: Option<&str>,
@@ -1272,19 +1276,22 @@ impl AgentOrchestrator {
             context_summary,
             diff_summary,
         };
-        let _ = app.emit("agent-action-log", entry);
+        events.emit_json(
+            "agent-action-log",
+            serde_json::to_value(entry).unwrap_or_default(),
+        );
     }
 
     pub fn emit_review_action_log(
         &self,
-        app: &AppHandle,
+        events: &dyn RunEvents,
         level: &str,
         phase: &str,
         summary: &str,
         details: &str,
     ) {
         self.emit_action_log(
-            app,
+            events,
             level,
             phase,
             None,
@@ -1369,12 +1376,13 @@ impl AgentOrchestrator {
     fn ensure_not_cancelled(
         &mut self,
         cancel_flag: &Arc<AtomicBool>,
-        app: &AppHandle,
+        events: &dyn RunEvents,
     ) -> Result<(), String> {
         if cancel_flag.load(Ordering::SeqCst) {
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::Idle);
-            self.emit_state(app);
+            self.emit_state(events);
+
             return Err("Agent task cancelled".to_string());
         }
         Ok(())
@@ -1612,6 +1620,70 @@ mod tests {
     ///
     /// 同一文件写多次要合并成一条：original 取第一次写之前的内容，updated 取
     /// 最后一次写入的。撤销要回到"这次运行之前"，不是回到中间某一步。
+    /// 审查区在界面上的说明全靠 action log，所以这里断言"发出了什么事件"，
+    /// 而不只是"函数没 panic"：一次逻辑正确但没发事件的运行，在界面上等于没发生。
+    ///
+    /// 这条以前断言不了 —— `emit_review_action_log` 要 `AppHandle`，而 lib 测试里
+    /// 拿不到（把 Tauri runtime 拉进测试二进制会让整个套件在加载阶段起不来）。
+    /// 现在发事件是一个可替换的依赖，测试塞 `RecordingEvents` 就行。
+    #[test]
+    fn review_action_log_reports_the_pending_diffs_it_is_about() {
+        let events = crate::agent::events::RecordingEvents::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs.push(FileDiff {
+            id: "diff-1".to_string(),
+            file: "src/app.ts".to_string(),
+            base_hash: None,
+            provenance: None,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                content: String::new(),
+                original: "before\n".to_string(),
+                updated: "after\n".to_string(),
+                provenance: None,
+                status: None,
+            }],
+            status: "pending".to_string(),
+        });
+
+        orchestrator.emit_review_action_log(
+            &events,
+            "info",
+            "diff_ready",
+            "1 file changed",
+            "details",
+        );
+
+        let payloads = events.payloads_for("agent-action-log");
+        assert_eq!(payloads.len(), 1);
+        let entry = &payloads[0];
+        assert_eq!(entry["level"], "info");
+        assert_eq!(entry["phase"], "diff_ready");
+        // 审查区的日志都挂在这个 stage 下，前端靠它分组
+        assert_eq!(entry["stage"], "Diff Review");
+        let diff_summary = entry["diffSummary"].as_str().unwrap_or_default();
+        assert!(
+            diff_summary.contains("src/app.ts"),
+            "日志要指明是哪次改动，否则记录里看不出它在说什么: {}",
+            diff_summary
+        );
+
+        // 没有可审查的 diff 时也要给一句明确的话，而不是空字符串
+        let empty_events = crate::agent::events::RecordingEvents::new();
+        AgentOrchestrator::new().emit_review_action_log(
+            &empty_events,
+            "info",
+            "diff_ready",
+            "nothing to review",
+            "details",
+        );
+        let entry = &empty_events.payloads_for("agent-action-log")[0];
+        assert_eq!(entry["diffSummary"], "No reviewable diffs.");
+    }
+
     #[test]
     fn tool_writes_become_applied_diffs_with_an_undo_point() {
         let mut orchestrator = AgentOrchestrator::new();

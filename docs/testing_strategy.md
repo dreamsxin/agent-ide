@@ -37,7 +37,9 @@ npm test
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, repositories with no commits, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/agent.rs` | Context-compression precedence (request override vs stored default, unknown mode rejected). This file is the IPC boundary and most of it still needs a running app; logic is being pulled out into services rather than tested in place — see below |
+| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary) |
 | `services/verification.rs` | Repair-prompt construction, output truncation, `--allow-run` pattern matching, long-running command detection, verification candidate preparation (blank trimming, long-running partition, the two distinct failure messages), batch check execution when one command cannot run, action-log level/summary/detail rendering, bounded repair loop policy (iteration numbering, budget exhaustion, apply failure, repair-requires-apply) |
+
 
 | `services/llm_client.rs` | Provider request shaping, mock provider tool calls, run token accounting, usage action-log wording for unknown / partially reported / fully reported usage |
 
@@ -271,7 +273,17 @@ interesting function takes `AppHandle` or `tauri::State`, which only exist insid
 approach is therefore not "write tests for the command layer" but **move the decisions out of it**,
 leaving adapters that are too thin to be worth testing.
 
+The same dependency blocked the orchestrator, which is not a command layer at all — it holds the
+pipeline logic. `agent/events.rs` breaks that: `RunEvents` is a one-method trait for emitting to the
+frontend, `AppHandle` implements it, and tests use `RecordingEvents` to assert what was emitted.
+Emission is worth asserting rather than ignoring — the frontend's entire state comes from these
+events, so a run that is logically correct but silent looks like nothing happened. The orchestrator's
+leaf emitters (`emit_state`, `emit_pipeline`, `emit_step`, `emit_action_log`,
+`emit_review_action_log`) now take `&dyn RunEvents`; `run` and `continue_pipeline_from` still take an
+owned `AppHandle` because they spawn token-forwarding tasks, so they remain untestable for now.
+
 Two rules that come out of doing this:
+
 
 - A signature that mentions `State<T>` when the body only reads one field is a testability bug, not a
   style question. `resolve_context_compression` took `State<AgentGlobalState>` to read a single
