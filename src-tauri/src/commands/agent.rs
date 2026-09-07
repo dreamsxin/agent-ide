@@ -1595,6 +1595,19 @@ pub struct LocalModelStatus {
     pub model_type: String,
 }
 
+/// 把配置里的 `~/...` 展开成绝对路径。
+///
+/// 以前这个函数长在 local_inference 里，随进程内推理一起删掉了；但 profile 仍然
+/// 可以指向一个本地模型目录，状态查询还需要报告它的真实位置。
+fn expand_home(path: &std::path::Path) -> std::path::PathBuf {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix('~') else {
+        return path.to_path_buf();
+    };
+    let home = dirs_next::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(rest.trim_start_matches(['/', '\\']))
+}
+
 /// Test LLM connectivity with a small request.
 #[tauri::command]
 fn local_model_status(
@@ -1612,9 +1625,7 @@ fn local_model_status(
     let local = config
         .local_model_config
         .ok_or_else(|| "Selected profile is not local".to_string())?;
-    let path =
-        crate::agent::local_inference::expand_model_path(std::path::Path::new(&local.model_path))
-            .join(&local.model_file);
+    let path = expand_home(std::path::Path::new(&local.model_path)).join(&local.model_file);
     let loaded = agent_state
         .local_engines
         .lock()
