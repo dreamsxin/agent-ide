@@ -139,3 +139,49 @@ describe("setActiveLlmProfile", () => {
     expect(useAgentStore.getState().apiKeyMasked).toBe("not configured");
   });
 });
+
+describe("undoLastApply", () => {
+  it("clears the error banner when every file is restored", async () => {
+    useAgentStore.setState({ error: "stale failure from an earlier run" });
+    invokeMock.mockResolvedValueOnce({
+      label: "Apply file src/app.ts",
+      restored: ["src/app.ts"],
+      failed: [],
+    });
+
+    const ok = await useAgentStore.getState().undoLastApply();
+
+    expect(ok).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("undo_last_apply");
+    // 撤销成功后还留着上一次的错误横幅会让人以为撤销也失败了
+    expect(useAgentStore.getState().error).toBeNull();
+  });
+
+  it("reports a partial restore instead of claiming success", async () => {
+    invokeMock.mockResolvedValueOnce({
+      label: "Auto-apply",
+      restored: ["src/a.ts"],
+      failed: ["src/b.ts: permission denied"],
+    });
+
+    const ok = await useAgentStore.getState().undoLastApply();
+
+    // 部分恢复不能算成功：磁盘此刻处于两次状态的中间
+    expect(ok).toBe(false);
+    const error = useAgentStore.getState().error ?? "";
+    expect(error).toContain("1");
+    expect(error.toLowerCase()).toContain("restored");
+  });
+
+  it("surfaces the backend refusal when there is nothing to undo", async () => {
+    invokeMock.mockRejectedValueOnce(
+      "Nothing to undo: no applied change is recorded"
+    );
+
+    const ok = await useAgentStore.getState().undoLastApply();
+
+    expect(ok).toBe(false);
+    // 静默失败会让按钮看起来是坏的，而不是"没有可撤销的东西"
+    expect(useAgentStore.getState().error).toContain("Nothing to undo");
+  });
+});
