@@ -206,9 +206,38 @@ struct SmokeArgs {
 }
 
 #[derive(Subcommand, Debug)]
+// `IdeBackend` 带着完整的 run 参数，`IdeSurface` 只有几个字段，体积差被 clippy
+// 盯上了。这里无所谓：整个进程只从 argv 构造一次这个枚举，既不放进集合也不
+// 高频传递。装箱要么 clap 的 derive 不接受，要么只是为了让 lint 闭嘴。
+#[allow(clippy::large_enum_variant)]
 enum SmokeCommand {
     /// Exercise workspace resolution, project scripts, command checks, Problems, diff apply, and repair-chain artifacts.
     IdeBackend(AgentCommandArgs),
+    /// Probe the IDE panel backends read-only: workspace, project tasks, Git, context packing.
+    IdeSurface(IdeSurfaceArgs),
+}
+
+/// `smoke ide-surface` 的参数。
+///
+/// 刻意只读、也不需要 LLM：它回答的是"桌面端那些面板背后的后端此刻能不能工作"，
+/// 而这些以前只能靠打开应用一个个点。没有 provider 依赖意味着它能进 CI。
+#[derive(Args, Debug, Clone)]
+struct IdeSurfaceArgs {
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = OutputMode::Text)]
+    output: OutputMode,
+
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    run_id: Option<String>,
+
+    /// Context compression mode used for the context-packing probe.
+    #[arg(long, value_enum, default_value_t = ContextModeArg::Budgeted)]
+    context_mode: ContextModeArg,
 }
 
 impl Default for RunArgs {
@@ -418,6 +447,66 @@ enum CliEvent {
         status: CliStatus,
         exit_code: u8,
     },
+    SurfaceProbed {
+        name: String,
+        status: String,
+        detail: String,
+    },
+}
+
+/// 一次 IDE 后端面探测的结果。
+///
+/// `unavailable` 和 `failed` 必须分开：工作区不是 git 仓库时 Git 面板本来就
+/// 没东西可显示，那不是缺陷；而 `git_status` 真的报错是缺陷。混成一个状态会
+/// 让这个命令在非 git 目录里永远是红的，很快就没人看了。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SurfaceProbe {
+    name: String,
+    status: String,
+    detail: String,
+}
+
+impl SurfaceProbe {
+    fn ok(name: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "ok".to_string(),
+            detail,
+        }
+    }
+
+    fn unavailable(name: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "unavailable".to_string(),
+            detail,
+        }
+    }
+
+    fn failed(name: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "failed".to_string(),
+            detail,
+        }
+    }
+
+    fn is_failure(&self) -> bool {
+        self.status == "failed"
+    }
+}
+
+/// Git 探测里哪些错误属于"这个仓库现在没东西可看"而不是缺陷。
+///
+/// 两种：根本不是 git 仓库；以及刚 `git init` 还没有任何提交（git2 的
+/// `UnbornBranch`）。后者是这个探测命令自己发现的：`git_status` 在无提交的新仓库
+/// 里直接返回 Err，所以桌面端 Git 面板在这种仓库里会报错而不是显示"尚无提交"。
+/// 那是 `commands::git` 的问题，不该让探测命令跟着一起红。
+fn git_probe_unavailable(error: &str) -> bool {
+    error.contains("Not a git repo")
+        || error.contains("UnbornBranch")
+        || error.contains("reference 'refs/heads/")
 }
 
 struct CliOutput {
@@ -987,7 +1076,198 @@ async fn run_agent_command(
 async fn run_smoke(args: SmokeArgs) -> Result<ExitCode, (ExitCode, String)> {
     match args.command {
         SmokeCommand::IdeBackend(args) => run_ide_backend_smoke(args).await,
+        SmokeCommand::IdeSurface(args) => run_ide_surface_smoke(args).await,
     }
+}
+
+/// 只读地探一遍桌面端各面板背后的后端。
+///
+/// 存在的理由：`agent_cli` 一行 `commands::` 都没 import，走的全是 `services::`
+/// 和 `agent::`，所以 Agent 流程之外的东西（Git 面板、命令面板、上下文装配）
+/// 在自动化里完全没有入口 —— 只能打开应用一个个点。这个子命令用**桌面端调用的
+/// 同一批函数**把它们跑一遍并给出机器可读结果。
+///
+/// 刻意不碰的东西：终端 PTY 和 LSP 需要真的起子进程，写操作和 fetch/pull/push
+/// 会碰网络和磁盘。这个命令必须能在 CI 里对任意仓库无副作用地跑。
+async fn run_ide_surface_smoke(args: IdeSurfaceArgs) -> Result<ExitCode, (ExitCode, String)> {
+    let mut output = CliOutput::new(args.output);
+    let run_id = args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| make_run_id(args.workspace.as_deref()));
+    let workspace_path = resolve_workspace(args.workspace.as_deref())?;
+    configure_workspace(&workspace_path)?;
+    let workspace_display = workspace_path.to_string_lossy().to_string();
+    let artifact_dir = args
+        .artifact_dir
+        .clone()
+        .unwrap_or_else(|| default_artifact_dir(&workspace_path, &run_id));
+
+    output.event(CliEvent::RunStarted {
+        run_id: run_id.clone(),
+        command: "smoke ide-surface".to_string(),
+        workspace: workspace_display.clone(),
+    });
+
+    let mut probes = Vec::new();
+
+    // 1. 工作区边界解析：所有面板都建立在它之上，它错了后面全错
+    probes.push(match workspace::resolve_existing(".") {
+        Ok(path) => SurfaceProbe::ok("workspace_resolve", path.to_string_lossy().to_string()),
+        Err(error) => SurfaceProbe::failed("workspace_resolve", error),
+    });
+
+    // 2. 命令面板 / TopBar 的命令来源
+    let tasks = project_tasks::discover_project_tasks_in_root(&workspace_path);
+    probes.push(match &tasks {
+        Ok(tasks) if tasks.is_empty() => SurfaceProbe::unavailable(
+            "project_tasks",
+            "No package.json scripts or Cargo tasks were discovered".to_string(),
+        ),
+        Ok(tasks) => SurfaceProbe::ok(
+            "project_tasks",
+            format!(
+                "{} task(s): {}",
+                tasks.len(),
+                tasks
+                    .iter()
+                    .map(|task| task.command.as_str())
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Err(error) => SurfaceProbe::failed("project_tasks", error.clone()),
+    });
+
+    // 3. Agent 验证工具和 Verify All 实际会覆盖哪些命令。
+    //    长驻命令被排除，所以这里显示的是"真的会跑的那些"，不是全部任务。
+    if let Ok(tasks) = &tasks {
+        let verifiable: Vec<&str> = tasks
+            .iter()
+            .map(|task| task.command.as_str())
+            .filter(|command| !crate::services::verification::is_long_running_command(command))
+            .collect();
+        probes.push(if verifiable.is_empty() {
+            SurfaceProbe::unavailable(
+                "verification_candidates",
+                "Every discovered task looks long-running, so a verification pass would cover nothing"
+                    .to_string(),
+            )
+        } else {
+            SurfaceProbe::ok(
+                "verification_candidates",
+                format!("{}: {}", verifiable.len(), verifiable.join(", ")),
+            )
+        });
+    }
+
+    // 4. Git 面板后端，调的就是桌面端那两个函数
+    probes.push(
+        match crate::commands::git::git_status(workspace_display.clone()) {
+            Ok(status) => SurfaceProbe::ok(
+                "git_status",
+                format!(
+                    "branch {}, {} changed entr(ies), {} staged, ahead {} behind {}, {} conflict(s)",
+                    status.branch,
+                    status.entries.len(),
+                    status.entries.iter().filter(|entry| entry.staged).count(),
+                    status.ahead,
+                    status.behind,
+                    status.conflicts.len()
+                ),
+            ),
+            Err(error) if git_probe_unavailable(&error) => {
+                SurfaceProbe::unavailable("git_status", error)
+            }
+            Err(error) => SurfaceProbe::failed("git_status", error),
+        },
+    );
+    probes.push(
+        match crate::commands::git::git_diff(
+            workspace_display.clone(),
+            None,
+            Some("all".to_string()),
+        ) {
+            Ok(diff) => SurfaceProbe::ok("git_diff", format!("{} chars", diff.len())),
+            Err(error) if git_probe_unavailable(&error) => {
+                SurfaceProbe::unavailable("git_diff", error)
+            }
+            Err(error) => SurfaceProbe::failed("git_diff", error),
+        },
+    );
+
+    // 5. 上下文装配：段落配额、预算裁剪，Agent 每次运行都依赖它
+    let context = build_workspace_context(&workspace_path, &[]);
+    let estimate = estimate_context(&context, args.context_mode);
+    probes.push(SurfaceProbe::ok(
+        "context_estimate",
+        format!(
+            "{} section(s), {} estimated tokens, budget {}",
+            estimate.sections.len(),
+            estimate.estimated_tokens,
+            estimate
+                .input_budget_tokens
+                .map(|tokens| tokens.to_string())
+                .unwrap_or_else(|| "unset".to_string())
+        ),
+    ));
+
+    for probe in &probes {
+        output.event(CliEvent::SurfaceProbed {
+            name: probe.name.clone(),
+            status: probe.status.clone(),
+            detail: probe.detail.clone(),
+        });
+        output.text(format!(
+            "[{}] {}: {}",
+            probe.status, probe.name, probe.detail
+        ));
+    }
+
+    let errors: Vec<String> = probes
+        .iter()
+        .filter(|probe| probe.is_failure())
+        .map(|probe| format!("{}: {}", probe.name, probe.detail))
+        .collect();
+    let (status, exit) = if errors.is_empty() {
+        (CliStatus::Ok, ExitCode::Success)
+    } else {
+        (CliStatus::PreconditionFailed, ExitCode::PreconditionFailed)
+    };
+
+    let summary = CliSummary {
+        schema_version: 1,
+        run_id,
+        status: status.clone(),
+        exit_code: exit.as_u8(),
+        workspace: workspace_display,
+        command: "smoke ide-surface".to_string(),
+        prompt: None,
+        output: args.output,
+        artifact_dir: artifact_dir.to_string_lossy().to_string(),
+        context: Some(estimate),
+        plan: Vec::new(),
+        diffs: Vec::new(),
+        apply_result: None,
+        commands: Vec::new(),
+        problems: Vec::new(),
+        repair_chain: Vec::new(),
+        repair_summary: Vec::new(),
+        project_tasks: tasks.unwrap_or_default(),
+        capabilities: None,
+        policy: default_policy_summary(),
+        errors,
+    };
+
+    emit_summary(&mut output, &summary)?;
+    write_artifacts(&artifact_dir, &summary, &output.events, None, None)?;
+    // 探测结果单独落一份，方便外部工具直接读而不用从事件流里筛
+    let probes_path = artifact_dir.join("surface-probes.json");
+    if let Ok(serialized) = serde_json::to_string_pretty(&probes) {
+        let _ = std::fs::write(probes_path, serialized);
+    }
+    Ok(exit)
 }
 
 async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (ExitCode, String)> {
@@ -2599,5 +2879,63 @@ console.log("ok");
             1
         );
         assert_eq!(chain[0]["commandsAfter"][0]["exitCode"], 0);
+    }
+
+    /// `smoke ide-surface` 是 Agent 流程之外那些面板后端的唯一自动化入口，
+    /// 所以它必须在**没有** LLM 配置、也不管工作区是不是 git 仓库的情况下成功：
+    /// 一旦它需要前置条件才能跑，就进不了 CI，也就等于不存在。
+    #[tokio::test]
+    async fn smoke_ide_surface_probes_panel_backends_without_a_provider() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        let workspace = SmokeWorkspace::new("surface", "initial");
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "smoke".to_string(),
+            "ide-surface".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        let probes_raw =
+            fs::read_to_string(workspace.artifacts.join("surface-probes.json")).unwrap();
+        assert_eq!(exit, ExitCode::Success, "probes: {}", probes_raw);
+
+        let probes: serde_json::Value = serde_json::from_str(&probes_raw).unwrap();
+        let probes = probes.as_array().expect("probe array").clone();
+        let by_name = |name: &str| {
+            probes
+                .iter()
+                .find(|probe| probe["name"] == name)
+                .unwrap_or_else(|| panic!("missing probe {}", name))
+                .clone()
+        };
+
+        assert_eq!(by_name("workspace_resolve")["status"], "ok");
+        assert_eq!(by_name("context_estimate")["status"], "ok");
+        // git 探测在非仓库目录里必须是 unavailable 而不是 failed —— 否则这个命令
+        // 在任何非 git 目录里都是红的，很快就没人看它的结果了
+        let git_status = by_name("git_status")["status"].clone();
+        assert!(
+            git_status == "ok" || git_status == "unavailable",
+            "{}",
+            git_status
+        );
+
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["status"], "ok");
+        assert_eq!(summary["command"], "smoke ide-surface");
     }
 }
