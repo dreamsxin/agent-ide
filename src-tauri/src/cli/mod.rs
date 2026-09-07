@@ -187,6 +187,13 @@ struct RunArgs {
     #[arg(long = "allow-delete")]
     allow_delete: bool,
 
+    /// Expose `workspace_write_file` to the model. Requires `--apply`.
+    ///
+    /// 单独一个开关，不复用 `--allow-edit`：那个管的是"产出的 diff 能否落盘"，
+    /// 而这个是"模型可以在运行途中直接写文件"，两件事。
+    #[arg(long = "allow-agent-write")]
+    allow_agent_write: bool,
+
     #[arg(long = "allow-git")]
     allow_git: Vec<String>,
 }
@@ -266,6 +273,7 @@ impl Default for RunArgs {
             allow_create: false,
             allow_edit: false,
             allow_delete: false,
+            allow_agent_write: false,
             allow_git: Vec::new(),
         }
     }
@@ -771,24 +779,33 @@ async fn run_agent_command(
         .unwrap_or_else(|| default_artifact_dir(&workspace_path, &run_id));
     let prompt = read_prompt(&args, positional_prompt)?;
     validate_repair_permissions(&args)?;
+    validate_agent_write_permission(&args)?;
     let llm = build_llm_client(&args)?;
-    // CLI 的工具面。`--allow-run` 给了允许清单才暴露验证工具 —— 在此之前 CLI 传的
-    // 是 `None` invoker，所以 headless 运行里模型是"盲"的：这也是 CLI 需要
-    // `--max-iterations` 修复循环兜底的原因。
+    // CLI 的工具面。在此之前 CLI 传的是 `None` invoker，所以 headless 运行里模型是
+    // "盲"的 —— 这也是 CLI 需要 `--max-iterations` 修复循环兜底的原因。
     //
-    // 写入工具刻意不在这里给：`--allow-edit` / `--allow-create` 管的是"产出的 diff
-    // 能否落盘"，把它们重新解释成"模型可以直接写文件"是偷偷提权。
-    let (llm, tool_invoker) = if args.allow_run.is_empty() {
-        (llm, None)
-    } else {
+    // 两个开关是分开的，故意的：
+    // - `--allow-run` 给验证工具，限定在同一批 pattern 内
+    // - `--allow-agent-write` 给写入工具，且要求 `--apply`（见
+    //   `validate_agent_write_permission`）
+    //
+    // 不复用 `--allow-edit` / `--allow-create`：那两个管的是"产出的 diff 能否落盘"，
+    // 把它们重新解释成"模型可以直接写文件"是偷偷提权。
+    let tool_permissions = crate::agent::workspace_tools::WorkspaceToolPermissions::new(
+        args.allow_run.clone(),
+        args.allow_agent_write,
+        args.allow_agent_write && args.allow_create,
+    );
+    let expose_tools = !args.allow_run.is_empty() || args.allow_agent_write;
+    let (llm, tool_invoker) = if expose_tools {
         crate::agent::workspace_tools::attach_workspace_tools(
             llm,
             None,
             None,
-            crate::agent::workspace_tools::WorkspaceToolPermissions::with_commands(
-                args.allow_run.clone(),
-            ),
+            tool_permissions.clone(),
         )
+    } else {
+        (llm, None)
     };
     let mut context = build_workspace_context(&workspace_path, &args.include);
     context.enrich_from_workspace_with_sources(&source_options(&args.include));
@@ -1090,6 +1107,26 @@ async fn run_agent_command(
         Some(&context_text),
         Some(&diffs),
     )?;
+    // 工具写入要留痕。桌面端把它们登记成可撤销的 applied diff 卡片，CLI 没有审查区，
+    // 所以对应物是 run artifact：不写这一份，磁盘变了而运行记录里查不到是谁改的。
+    //
+    // 只要开了写权限就落这份文件，哪怕是空数组：文件缺失和"一次都没写"是两件事，
+    // 混在一起的话读运行记录的人分不出"没授权"和"授权了但没用"。
+    if args.allow_agent_write {
+        let records: Vec<serde_json::Value> = tool_permissions
+            .take_writes()
+            .iter()
+            .map(|write| {
+                serde_json::json!({
+                    "file": write.file,
+                    "created": write.previous.is_none(),
+                    "previousChars": write.previous.as_ref().map(|value| value.len()),
+                    "updatedChars": write.updated.len(),
+                })
+            })
+            .collect();
+        write_json(artifact_dir.join("tool-writes.json"), &records)?;
+    }
     Ok(exit)
 }
 
@@ -1965,9 +2002,9 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         model: model.clone(),
         provider: "custom".to_string(),
         max_output_tokens: None,
-        // 只有给了 `--allow-run` 才切到原生工具：否则任意 provider 都会突然收到
+        // 只有真的要给工具时才切到原生工具：否则任意 provider 都会突然收到
         // `tools` 参数，而 CLI 的默认目标是"能对着任何 OpenAI 兼容端点跑"。
-        tool_call_mode: if args.allow_run.is_empty() {
+        tool_call_mode: if args.allow_run.is_empty() && !args.allow_agent_write {
             "text_protocol".to_string()
         } else {
             "native_tools".to_string()
@@ -2053,6 +2090,22 @@ fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)>
                 "--max-iterations requires explicit --allow-run for command(s): {}",
                 unauthorized.join(", ")
             ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_write_permission(args: &RunArgs) -> Result<(), (ExitCode, String)> {
+    if !args.allow_agent_write {
+        return Ok(());
+    }
+    // 没有 `--apply` 的运行是预览：用户的预期是"磁盘一点都不动"。写入工具会在
+    // 运行途中落盘，直接违背这个预期，所以必须显式配上 `--apply`。
+    // 这和桌面端把写入工具锁在 Auto 模式是同一条理由 —— Auto 本来就会自动落盘。
+    if !args.apply {
+        return Err((
+            ExitCode::InvalidInput,
+            "--allow-agent-write requires --apply: without it a run is a preview and must leave the workspace untouched, but the write tool changes files mid-run.".to_string(),
         ));
     }
     Ok(())
@@ -3049,5 +3102,121 @@ console.log("ok");
             "a command ran without --allow-run: the tool was reachable when it should not exist"
         );
         assert_eq!(exit, ExitCode::ChangesProposed);
+    }
+
+    /// 写入工具的端到端证据：模型调用 → 文件真的落盘 → 运行记录里查得到。
+    ///
+    /// 最后一条是重点。桌面端把工具写入登记成可撤销的 applied diff 卡片，CLI 没有
+    /// 审查区，对应物就是 `tool-writes.json`；不写它，磁盘变了而运行记录查不到
+    /// 是谁改的。
+    #[tokio::test]
+    async fn smoke_write_tool_lands_a_file_and_records_it() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("writetool", "initial");
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_write_file");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({
+                "path": "written-by-agent.txt",
+                "content": "tool wrote this\n",
+            })
+            .to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--apply".to_string(),
+            "--allow-create".to_string(),
+            "--allow-edit".to_string(),
+            "--allow-agent-write".to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        result.unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path("written-by-agent.txt")).unwrap(),
+            "tool wrote this\n"
+        );
+        let records: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("tool-writes.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(records[0]["file"], "written-by-agent.txt");
+        assert_eq!(records[0]["created"], true);
+    }
+
+    /// 对照组：同一次调用，只是没给 `--allow-agent-write`。工具不通告也不认领，
+    /// 所以文件不该出现 —— 证明它是真的不可达，而不是恰好没被调到。
+    #[tokio::test]
+    async fn smoke_write_tool_is_absent_without_permission() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("nowrite", "initial");
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_write_file");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({
+                "path": "written-by-agent.txt",
+                "content": "tool wrote this\n",
+            })
+            .to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--apply".to_string(),
+            "--allow-create".to_string(),
+            "--allow-edit".to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        result.unwrap();
+
+        assert!(
+            !workspace.path("written-by-agent.txt").exists(),
+            "the write tool was reachable without --allow-agent-write"
+        );
+        assert!(!workspace.artifacts.join("tool-writes.json").exists());
+    }
+
+    /// 预览运行（没有 `--apply`）的承诺是"磁盘一点都不动"，而写入工具会在运行
+    /// 途中落盘。所以这个组合必须在跑之前就被拒绝，而不是跑完才发现文件变了。
+    #[test]
+    fn agent_write_requires_apply() {
+        let mut args = RunArgs {
+            allow_agent_write: true,
+            ..RunArgs::default()
+        };
+
+        let error = validate_agent_write_permission(&args).unwrap_err();
+        assert_eq!(error.0, ExitCode::InvalidInput);
+        assert!(error.1.contains("--apply"), "{}", error.1);
+
+        args.apply = true;
+        assert!(validate_agent_write_permission(&args).is_ok());
     }
 }

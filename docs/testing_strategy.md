@@ -37,7 +37,7 @@ npm test
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/lsp.rs` | LSP file URI encoding/decoding, Windows verbatim path normalization, indexing-state detection |
-| `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all), repair permission requirements, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, `smoke ide-backend` |
+| `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all), repair permission requirements, `--allow-agent-write` requiring `--apply`, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, `tool-writes.json`, `smoke ide-backend` |
 
 Run command:
 
@@ -241,7 +241,20 @@ that differ only in `--allow-run`, asserting the command's side effect appears i
 other. That distinguishes "the tool ran" from "the round completed", which a diff-only assertion
 cannot.
 
+The write tool has the same shape of coverage under `--allow-agent-write`
+(`cli::tests::smoke_write_tool_*`): one run asserts the file on disk holds what the model wrote and
+that `tool-writes.json` records it, its pair asserts the file is untouched without the flag, and a
+third asserts the flag is rejected without `--apply`. Asserting the file contents rather than the
+tool's return string is the point — a tool can report success and still not have written anything.
+
 Still not covered by the desktop harness: its profile uses `toolCallMode = "text_protocol"`, so
-`npm run e2e:workflow` continues to exercise the text protocol rather than the tool loop. The write
-tool (`workspace_write_file`) also has no end-to-end coverage — it is gated on `auto` mode in the
-desktop app and is deliberately not exposed by the CLI.
+`npm run e2e:workflow` continues to exercise the text protocol rather than the tool loop. The
+desktop's own write path (tool writes becoming applied diff cards with an undo checkpoint) is
+covered at the orchestrator level, not end to end through the UI.
+
+One trap worth knowing about, since it produced a false green for a while: `npm run e2e:workflow`
+copies the repository into `artifacts/e2e/workflow/<timestamp>/workspace/`, test files included.
+Vitest's default `include` picked those copies up, so `npm test` was running frozen snapshots of old
+code alongside the real suite — 43 files instead of 10 — and a failure there would have pointed at
+history rather than at the working tree. `vite.config.ts` now pins `test.include` to `src/**`.
+
