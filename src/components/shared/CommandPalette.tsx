@@ -141,6 +141,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const toggleFocusMode = useLayoutStore((s) => s.toggleFocusMode);
+  const performanceOverlay = useLayoutStore((s) => s.performanceOverlay);
+  const togglePerformanceOverlay = useLayoutStore((s) => s.togglePerformanceOverlay);
   const setWorkspacePath = useLayoutStore((s) => s.setWorkspacePath);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const stopAgent = useAgentStore((s) => s.stopAgent);
@@ -228,6 +230,13 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         group: "View",
         run: toggleTheme,
       },
+      {
+        id: "view.performance-overlay",
+        title: performanceOverlay ? "Hide Editor Performance Overlay" : "Show Editor Performance Overlay",
+        subtitle: "Editor FPS, frame time, and dropped frames",
+        group: "View",
+        run: togglePerformanceOverlay,
+      },
       agentModeCommand("agent.mode.suggest", "Set Agent Mode: Suggest", "suggest", changeMode),
       agentModeCommand("agent.mode.edit", "Set Agent Mode: Edit", "edit", changeMode),
       agentModeCommand("agent.mode.auto", "Set Agent Mode: Auto", "auto", changeMode),
@@ -258,6 +267,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     bottomVisible,
     changeMode,
     leftVisible,
+    performanceOverlay,
     rightVisible,
     runProjectTask,
     setBottomTab,
@@ -269,6 +279,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     toggleBottomPanel,
     toggleFocusMode,
     toggleLeftPanel,
+    togglePerformanceOverlay,
     toggleRightPanel,
     toggleTheme,
   ]);

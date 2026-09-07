@@ -25,6 +25,11 @@ interface LayoutStore {
   // Agent 面板当前视图
   agentView: AgentViewId;
 
+  // 编辑器性能浮层。默认关闭：它驱动一个常驻 requestAnimationFrame 循环，
+  // 每帧都 setState，属于开发期诊断工具，不应该在正常使用时开着。
+  performanceOverlay: boolean;
+
+
   // workspacePath
   workspacePath: string;
 
@@ -39,6 +44,7 @@ interface LayoutStore {
   setLeftTab: (tab: LayoutStore["leftTab"]) => void;
   setBottomTab: (tab: LayoutStore["bottomTab"]) => void;
   setAgentView: (view: AgentViewId) => void;
+  togglePerformanceOverlay: () => void;
   setWorkspacePath: (path: string) => void;
 }
 
@@ -53,6 +59,7 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
   leftTab: "explorer",
   bottomTab: "terminal",
   agentView: "task",
+  performanceOverlay: false,
   workspacePath: "",
 
   setLeftWidth: (w) => set({ leftWidth: Math.max(180, Math.min(500, w)) }),
@@ -71,5 +78,6 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
   setLeftTab: (leftTab) => set({ leftTab }),
   setBottomTab: (bottomTab) => set({ bottomTab }),
   setAgentView: (agentView) => set({ agentView }),
+  togglePerformanceOverlay: () => set((s) => ({ performanceOverlay: !s.performanceOverlay })),
   setWorkspacePath: (workspacePath) => set({ workspacePath }),
 }));

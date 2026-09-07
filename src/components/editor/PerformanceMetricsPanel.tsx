@@ -3,9 +3,10 @@ import type { PerformanceMetrics } from "../../utils/incrementalRenderer";
 interface PerformanceMetricsPanelProps {
   metrics: PerformanceMetrics | null;
   onReset?: () => void;
+  onClose?: () => void;
 }
 
-export default function PerformanceMetricsPanel({ metrics, onReset }: PerformanceMetricsPanelProps) {
+export default function PerformanceMetricsPanel({ metrics, onReset, onClose }: PerformanceMetricsPanelProps) {
   if (!metrics) return null;
 
   const memory = metrics.memoryUsage >= 1024
@@ -14,9 +15,18 @@ export default function PerformanceMetricsPanel({ metrics, onReset }: Performanc
 
   return (
     <div className="absolute right-2 top-2 z-10 w-52 rounded border border-surface-border bg-surface-panel/95 p-2 text-[10px] shadow-lg backdrop-blur-sm">
-      <div className="mb-1 flex items-center justify-between text-[11px] font-semibold text-surface-text">
+      <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold text-surface-text">
         <span>Editor performance</span>
-        <button type="button" onClick={onReset} title="Reset performance metrics" className="text-surface-muted hover:text-surface-text">Reset</button>
+        <button type="button" onClick={onReset} title="Reset performance metrics" className="ml-auto text-surface-muted hover:text-surface-text">Reset</button>
+        <button
+          type="button"
+          onClick={onClose}
+          title="Close performance overlay"
+          aria-label="Close performance overlay"
+          className="text-surface-muted hover:text-surface-text"
+        >
+          ×
+        </button>
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-surface-muted">
         <Metric label="FPS" value={metrics.fps.toFixed(1)} />

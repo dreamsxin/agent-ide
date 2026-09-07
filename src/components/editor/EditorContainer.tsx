@@ -4,6 +4,7 @@ import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLspStore } from "../../stores/useLspStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useThemeStore } from "../../stores/useThemeStore";
 import { pathsEqual } from "../../utils/paths";
 import { MonacoContext } from "./MonacoContext";
 import {
@@ -103,6 +104,9 @@ export default function EditorContainer() {
   const agentState = useAgentStore((s) => s.state);
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const rightVisible = useLayoutStore((s) => s.rightVisible);
+  const performanceOverlay = useLayoutStore((s) => s.performanceOverlay);
+  const togglePerformanceOverlay = useLayoutStore((s) => s.togglePerformanceOverlay);
+  const theme = useThemeStore((s) => s.theme);
 
   const [editorRef, setEditorRef] = useState<editor.IStandaloneCodeEditor | null>(null);
   const [monacoRef, setMonacoRef] = useState<typeof import("monaco-editor") | null>(null);
@@ -116,12 +120,14 @@ export default function EditorContainer() {
   const lspChangeTimerRef = useRef<number | null>(null);
   const [lspReady, setLspReady] = useState(false);
 
-  // 集成增量渲染引擎
+  // 集成增量渲染引擎。仅在性能浮层打开时启用：renderLine 是刻意的空操作
+  // （Monaco 自己负责渲染），所以这个循环唯一的产出就是指标，关掉浮层还继续跑
+  // 等于每帧白白 setState 一次。
   const {
     metrics: renderMetrics,
     resetMetrics: resetRenderMetrics,
   } = useIncrementalRendering(editorRef, {
-    enabled: true, // 可以通过设置控制是否启用
+    enabled: performanceOverlay,
     config: {
       frameBudgetMs: 16, // 60fps 目标
       targetFps: 60,
@@ -129,18 +135,7 @@ export default function EditorContainer() {
       dirtyLineTtl: 1000,
       maxRenderQueueSize: 1000,
     },
-    onMetricsUpdate: (metrics) => {
-      // 可以在这里记录性能指标或显示给用户
-      console.log('渲染性能指标:', {
-        fps: metrics.fps.toFixed(1),
-        frameTime: metrics.frameTime.toFixed(2) + 'ms',
-        renderTime: metrics.renderTime.toFixed(2) + 'ms',
-        memoryUsage: (metrics.memoryUsage / 1024).toFixed(2) + 'KB',
-        droppedFrames: metrics.droppedFrames,
-        totalFrames: metrics.totalFrames,
-      });
-    },
-    profilingEnabled: true, // 启用性能分析
+    profilingEnabled: performanceOverlay,
   });
 
   const activeTab = openFiles.find((f) => f.path === activeFile);
@@ -592,7 +587,11 @@ export default function EditorContainer() {
 
       {/* Monaco 编辑器区 */}
       <div className="flex-1 relative overflow-hidden">
-        <PerformanceMetricsPanel metrics={renderMetrics} onReset={resetRenderMetrics} />
+        <PerformanceMetricsPanel
+          metrics={renderMetrics}
+          onReset={resetRenderMetrics}
+          onClose={togglePerformanceOverlay}
+        />
         <MonacoContext.Provider value={contextValue}>
           {activeTab ? (
             <Suspense
@@ -607,7 +606,7 @@ export default function EditorContainer() {
                 path={activeFile ?? undefined}
                 height="100%"
                 language={activeTab.language || detectLanguage(activeTab.path)}
-                theme="vs-dark"
+                theme={theme === "light" ? "vs" : "vs-dark"}
                 value={currentContent}
                 onChange={handleChange}
                 onMount={handleEditorMount}
