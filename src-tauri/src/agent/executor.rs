@@ -172,6 +172,44 @@ pub async fn execute_step(
     stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx).await
 }
 
+/// 较早的阶段输出进提示词的字符上限
+const MAX_EARLIER_STAGE_CHARS: usize = 6_000;
+/// 原样保留的最近阶段数
+const FULL_RECENT_STAGES: usize = 2;
+
+/// 把之前几个阶段的输出拼成提示词里的 "Prior stage outputs" 段落。
+///
+/// 以前是一句 `stage_outputs.join(...)`，没有任何上限。这一段是绕过上下文预算
+/// 直接拼进 prompt 的（预算只管 `context`），所以阶段一多、输出一长，请求就无界
+/// 增长：要么超模型上下文，要么把真正有用的项目上下文挤出窗口。
+///
+/// 规则：最近两个阶段原样保留 —— 下一个阶段最依赖紧邻的上一个；更早的按**尾部**
+/// 截断，因为结论和 diff 都在末尾。截断由 `truncate_for_prompt` 完成，它会写明
+/// 省掉了多少字符，所以模型看得出自己拿到的是节选，而不是以为这就是全部历史。
+pub fn join_prior_outputs(stage_outputs: &[String]) -> String {
+    join_prior_outputs_with_limits(stage_outputs, FULL_RECENT_STAGES, MAX_EARLIER_STAGE_CHARS)
+}
+
+fn join_prior_outputs_with_limits(
+    stage_outputs: &[String],
+    full_recent: usize,
+    max_earlier_chars: usize,
+) -> String {
+    let earlier = stage_outputs.len().saturating_sub(full_recent);
+    stage_outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            if index < earlier {
+                crate::services::verification::truncate_for_prompt(output, max_earlier_chars)
+            } else {
+                output.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
 pub async fn execute_stage(
     llm: &LlmClient,
     role: AgentRole,
@@ -1021,6 +1059,39 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Prior stage outputs" 是绕过上下文预算直接拼进 prompt 的，所以它自己必须
+    /// 有上限：最近两个阶段原样，更早的按尾部截断并写明省略量。
+    #[test]
+    fn prior_outputs_keep_recent_stages_and_trim_older_ones() {
+        let old = "O".repeat(50);
+        let outputs = vec![
+            old.clone(),
+            "second".to_string(),
+            "third".to_string(),
+            "fourth".to_string(),
+        ];
+
+        let joined = join_prior_outputs_with_limits(&outputs, 2, 10);
+
+        // 最近两个阶段一个字都不能少：下一个阶段最依赖紧邻的上一个
+        assert!(joined.ends_with("third\n\n---\n\nfourth"), "{}", joined);
+
+        // 更早的被截断，而且省略量是写出来的 —— 静默丢弃会让模型以为看到了全部
+        assert!(
+            joined.contains("earlier character(s) omitted"),
+            "{}",
+            joined
+        );
+        assert!(!joined.contains(&old), "旧输出不该原样出现");
+        // 截断保尾：结论和 diff 都在末尾
+        assert!(joined.contains(&"O".repeat(10)), "{}", joined);
+    }
+
+    #[test]
+    fn prior_outputs_are_empty_when_no_stage_has_run() {
+        assert_eq!(join_prior_outputs(&[]), "");
+    }
 
     struct RecordingInvoker {
         prefix: &'static str,
