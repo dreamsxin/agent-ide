@@ -2526,6 +2526,95 @@ mod tests {
     ///
     /// 这条看着简单，但它是"自动修复"能不能默认开着的前提：每次运行结束都白跑
     /// 一轮模型，既费钱又会在通过的代码上乱改。
+    /// 提示词契约：每个 stage 的请求里必须带着哪些东西。
+    ///
+    /// 提示词结构是能被重构悄悄改坏的 —— 某个角色的输出规则丢了、用户任务被挤掉、
+    /// 上一阶段的结论没带上：运行照样 Ok，只有模型输出变差，而"变差"这个仓库里
+    /// 没有任何测试能衡量。所以退一步，把可测的那部分钉住：请求的组成部分。
+    ///
+    /// 这也是 9.0.11（把 prose 拼接换成真正的消息线程）的安全网：那次重构会改动
+    /// 每个 stage 的提示词结构，这条测试能立刻指出哪一部分在改完之后丢了。
+    #[test]
+    fn every_stage_request_carries_the_task_role_rules_and_prior_work() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/app.ts", "const value = 1;\n");
+
+        let recorder = std::sync::Arc::new(crate::services::llm_client::RequestRecorder::new());
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "mock://prompt-contract".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "mock-model".to_string(),
+                provider: "openai".to_string(),
+                max_output_tokens: None,
+                tool_call_mode: "text_protocol".to_string(),
+                model_type: crate::services::llm_client::ModelType::from_string("openai"),
+                local_model_config: None,
+            })
+            .with_request_recorder(recorder.clone());
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(orchestrator.run(
+                "rename the greeting helper".to_string(),
+                crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref()),
+                ContextCompressionMode::Focused,
+                None,
+                crate::services::context::ContextSourceOptions {
+                    include_project_tree: false,
+                    include_git_diff: false,
+                    include_project_memory: false,
+                },
+                vec![
+                    crate::agent::multi_agent::PipelineStage::new(
+                        crate::agent::multi_agent::AgentRole::Architect,
+                        "Architect",
+                    ),
+                    crate::agent::multi_agent::PipelineStage::new(
+                        crate::agent::multi_agent::AgentRole::Coder,
+                        "Coder",
+                    ),
+                ],
+                IdeMode::Code,
+                Arc::new(AtomicBool::new(false)),
+                &llm,
+                events.clone(),
+            ));
+        assert!(result.is_ok(), "{:?}", result);
+
+        let stage_request = |stage: &str| -> String {
+            (0..recorder.requests().len())
+                .map(|index| recorder.request_text(index))
+                .find(|text| text.contains(&format!("Pipeline stage: {}", stage)))
+                .unwrap_or_else(|| panic!("没有找到 {} 阶段的请求", stage))
+        };
+
+        let architect = stage_request("Architect");
+        // 用户任务必须原样出现：这是每个 stage 唯一的目标来源
+        assert!(
+            architect.contains("rename the greeting helper"),
+            "{}",
+            architect
+        );
+        // 角色的输出规则也必须在：丢了它 Architect 就会开始输出 diff
+        assert!(
+            architect.contains("Do not output code diffs"),
+            "{}",
+            architect
+        );
+        // 审查区现状要带上，否则 stage 会重复提议已经存在的改动
+        assert!(architect.contains("pending diffs"), "{}", architect);
+
+        let coder = stage_request("Coder");
+        assert!(coder.contains("rename the greeting helper"), "{}", coder);
+        // 上一阶段的产出必须传下去 —— 这正是 9.0.11 重构不能弄丢的东西
+        assert!(coder.contains("Prior stage outputs"), "{}", coder);
+        assert!(coder.contains("Architect"), "{}", coder);
+    }
+
     #[test]
     fn repair_loop_does_not_call_the_model_when_checks_already_pass() {
         let _guard = workspace::env_test_guard();

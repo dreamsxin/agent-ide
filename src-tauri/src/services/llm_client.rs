@@ -725,6 +725,53 @@ struct StreamToolCallFunction {
     arguments: Option<String>,
 }
 
+/// 记录每次请求实际发出去的消息列表。
+///
+/// 提示词的结构是可以被重构悄悄改坏的：某个 stage 的输出规则丢了、用户任务
+/// 被挤掉了、上一阶段的结论没带上——运行照样成功，返回值照样是 Ok，只有模型
+/// 输出会变差，而"变差"这个仓库里没有任何测试能衡量。
+///
+/// 所以退一步，测能测的那部分：**每个 stage 的请求里必须带着哪些东西**。
+/// 这个记录器让测试拿到真实发出的消息，从而把提示词的组成部分变成契约。
+#[derive(Default)]
+pub struct RequestRecorder {
+    requests: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+}
+
+impl RequestRecorder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 按发出顺序返回每次请求的消息列表
+    pub fn requests(&self) -> Vec<Vec<ChatMessage>> {
+        self.requests
+            .lock()
+            .map(|requests| requests.clone())
+            .unwrap_or_default()
+    }
+
+    /// 第 n 次请求里所有消息的正文拼起来，方便断言"这段内容在不在提示词里"
+    pub fn request_text(&self, index: usize) -> String {
+        self.requests()
+            .get(index)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    fn record(&self, messages: &[ChatMessage]) {
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.push(messages.to_vec());
+        }
+    }
+}
+
 /// LLM 客户端
 #[derive(Clone)]
 pub struct LlmClient {
@@ -738,6 +785,8 @@ pub struct LlmClient {
     usage_meter: Option<Arc<RunUsageMeter>>,
     /// 供应商明确拒绝过 `tools` 参数：后续请求不再附带，避免每次都白撞一次 400
     tools_rejected: Arc<AtomicBool>,
+    /// 只在测试里挂上，用来断言提示词的组成
+    request_recorder: Option<Arc<RequestRecorder>>,
 }
 
 impl LlmClient {
@@ -757,7 +806,14 @@ impl LlmClient {
             extra_tools: Vec::new(),
             usage_meter: None,
             tools_rejected: Arc::new(AtomicBool::new(false)),
+            request_recorder: None,
         }
+    }
+
+    /// 挂上请求记录器。同一个 Arc 可以跨 stage 共享，请求按发出顺序累积。
+    pub fn with_request_recorder(mut self, recorder: Arc<RequestRecorder>) -> Self {
+        self.request_recorder = Some(recorder);
+        self
     }
 
     /// 这次运行里供应商是否拒绝过 `tools`（即工具能力已被降级掉）
@@ -844,6 +900,9 @@ impl LlmClient {
         cancel_flag: Arc<AtomicBool>,
         tx: mpsc::Sender<String>,
     ) -> Result<LlmStreamOutput, String> {
+        if let Some(recorder) = &self.request_recorder {
+            recorder.record(&messages);
+        }
         // 检查是否为本地模型
         if self.config.endpoint.starts_with("local://") || self.config.provider == "local" {
             return self.stream_chat_local(messages, cancel_flag, tx).await;

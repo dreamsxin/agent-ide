@@ -38,7 +38,8 @@ npm test
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, repositories with no commits, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/agent.rs` | Context-compression precedence (request override vs stored default, unknown mode rejected). This file is the IPC boundary and most of it still needs a running app; logic is being pulled out into services rather than tested in place — see below |
 | `agent/executor.rs` | Diff-block parsing with diagnostics, tool-loop iteration and capability degradation, prior-stage-output bounding (recent stages verbatim, older ones tail-truncated with the omission stated) |
-| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary), a full `run` against a `mock://` provider asserting the plan / state / pipeline events reach the frontend, the bounded repair loop (no model call when checks already pass; gives up at its budget and logs every iteration) |
+| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary), a full `run` against a `mock://` provider asserting the plan / state / pipeline events reach the frontend, the prompt contract for each stage (task, role output rules, prior stage work, pending diffs), the bounded repair loop (no model call when checks already pass; gives up at its budget and logs every iteration) |
+
 
 
 
@@ -270,7 +271,28 @@ Vitest's default `include` picked those copies up, so `npm test` was running fro
 code alongside the real suite — 43 files instead of 10 — and a failure there would have pointed at
 history rather than at the working tree. `vite.config.ts` now pins `test.include` to `src/**`.
 
+## Prompt contracts
+
+Prompt structure is the one thing in this project that a refactor can silently
+break: drop a role's output rules, push the user task out of the request, fail to
+carry the previous stage's conclusion — and the run still returns `Ok`. Only the
+model's output gets worse, and nothing here can measure "worse".
+
+So the testable part is asserted instead: **what each stage's request must
+contain**. `LlmClient::with_request_recorder` captures the messages actually sent
+(`services/llm_client.rs::RequestRecorder`), and
+`orchestrator::tests::every_stage_request_carries_the_task_role_rules_and_prior_work`
+pins four things per stage — the user task verbatim, the role's output rules, the
+prior stage's work, and the pending-diff state.
+
+This is deliberately not a quality eval. It is the safety net for 9.0.11, which
+has to restructure every stage's prompt to replace prose concatenation with a
+real message thread: after that change, this test says which part went missing.
+Judging whether the *new* structure produces better output still needs a real
+provider and a human, and that gap is why 9.0.11 has not been attempted.
+
 ## The command layer
+
 
 `commands/agent.rs` is the largest untested file in the backend. It cannot be tested in place: every
 interesting function takes `AppHandle` or `tauri::State`, which only exist inside a running app. The
