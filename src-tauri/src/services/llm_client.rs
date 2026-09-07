@@ -1055,8 +1055,9 @@ impl LlmClient {
             }
         };
         let mut tool_calls: Vec<LlmToolCall> = Vec::new();
-        // choices 会被 into_iter 消耗，用量要先取出来
+        // choices 会被 into_iter 消耗，用量和条数要先取出来
         let payload_usage = payload.usage.filter(|usage| !usage.is_empty());
+        let choice_count = payload.choices.len();
         let content = payload
             .choices
             .into_iter()
@@ -1072,8 +1073,21 @@ impl LlmClient {
             })
             .filter(|text| !text.is_empty());
 
+        // 记账必须先做：这次调用花的钱不因为它失败而消失。以前 record_usage 在
+        // 下面的错误返回之后，所以一次空响应会让 per-run cap 少算一整次调用 ——
+        // 实测日志里的 "only 1 of 2 LLM call(s) reported usage" 就是这么来的，
+        // 不是供应商没回报。
+        if let Some(ref meter) = self.usage_meter {
+            meter.record_usage(payload_usage.as_ref());
+        }
+
         if content.is_none() && tool_calls.is_empty() {
-            return Err("LLM response did not contain message content".to_string());
+            return Err(format!(
+                "LLM response had no message content and no tool calls ({} choice(s) returned). \
+                 The usual causes are the output being cut off at the configured max output tokens, \
+                 or a reasoning model spending the whole output budget before emitting content.",
+                choice_count
+            ));
         }
 
         if cancel_flag.load(Ordering::SeqCst) {
@@ -1081,9 +1095,6 @@ impl LlmClient {
         }
         if let Some(ref text) = content {
             let _ = tx.send(text.clone()).await;
-        }
-        if let Some(ref meter) = self.usage_meter {
-            meter.record_usage(payload_usage.as_ref());
         }
         Ok(LlmStreamOutput {
             content: content.unwrap_or_default(),
