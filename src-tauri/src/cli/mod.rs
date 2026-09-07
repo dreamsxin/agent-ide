@@ -2497,19 +2497,26 @@ mod tests {
             "package.json",
             r#"{"scripts":{"build":"node test.js","test":"node test.js"}}"#,
         );
+        // `file:///` + 绝对路径只在 Windows 上正确（根以盘符开头）。Unix 的根本身
+        // 就是一个斜杠，硬拼会得到 `file:////tmp/...`。按平台拼出合法 URI。
+        let workspace_uri = {
+            let root = workspace.root.to_string_lossy().replace('\\', "/");
+            if cfg!(windows) {
+                format!("file:///{}", root)
+            } else {
+                format!("file://{}", root)
+            }
+        };
         let test_js = r#"import { readFileSync } from "node:fs";
 const value = readFileSync("smoke.txt", "utf8").trim();
 if (value !== "fixed") {
   console.error("ReferenceError: smoke is not fixed");
-  console.error("    at file:///WORKSPACE/test.js:3:1");
+  console.error("    at WORKSPACE_URI/test.js:3:1");
   process.exit(1);
 }
 console.log("ok");
 "#
-        .replace(
-            "WORKSPACE",
-            &workspace.root.to_string_lossy().replace('\\', "/"),
-        );
+        .replace("WORKSPACE_URI", &workspace_uri);
         workspace.write("test.js", &test_js);
 
         let exit = run_from_args([
