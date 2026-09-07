@@ -41,13 +41,19 @@ pub fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec
     problems
 }
 
+/// 截断命令输出时保**尾部**。
+///
+/// 编译错误、断言失败、堆栈几乎总在输出末尾，前面是装依赖、编译进度之类的噪音。
+/// 原本保的是头部，长输出下等于把真正的失败原因整段丢掉、只把噪音喂给模型 ——
+/// 这是把 Rust 和 TypeScript 两处实现摆在一起对比才看出来的，CLI 一直在用错的那一半。
 pub fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
+    let total = value.chars().count();
+    if total <= max_chars {
         return value.to_string();
     }
-    let mut truncated = value.chars().take(max_chars).collect::<String>();
-    truncated.push_str("\n... truncated ...");
-    truncated
+    let omitted = total - max_chars;
+    let tail: String = value.chars().skip(omitted).collect();
+    format!("... {} earlier character(s) omitted ...\n{}", omitted, tail)
 }
 
 /// 把失败的检查拼成一段修复提示。
@@ -206,17 +212,30 @@ mod tests {
         assert!(!prompt.contains("all good"), "{}", prompt);
     }
 
+    /// 报错在末尾，所以截断要保尾巴。保头部等于把失败原因丢掉、只留噪音。
     #[test]
-    fn long_output_is_truncated_on_char_boundaries() {
+    fn truncation_keeps_the_tail_where_the_failures_are() {
+        let noisy = format!("{}FINAL FAILURE LINE", "progress\n".repeat(4000));
+
+        let truncated = truncate_for_prompt(&noisy, 100);
+
+        assert!(truncated.ends_with("FINAL FAILURE LINE"), "{}", truncated);
+        assert!(truncated.starts_with("... "), "{}", truncated);
+    }
+
+    #[test]
+    fn truncation_cuts_on_char_boundaries() {
         let multibyte = "错误".repeat(20_000);
 
         let truncated = truncate_for_prompt(&multibyte, 100);
 
-        assert!(truncated.ends_with("... truncated ..."));
         // 按字符截断而不是按字节，否则多字节输出会在中间被切坏
-        assert_eq!(
-            truncated.chars().count(),
-            100 + "\n... truncated ...".chars().count()
-        );
+        assert!(truncated.ends_with("错误"));
+        assert!(truncated.chars().count() < 200);
+    }
+
+    #[test]
+    fn short_output_is_left_alone() {
+        assert_eq!(truncate_for_prompt("2 errors", 100), "2 errors");
     }
 }
