@@ -4,6 +4,7 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
+import PendingChangesCard from "./PendingChangesCard";
 import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
 import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
 import type { ProblemEntry } from "../../stores/useProblemStore";
@@ -370,6 +371,9 @@ export default function ChatView() {
             }
           />
         ))}
+        {/* 待审查改动紧跟在最后一条回复之后：这一层负责通知和快速决策，
+            逐 hunk 深审仍在 Changes 面板 */}
+        <PendingChangesCard />
         {activeSddArtifact && (
           <div className="rounded border border-surface-border bg-surface-base/70 p-2 text-xs text-surface-text">
             <div className="mb-2 flex items-center justify-between gap-2">
