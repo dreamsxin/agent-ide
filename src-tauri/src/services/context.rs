@@ -352,6 +352,69 @@ pub fn estimated_input_tokens_from_budget(budget: &ContextBudget) -> Option<usiz
     Some(max_context.saturating_sub(reserved).saturating_sub(512))
 }
 
+/// 段落的预算优先级与配额权重。
+///
+/// 之前的装配是顺序贪心：按段落顺序消耗预算，第一个装不下的段落被截断后
+/// `remaining` 直接归零，其后所有段落一律标记 "budget exhausted"。后果是
+/// 一个大文件或一个大 diff 就能把 git diff、目录树整段饿死 —— 而这跟段落
+/// 本身的重要程度无关，只跟它在列表里的位置有关。
+///
+/// 现在每个段落有独立配额：先按优先级发放各自的配额上限，再把剩余额度回补
+/// 给被截断的段落。大段落最多吃掉自己那份，不会连带饿死后面的。
+///
+/// 返回 `(优先级, 配额权重)`。优先级小的先分配；权重是该段落能占用的输入
+/// 预算比例，权重之和故意大于 1 —— 配额是软上限，没人用的额度会在第二轮
+/// 回补出去。
+fn section_budget_rule(id: &str) -> (u8, f32) {
+    match id {
+        // 项目头和活动文件路径都是几十字节，但没有它们模型不知道自己在改什么
+        "project" => (0, 0.05),
+        "active_file_path" => (1, 0.03),
+        // 项目约定和用户选区是最强的意图信号，排在正文之前
+        "project_memory" => (2, 0.15),
+        "selection" => (3, 0.15),
+        "conversation" => (4, 0.10),
+        "active_file_content" => (5, 0.30),
+        "git_diff" => (6, 0.20),
+        "project_tree" => (7, 0.10),
+        "open_files" => (8, 0.05),
+        _ => (9, 0.05),
+    }
+}
+
+/// 配额小于这个字节数时不再截断，直接排除该段落。
+///
+/// 截断标记本身要占几十字节，配额太小的话装进去的全是 "context truncated"
+/// 而没有实际内容，纯属浪费预算。
+const MIN_USEFUL_SECTION_CHARS: usize = 240;
+
+pub fn estimate_tokens_for_text(text: &str) -> usize {
+    // ASCII 大致 4 字符 1 token；CJK 等非 ASCII 字符按 1 token 计。
+    // 原来统一用 `字节数 / 4`，对中文是系统性低估：一个汉字 3 字节算 0.75
+    // token，实际接近 1 token。中文提示词因此会在预算边缘被整段截断。
+    let mut ascii = 0usize;
+    let mut wide = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            wide += 1;
+        }
+    }
+    ascii.saturating_add(3) / 4 + wide
+}
+
+/// 按实际文本构成推算"每 token 多少字节"，用于把 token 预算换成字节预算。
+///
+/// 纯 ASCII 约 4，纯中文约 3。固定用 4 会让中文内容超出真实预算。
+fn bytes_per_token(text: &str) -> usize {
+    let tokens = estimate_tokens_for_text(text);
+    if tokens == 0 {
+        return 4;
+    }
+    (text.len() / tokens).clamp(2, 4)
+}
+
 fn build_context_with_estimate(
     sections: Vec<ContextSection>,
     options: &ContextBuildOptions,
@@ -361,30 +424,61 @@ fn build_context_with_estimate(
         .budget
         .as_ref()
         .and_then(estimated_input_tokens_from_budget);
-    let max_chars = input_budget_tokens.map(|tokens| tokens.saturating_mul(4));
-    let mut remaining = max_chars.unwrap_or(usize::MAX);
+    let max_chars = input_budget_tokens.map(|tokens| {
+        let combined: String = sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect();
+        tokens.saturating_mul(bytes_per_token(&combined))
+    });
+
+    let allotted = match max_chars {
+        Some(max_chars) => {
+            let lengths: Vec<(usize, usize)> = sections
+                .iter()
+                .map(|section| {
+                    (
+                        section_budget_rule(section.id).0 as usize,
+                        section.content.len(),
+                    )
+                })
+                .collect();
+            let weights: Vec<f32> = sections
+                .iter()
+                .map(|section| section_budget_rule(section.id).1)
+                .collect();
+            Some(allocate_with_quotas(&lengths, &weights, max_chars))
+        }
+        None => None,
+    };
+
     let mut output = String::new();
     let mut estimates = Vec::new();
 
-    for section in sections {
+    for (index, section) in sections.into_iter().enumerate() {
         let raw_section_chars = section.content.len();
+        let raw_section_tokens = estimate_tokens_for_text(&section.content);
         let mut included = true;
         let mut trimmed = false;
         let mut excluded_reason = None;
         let mut content = section.content;
 
-        if max_chars.is_some() {
-            if remaining == 0 {
-                included = false;
-                content.clear();
-                excluded_reason = Some("excluded because budget was exhausted".to_string());
-            } else if content.len() > remaining {
-                trimmed = true;
-                content = excerpt_text(&content, remaining);
-                remaining = 0;
-                excluded_reason = Some("trimmed to fit input budget".to_string());
-            } else {
-                remaining = remaining.saturating_sub(content.len());
+        if let Some(ref allotted) = allotted {
+            let grant = allotted[index];
+            if grant < content.len() {
+                if grant < MIN_USEFUL_SECTION_CHARS {
+                    included = false;
+                    content.clear();
+                    excluded_reason = Some(
+                        "excluded because higher-priority sections used the input budget"
+                            .to_string(),
+                    );
+                } else {
+                    trimmed = true;
+                    content = excerpt_text(&content, grant);
+                    excluded_reason =
+                        Some("trimmed to fit its share of the input budget".to_string());
+                }
             }
         }
 
@@ -399,7 +493,7 @@ fn build_context_with_estimate(
             id: section.id.to_string(),
             label: section.label.to_string(),
             chars: raw_section_chars,
-            estimated_tokens: estimate_tokens(raw_section_chars),
+            estimated_tokens: raw_section_tokens,
             included,
             trimmed,
             excluded_reason,
@@ -411,7 +505,7 @@ fn build_context_with_estimate(
         sections: estimates,
         raw_chars,
         final_chars,
-        estimated_tokens: estimate_tokens(final_chars),
+        estimated_tokens: estimate_tokens_for_text(&output),
         input_budget_tokens,
         trimmed: final_chars < raw_chars,
     };
@@ -419,8 +513,42 @@ fn build_context_with_estimate(
     (output, response)
 }
 
-pub fn estimate_tokens(chars: usize) -> usize {
-    chars.saturating_add(3) / 4
+/// 按优先级发配额，再回补剩余额度。
+///
+/// `lengths[i] = (优先级, 段落字节数)`，`weights[i]` 是该段落的配额比例。
+fn allocate_with_quotas(
+    lengths: &[(usize, usize)],
+    weights: &[f32],
+    max_chars: usize,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&index| lengths[index].0);
+
+    let mut allotted = vec![0usize; lengths.len()];
+    let mut remaining = max_chars;
+
+    for &index in &order {
+        let length = lengths[index].1;
+        let cap = ((max_chars as f32) * weights[index]).round() as usize;
+        let grant = length.min(cap).min(remaining);
+        allotted[index] = grant;
+        remaining -= grant;
+    }
+
+    for &index in &order {
+        if remaining == 0 {
+            break;
+        }
+        let need = lengths[index].1.saturating_sub(allotted[index]);
+        if need == 0 {
+            continue;
+        }
+        let grant = need.min(remaining);
+        allotted[index] += grant;
+        remaining -= grant;
+    }
+
+    allotted
 }
 
 pub fn build_project_tree_summary(max_entries: usize, max_depth: usize) -> Result<String, String> {
@@ -906,5 +1034,67 @@ mod tests {
         assert!(prompt.len() <= 10_000 + 120);
         assert!(estimate.trimmed);
         assert!(estimate.input_budget_tokens.is_some());
+    }
+
+    /// 顺序贪心的老装配里，一个超大 active file 会把它后面的 git diff、目录树
+    /// 全部饿死（`remaining` 归零后一律 "budget exhausted"）。配额分配下，每个
+    /// 段落只能吃掉自己那份。
+    #[test]
+    fn budget_quotas_keep_lower_priority_sections_alive() {
+        let mut ctx = sample_context(&"x".repeat(200_000));
+        ctx.project_memory = Some("Always run cargo test.".to_string());
+        ctx.git_diff = Some(format!(
+            "diff --git a/a.ts b/a.ts\n{}\n",
+            "+line\n".repeat(5_000)
+        ));
+        ctx.project_tree = Some("src/\n  src/app.ts\n  src/main.ts".repeat(200));
+
+        let options = ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            Some(ContextBudget {
+                max_context_tokens: Some(8_000),
+                reserved_output_tokens: Some(1_000),
+            }),
+        );
+        let estimate = ctx.estimate_prompt_context(&options);
+        let prompt = ctx.to_prompt_context_with_options(&options);
+
+        let included = |id: &str| {
+            estimate
+                .sections
+                .iter()
+                .find(|section| section.id == id)
+                .map(|section| section.included)
+                .unwrap_or(false)
+        };
+
+        assert!(included("active_file_content"));
+        assert!(included("git_diff"), "{:?}", estimate.sections);
+        assert!(included("project_tree"), "{:?}", estimate.sections);
+        // 高优先级的小段落必须完整保留
+        assert!(prompt.contains("Always run cargo test."));
+        assert!(prompt.contains("const selected = true;"));
+        assert!(!estimate
+            .sections
+            .iter()
+            .any(|section| section.excluded_reason.as_deref()
+                == Some("excluded because budget was exhausted")));
+    }
+
+    /// 统一按 `字节数 / 4` 估算对中文是系统性低估：一个汉字 3 字节会被算成
+    /// 0.75 token，实际接近 1 token，中文提示词因此在预算边缘被整段截断。
+    #[test]
+    fn token_estimate_counts_cjk_characters_individually() {
+        assert_eq!(estimate_tokens_for_text("abcd"), 1);
+        assert_eq!(estimate_tokens_for_text("你好世界"), 4);
+
+        let chinese = "把错误分支也处理一下".repeat(100);
+        let byte_based = chinese.len() / 4;
+        assert!(
+            estimate_tokens_for_text(&chinese) > byte_based,
+            "CJK estimate {} should exceed the byte-based {}",
+            estimate_tokens_for_text(&chinese),
+            byte_based
+        );
     }
 }
