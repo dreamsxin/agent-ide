@@ -253,6 +253,15 @@ The empty-content error also carried no evidence — it named neither the choice
 
 **Warning recorded while investigating an unrelated report** (the user's saved API key reverted to `sk-test`, a value that appears only in test code): `workspace::env_test_guard()` is *only a mutex*. It does not set `AGENT_IDE_CONFIG_DIR`, and `config_dir()` falls back to the real `~/.agent-ide` when that variable is unset. Several test modules `remove_var` it on teardown (`workspace.rs`, `commands/git.rs`, `agent/diff_apply.rs`, …), and `std::env::set_var` is process-global while tests share one process. So a test that does not set the variable itself can read and write the developer's real config and OS credential store. This has not been confirmed as the cause of the key reverting, but the hole is real and `cargo test` should be treated as unsafe until `env_test_guard` owns the isolation and no test is allowed to unset it.
 
+**Partly closed the same day.** `config_dir()` now refuses to fall back to the real home in test builds: under `#[cfg(test)]` it returns a temp path instead of `~/.agent-ide`. One place, five lines, and it makes the whole class of accident impossible regardless of which test forgets to isolate itself. Verified by hashing `~/.agent-ide/config.json` before and after `cargo test` — byte identical, 212 passed.
+
+Two honest caveats:
+
+- **The fallback directory was never created during that run**, which means no test actually reached `config_dir()` unisolated this time. So the mechanical hole was real but it is *not* proven to be what reverted the key. That question is still open.
+- **The OS credential store is not covered.** `keyring` entries are keyed by service name, not by config directory, so a test that saves a profile credential can still write the developer's real credential store. For an *API key* specifically that is the more likely path, since the key lives in the keyring rather than in `config.json`. Isolating it needs a test-only credential backend, not a path change.
+
+
+
  (DeepSeek, `deepseek-v4-flash`, Suggest mode, prompt "创建 hello.txt 内容为 world"). `cargo clippy --all-targets -- -D warnings` clean, `cargo test` 205 passed / 0 failed / 1 ignored.
 
 **Token accounting is verified end to end.** The `run_token_usage` action log reported `Calls with reported usage: 5 of 5`, 6014 prompt + 5281 completion = 11295 tokens. That closes the second of the three "never seen real data" risks: `stream_options: {include_usage: true}` is accepted, usage is parsed on every call, and `RunUsageMeter` totals are real rather than estimated. `Per-run cap: not set` — the cap mechanism is now trustworthy but nobody has configured one yet.
