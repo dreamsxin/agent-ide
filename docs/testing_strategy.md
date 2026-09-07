@@ -281,9 +281,14 @@ Two rules that come out of doing this:
   lived inside a function that needed `AppHandle` to call. It is now
   `RunUsageSnapshot::action_log_summary`.
 
-What remains behind the Tauri dependency in that file, deliberately for now: event emission order in
-`send_agent_prompt` / `run_agent_step` (the "register tool writes on every exit path" invariant is
-documented in comments and enforced nowhere), and the resumed-pipeline meter rule in
-`continue_agent_pipeline`.
+What remains behind the Tauri dependency in that file, deliberately for now: the resumed-pipeline
+meter rule in `continue_agent_pipeline`, and event emission order within each branch. The one
+invariant that used to live only in a comment — "register tool writes on every exit path" — is now
+structural instead: all nine exit branches across the three run commands call a single
+`finish_agent_run`, which does finish-run, publish-writes and usage accounting in that order. Writing
+that helper is what surfaced the drift it was meant to prevent: `run_agent_step`'s cancel and error
+branches had never emitted the usage log, so a step cancelled mid-run left no record of the tokens it
+had already spent.
+
 
 
