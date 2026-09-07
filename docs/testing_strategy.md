@@ -13,6 +13,7 @@ Agent IDE uses a multi-layer testing approach covering unit tests, integration t
 | File | What it tests |
 |------|---------------|
 | `src/utils/paths.test.ts` | Windows/file-URI path normalization, `file:///` URI parsing, path-to-URI conversion |
+| `src/hooks/useAppBootstrap.test.tsx` | Mount-time wiring: LLM config loaded on mount, loaded even with no workspace to restore, workspace restore in the Tauri runtime, and survival when the workspace lookup rejects. Runs under jsdom via a per-file docblock |
 | `src/utils/terminalProblemParser.test.ts` | Terminal output parsing into Problems entries for TypeScript/lint/test-style `file:line:column` formats, Vitest/Jest-style `FAIL` summaries, and stack traces |
 | `src/hooks/useLspDiagnostics.test.ts` | LSP diagnostics hook behavior — bridging LSP diagnostics into the Problems store |
 | `src/stores/useProblemStore.test.ts` | Problem store behavior — adding, replacing, clearing, and deduplicating problems across diagnostic/lsp/test/agent/system sources |
@@ -138,6 +139,8 @@ Current CI status: GitHub Actions workflow (`windows-package.yml`) handles Windo
 | Agent state transitions | Thin | Needs more coverage for edge cases (error recovery, cancelled states, interrupted sessions) |
 | Frontend store behavior | Thin | Needs more coverage for Agent event bridging, diff status updates, Problem deduplication |
 | Monaco diagnostics bridge | None | Requires real Monaco/Tauri runtime; currently manual smoke only |
+| Mount-time wiring | Thin | `useAppBootstrap` is covered (jsdom + React Testing Library). Every other component's mount behaviour is still unobserved — this is the gap that let the startup "LLM Not Configured" bug ship |
+| IDE panel backends | Good | `agent_cli smoke ide-surface` probes workspace, project tasks, verification candidates, Git status/diff, and context packing through the same functions the desktop calls; runs in CI as both an in-process test and the real binary |
 | LSP server integration | None | LSP URI/indexing helpers are tested; actual server spawn requires runtime validation |
 | Tauri runtime (E2E) | Manual only | Smoke checklist in `docs/smoke_test.md` |
 | LSP indexing at scale | None | Pending Phase 8.5/9 runtime validation on large TypeScript/Go workspaces |
@@ -200,4 +203,4 @@ cargo test --bin agent_cli
 - **`npm run dev`**: Vite web preview only. Tauri IPC, filesystem, terminal, Git, and Agent backend are disabled or stubbed. Do not rely on this for testing backend functionality.
 - **`npm run tauri -- dev`**: Real IDE runtime with Rust backend and Tauri APIs. Required for all smoke and E2E validation.
 - **Rust tests** use temporary directories with UUID-based names and a mutex guard (`env_test_guard`) to prevent concurrent workspace config mutation across test threads.
-- **Frontend tests** run in a JSDOM environment via Vitest and do not require a Tauri runtime.
+- **Frontend tests** run in Vitest's default node environment and do not require a Tauri runtime. `src/hooks/useAppBootstrap.test.tsx` is the exception: it opts into jsdom with a `// @vitest-environment jsdom` docblock because it renders a hook. The global environment is deliberately left as node — only files that need a DOM pay for one.

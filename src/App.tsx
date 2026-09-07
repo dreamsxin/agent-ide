@@ -1,5 +1,4 @@
 import { lazy, Suspense, useCallback, useRef, useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
 import AgentPanel from "./components/layout/AgentPanel";
@@ -11,14 +10,11 @@ import ConfirmDialog from "./components/agent/ConfirmDialog";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import PanelLoading from "./components/shared/PanelLoading";
 import { useLayoutStore } from "./stores/useLayoutStore";
-import { useEditorStore } from "./stores/useEditorStore";
-import { useLogStore } from "./stores/useLogStore";
-import { useAgentStore } from "./stores/useAgentStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
+import { useAppBootstrap } from "./hooks/useAppBootstrap";
 import useShortcuts from "./hooks/useShortcuts";
 import { useProjectTasks } from "./hooks/useProjectTasks";
 import { useRunProjectTask } from "./hooks/useRunProjectTask";
-import { isTauriRuntime } from "./utils/tauri";
 
 const EditorContainer = lazy(() => import("./components/editor/EditorContainer"));
 
@@ -103,36 +99,7 @@ export default function App() {
     return () => window.removeEventListener("toggle-command-palette", handler);
   }, []);
 
-  // 启动时加载 LLM 配置。
-  //
-  // 和工作区恢复分开、也不受"有没有保存过工作区"影响：LLM 配置是全局的。
-  // 之前只有 Agent 设置面板挂载时才拉一次，于是启动后 TopBar 指示灯一直红着
-  // 报 "LLM Not Configured"、ChatView 的 profile 下拉一直是空的 —— 配置好着，
-  // 只是界面没问过后端。
-  useEffect(() => {
-    void useAgentStore.getState().fetchLlmConfig();
-  }, []);
-
-  // 启动时恢复上次的工作目录
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-    invoke<string | null>("get_workspace_path").then((saved) => {
-      if (saved && typeof saved === "string" && saved.length > 0) {
-        console.log("[App] Restoring workspace:", saved);
-        useLayoutStore.getState().setWorkspacePath(saved);
-        useEditorStore.getState().setWorkspacePath(saved);
-        useLogStore.getState().restoreLogs(saved);
-        useAgentStore.getState().restoreAgentSession(saved);
-        void useAgentStore.getState().restoreDiffs(saved);
-        void useAgentStore.getState().reconcileBackendRun();
-        void useEditorStore.getState().restoreEditorSession(saved);
-      } else {
-        console.log("[App] No saved workspace found, starting empty");
-      }
-    }).catch((err) => {
-      console.warn("[App] Failed to load workspace:", err);
-    });
-  }, []);
+  useAppBootstrap();
 
   const allShortcuts = [
     ...shortcuts,
