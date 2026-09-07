@@ -125,20 +125,50 @@ pub fn build_repair_prompt(
     lines.join("\n")
 }
 
+/// 这条命令是否会长驻不退出。
+///
+/// 验证是"逐条跑完再看结果"，把 `npm run dev` 之类塞进去会永远卡住 —— 这不是
+/// 假设，开发服务器本来就不该退出。所以这是安全不变量而不是偏好开关：任何
+/// 验证批次都不该包含长驻命令，想跑它们请用命令面板。
+/// 排除优先于包含，`build:watch` 这种要被排除掉。
+pub fn is_long_running_command(command: &str) -> bool {
+    const LONG_RUNNING_HINTS: [&str; 7] = [
+        "dev",
+        "start",
+        "watch",
+        "serve",
+        "preview",
+        "--watch",
+        "tauri dev",
+    ];
+    let lowered = command.to_lowercase();
+    LONG_RUNNING_HINTS
+        .iter()
+        .any(|hint| lowered.split_whitespace().any(|word| word == *hint) || lowered.contains(hint))
+}
+
 /// 一次验证的结论，回给前端。
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerificationReport {
     pub results: Vec<RunProjectTaskResult>,
     pub problems: Vec<ProblemEntry>,
     /// 失败的检查条数
     pub failed: usize,
+    /// 因为会长驻而没有执行的命令。列出来而不是静默丢弃：
+    /// 用户需要知道这次验证实际覆盖了什么
+    pub skipped: Vec<String>,
     /// 全部通过时为 None —— 没有失败就没有要修的东西，
     /// 返回一段"修复提示"只会诱导用户白跑一轮
     pub repair_prompt: Option<String>,
 }
 
 /// 从已经跑完的检查结果生成结论
-pub fn summarize(original_prompt: &str, results: Vec<RunProjectTaskResult>) -> VerificationReport {
+pub fn summarize(
+    original_prompt: &str,
+    results: Vec<RunProjectTaskResult>,
+    skipped: Vec<String>,
+) -> VerificationReport {
     let failures = failed_command_results(&results);
     let problems = collect_command_problems(&results);
     let repair_prompt = if failures.is_empty() {
@@ -150,6 +180,7 @@ pub fn summarize(original_prompt: &str, results: Vec<RunProjectTaskResult>) -> V
         failed: failures.len(),
         results,
         problems,
+        skipped,
         repair_prompt,
     }
 }
@@ -157,6 +188,41 @@ pub fn summarize(original_prompt: &str, results: Vec<RunProjectTaskResult>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 长驻命令必须挡在验证批次之外：验证是逐条跑完再看结果，
+    /// 混进一个不退出的开发服务器就永远卡住。
+    #[test]
+    fn long_running_commands_are_recognized() {
+        for command in [
+            "npm run dev",
+            "npm start",
+            "npm run build:watch",
+            "vite preview",
+            "cargo watch -x test",
+            "npm run tauri dev",
+        ] {
+            assert!(
+                is_long_running_command(command),
+                "{} should be long running",
+                command
+            );
+        }
+
+        for command in [
+            "npm test",
+            "npm run lint",
+            "npm run build",
+            "cargo test",
+            "cargo clippy -- -D warnings",
+            "tsc --noEmit",
+        ] {
+            assert!(
+                !is_long_running_command(command),
+                "{} should be runnable",
+                command
+            );
+        }
+    }
 
     fn result(command: &str, exit_code: Option<i32>, stderr: &str) -> RunProjectTaskResult {
         RunProjectTaskResult {
@@ -187,7 +253,11 @@ mod tests {
     /// 全部通过时不该给出修复提示，否则会诱导用户白跑一轮修复
     #[test]
     fn passing_checks_produce_no_repair_prompt() {
-        let report = summarize("add pagination", vec![result("npm test", Some(0), "")]);
+        let report = summarize(
+            "add pagination",
+            vec![result("npm test", Some(0), "")],
+            Vec::new(),
+        );
 
         assert_eq!(report.failed, 0);
         assert!(report.repair_prompt.is_none());
@@ -201,9 +271,12 @@ mod tests {
                 result("npm test", Some(0), "all good"),
                 result("npm run lint", Some(1), "Unexpected any"),
             ],
+            vec!["npm run dev".to_string()],
         );
 
         assert_eq!(report.failed, 1);
+        // 跳过的命令要如实列出，用户才知道这次验证覆盖了什么
+        assert_eq!(report.skipped, vec!["npm run dev".to_string()]);
         let prompt = report.repair_prompt.expect("repair prompt");
         assert!(prompt.contains("add pagination"), "{}", prompt);
         assert!(prompt.contains("npm run lint"), "{}", prompt);

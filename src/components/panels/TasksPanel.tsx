@@ -1,9 +1,17 @@
 import { useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 import { useFixWithAgent } from "../../hooks/useFixWithAgent";
+
+type VerificationReport = {
+  failed: number;
+  skipped: string[];
+  repairPrompt: string | null;
+  results: { command: string; exitCode: number | null }[];
+};
 
 export default function TasksPanel() {
   const lastTask = useTaskStore((s) => s.lastTask);
@@ -12,8 +20,10 @@ export default function TasksPanel() {
   const clearTaskRunHistory = useTaskStore((s) => s.clearTaskRunHistory);
   const { tasks, usingFallback, loading, error } = useProjectTasks();
   const runProjectTask = useRunProjectTask();
-  const { fixTaskFailure, isAgentBusy } = useFixWithAgent();
+  const { fixTaskFailure, sendFixPrompt, isAgentBusy } = useFixWithAgent();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyStatus, setVerifyStatus] = useState<string | null>(null);
   const selectedRun = useMemo(
     () => taskRunHistory.find((run) => run.runId === selectedRunId) ?? taskRunHistory[0],
     [selectedRunId, taskRunHistory]
@@ -31,6 +41,33 @@ export default function TasksPanel() {
     void runProjectTask(task);
   };
 
+  // 跑一遍全部检查；失败就把后端生成的修复提示直接发给 Agent。
+  // 后端会挡掉 dev/watch 这类长驻命令并回报跳过了哪些。
+  const verifyAll = async () => {
+    if (!isTauriRuntime() || tasks.length === 0) return;
+    setVerifying(true);
+    setVerifyStatus(null);
+    try {
+      const report = await invoke<VerificationReport>("verify_workspace", {
+        request: { commands: tasks.map((item) => item.command) },
+      });
+      const skipped = report.skipped.length > 0 ? ` · skipped ${report.skipped.length}` : "";
+      setVerifyStatus(
+        report.failed === 0
+          ? `All ${report.results.length} check(s) passed${skipped}`
+          : `${report.failed} of ${report.results.length} check(s) failed${skipped} · sent to Agent`
+      );
+      if (report.repairPrompt) {
+        await sendFixPrompt(report.repairPrompt);
+      }
+    } catch (error) {
+      setVerifyStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+
   return (
     <div data-testid="commands-panel" className="flex h-full flex-col bg-black text-xs">
       <div className="flex items-center justify-between gap-3 border-b border-surface-border px-3 py-1.5">
@@ -41,10 +78,22 @@ export default function TasksPanel() {
             {usingFallback ? "fallback commands" : "workspace configuration"}
           </div>
         </div>
-        <div className="truncate text-[11px] text-surface-muted">
-          {usingFallback
-            ? "No workspace tasks discovered yet. Showing fallback commands."
-            : "Tasks discovered from the current workspace configuration."}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void verifyAll()}
+            disabled={!isTauriRuntime() || verifying || isAgentBusy || tasks.length === 0}
+            data-testid="verify-all"
+            title="Run every discovered check; long-running commands like dev/watch are skipped"
+            className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {verifying ? "Verifying..." : "Verify All"}
+          </button>
+          <div className="max-w-[280px] truncate text-[11px] text-surface-muted">
+            {verifyStatus ??
+              (usingFallback
+                ? "No workspace tasks discovered yet. Showing fallback commands."
+                : "Tasks discovered from the current workspace configuration.")}
+          </div>
         </div>
       </div>
 
@@ -75,7 +124,8 @@ export default function TasksPanel() {
             )}
             {tasks.map((task) => {
               const runState = taskRuns[task.id];
-              return (
+
+  return (
                 <button
                   key={task.id}
                   onClick={() => void runProjectTask(task)}
