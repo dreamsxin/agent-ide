@@ -146,6 +146,10 @@ pub struct SendPromptRequest {
     /// 未显式授权时，新建文件的 diff 留给人工审查而不是静默写盘。
     #[serde(default, rename = "allowFileCreate")]
     pub allow_file_create: bool,
+    /// 是否允许 Agent 自己跑项目声明的检查命令。缺省 false。
+    /// 授权后暴露的仍然只有项目自己声明的、非长驻的命令，不是任意 shell。
+    #[serde(default, rename = "allowCommandRun")]
+    pub allow_command_run: bool,
     #[serde(rename = "runId")]
     pub run_id: Option<String>,
     #[serde(rename = "ideMode")]
@@ -201,6 +205,9 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::tool_approval`
     #[serde(default, rename = "toolApproval")]
     pub tool_approval: Option<String>,
+    /// 同 `SendPromptRequest::allow_command_run`
+    #[serde(default, rename = "allowCommandRun")]
+    pub allow_command_run: bool,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -258,18 +265,19 @@ pub async fn send_agent_prompt(
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
-    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
-        &mcp_state.registry,
-        &app_handle,
-        llm,
-        crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref()),
-    )
-    .await;
-    // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
+    let tool_policy =
+        crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
+    let (llm, tool_invoker) =
+        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
+            .await;
+    // 内置工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文。
+    // 命令执行按本次运行的权限决定是否暴露。
+    let tool_permissions = agent_tool_permissions(request.allow_command_run);
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
         Some(workspace_tool_logger(&app_handle)),
+        tool_permissions.clone(),
     );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
@@ -302,6 +310,8 @@ pub async fn send_agent_prompt(
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
     orch.tool_invoker = tool_invoker;
+    orch.tool_policy = tool_policy;
+    orch.tool_permissions = tool_permissions;
     orch.allow_file_create = request.allow_file_create;
     orch.begin_run(request.run_id.clone());
     orch.start_usage_accounting(usage_meter.clone());
@@ -376,6 +386,26 @@ fn workspace_tool_logger(app_handle: &AppHandle) -> crate::agent::workspace_tool
         };
         let _ = app.emit("agent-action-log", entry);
     })
+}
+
+/// 本次运行允许 Agent 执行哪些命令。
+///
+/// 清单由后端从**项目自己声明的**任务推导（package.json scripts、Cargo），不是
+/// 模型自选、也不需要用户手写通配符。再滤掉长驻命令：验证是跑完再看结果，
+/// `npm run dev` 永远不退出。未授权时返回空清单，命令工具连通告都不会出现。
+fn agent_tool_permissions(
+    allow_command_run: bool,
+) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
+    if !allow_command_run {
+        return crate::agent::workspace_tools::WorkspaceToolPermissions::read_only();
+    }
+    let allowed = crate::services::project_tasks::discover_project_tasks(None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|task| task.command)
+        .filter(|command| !crate::services::verification::is_long_running_command(command))
+        .collect();
+    crate::agent::workspace_tools::WorkspaceToolPermissions::with_commands(allowed)
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -557,18 +587,18 @@ pub async fn run_agent_step(
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
-    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
-        &mcp_state.registry,
-        &app_handle,
-        llm,
-        crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref()),
-    )
-    .await;
+    let tool_policy =
+        crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
+    let (llm, tool_invoker) =
+        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
+            .await;
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
+    let tool_permissions = agent_tool_permissions(request.allow_command_run);
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
         Some(workspace_tool_logger(&app_handle)),
+        tool_permissions.clone(),
     );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
     let mut context = build_agent_context(
@@ -604,6 +634,8 @@ pub async fn run_agent_step(
     {
         let mut orch = agent_state.orchestrator.lock().await;
         orch.begin_run(request.run_id.clone());
+        orch.tool_policy = tool_policy;
+        orch.tool_permissions = tool_permissions;
         orch.start_usage_accounting(usage_meter.clone());
         let started = orch.begin_step(&step, "Single step execution started");
         let _ = app_handle.emit(
@@ -734,20 +766,32 @@ pub async fn run_agent_step(
 pub async fn continue_agent_pipeline(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
-    // 续跑同样要带上内置工作区工具，否则恢复后的 stage 看不到这些工具存在
-    let (llm, _) = crate::agent::workspace_tools::attach_workspace_tools(
-        llm,
-        None,
-        Some(workspace_tool_logger(&app_handle)),
-    );
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;
     let Some(paused) = orch.paused_run.take() else {
         return Err("No paused Agent pipeline to continue.".to_string());
     };
+    // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
+    // 必须一起装：只装定义会让恢复后的 stage 看到工具，却由上次运行残留的执行器
+    // 处理调用，或者根本没人处理。
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        orch.tool_policy,
+    )
+    .await;
+    let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        tool_invoker,
+        Some(workspace_tool_logger(&app_handle)),
+        orch.tool_permissions.clone(),
+    );
+    orch.tool_invoker = tool_invoker;
     // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
     // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
     let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);

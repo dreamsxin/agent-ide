@@ -56,6 +56,29 @@ pub fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
     format!("... {} earlier character(s) omitted ...\n{}", omitted, tail)
 }
 
+/// 命令是否在允许清单里。
+///
+/// 支持 `*`（全部放行）和前缀通配 `cargo *`。原本只在 `cli/mod.rs` 里私有，
+/// 但 Agent 的验证工具需要同一套判定 —— 两个入口对"什么算被授权"的理解
+/// 必须一致，否则 CLI 拦得住的命令桌面端可能放过去。
+pub fn is_command_allowed(command: &str, allowed: &[String]) -> bool {
+    let command = normalize_command_pattern(command);
+    allowed.iter().any(|pattern| {
+        let pattern = normalize_command_pattern(pattern);
+        if pattern == "*" {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return command.starts_with(prefix.trim_end());
+        }
+        command == pattern
+    })
+}
+
+pub fn normalize_command_pattern(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// 把失败的检查拼成一段修复提示。
 ///
 /// 刻意只给失败项：把通过的检查也塞进去会稀释信号，模型容易开始"顺手改改"
