@@ -2843,6 +2843,64 @@ mod tests {
         assert_eq!(summary["repairSummary"][0]["checksFailedAfter"], false);
     }
 
+    /// 修复循环放弃的那条路径。上面那个测试只覆盖"修一轮就好了"，
+    /// 而"修不好"才是退出码和记录必须说实话的场合：这里的检查命令永远不会通过，
+    /// 所以循环会一直修到预算用完 —— 这同时钉住了迭代计数（预算 2 就是修 2 轮，
+    /// 不是 1 轮也不是 3 轮）。
+    #[tokio::test]
+    async fn smoke_repair_chain_reports_giving_up_when_checks_never_pass() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("repair-giveup", "initial");
+        // mock 产出的修复把文件写成 "fixed"，所以找一个它永远不会写进去的词
+        let check_command = if cfg!(windows) {
+            "findstr never-appears smoke.txt"
+        } else {
+            "grep never-appears smoke.txt"
+        };
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--endpoint".to_string(),
+            "mock://cli-smoke".to_string(),
+            "--api-key".to_string(),
+            "sk-smoke".to_string(),
+            "--model".to_string(),
+            "mock-model".to_string(),
+            "--apply".to_string(),
+            "--run-command".to_string(),
+            check_command.to_string(),
+            "--allow-run".to_string(),
+            check_command.to_string(),
+            "--max-iterations".to_string(),
+            "2".to_string(),
+            "Update smoke file and repair checks".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        // 检查没过就必须是 ChecksFailed：修复循环跑过并不代表运行成功
+        assert_eq!(exit, ExitCode::ChecksFailed);
+        let chain: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("repair-chain.json")).unwrap(),
+        )
+        .unwrap();
+        let chain = chain.as_array().unwrap();
+        assert_eq!(chain.len(), 2, "预算是 2 轮");
+        // 每一轮都要记下"修完还是失败"，否则从记录里看不出这个链为什么停
+        for record in chain {
+            assert_eq!(record["checksFailedAfter"], true);
+        }
+    }
+
     #[tokio::test]
     async fn smoke_ide_backend_covers_project_command_problem_apply_and_repair_artifacts() {
         let _guard = cli_smoke_lock()

@@ -42,7 +42,8 @@ npm test
 | `services/llm_client.rs` | Provider request shaping, mock provider tool calls, run token accounting, usage action-log wording for unknown / partially reported / fully reported usage |
 
 | `commands/lsp.rs` | LSP file URI encoding/decoding, Windows verbatim path normalization, indexing-state detection |
-| `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all), repair permission requirements, `--allow-agent-write` requiring `--apply`, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, `tool-writes.json`, `smoke ide-backend` |
+| `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all), repair permission requirements, `--allow-agent-write` requiring `--apply`, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json` for both a repair that succeeds and one that exhausts its budget, `tool-writes.json`, `smoke ide-backend` |
+
 
 Run command:
 
