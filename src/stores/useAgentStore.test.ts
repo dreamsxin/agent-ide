@@ -76,6 +76,10 @@ describe("sendPrompt", () => {
     // 只有授予命令执行权限才放开全部 MCP 工具
     expect(autoRequest.request.toolApproval).toBe("allow_all");
     expect(autoRequest.request.allowFileCreate).toBe(true);
+    // 命令执行权限决定后端是否把项目检查命令暴露成 Agent 工具。
+    // ask 预设必须是 false：否则模型能自己跑命令，而用户从未同意过。
+    expect(askRequest.request.allowCommandRun).toBe(false);
+    expect(autoRequest.request.allowCommandRun).toBe(true);
   });
 
   it("sends the prompt through the send_agent_prompt command", async () => {

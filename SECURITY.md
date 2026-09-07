@@ -162,9 +162,16 @@ Which permission toggles are actually enforced in the backend:
 
 - `allowFileCreate` — enforced. In `auto` mode, new-file diffs are held for review instead of being written when it is false.
 - `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. `ask` / `suggest` resolve to `AutoApprovedOnly`; `auto` resolves to `AllowAll`.
+- `allowCommandRun` — enforced. When false, the `workspace_run_command` tool is **not advertised to the model and not claimed by the invoker**, so there is no Agent path to process execution other than MCP tools. When true, the exposed allow-list is derived by the backend from the project's own declared tasks (`package.json` scripts, Cargo), never from model input, and long-running commands (dev servers, watch tasks) are refused regardless of the list. Every call is written to the action log.
 - `allowFileDelete`, `allowGitActions` — **not enforced, because no Agent-reachable backend path performs those operations today.** Adding checks for them would be theatre until such a path exists. Agent runs never invoke Git commands, and diff application never deletes files.
-- `allowCommandRun` has no effect on process execution in the desktop app; the Agent cannot spawn processes except through MCP tools. In the CLI, command execution is instead gated by `--allow-run` patterns.
+- In the CLI, command execution is gated by `--allow-run` patterns instead. Both entry points now share one matcher (`services::verification::is_command_allowed`), so what counts as authorized cannot drift between them.
 - `McpToolPolicy::Deny` exists but no preset currently produces it, so there is no way to run with MCP tools fully disabled short of removing the servers from `mcp.json`.
+
+Limits of the command tool, stated plainly:
+
+- A permitted command is still arbitrary code execution by whatever the project declares. `npm test` runs the project's test script, which can do anything. The boundary is "commands this project already defines", not "commands that are safe".
+- Commands run in the workspace root with the inherited environment. There is no network, filesystem, or environment isolation.
+- Output is truncated to 12,000 characters (tail kept, since failures land at the end) before reaching the model.
 
 
 

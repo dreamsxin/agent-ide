@@ -51,6 +51,15 @@ pub struct AgentOrchestrator {
     pub paused_run: Option<PausedPipelineRun>,
     /// 外部工具执行器（MCP）。None 表示本次运行不暴露外部工具。
     pub tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
+    /// 本次运行使用的 MCP 放行策略。
+    ///
+    /// 记在这里是为了让 `continue_agent_pipeline` 能按同一策略重建工具面：
+    /// 工具定义（进请求体）和执行器（跑调用）必须一起装，只装一半会让模型
+    /// 看到工具却没人执行它的调用。
+    pub tool_policy: crate::services::mcp::McpToolPolicy,
+    /// 本次运行内置工作区工具的授权范围（命令执行清单）。
+    /// 和 `tool_policy` 同理：续跑时要按原样重建工具面。
+    pub tool_permissions: crate::agent::workspace_tools::WorkspaceToolPermissions,
     /// Auto 模式自动应用时是否允许创建新文件。
     ///
     /// 保守默认 false：请求没带这个权限时，新建文件的 diff 留给人工审查，
@@ -147,6 +156,8 @@ impl AgentOrchestrator {
             last_run_id: None,
             paused_run: None,
             tool_invoker: None,
+            tool_policy: crate::services::mcp::McpToolPolicy::AutoApprovedOnly,
+            tool_permissions: crate::agent::workspace_tools::WorkspaceToolPermissions::read_only(),
             allow_file_create: false,
             run_usage: None,
             conversation: Vec::new(),

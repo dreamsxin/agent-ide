@@ -11,7 +11,7 @@ use crate::services::problem_parser::ProblemEntry;
 use crate::services::project_tasks::{self, RunProjectTaskResult};
 // 修复循环的措辞和截断规则和桌面端共用，避免两套实现慢慢漂移
 use crate::services::verification::{
-    build_repair_prompt, collect_command_problems, failed_command_results,
+    build_repair_prompt, collect_command_problems, failed_command_results, is_command_allowed,
 };
 use crate::services::{context::AgentContext, workspace};
 use chrono::Utc;
@@ -1750,24 +1750,6 @@ fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)>
         ));
     }
     Ok(())
-}
-
-fn is_command_allowed(command: &str, allow_run: &[String]) -> bool {
-    let command = normalize_command_pattern(command);
-    allow_run.iter().any(|pattern| {
-        let pattern = normalize_command_pattern(pattern);
-        if pattern == "*" {
-            return true;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return command.starts_with(prefix.trim_end());
-        }
-        command == pattern
-    })
-}
-
-fn normalize_command_pattern(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf, (ExitCode, String)> {

@@ -138,10 +138,13 @@ file content here
 1. If a tool for reading or searching the workspace is available, use it to read the exact
    current text of any file you intend to edit before writing a diff. Never guess an ORIGINAL
    section — a mismatch makes the change unappliable.
-2. Output ONLY code and diffs — no explanations unless no code change is needed
-3. Each diff block must have exactly one ORIGINAL and one UPDATED section
-4. For edits: show EXACT original code that needs to be replaced
-5. Be precise — copy the original code exactly as it appears
+2. If a tool for running the project's check commands is available, use it to see the real
+   failure output before deciding what to change, and cite what it reported. Do not describe a
+   check as passing unless you ran it.
+3. Output ONLY code and diffs — no explanations unless no code change is needed
+4. Each diff block must have exactly one ORIGINAL and one UPDATED section
+5. For edits: show EXACT original code that needs to be replaced
+6. Be precise — copy the original code exactly as it appears
 
 Respond now with the implementation."#;
 
