@@ -92,6 +92,7 @@ pub fn run() {
             commands::agent::clear_agent_conversation,
             commands::agent::undo_last_apply,
             commands::agent::verify_workspace,
+            commands::agent::agent_repair_prompt,
             commands::agent::test_llm_connection,
             commands::agent::get_local_model_status,
             commands::agent::load_local_model,

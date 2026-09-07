@@ -1065,6 +1065,62 @@ pub async fn verify_workspace(
     Ok(report)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairPromptRequest {
+    pub command: String,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// 该次运行的输出（stdout / stderr 已由前端合并）
+    #[serde(default)]
+    pub output: String,
+    #[serde(default)]
+    pub original_prompt: Option<String>,
+}
+
+/// 为单次失败的命令生成修复提示。
+///
+/// 存在的意义是消掉重复：这段提示词此前在 Rust（多检查验证）和 TypeScript
+/// （单任务 Fix 按钮）各有一份，两边曾对"输出太长时保哪一半"给出相反答案，
+/// 而 CLI 用的那半是错的。前端现在优先调这里，TS 那份只留作非 Tauri 兜底。
+#[tauri::command]
+pub async fn agent_repair_prompt(
+    agent_state: State<'_, AgentGlobalState>,
+    request: RepairPromptRequest,
+) -> Result<String, String> {
+    if request.command.trim().is_empty() {
+        return Err("Repair prompt needs the failed command.".to_string());
+    }
+
+    let original_prompt = match request.original_prompt {
+        Some(prompt) if !prompt.trim().is_empty() => prompt,
+        _ => {
+            let orch = agent_state.orchestrator.lock().await;
+            orch.conversation
+                .last()
+                .map(|turn| turn.prompt.clone())
+                .unwrap_or_else(|| "(original task not recorded)".to_string())
+        }
+    };
+
+    let result = crate::services::project_tasks::RunProjectTaskResult {
+        command: request.command,
+        // 缺失的退出码在 verification 里算作失败，正是这里要的语义
+        exit_code: request.exit_code,
+        duration_ms: 0,
+        stdout: String::new(),
+        stderr: request.output,
+        problems: Vec::new(),
+    };
+
+    Ok(crate::services::verification::build_repair_prompt(
+        &original_prompt,
+        1,
+        std::slice::from_ref(&result),
+        &[],
+    ))
+}
+
 fn is_cancelled_error(err: &str) -> bool {
     err == "Agent task cancelled"
 }
