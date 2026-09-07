@@ -617,7 +617,15 @@ cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
 
-CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, `run`, and `smoke ide-backend`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `project-tasks.json`, `problems.json`, `repair-chain.json`, and `repair-summary.json` artifacts.
+CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, `run`, `smoke ide-backend`, and `smoke ide-surface`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `project-tasks.json`, `problems.json`, `repair-chain.json`, and `repair-summary.json` artifacts.
+
+`smoke ide-surface` is the read-only probe for the panel backends the Agent flow does not touch — workspace resolution, project task discovery, verification candidates, Git status/diff, and context packing — using the same functions the desktop calls. It needs no LLM provider, so it can run in CI:
+
+```powershell
+target\release\agent_cli smoke ide-surface --output json
+```
+
+It reports each probe as `ok`, `unavailable` (nothing to show, e.g. not a Git repository), or `failed`, and writes `surface-probes.json` beside the other run artifacts. Only `failed` affects the exit code.
 
 It is intentionally not a full command-line IDE replacement. Visual Agent plan controls, Problems/Terminal/Git integration, LSP views, run history, and per-hunk review UI remain desktop IDE workflows.
 

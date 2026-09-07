@@ -310,6 +310,7 @@ Implemented:
 - Optional all-diff apply.
 - `doctor`, `context estimate`, `plan`, and `run` command shape.
 - `smoke ide-backend` for IDE backend integration smoke.
+- `smoke ide-surface` for read-only probes of the panel backends the Agent flow does not touch (workspace resolution, project tasks, verification candidates, Git status/diff, context packing). No provider required, so it runs in CI. Each probe reports `ok` / `unavailable` / `failed`; only `failed` affects the exit code, and results are written to `surface-probes.json`.
 - `--output text|json|ndjson`.
 - run-id and artifact directory output.
 - stable exit-code contract.
