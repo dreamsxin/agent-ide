@@ -105,6 +105,9 @@ What the backend enforces:
 - **Tool-name gating only.** `McpToolPolicy` decides which discovered tools are advertised to the model and re-checks the name at call time: `Deny` exposes nothing, `AutoApprovedOnly` exposes only tools the user listed in that server's `autoApprove`, `AllowAll` exposes everything. An unrecognized policy string falls back to the restrictive `AutoApprovedOnly`, and `autoApprove` defaults to empty.
 - Tool arguments must be a JSON object.
 - The server process is spawned with its `cwd` resolved inside the workspace.
+- **Qualified tool names are unique.** Tool names are sanitized into `mcp__{server}__{tool}`, which is lossy — `.` and spaces both become `_`, and the separator is itself `__`, so two distinct servers can sanitize to the same advertised name. Discovery now claims names first-come and drops later collisions, reporting them on that server's status. Without this, the call-time lookup took the first match and a tool call could silently land on a different server than the model named.
+- **Tool results are capped at 64,000 characters** before they re-enter the conversation, with the truncation stated in the result text. Non-text content parts (image/audio) are replaced by a placeholder rather than inlined as base64.
+
 
 What the backend does **not** enforce:
 
@@ -215,7 +218,7 @@ Other guarantees:
 - The three hardcoded URLs (`https://api.openai.com/v1`, `https://api.deepseek.com/v1`) are overridable defaults, not fixed destinations. There is no scheme or host allow-list on the configured endpoint.
 - Git remote URLs come from the repository's own config, not from the app.
 - Agent output is never rendered as HTML: `ReactMarkdown skipHtml` plus `sanitizeMarkdown` before rendering.
-- API keys are masked in IPC responses, action logs, and the UI. The exception is `reveal_llm_api_key`, and MCP tool arguments, which are logged unredacted — see the credential section.
+- API keys are masked in IPC responses, action logs, and the UI. The exception is `reveal_llm_api_key`. MCP tool arguments are redacted by key name only, and MCP tool results are not redacted at all — see the credential section.
 
 ## Terminal Security
 

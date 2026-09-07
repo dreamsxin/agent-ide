@@ -14,6 +14,9 @@ export default {
         accent: {
           blue: "rgb(var(--accent-blue-rgb) / <alpha-value>)",
           purple: "rgb(var(--accent-purple-rgb) / <alpha-value>)",
+          // 13 处 `text-accent-green` 早已在用，但调色板里从来没有 green，
+          // 于是所有"成功"指示器都退化成继承色。补 token 而不是改 13 个调用点。
+          green: "rgb(var(--accent-green-rgb) / <alpha-value>)",
         },
         diff: {
           add: "rgb(var(--diff-add-rgb) / <alpha-value>)",
