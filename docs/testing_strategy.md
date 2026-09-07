@@ -288,8 +288,33 @@ prior stage's work, and the pending-diff state.
 This is deliberately not a quality eval. It is the safety net for 9.0.11, which
 has to restructure every stage's prompt to replace prose concatenation with a
 real message thread: after that change, this test says which part went missing.
-Judging whether the *new* structure produces better output still needs a real
-provider and a human, and that gap is why 9.0.11 has not been attempted.
+
+## Real-provider eval
+
+Judging whether a prompt change made output *better* needs a real model, so that
+is a separate, manual step: `scripts/eval/deepseek-pipeline.ps1` runs one full
+pipeline against DeepSeek in a throwaway temp workspace and prints where the
+artifacts landed (`prompt.txt`, `context.txt`, `changes.json`, `summary.json`) for
+a human to read.
+
+Three properties of that script are deliberate:
+
+- **Preview by default.** No `--apply`, so the workspace is untouched and one eval
+  costs one model call. `-Apply` exists for evaluating behaviour that must land on
+  disk, such as the repair loop.
+- **A throwaway workspace, never this repository.** A real model edits files; the
+  eval should not be able to touch the project it is being run from.
+- **The key comes only from `-ApiKey` / `DEEPSEEK_API_KEY`, and `-DryRun` prints
+  the command with it redacted.** The script does not go looking for credentials
+  anywhere else, and options are ordered ahead of the task text so the key can
+  never be parsed as part of the prompt.
+
+This has not been run yet: no DeepSeek key is configured in this environment
+(`agent_cli doctor` reports `LLM_ENDPOINT, LLM_API_KEY, and LLM_MODEL are not all
+configured`), so the eval is set up but unexecuted. There is also an older
+`#[ignore]`d live test, `llm_client::tests::deepseek_v4_flash_live_smoke`, gated on
+`DEEPSEEK_TEST_KEY`; it covers one non-streaming request, not the pipeline.
+
 
 ## The command layer
 
