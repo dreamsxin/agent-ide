@@ -167,6 +167,11 @@ export default function ChatView() {
   const saveActiveSdd = useAgentStore((s) => s.saveActiveSdd);
   const promoteSddToCodePrompt = useAgentStore((s) => s.promoteSddToCodePrompt);
   const [input, setInput] = useState("");
+  // 失败后重试要重发的是失败的那条 prompt，不是输入框里当时碰巧有什么。
+  // 原来 Retry 的 onClick 就是 handleSend、disabled 是 !input.trim()，而
+  // handleSend 发出后会清空输入框 —— 所以那个红色按钮在失败后永远是禁用的，
+  // 点不动。把失败的 prompt 放回输入框，重试才有对象，用户也能看到要重发什么。
+  const [lastPrompt, setLastPrompt] = useState("");
   const [sddSaveMessage, setSddSaveMessage] = useState("");
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextOptions, setContextOptions] = useState<ChatContextOptions>(() => loadContextOptions());
@@ -303,10 +308,18 @@ export default function ChatView() {
     };
   }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory]);
 
+  // 运行失败时把 prompt 放回输入框，Retry 才有可发的东西
+  useEffect(() => {
+    if (agentState === "error" && lastPrompt && !input.trim()) {
+      setInput(lastPrompt);
+    }
+  }, [agentState, input, lastPrompt]);
+
   const handleSend = useCallback(async () => {
     if (!input.trim() || isActing) return;
 
     const content = input.trim();
+    setLastPrompt(content);
     addMessage({
       id: Date.now().toString(),
       role: "user",
