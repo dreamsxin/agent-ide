@@ -210,16 +210,20 @@ Two tool families are exposed:
 | Output protocol | `emit_agent_changes`, `emit_sdd_draft` | Not side effects. Their arguments are synthesized back into `agent-changes` blocks so the diff parser stays transport-agnostic. |
 | Workspace read | `workspace_read_file`, `workspace_search_text`, `workspace_list_files` | Read-only, resolved through `workspace::resolve_existing`, credential files refused, 64 KB read cap, 60 search hits, 200 listed entries. |
 | Workspace verify | `workspace_run_command` | Only advertised when the run grants `allowCommandRun`. The allow-list is derived by the backend from the project's declared tasks, never from model input. Long-running commands are refused regardless of the list. Output tail-truncated to 12,000 chars. |
+| Workspace write | `workspace_write_file` | Only advertised in `auto` mode. Whole-file replacement through `resolve_for_agent_write`; creating a file needs `allowFileCreate`. Each write is recorded as an `applied` diff with its pre-write content and covered by an undo checkpoint. |
 | MCP | `mcp__{server}__{tool}` | External stdio servers, gated by `McpToolPolicy`. |
 
 Notes:
 
 - `workspace_run_command` is the only Agent path to process execution outside MCP. When the permission is absent the tool is neither advertised nor claimed by the invoker — a tool that would always fail is worse than an absent one, because the model spends a round discovering that.
 - The long-running-command refusal is a safety invariant, not a preference: verification runs a command to completion, and a dev server never exits. It is checked before the allow-list, so listing `npm run dev` does not enable it.
+- Gating writes on `auto` mode is deliberate rather than a new permission flag. `auto` already applies pending diffs without a click, so writing mid-run grants nothing it did not already have; `suggest` / `edit` promise "review before it lands", so the tool is absent there and the model emits diffs.
+- Tool writes are published back into the review area (`AgentOrchestrator::record_tool_writes`) on every exit path — success, failure, and cancellation — because a write that happened before a failure is still on disk. Without that, the file changes and the Diff view shows nothing, which is the auditability the product exists for.
 - Tool failures do not abort the stage; the error text is returned to the model so it can adapt.
 - Cancellation is checked before each tool call.
-- Tool definitions and the executing `ToolInvoker` are always attached together. `send_agent_prompt`, `run_agent_step`, and `continue_agent_pipeline` all build both; the MCP policy and command allow-list used by a run are remembered on the orchestrator (`tool_policy`, `tool_permissions`) so a resumed pipeline rebuilds the same tool surface.
+- Tool definitions and the executing `ToolInvoker` are always attached together. `send_agent_prompt`, `run_agent_step`, and `continue_agent_pipeline` all build both; the MCP policy and tool permissions used by a run are remembered on the orchestrator (`tool_policy`, `tool_permissions`) so a resumed pipeline rebuilds the same tool surface. The write log is shared through the same `Arc`, so a resumed run's writes are still published.
 - `agent_cli` currently passes no invoker, so headless runs expose no tools. That asymmetry is intentional today but is why the CLI needs its own repair loop.
+
 
 
 
@@ -544,11 +548,11 @@ error
 
 Highest-impact gaps:
 
-1. **Agent write loop** (largest remaining gap)
-   - The model can now read the workspace and run the project's own check commands (`workspace_run_command`, gated by `allowCommandRun`), so it can observe real failure output instead of guessing.
-   - It still cannot write. Edits are produced as `agent-changes` output and applied by the user afterwards, so the model cannot observe the result of its *own* change — only the state before it.
-   - A stage failure aborts the pipeline (`orchestrator.rs` returns `Err`). `agent_cli` has a bounded repair loop (`--max-iterations`, default 0 = off); the desktop app has `verify_workspace` + `agent_repair_prompt` and a `Verify All` / `Fix with Agent` path, but each is a single user-triggered round rather than an autonomous loop.
-   - Target: a write tool behind the existing permission model, plus an orchestrator-level bounded repair loop.
+1. **Autonomous repair loop** (largest remaining gap)
+   - The model can read the workspace, run the project's check commands, and — in `auto` mode — write files, so a full observe/change/verify cycle is now possible within one stage's tool loop.
+   - What is still missing is the orchestrator driving that cycle: a stage failure or a failed check aborts the pipeline (`orchestrator.rs` returns `Err`) instead of feeding the failure back for a bounded number of retries.
+   - `agent_cli` has a bounded repair loop (`--max-iterations`, default 0 = off); the desktop app has `verify_workspace` + `agent_repair_prompt` and a `Verify All` / `Fix with Agent` path, but each is a single user-triggered round.
+   - Target: an orchestrator-level bounded repair loop reusing `services/verification.rs`.
 
 2. **Version-aware diff application**
    - `baseHash` is stamped by the backend from real file content, so stale detection works.
@@ -642,7 +646,7 @@ These are targets, not verified measurements. Baseline tests are a Phase 10 item
 
 Ordered by dependency, not by appeal:
 
-1. **Write tool.** A write tool behind `resolve_for_agent_write` and permission flags, checkpointed for undo. Reading and verifying already work; writing is what still leaves the model blind to the effect of its own change.
+1. **Write tool.** Done: `workspace_write_file`, advertised only in `auto` mode, recorded as an applied+undoable diff.
 2. **Autonomous bounded repair loop.** The prompt builder and check runner are already shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `Verify All` / `Fix with Agent` already send a repair prompt — but each is one user-triggered round. What is missing is the orchestrator running verify → repair → re-verify itself, bounded by an iteration count, so a failed stage or failed check does not abort the pipeline.
 3. **Persistent message thread per run.** Replace prose concatenation of prior stage output with a real message list so tool results survive across stages and prompt caching becomes possible.
 4. **Symbol index and retrieval.** tree-sitter symbol index plus local retrieval feeding `budgeted` packing. Prerequisite for large workspaces, where the 160-entry project tree is not a usable map.

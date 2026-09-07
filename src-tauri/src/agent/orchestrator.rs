@@ -184,6 +184,101 @@ impl AgentOrchestrator {
         }
     }
 
+    /// 把 Agent 写入工具落下的改动登记成可审查、可撤销的 diff。
+    ///
+    /// 直接写盘会绕过审查区：文件变了，而 Diff 视图里什么都没有，用户失去了
+    /// "Agent 到底改了什么"的可见性 —— 而这正是这个产品的核心价值。所以每次
+    /// 写入事后都合成一张 `applied` 状态的 diff 卡片（original = 写前内容），
+    /// 并压一个回滚点，让 `Undo Apply` 对工具写入同样有效。
+    ///
+    /// 同一文件被写多次时合并成一条：original 取**第一次**写之前的内容，
+    /// updated 取**最后一次**写入的内容。撤销要回到"这次运行之前"，而不是
+    /// 回到中间某一步。
+    pub fn record_tool_writes(
+        &mut self,
+        writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
+    ) -> Vec<crate::agent::state_machine::FileDiff> {
+        use crate::agent::state_machine::{DiffHunk, DiffProvenance, FileDiff};
+
+        if writes.is_empty() {
+            return Vec::new();
+        }
+
+        // 按文件聚合，保持首次出现的顺序
+        let mut order: Vec<String> = Vec::new();
+        let mut merged: std::collections::HashMap<
+            String,
+            crate::agent::workspace_tools::AgentFileWrite,
+        > = std::collections::HashMap::new();
+        for write in writes {
+            match merged.get_mut(&write.file) {
+                Some(existing) => existing.updated = write.updated,
+                None => {
+                    order.push(write.file.clone());
+                    merged.insert(write.file.clone(), write);
+                }
+            }
+        }
+
+        let mut snapshots = Vec::new();
+        let mut created = Vec::new();
+        for file in &order {
+            let Some(write) = merged.remove(file) else {
+                continue;
+            };
+            snapshots.push(crate::agent::diff_apply::FileSnapshot {
+                file: write.file.clone(),
+                path: write.path.clone(),
+                previous: write.previous.clone(),
+            });
+            let is_new = write.previous.is_none();
+            let diff = FileDiff {
+                id: uuid::Uuid::new_v4().to_string(),
+                file: write.file.clone(),
+                base_hash: None,
+                provenance: Some(DiffProvenance {
+                    protocol: "workspace_tool".to_string(),
+                    operation: if is_new { "create" } else { "edit" }.to_string(),
+                    rationale: Some(
+                        "Written directly by the Agent through workspace_write_file".to_string(),
+                    ),
+                    schema_version: None,
+                    change_index: None,
+                    source_role: None,
+                    source_stage: Some("Tool Call".to_string()),
+                    regenerated_from_diff_id: None,
+                    regenerated_from_hunk_index: None,
+                }),
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: write
+                        .previous
+                        .as_deref()
+                        .map(|previous| previous.lines().count() as u32)
+                        .unwrap_or(0),
+                    new_start: 1,
+                    new_lines: write.updated.lines().count() as u32,
+                    content: String::new(),
+                    original: write.previous.clone().unwrap_or_default(),
+                    updated: write.updated.clone(),
+                    provenance: None,
+                    // 已经落盘了，状态必须如实反映，否则用户会以为还能审查
+                    status: Some("applied".to_string()),
+                }],
+                status: "applied".to_string(),
+            };
+            created.push(diff);
+        }
+
+        self.push_undo_checkpoint("Agent tool writes", snapshots);
+        self.diffs.extend(created.clone());
+        // 磁盘内容变了，其他还挂着的 diff 的 baseHash 要跟着刷新，
+        // 否则它们会被误判 stale
+        crate::agent::diff_apply::stamp_base_hashes(&mut self.diffs);
+        self.refresh_review_state();
+        created
+    }
+
     /// 栈顶回滚点的描述，供界面显示"将要撤销什么"
     pub fn pending_undo(&self) -> Option<(String, Vec<String>)> {
         self.undo_stack
@@ -1506,9 +1601,71 @@ fn attach_stage_provenance(
 mod tests {
     use super::*;
     use crate::agent::state_machine::{DiffHunk, FileDiff};
+    use crate::agent::workspace_tools::AgentFileWrite;
     use crate::services::workspace;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
+
+    /// 工具直接写盘会绕过审查区：文件变了而 Diff 视图空着，用户看不到 Agent
+    /// 改了什么，也没有撤销入口。所以每次写入都要合成一张已应用的 diff 卡片，
+    /// 并压一个回滚点。
+    ///
+    /// 同一文件写多次要合并成一条：original 取第一次写之前的内容，updated 取
+    /// 最后一次写入的。撤销要回到"这次运行之前"，不是回到中间某一步。
+    #[test]
+    fn tool_writes_become_applied_diffs_with_an_undo_point() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_tool_writes(vec![
+            AgentFileWrite {
+                file: "src/app.ts".to_string(),
+                path: PathBuf::from("src/app.ts"),
+                previous: Some("before run\n".to_string()),
+                updated: "first write\n".to_string(),
+            },
+            AgentFileWrite {
+                file: "src/app.ts".to_string(),
+                path: PathBuf::from("src/app.ts"),
+                previous: Some("first write\n".to_string()),
+                updated: "second write\n".to_string(),
+            },
+            AgentFileWrite {
+                file: "src/new.ts".to_string(),
+                path: PathBuf::from("src/new.ts"),
+                previous: None,
+                updated: "created\n".to_string(),
+            },
+        ]);
+
+        assert_eq!(recorded.len(), 2, "same file must merge into one entry");
+        let edited = &recorded[0];
+        assert_eq!(edited.file, "src/app.ts");
+        assert_eq!(edited.status, "applied");
+        assert_eq!(edited.hunks[0].status.as_deref(), Some("applied"));
+        assert_eq!(edited.hunks[0].original, "before run\n");
+        assert_eq!(edited.hunks[0].updated, "second write\n");
+        assert_eq!(
+            edited.provenance.as_ref().map(|p| p.operation.as_str()),
+            Some("edit")
+        );
+        assert_eq!(
+            recorded[1]
+                .provenance
+                .as_ref()
+                .map(|p| p.operation.as_str()),
+            Some("create")
+        );
+
+        // 回滚点必须存在，否则 Undo Apply 对工具写入无效
+        let (label, files) = orchestrator.pending_undo().expect("undo checkpoint");
+        assert!(label.contains("tool"), "{}", label);
+        assert_eq!(files.len(), 2);
+
+        // 空输入不该压出一个什么都没改的回滚点
+        let mut fresh = AgentOrchestrator::new();
+        assert!(fresh.record_tool_writes(Vec::new()).is_empty());
+        assert!(fresh.pending_undo().is_none());
+    }
 
     struct TestEnv {
         root: PathBuf,

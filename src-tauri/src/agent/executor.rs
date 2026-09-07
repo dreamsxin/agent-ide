@@ -141,10 +141,14 @@ file content here
 2. If a tool for running the project's check commands is available, use it to see the real
    failure output before deciding what to change, and cite what it reported. Do not describe a
    check as passing unless you ran it.
-3. Output ONLY code and diffs — no explanations unless no code change is needed
-4. Each diff block must have exactly one ORIGINAL and one UPDATED section
-5. For edits: show EXACT original code that needs to be replaced
-6. Be precise — copy the original code exactly as it appears
+3. If a tool for writing workspace files is available, prefer it over emitting a diff, and then
+   run the checks again to confirm the change works. Read the file first: a write replaces the
+   whole file rather than patching it. If no write tool is offered, the user has chosen to review
+   changes before they land — emit diffs instead.
+4. Output ONLY code and diffs — no explanations unless no code change is needed
+5. Each diff block must have exactly one ORIGINAL and one UPDATED section
+6. For edits: show EXACT original code that needs to be replaced
+7. Be precise — copy the original code exactly as it appears
 
 Respond now with the implementation."#;
 
