@@ -53,16 +53,16 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
-      # The default `llama-cpp` feature needs LLVM/libclang plus a full
-      # llama.cpp native build, so CI verifies the feature-off build that every
-      # non-local-inference code path uses.
+      # No feature flags: in-process local inference is gone, so what CI builds
+      # is exactly what `cargo build` gives a contributor.
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         working-directory: src-tauri
-        run: cargo test --no-default-features
+        run: cargo test
+
 
   rust-linux:
     name: Rust on Linux (clippy + tests)
@@ -108,14 +108,14 @@ jobs:
       # `cfg(unix)` paths that the Windows job never sees.
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         working-directory: src-tauri
         run: |
           dbus-run-session -- bash -c '
             echo "" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --no-default-features
+            cargo test
           '
 
   rust-macos:
@@ -137,7 +137,7 @@ jobs:
       # ship with the OS, unlike the GTK/webkit2gtk stack on Linux.
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       # The credential round-trip test uses the Keychain via the `apple-native`
       # backend. GitHub's macOS runners normally have an unlocked login
@@ -145,6 +145,6 @@ jobs:
       # this step is where it will show, which is the point of adding the job.
       - name: Tests
         working-directory: src-tauri
-        run: cargo test --no-default-features
+        run: cargo test
 
 

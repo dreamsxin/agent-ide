@@ -44,21 +44,13 @@ keyring = { version = "3", features = [
 ] }
 async-trait = "0.1"
 
-# 本地推理引擎依赖
-llama-cpp-rs = { package = "llama_cpp_rs", version = "0.3", optional = true }
-candle-core = { version = "0.7", features = ["cuda"], optional = true }
-candle-transformers = { version = "0.7", optional = true }
-candle-nn = { version = "0.7", optional = true }
-tokenizers = { version = "0.20", optional = true }
-hf-hub = { version = "0.3", optional = true }
-ureq = { version = "2.9", optional = true }
-
 # 性能监控依赖
 flamegraph = { version = "0.6", optional = true }
 criterion = { version = "0.5", features = ["html_reports"], optional = true }
 
+# 本地模型走 OpenAI 兼容的 HTTP 端点（Ollama / LM Studio / vLLM），不再进程内
+# 链接推理引擎。llama_cpp_rs 需要 LLVM/libclang 和一次完整的 llama.cpp 原生构建，
+# 这个代价换来的是一条从未上线过的代码路径，同时让默认 `cargo build` 在没装
+# libclang 的机器上直接失败。
 [features]
-default = ["llama-cpp"]
-llama-cpp = ["llama-cpp-rs", "tokenizers", "hf-hub", "ureq"]
-candle = ["candle-core", "candle-transformers", "candle-nn", "tokenizers", "hf-hub", "ureq"]
 performance-tools = ["flamegraph", "criterion"]

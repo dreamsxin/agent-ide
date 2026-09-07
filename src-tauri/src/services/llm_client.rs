@@ -1574,29 +1574,16 @@ impl ModelEngine for CodeLlamaEngine {
     }
 }
 
-/// 创建本地模型引擎
+/// 本地模型不再进程内推理。
+///
+/// 这里刻意返回错误而不是静默降级：一个配置了本地模型的 profile 如果被悄悄
+/// 当成远端调用，用户会看到一堆莫名其妙的 401/404。让它明确说清该怎么配。
 pub fn create_local_model_engine(config: LocalModelConfig) -> Result<Arc<dyn ModelEngine>, String> {
-    if !config.model_type.is_local() {
-        return Err(format!(
-            "Unsupported local model type: {:?}",
-            config.model_type
-        ));
-    }
-    let inference_config = crate::agent::local_inference::LocalInferenceConfig {
-        model_path: std::path::PathBuf::from(config.model_path),
-        model_type: config.model_type,
-        model_file: config.model_file,
-        n_threads: config.n_threads,
-        n_ctx: config.n_ctx,
-        n_gpu_layers: config.n_gpu_layers,
-        n_batch: config.n_batch,
-        temperature: config.temperature,
-        top_p: config.top_p,
-        top_k: config.top_k,
-        max_tokens: config.max_tokens,
-    };
-    Ok(Arc::new(
-        crate::agent::local_inference::LlamaCppEngine::new(inference_config)?,
+    Err(format!(
+        "In-process local inference was removed. Serve {} through an OpenAI-compatible endpoint \
+         instead (Ollama http://localhost:11434/v1, LM Studio http://localhost:1234/v1, or vLLM) \
+         and configure it as a normal profile endpoint plus model name.",
+        config.name
     ))
 }
 
