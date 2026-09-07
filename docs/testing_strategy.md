@@ -277,10 +277,12 @@ The same dependency blocked the orchestrator, which is not a command layer at al
 pipeline logic. `agent/events.rs` breaks that: `RunEvents` is a one-method trait for emitting to the
 frontend, `AppHandle` implements it, and tests use `RecordingEvents` to assert what was emitted.
 Emission is worth asserting rather than ignoring — the frontend's entire state comes from these
-events, so a run that is logically correct but silent looks like nothing happened. The orchestrator's
-leaf emitters (`emit_state`, `emit_pipeline`, `emit_step`, `emit_action_log`,
-`emit_review_action_log`) now take `&dyn RunEvents`; `run` and `continue_pipeline_from` still take an
-owned `AppHandle` because they spawn token-forwarding tasks, so they remain untestable for now.
+events, so a run that is logically correct but silent looks like nothing happened.
+`agent/orchestrator.rs` now contains **no Tauri types at all**: the leaf emitters take
+`&dyn RunEvents`, and `run` / `continue_pipeline_from` take `Arc<dyn RunEvents>` (owned, because they
+spawn token-forwarding tasks). Nothing in the pipeline requires a desktop runtime any more; what is
+still missing is tests that drive it, not the ability to write them.
+
 
 Two rules that come out of doing this:
 

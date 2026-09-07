@@ -347,7 +347,7 @@ pub async fn send_agent_prompt(
             ide_mode,
             cancel_flag,
             &llm,
-            app_handle.clone(),
+            std::sync::Arc::new(app_handle.clone()),
         )
         .await
     {
@@ -882,7 +882,7 @@ pub async fn continue_agent_pipeline(
             paused.ide_mode,
             cancel_flag,
             &llm,
-            app_handle.clone(),
+            std::sync::Arc::new(app_handle.clone()),
         )
         .await
     {

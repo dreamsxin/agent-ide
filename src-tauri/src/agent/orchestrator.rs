@@ -19,9 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::AppHandle;
-
-use tauri::Emitter;
+// 这个文件里已经没有 Tauri 类型了：发事件走 `RunEvents`，所以 orchestrator
+// 的流水线逻辑可以在没有桌面运行时的情况下被测试。
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,7 +420,7 @@ impl AgentOrchestrator {
         ide_mode: IdeMode,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
-        app: AppHandle,
+        events: std::sync::Arc<dyn RunEvents>,
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
 
@@ -430,7 +429,7 @@ impl AgentOrchestrator {
         let _ = self
             .state_mgr
             .transition(&AgentEvent::UserPrompt(prompt.clone()));
-        self.emit_state(&app);
+        self.emit_state(events.as_ref());
 
         // 2. Call LLM Streaming for planning
         let raw_ctx_str = context.to_prompt_context_with_mode(&context_compression);
@@ -445,7 +444,7 @@ impl AgentOrchestrator {
             ctx_str.len(),
         );
         self.emit_action_log(
-            &app,
+            events.as_ref(),
             "info",
             "prompt",
             None,
@@ -478,7 +477,7 @@ impl AgentOrchestrator {
         };
         if trim_to_direct {
             self.emit_action_log(
-                &app,
+                events.as_ref(),
                 "info",
                 "pipeline_shape",
                 None,
@@ -490,21 +489,21 @@ impl AgentOrchestrator {
                 None,
             );
         }
-        self.emit_pipeline(&app, &pipeline);
+        self.emit_pipeline(events.as_ref(), &pipeline);
         let (tx, mut rx) = mpsc::channel::<String>(32);
 
         // Forward planner stream tokens to the frontend.
-        let app_clone = app.clone();
+        let events_clone = events.clone();
         tokio::spawn(async move {
             while let Some(token) = rx.recv().await {
-                let _ = app_clone.emit("agent-stream-token", token);
+                events_clone.emit_json("agent-stream-token", serde_json::json!(token));
             }
         });
 
         let (steps, _full_response) =
             planner::plan_task(llm, &prompt, &ctx_str, cancel_flag.clone(), tx).await?;
         self.emit_action_log(
-            &app,
+            events.as_ref(),
             "success",
             "planner",
             None,
@@ -520,14 +519,14 @@ impl AgentOrchestrator {
         );
 
         self.steps = steps;
-        self.ensure_not_cancelled(&cancel_flag, &app)?;
+        self.ensure_not_cancelled(&cancel_flag, events.as_ref())?;
 
         // 3. Transition to Planning
         let _ = self
             .state_mgr
             .transition(&AgentEvent::PlanReady(self.steps.clone()));
-        self.emit_state(&app);
-        let _ = app.emit(
+        self.emit_state(events.as_ref());
+        events.emit_json(
             "agent-plan-ready",
             serde_json::to_value(&self.steps).unwrap_or_default(),
         );
@@ -545,7 +544,7 @@ impl AgentOrchestrator {
             ide_mode,
             cancel_flag,
             llm,
-            app,
+            events,
         )
         .await
     }
@@ -563,7 +562,7 @@ impl AgentOrchestrator {
         ide_mode: IdeMode,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
-        app: AppHandle,
+        events: std::sync::Arc<dyn RunEvents>,
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
 
@@ -581,9 +580,9 @@ impl AgentOrchestrator {
                     stage_index,
                     ide_mode,
                 });
-                self.emit_pipeline(&app, &pipeline);
+                self.emit_pipeline(events.as_ref(), &pipeline);
                 self.emit_action_log(
-                    &app,
+                    events.as_ref(),
                     "info",
                     "stage_paused",
                     Some(stage.role.to_string()),
@@ -595,13 +594,13 @@ impl AgentOrchestrator {
                 );
                 self.state_mgr
                     .set(crate::agent::state_machine::AgentState::WaitingUser);
-                self.emit_state(&app);
+                self.emit_state(events.as_ref());
                 return Ok(());
             }
             mark_pipeline_stage(&mut pipeline, stage_index, "active");
-            self.emit_pipeline(&app, &pipeline);
+            self.emit_pipeline(events.as_ref(), &pipeline);
             self.emit_action_log(
-                &app,
+                events.as_ref(),
                 "info",
                 "stage_start",
                 Some(stage.role.to_string()),
@@ -621,18 +620,18 @@ impl AgentOrchestrator {
             self.steps[step_index]
                 .logs
                 .push(format!("{} stage started", stage.role.to_string()));
-            self.emit_step(&app, step_index);
+            self.emit_step(events.as_ref(), step_index);
 
             let _ = self
                 .state_mgr
                 .transition(&AgentEvent::StepStart(stage.name.clone()));
-            self.emit_state(&app);
+            self.emit_state(events.as_ref());
 
             let (tx2, mut rx2) = mpsc::channel::<String>(32);
-            let app_clone2 = app.clone();
+            let events_clone2 = events.clone();
             tokio::spawn(async move {
                 while let Some(token) = rx2.recv().await {
-                    let _ = app_clone2.emit("agent-stream-token", token);
+                    events_clone2.emit_json("agent-stream-token", serde_json::json!(token));
                 }
             });
 
@@ -669,7 +668,7 @@ impl AgentOrchestrator {
 
                     let generated_diff_count = if ide_mode == IdeMode::Plan {
                         self.handle_plan_stage_response(
-                            &app,
+                            events.as_ref(),
                             &stage,
                             &response,
                             &prompt,
@@ -689,7 +688,7 @@ impl AgentOrchestrator {
                         self.diffs.extend(step_diffs);
                         if !parsed.diagnostics.is_empty() {
                             self.emit_action_log(
-                                &app,
+                                events.as_ref(),
                                 "warn",
                                 "agent_changes_validation",
                                 Some(stage.role.to_string()),
@@ -704,7 +703,7 @@ impl AgentOrchestrator {
                     };
                     mark_pipeline_stage(&mut pipeline, stage_index, "completed");
                     self.emit_action_log(
-                        &app,
+                        events.as_ref(),
                         "success",
                         "stage_complete",
                         Some(stage.role.to_string()),
@@ -729,10 +728,10 @@ impl AgentOrchestrator {
                     self.steps[step_index].status = "error".to_string();
                     self.steps[step_index].logs.push(format!("Error: {}", e));
                     mark_pipeline_stage(&mut pipeline, stage_index, "failed");
-                    self.emit_step(&app, step_index);
-                    self.emit_pipeline(&app, &pipeline);
+                    self.emit_step(events.as_ref(), step_index);
+                    self.emit_pipeline(events.as_ref(), &pipeline);
                     self.emit_action_log(
-                        &app,
+                        events.as_ref(),
                         "error",
                         "stage_error",
                         Some(stage.role.to_string()),
@@ -746,14 +745,14 @@ impl AgentOrchestrator {
                 }
             }
 
-            self.ensure_not_cancelled(&cancel_flag, &app)?;
-            self.emit_step(&app, step_index);
-            self.emit_pipeline(&app, &pipeline);
+            self.ensure_not_cancelled(&cancel_flag, events.as_ref())?;
+            self.emit_step(events.as_ref(), step_index);
+            self.emit_pipeline(events.as_ref(), &pipeline);
 
             let _ = self
                 .state_mgr
                 .transition(&AgentEvent::StepDone(stage.name.clone()));
-            self.emit_state(&app);
+            self.emit_state(events.as_ref());
 
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
@@ -761,13 +760,13 @@ impl AgentOrchestrator {
         // 5. Auto applies diffs immediately; other modes wait for review.
         if ide_mode == IdeMode::Plan {
             if let Some(artifact) = self.sdd_artifacts.last() {
-                let _ = app.emit(
+                events.emit_json(
                     "agent-sdd-ready",
                     serde_json::to_value(artifact).unwrap_or_default(),
                 );
 
                 self.emit_action_log(
-                    &app,
+                    events.as_ref(),
                     "info",
                     "sdd_ready",
                     None,
@@ -783,17 +782,17 @@ impl AgentOrchestrator {
             }
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
-            self.emit_state(&app);
+            self.emit_state(events.as_ref());
             return Ok(());
         }
 
         if !self.diffs.is_empty() {
-            let _ = app.emit(
+            events.emit_json(
                 "agent-diff-ready",
                 serde_json::to_value(&self.diffs).unwrap_or_default(),
             );
             self.emit_action_log(
-                &app,
+                events.as_ref(),
                 "info",
                 "diff_ready",
                 None,
@@ -840,7 +839,7 @@ impl AgentOrchestrator {
                 )
             };
             self.emit_action_log(
-                &app,
+                events.as_ref(),
                 level,
                 "auto_apply",
                 None,
@@ -862,7 +861,7 @@ impl AgentOrchestrator {
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
         }
-        self.emit_state(&app);
+        self.emit_state(events.as_ref());
 
         Ok(())
     }
