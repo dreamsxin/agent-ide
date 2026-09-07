@@ -118,3 +118,33 @@ jobs:
             cargo test --no-default-features
           '
 
+  rust-macos:
+    name: Rust on macOS (clippy + tests)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos
+
+      # macOS needs no extra system packages: WebKit and Security.framework
+      # ship with the OS, unlike the GTK/webkit2gtk stack on Linux.
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      # The credential round-trip test uses the Keychain via the `apple-native`
+      # backend. GitHub's macOS runners normally have an unlocked login
+      # keychain, so no setup is attempted here — if that assumption is wrong
+      # this step is where it will show, which is the point of adding the job.
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --no-default-features
+
+
