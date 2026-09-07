@@ -208,6 +208,9 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::allow_command_run`
     #[serde(default, rename = "allowCommandRun")]
     pub allow_command_run: bool,
+    /// 同 `SendPromptRequest::allow_file_create`
+    #[serde(default, rename = "allowFileCreate")]
+    pub allow_file_create: bool,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -271,8 +274,19 @@ pub async fn send_agent_prompt(
         crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
             .await;
     // 内置工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文。
-    // 命令执行按本次运行的权限决定是否暴露。
-    let tool_permissions = agent_tool_permissions(request.allow_command_run);
+    // 命令执行和写入按本次运行的权限决定是否暴露。
+    //
+    // 写权限只跟 Auto 模式挂钩，且在这里就取好快照：Auto 本来就会在流水线结束后
+    // 自动落盘，运行途中写不构成新的特权等级；Suggest/Edit 的约定是"人先看再落盘"。
+    let allow_write = {
+        let orch = agent_state.orchestrator.lock().await;
+        matches!(orch.mode, AgentMode::Auto)
+    };
+    let tool_permissions = agent_tool_permissions(
+        request.allow_command_run,
+        allow_write,
+        request.allow_file_create,
+    );
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -311,7 +325,7 @@ pub async fn send_agent_prompt(
     let mut orch = agent_state.orchestrator.lock().await;
     orch.tool_invoker = tool_invoker;
     orch.tool_policy = tool_policy;
-    orch.tool_permissions = tool_permissions;
+    orch.tool_permissions = tool_permissions.clone();
     orch.allow_file_create = request.allow_file_create;
     orch.begin_run(request.run_id.clone());
     orch.start_usage_accounting(usage_meter.clone());
@@ -335,12 +349,16 @@ pub async fn send_agent_prompt(
     {
         Ok(()) => {
             orch.finish_run();
+            // 写入登记放在所有分支里：取消或失败之前发生的写入照样在磁盘上，
+            // 不登记就等于磁盘变了而审查区看不到、也没有撤销入口
+            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
             orch.record_conversation_turn(&prompt_for_history);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
         }
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
+            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
@@ -357,6 +375,7 @@ pub async fn send_agent_prompt(
         }
         Err(err) => {
             orch.finish_run();
+            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             return Err(err);
         }
@@ -395,17 +414,56 @@ fn workspace_tool_logger(app_handle: &AppHandle) -> crate::agent::workspace_tool
 /// `npm run dev` 永远不退出。未授权时返回空清单，命令工具连通告都不会出现。
 fn agent_tool_permissions(
     allow_command_run: bool,
+    allow_write: bool,
+    allow_create: bool,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
-    if !allow_command_run {
-        return crate::agent::workspace_tools::WorkspaceToolPermissions::read_only();
+    let allowed_commands = if allow_command_run {
+        crate::services::project_tasks::discover_project_tasks(None)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|task| task.command)
+            .filter(|command| !crate::services::verification::is_long_running_command(command))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    crate::agent::workspace_tools::WorkspaceToolPermissions::new(
+        allowed_commands,
+        allow_write,
+        allow_create,
+    )
+}
+
+/// 把 Agent 写入工具落下的改动登记进审查区并通知前端。
+///
+/// 不做这一步的话，直接写盘等于绕过审查：磁盘变了而 Diff 视图空着，用户看不到
+/// Agent 改了什么，也没有撤销入口。
+fn publish_tool_writes(
+    orch: &mut crate::agent::orchestrator::AgentOrchestrator,
+    app_handle: &AppHandle,
+    permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
+) {
+    let writes = permissions.take_writes();
+    if writes.is_empty() {
+        return;
     }
-    let allowed = crate::services::project_tasks::discover_project_tasks(None)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|task| task.command)
-        .filter(|command| !crate::services::verification::is_long_running_command(command))
-        .collect();
-    crate::agent::workspace_tools::WorkspaceToolPermissions::with_commands(allowed)
+    let recorded = orch.record_tool_writes(writes);
+    let files = recorded
+        .iter()
+        .map(|diff| diff.file.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    orch.emit_review_action_log(
+        app_handle,
+        "info",
+        "tool_write",
+        &format!("Agent wrote {} file(s) directly", recorded.len()),
+        &format!("{}\nUndo Apply restores them.", files),
+    );
+    let _ = app_handle.emit(
+        "agent-diff-ready",
+        serde_json::to_value(&orch.diffs).unwrap_or_default(),
+    );
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -593,7 +651,16 @@ pub async fn run_agent_step(
         crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
             .await;
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
-    let tool_permissions = agent_tool_permissions(request.allow_command_run);
+    // 单步执行也走同一套授权：写权限只跟 Auto 模式挂钩
+    let allow_write = {
+        let orch = agent_state.orchestrator.lock().await;
+        matches!(orch.mode, AgentMode::Auto)
+    };
+    let tool_permissions = agent_tool_permissions(
+        request.allow_command_run,
+        allow_write,
+        request.allow_file_create,
+    );
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -635,7 +702,7 @@ pub async fn run_agent_step(
         let mut orch = agent_state.orchestrator.lock().await;
         orch.begin_run(request.run_id.clone());
         orch.tool_policy = tool_policy;
-        orch.tool_permissions = tool_permissions;
+        orch.tool_permissions = tool_permissions.clone();
         orch.start_usage_accounting(usage_meter.clone());
         let started = orch.begin_step(&step, "Single step execution started");
         let _ = app_handle.emit(
@@ -666,6 +733,9 @@ pub async fn run_agent_step(
     )
     .await;
     let mut orch = agent_state.orchestrator.lock().await;
+    // 登记写入放在分支之前：步骤失败或被取消之前发生的写入照样在磁盘上，
+    // 不登记就等于磁盘变了而审查区看不到、也没有撤销入口
+    publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
     match response {
         Ok(response) => {
             // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
@@ -792,6 +862,9 @@ pub async fn continue_agent_pipeline(
         orch.tool_permissions.clone(),
     );
     orch.tool_invoker = tool_invoker;
+    // 写入记录跟着 `Clone` 共享同一份，所以这里先克一份出来，事后登记时
+    // 不用同时可变借用 orchestrator
+    let tool_permissions = orch.tool_permissions.clone();
     // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
     // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
     let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
@@ -824,11 +897,13 @@ pub async fn continue_agent_pipeline(
     {
         Ok(()) => {
             orch.finish_run();
+            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             Ok("Agent pipeline continued".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
             orch.finish_run();
+            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
             let ide_mode = orch.ide_mode;
@@ -846,6 +921,7 @@ pub async fn continue_agent_pipeline(
         }
         Err(err) => {
             orch.finish_run();
+            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
             emit_usage_action_log(&orch, &app_handle, &usage_meter);
             Err(err)
         }

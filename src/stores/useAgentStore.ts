@@ -895,6 +895,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           contextSources: params.contextSources ?? null,
           toolApproval: mcpApprovalForPermissions(get().permissions),
           allowCommandRun: get().permissions.allowCommandRun,
+          allowFileCreate: get().permissions.allowFileCreate,
           extraPrompt: params.extraPrompt ?? null,
           regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
           regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,

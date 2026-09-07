@@ -24,6 +24,7 @@ pub const READ_FILE: &str = "workspace_read_file";
 pub const SEARCH_TEXT: &str = "workspace_search_text";
 pub const LIST_FILES: &str = "workspace_list_files";
 pub const RUN_COMMAND: &str = "workspace_run_command";
+pub const WRITE_FILE: &str = "workspace_write_file";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -43,15 +44,43 @@ const SKIPPED_DIRS: [&str; 6] = [
     ".agent-ide",
 ];
 
+/// Agent 通过写入工具落下的一次改动。
+///
+/// 记写之前的内容而不是只记路径：撤销要靠它，事后合成的 diff 卡片也要靠它
+/// 才能显示"改了什么"，而不是只显示"改过"。
+#[derive(Clone, Debug)]
+pub struct AgentFileWrite {
+    /// 工作区相对路径
+    pub file: String,
+    pub path: std::path::PathBuf,
+    /// 写之前的内容，None 表示这是新建文件
+    pub previous: Option<String>,
+    pub updated: String,
+}
+
+type AgentWriteLog = std::sync::Arc<std::sync::Mutex<Vec<AgentFileWrite>>>;
+
 /// 一次运行里内置工具的授权范围。
 ///
-/// 只读工具无条件启用（受工作区边界约束、拒绝凭据文件）。命令执行不一样：
-/// 它是真正的副作用，所以清单为空时这个工具**根本不出现在模型的工具列表里** ——
+/// 只读工具无条件启用（受工作区边界约束、拒绝凭据文件）。命令执行和写入不一样：
+/// 它们是真正的副作用，未授权时这些工具**根本不出现在模型的工具列表里** ——
 /// 而不是出现之后再拒绝。让模型看见一个永远会失败的工具只会浪费轮次。
 #[derive(Clone, Debug, Default)]
 pub struct WorkspaceToolPermissions {
     /// 允许执行的命令，支持 `cargo *` 前缀通配。空 = 不暴露命令执行工具
     pub allowed_commands: Vec<String>,
+    /// 是否允许运行途中直接写盘。
+    ///
+    /// 只有 Auto 模式给。理由是它不构成新的特权等级：Auto 本来就在流水线结束
+    /// 后自动落盘，不需要人点一下。Suggest/Edit 的产品约定是"人先看再落盘"，
+    /// 那两种模式下这个工具不通告，模型照旧输出可审查的 diff。
+    pub allow_write: bool,
+    /// 是否允许新建文件（对应 `allowFileCreate`）。false 时只能改已存在的文件，
+    /// 与 Auto 模式自动应用时对新建文件的处理保持一致。
+    pub allow_create: bool,
+    /// 已经发生的写入。跟着 `Clone` 共享同一份（`Arc`），所以命令层可以克隆一份
+    /// 交给工具、另一份记在 orchestrator 上，事后从任一份都取得到记录。
+    writes: AgentWriteLog,
 }
 
 impl WorkspaceToolPermissions {
@@ -60,11 +89,40 @@ impl WorkspaceToolPermissions {
     }
 
     pub fn with_commands(allowed_commands: Vec<String>) -> Self {
-        Self { allowed_commands }
+        Self {
+            allowed_commands,
+            ..Self::default()
+        }
+    }
+
+    pub fn new(allowed_commands: Vec<String>, allow_write: bool, allow_create: bool) -> Self {
+        Self {
+            allowed_commands,
+            allow_write,
+            allow_create,
+            writes: AgentWriteLog::default(),
+        }
+    }
+
+    /// 取出并清空写入记录。
+    ///
+    /// 锁中毒时返回空而不是 panic：丢掉审计记录已经够糟，再让整次运行崩掉
+    /// 是把一个可恢复的问题变成不可恢复的。
+    pub fn take_writes(&self) -> Vec<AgentFileWrite> {
+        match self.writes.lock() {
+            Ok(mut writes) => std::mem::take(&mut *writes),
+            Err(_) => Vec::new(),
+        }
     }
 
     fn allows_commands(&self) -> bool {
         !self.allowed_commands.is_empty()
+    }
+
+    fn record_write(&self, write: AgentFileWrite) {
+        if let Ok(mut writes) = self.writes.lock() {
+            writes.push(write);
+        }
     }
 }
 
@@ -124,6 +182,39 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
             }),
         },
     ];
+
+    if permissions.allow_write {
+        definitions.push(ToolDefinition {
+            name: WRITE_FILE.to_string(),
+            description: format!(
+                "Write the full new contents of a workspace file, then verify the result with a \
+                 check command. Read the file first so you preserve everything you are not \
+                 changing — this replaces the whole file, it does not patch it. {} The change is \
+                 recorded as a reviewable, undoable entry, so prefer this over describing an edit \
+                 you cannot verify.",
+                if permissions.allow_create {
+                    "New files may be created."
+                } else {
+                    "Only files that already exist may be written; creating new files is not \
+                     permitted in this run."
+                }
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path, e.g. src/app.ts"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Complete new file contents, not a patch or excerpt"
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+        });
+    }
 
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
@@ -200,6 +291,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             // 未授权时不认领：工具本来也没有被通告出去，认领它只会把一个
             // "不存在的工具"变成一个"总是失败的工具"
             RUN_COMMAND => self.permissions.allows_commands(),
+            WRITE_FILE => self.permissions.allow_write,
             _ => false,
         }
     }
@@ -227,6 +319,15 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 )
                 .await
             }
+            WRITE_FILE => write_file_tool(
+                string_arg(&args, "path").ok_or("Missing 'path'")?,
+                // 内容不能用 `string_arg`：它会把空串过滤成 None，而"把文件写空"
+                // 是合法请求（清掉一个文件的内容）
+                args.get("content")
+                    .and_then(|value| value.as_str())
+                    .ok_or("Missing 'content'")?,
+                &self.permissions,
+            ),
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
@@ -422,6 +523,76 @@ async fn run_command_tool(command: &str, allowed: &[String]) -> Result<String, S
         } else {
             verification::truncate_for_prompt(&output, MAX_COMMAND_OUTPUT_CHARS)
         }
+    ))
+}
+
+/// 把整份新内容写进工作区文件。
+///
+/// 这是闭环的最后一半：在此之前模型能读、能跑检查，但改动只能以 `agent-changes`
+/// 输出交给人应用，所以它永远看不到**自己那次改动**之后的状态。
+///
+/// 为什么整份覆盖而不是打补丁：补丁定位失败（"Could not find original content"）
+/// 是既有失败模式的主要来源，而模型已经有读取工具可以先取到准确内容。整份写入
+/// 把"定位"这一步彻底去掉。代价是模型必须保留它不想改的部分，工具描述里明说了。
+///
+/// 约束：
+/// - 路径过 `resolve_for_agent_write`，因此 `.git/`、`.agent-ide/`、`node_modules/`
+///   和凭据文件一律拒绝——和 diff 应用路径同一套规则，不是另写一份。
+/// - 新建文件需要 `allow_create`，与 Auto 模式自动应用时对新建文件的处理一致。
+/// - 内容没变时不记录：给撤销栈塞一个什么都没改的回滚点会让栈顶失真。
+fn write_file_tool(
+    path: &str,
+    content: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allow_write {
+        return Err(
+            "Writing files is not authorized for this run. Return an agent-changes block for \
+             review instead."
+                .to_string(),
+        );
+    }
+    let resolved = workspace::resolve_for_agent_write(path)?;
+    let previous = match std::fs::read_to_string(&resolved) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Read {} before writing: {}", path, error)),
+    };
+    if previous.is_none() && !permissions.allow_create {
+        return Err(format!(
+            "{} does not exist and creating files is not authorized for this run.",
+            path
+        ));
+    }
+    if previous.as_deref() == Some(content) {
+        return Ok(format!(
+            "{} already has this exact content; nothing written.",
+            path
+        ));
+    }
+
+    if let Some(parent) = resolved.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Create parent directory for {}: {}", path, error))?;
+    }
+    std::fs::write(&resolved, content).map_err(|error| format!("Write {}: {}", path, error))?;
+
+    permissions.record_write(AgentFileWrite {
+        file: path.to_string(),
+        path: resolved,
+        previous: previous.clone(),
+        updated: content.to_string(),
+    });
+
+    Ok(format!(
+        "{} {} ({} bytes). The change is recorded and can be undone.",
+        if previous.is_none() {
+            "Created"
+        } else {
+            "Updated"
+        },
+        path,
+        content.len()
     ))
 }
 
@@ -686,5 +857,87 @@ mod tests {
 
         assert!(output.contains("exit code: 3"), "{}", output);
         assert!(output.contains("duration:"), "{}", output);
+    }
+
+    /// 未授权时写入工具不该出现，也不该被认领 —— 和命令工具同一条规则。
+    #[test]
+    fn write_tool_is_absent_without_permission() {
+        let read_only = WorkspaceToolPermissions::read_only();
+        let names: Vec<String> = tool_definitions(&read_only)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(!names.contains(&WRITE_FILE.to_string()), "{:?}", names);
+        assert!(!WorkspaceToolInvoker::without_logging(read_only).handles(WRITE_FILE));
+
+        let writable = WorkspaceToolPermissions::new(Vec::new(), true, true);
+        let names: Vec<String> = tool_definitions(&writable)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(names.contains(&WRITE_FILE.to_string()));
+        assert!(WorkspaceToolInvoker::without_logging(writable).handles(WRITE_FILE));
+    }
+
+    /// 写入必须记下写之前的内容：撤销靠它，事后合成的 diff 卡片也靠它才能
+    /// 显示"改了什么"。
+    #[test]
+    fn write_tool_records_previous_content_for_undo() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/app.ts", "const value = 1;\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        let created = write_file_tool("src/new.ts", "export const a = 1;\n", &permissions).unwrap();
+        assert!(created.contains("Created"), "{}", created);
+
+        let updated = write_file_tool("src/app.ts", "const value = 2;\n", &permissions).unwrap();
+        assert!(updated.contains("Updated"), "{}", updated);
+
+        let writes = permissions.take_writes();
+        assert_eq!(writes.len(), 2);
+        assert!(writes[0].previous.is_none());
+        assert_eq!(writes[1].previous.as_deref(), Some("const value = 1;\n"));
+        assert_eq!(writes[1].updated, "const value = 2;\n");
+        // 取过之后就清空，避免同一批写入被登记两次
+        assert!(permissions.take_writes().is_empty());
+
+        // 内容没变时不记录：给撤销栈塞一个什么都没改的回滚点会让栈顶失真
+        let unchanged = write_file_tool("src/app.ts", "const value = 2;\n", &permissions).unwrap();
+        assert!(unchanged.contains("nothing written"), "{}", unchanged);
+        assert!(permissions.take_writes().is_empty());
+    }
+
+    /// 凭据文件和 `.git/` 由 `resolve_for_agent_write` 拒绝，新建文件另需授权。
+    ///
+    /// 断言的重点是写入工具走的是和 diff 应用同一套拒绝清单，而不是自己另写
+    /// 一份判断 —— 两份判断迟早会分叉。
+    #[test]
+    fn write_tool_refuses_denied_paths_and_unauthorized_creates() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/app.ts", "const value = 1;\n");
+
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+        let error = write_file_tool(".env", "SECRET=1\n", &permissions).unwrap_err();
+        assert!(error.to_lowercase().contains("credential"), "{}", error);
+        let error =
+            write_file_tool(".git/hooks/pre-commit", "#!/bin/sh\n", &permissions).unwrap_err();
+        assert!(!error.is_empty());
+
+        // allow_write 但不允许新建：只能改已存在的文件
+        let edit_only = WorkspaceToolPermissions::new(Vec::new(), true, false);
+        let error = write_file_tool("src/brand-new.ts", "x\n", &edit_only).unwrap_err();
+        assert!(
+            error.contains("creating files is not authorized"),
+            "{}",
+            error
+        );
+        assert!(write_file_tool("src/app.ts", "const value = 3;\n", &edit_only).is_ok());
+
+        // 完全没有写权限时，即使调到了也必须拒绝，而不是只依赖"没通告出去"
+        let read_only = WorkspaceToolPermissions::read_only();
+        let error = write_file_tool("src/app.ts", "x\n", &read_only).unwrap_err();
+        assert!(error.contains("not authorized"), "{}", error);
     }
 }

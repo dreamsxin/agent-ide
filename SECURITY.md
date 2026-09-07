@@ -160,18 +160,22 @@ The Agent operates in a "suggest-then-apply" pattern with three modes:
 
 Which permission toggles are actually enforced in the backend:
 
-- `allowFileCreate` — enforced. In `auto` mode, new-file diffs are held for review instead of being written when it is false.
+- `allowFileCreate` — enforced twice. In `auto` mode, new-file diffs are held for review instead of being written when it is false, and `workspace_write_file` refuses to create a file that does not exist.
 - `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. `ask` / `suggest` resolve to `AutoApprovedOnly`; `auto` resolves to `AllowAll`.
 - `allowCommandRun` — enforced. When false, the `workspace_run_command` tool is **not advertised to the model and not claimed by the invoker**, so there is no Agent path to process execution other than MCP tools. When true, the exposed allow-list is derived by the backend from the project's own declared tasks (`package.json` scripts, Cargo), never from model input, and long-running commands (dev servers, watch tasks) are refused regardless of the list. Every call is written to the action log.
-- `allowFileDelete`, `allowGitActions` — **not enforced, because no Agent-reachable backend path performs those operations today.** Adding checks for them would be theatre until such a path exists. Agent runs never invoke Git commands, and diff application never deletes files.
+- **Agent mode gates direct writes.** `workspace_write_file` is advertised only when the run is in `auto` mode. This is not a new privilege level: `auto` already applies pending diffs without a click, so writing during the run grants nothing it did not already have. In `suggest` / `edit` the tool is absent and the model must emit reviewable diffs, which is what those modes promise. Writes still go through `workspace::resolve_for_agent_write`, so `.git/`, `.agent-ide/`, `node_modules/` and credential files are refused on this path too.
+- Every tool write is recorded as an `applied` diff entry in the review area with the pre-write content, and is covered by an undo checkpoint, so `Undo Apply` restores it. A write that would bypass the review area entirely is the failure mode this avoids: the file changes and the user has no way to see what changed.
+- `allowFileDelete`, `allowGitActions` — **not enforced, because no Agent-reachable backend path performs those operations today.** Adding checks for them would be theatre until such a path exists. Agent runs never invoke Git commands, and neither diff application nor the write tool deletes files.
+- Permissions are captured as a per-run snapshot when the run starts. Narrowing a permission mid-run does not revoke a tool that was already advertised for that run; stop the run instead.
 - In the CLI, command execution is gated by `--allow-run` patterns instead. Both entry points now share one matcher (`services::verification::is_command_allowed`), so what counts as authorized cannot drift between them.
 - `McpToolPolicy::Deny` exists but no preset currently produces it, so there is no way to run with MCP tools fully disabled short of removing the servers from `mcp.json`.
 
-Limits of the command tool, stated plainly:
+Limits of the command and write tools, stated plainly:
 
 - A permitted command is still arbitrary code execution by whatever the project declares. `npm test` runs the project's test script, which can do anything. The boundary is "commands this project already defines", not "commands that are safe".
 - Commands run in the workspace root with the inherited environment. There is no network, filesystem, or environment isolation.
-- Output is truncated to 12,000 characters (tail kept, since failures land at the end) before reaching the model.
+- Command output is truncated to 12,000 characters (tail kept, since failures land at the end) before reaching the model.
+- `workspace_write_file` replaces the whole file. A model that writes without reading first can drop content it never saw. The tool description says so, and the pre-write content is kept for undo, but nothing prevents it.
 
 
 
