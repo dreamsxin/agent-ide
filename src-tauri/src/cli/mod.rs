@@ -507,14 +507,12 @@ impl SurfaceProbe {
 
 /// Git 探测里哪些错误属于"这个仓库现在没东西可看"而不是缺陷。
 ///
-/// 两种：根本不是 git 仓库；以及刚 `git init` 还没有任何提交（git2 的
-/// `UnbornBranch`）。后者是这个探测命令自己发现的：`git_status` 在无提交的新仓库
-/// 里直接返回 Err，所以桌面端 Git 面板在这种仓库里会报错而不是显示"尚无提交"。
-/// 那是 `commands::git` 的问题，不该让探测命令跟着一起红。
+/// 只剩一种：根本不是 git 仓库。这个探测命令当初还发现了第二种——刚 `git init`
+/// 还没有提交时 `git_status` 直接返回 Err（git2 的 `UnbornBranch`），桌面端 Git
+/// 面板在新建仓库里会因此报错。那个缺陷已经在 `commands::git` 里修掉了，所以这里
+/// 不再容忍它：继续容忍等于把回归静音成"不可用"。
 fn git_probe_unavailable(error: &str) -> bool {
     error.contains("Not a git repo")
-        || error.contains("UnbornBranch")
-        || error.contains("reference 'refs/heads/")
 }
 
 struct CliOutput {

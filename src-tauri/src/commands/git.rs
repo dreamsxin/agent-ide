@@ -44,25 +44,40 @@ pub fn git_status(path: String) -> Result<GitStatus, String> {
     let path = workspace::resolve_existing(&path)?;
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
 
-    // 获取当前分支名
-    let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
-    let branch = head.shorthand().unwrap_or("HEAD").to_string();
+    // 刚 `git init` 出来、还没有任何 commit 的仓库里 HEAD 是 unborn：它已经指向
+    // refs/heads/<name>，但那个 ref 还不存在，于是 `repo.head()` 返回 UnbornBranch。
+    // 这里以前直接 `?`，结果整个 Git 面板对着一个新建仓库报错——而同一个仓库里
+    // `git status` 工作得很好，那才是这个命令要对齐的行为。
+    let head = match repo.head() {
+        Ok(head) => Some(head),
+        Err(err) if err.code() == git2::ErrorCode::UnbornBranch => None,
+        Err(err) => return Err(format!("HEAD: {}", err)),
+    };
+    let branch = match head.as_ref() {
+        Some(head) => head.shorthand().unwrap_or("HEAD").to_string(),
+        // 没有 commit 不等于没有分支名：HEAD 指向的那个名字就是下一次 commit 会落在
+        // 的分支，也是 `git status` 显示的那个，所以照实报出来而不是 "HEAD"。
+        None => unborn_branch_name(&repo),
+    };
 
     // 获取 ahead/behind
     let mut ahead = 0;
     let mut behind = 0;
     let upstream_name = head
-        .shorthand()
+        .as_ref()
         .and_then(|_| current_upstream_name(&repo).ok())
         .flatten();
-    if let Ok(upstream) = repo.revparse_single("@{upstream}") {
-        let local = head.peel_to_commit().map_err(|e| e.to_string())?;
-        let upstream_commit = upstream.peel_to_commit().map_err(|e| e.to_string())?;
-        let (a, b) = repo
-            .graph_ahead_behind(local.id(), upstream_commit.id())
-            .map_err(|e| e.to_string())?;
-        ahead = a;
-        behind = b;
+    // 无提交时没有本地 commit 可比，ahead/behind 只能是 0——不是"未知"，是确实还没有。
+    if let Some(head) = head.as_ref() {
+        if let Ok(upstream) = repo.revparse_single("@{upstream}") {
+            let local = head.peel_to_commit().map_err(|e| e.to_string())?;
+            let upstream_commit = upstream.peel_to_commit().map_err(|e| e.to_string())?;
+            let (a, b) = repo
+                .graph_ahead_behind(local.id(), upstream_commit.id())
+                .map_err(|e| e.to_string())?;
+            ahead = a;
+            behind = b;
+        }
     }
 
     // 获取状态
@@ -376,8 +391,14 @@ pub fn git_diff(
     let repo = git2::Repository::discover(&path).map_err(|e| format!("Not a git repo: {}", e))?;
     let diff_kind = GitDiffKind::parse(kind)?;
 
-    let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
-    let tree = head.peel_to_tree().map_err(|e| format!("Tree: {}", e))?;
+    // 同 git_status：新仓库没有 HEAD tree。git2 的三个 diff 接口都接受 `None`，
+    // 语义就是"和空树比"，也正是 `git diff` 在这种仓库里给出的结果。
+    let head_tree = match repo.head() {
+        Ok(head) => Some(head.peel_to_tree().map_err(|e| format!("Tree: {}", e))?),
+        Err(err) if err.code() == git2::ErrorCode::UnbornBranch => None,
+        Err(err) => return Err(format!("HEAD: {}", err)),
+    };
+    let tree = head_tree.as_ref();
 
     let mut diff_opts = git2::DiffOptions::new();
     diff_opts
@@ -391,10 +412,8 @@ pub fn git_diff(
     let index = repo.index().map_err(|e| format!("Index: {}", e))?;
     let diff = match diff_kind {
         GitDiffKind::Worktree => repo.diff_index_to_workdir(Some(&index), Some(&mut diff_opts)),
-        GitDiffKind::Staged => {
-            repo.diff_tree_to_index(Some(&tree), Some(&index), Some(&mut diff_opts))
-        }
-        GitDiffKind::All => repo.diff_tree_to_workdir_with_index(Some(&tree), Some(&mut diff_opts)),
+        GitDiffKind::Staged => repo.diff_tree_to_index(tree, Some(&index), Some(&mut diff_opts)),
+        GitDiffKind::All => repo.diff_tree_to_workdir_with_index(tree, Some(&mut diff_opts)),
     }
     .map_err(|e| format!("Diff: {}", e))?;
 
@@ -617,6 +636,19 @@ fn current_branch_name(repo: &git2::Repository) -> Result<String, String> {
     head.shorthand()
         .map(str::to_string)
         .ok_or_else(|| "Detached HEAD is not supported for this operation".to_string())
+}
+
+/// HEAD 还没有指向任何 commit 时，它仍然是个指向 refs/heads/<name> 的符号引用。
+/// 那个名字就是下一次 commit 会创建的分支，也是 `git status` 在同样仓库里显示的分支。
+fn unborn_branch_name(repo: &git2::Repository) -> String {
+    repo.find_reference("HEAD")
+        .ok()
+        .and_then(|head| {
+            head.symbolic_target()
+                .and_then(|target| target.strip_prefix("refs/heads/"))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "HEAD".to_string())
 }
 
 fn current_upstream_name(repo: &git2::Repository) -> Result<Option<String>, String> {
@@ -874,6 +906,25 @@ mod tests {
 
     impl TestRepo {
         fn new() -> Self {
+            let env = Self::without_commit();
+            let repo = git2::Repository::open(&env.root).unwrap();
+            let tracked = env.root.join("tracked.txt");
+            std::fs::write(&tracked, "initial\n").unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = git2::Signature::now("Agent IDE Test", "agent@example.com").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+
+            env
+        }
+
+        /// `git init` 之后还没有提交的仓库。HEAD 在这种仓库里是 unborn，
+        /// 这是 Git 面板打开一个新建工作区时的真实状态。
+        fn without_commit() -> Self {
             let base = std::env::current_dir()
                 .unwrap()
                 .join("target")
@@ -886,17 +937,7 @@ mod tests {
             std::env::set_var("AGENT_IDE_CONFIG_DIR", &config_dir);
             workspace::save_workspace_path(root.to_string_lossy().as_ref()).unwrap();
 
-            let repo = git2::Repository::init(&root).unwrap();
-            let tracked = root.join("tracked.txt");
-            std::fs::write(&tracked, "initial\n").unwrap();
-            let mut index = repo.index().unwrap();
-            index.add_path(Path::new("tracked.txt")).unwrap();
-            index.write().unwrap();
-            let tree_id = index.write_tree().unwrap();
-            let tree = repo.find_tree(tree_id).unwrap();
-            let sig = git2::Signature::now("Agent IDE Test", "agent@example.com").unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
+            git2::Repository::init(&root).unwrap();
 
             Self { root, config_dir }
         }
@@ -954,6 +995,59 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.path == "staged.txt" && entry.status == "added" && entry.staged));
+    }
+
+    #[test]
+    fn git_status_works_in_a_repo_without_commits() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::without_commit();
+        std::fs::write(env.root.join("untracked.txt"), "new\n").unwrap();
+        std::fs::write(env.root.join("staged.txt"), "staged\n").unwrap();
+
+        let repo = git2::Repository::open(&env.root).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+
+        let status = git_status(env.root.to_string_lossy().to_string()).unwrap();
+
+        // 分支名来自 unborn 的 HEAD 符号引用，所以是真实的分支名而不是 "HEAD"。
+        assert!(!status.branch.is_empty());
+        assert_ne!(status.branch, "HEAD");
+        assert_eq!((status.ahead, status.behind), (0, 0));
+        assert!(status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "staged.txt" && entry.status == "added" && entry.staged));
+        assert!(status
+            .entries
+            .iter()
+            .any(|entry| entry.path == "untracked.txt"
+                && entry.status == "untracked"
+                && !entry.staged));
+    }
+
+    #[test]
+    fn git_diff_works_in_a_repo_without_commits() {
+        let _guard = workspace::env_test_guard();
+        let env = TestRepo::without_commit();
+        std::fs::write(env.root.join("staged.txt"), "staged\n").unwrap();
+
+        let repo = git2::Repository::open(&env.root).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("staged.txt")).unwrap();
+        index.write().unwrap();
+
+        let staged = git_diff(
+            env.root.to_string_lossy().to_string(),
+            None,
+            Some("staged".to_string()),
+        )
+        .unwrap();
+
+        // 没有 HEAD tree 就和空树比：暂存的新文件整体是新增内容。
+        assert!(staged.contains("staged.txt"));
+        assert!(staged.contains("+staged"));
     }
 
     #[test]
