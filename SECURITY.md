@@ -273,7 +273,7 @@ Ordered by how much they would matter to an operator. Each was confirmed by read
 10. **Cancellation is cooperative** — a shared `AtomicBool` checked in the request and streaming paths. There is no transport-level abort.
 11. **A token cap cannot be enforced against providers that report no usage** (local runtimes, mock endpoints). This is surfaced rather than silently treated as zero.
 12. **Hunk matching is textual**, not AST-aware. Ambiguous matches are rejected rather than guessed, and `baseHash` catches stale edits, but line-offset tolerance is not implemented.
-13. **macOS and Linux credential backends are unvalidated at runtime.** Windows is verified end to end. A Linux CI job that installs `gnome-keyring` and runs the test suite under `dbus-run-session` has just been added to attempt the Secret Service round trip; **its first result has not been reviewed yet**, so Linux stays listed as unvalidated until it is. macOS has no CI coverage at all.
+13. **macOS and Linux credential backends are unvalidated at runtime.** Windows is verified end to end. Linux and macOS CI jobs now attempt the round trip — Linux under `dbus-run-session` with `gnome-keyring`, macOS against the login Keychain — but **neither result has been confirmed yet**. Linux's first run failed before reaching the tests, on an unrelated RGBA icon problem that has since been fixed, so both stay listed as unvalidated until a run gets that far.
 14. **The CLI deny-path model is not implemented**; the Agent write deny list covers the desktop diff path only, and both share it via `diff_apply`.
 
 ## Vulnerability Reporting
