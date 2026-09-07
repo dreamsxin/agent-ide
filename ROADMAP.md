@@ -255,7 +255,18 @@ How current agent frameworks avoid this: a single agent with tools decides what 
 
 Note that `TaskContext` and `Complexity` existed in `llm_client.rs` and looked exactly like the types such routing would need. They were dead: three matches repo-wide, all inside their own definitions, zero constructions and zero reads. Deleted, same as the `candle` feature earlier today. Their presence made it look like complexity-based routing existed when nothing of the kind was wired.
 
-Also fixed while the data was fresh: the usage summary line said "Run used N tokens across M LLM call(s)" whenever *at least one* call reported usage, because `usage_is_unknown()` is only true when `reported_calls == 0`. A run where 1 of 5 calls reported would have read as full success while the cap silently undercounted. Partial reporting now says so in the summary instead of only in the expandable details.
+Acted on the finding: the Tester role prompt now has an explicit no-op exit. It previously read "Add or adjust focused tests" / "Prefer concrete test diffs over general advice" / "output ONLY diff/new-file blocks" — three unconditional instructions with no way to decline, which is why `test_hello.py` appeared. It now judges necessity first and is told in as many words that writing no tests is a valid and often correct outcome. Compare the Architect role, which has always had a clear boundary ("Do not output code diffs"); Tester never did.
+
+Not yet done, and this is the structural half: **the pipeline is still unconditional**. Precise state for whoever picks it up:
+
+- Stage list: `agent/multi_agent.rs` `default_pipeline()` returns Architect → Coder → Tester → Reviewer. Planner is *not* in that list — it is an unconditional extra LLM call in `orchestrator::run` before the loop, so skipping stages alone still costs one planner round trip.
+- The loop is `orchestrator::continue_pipeline_from`, one `executor::execute_stage` per stage, plus a fixed 300ms sleep per iteration.
+- The only existing conditional stage selection is the `IdeMode::Plan` branch in `orchestrator::run`, which is the shape to copy.
+- The only existing short-circuit is `pause_before`, which interrupts rather than skips.
+- Complexity signals are available in `commands::agent::send_agent_prompt` (`request.prompt`, `context.context_files`, `context.active_file`) but are flattened into a rendered string before `run` sees them, so the classification has to happen in the command layer and be passed in.
+- The default stage list is duplicated in three places — `multi_agent.rs`, `src/stores/useAgentStore.ts`, and `src/components/agent/PipelineEditor.tsx`. Changing the default without changing all three desynchronises frontend and backend.
+
+ "Run used N tokens across M LLM call(s)" whenever *at least one* call reported usage, because `usage_is_unknown()` is only true when `reported_calls == 0`. A run where 1 of 5 calls reported would have read as full success while the cap silently undercounted. Partial reporting now says so in the summary instead of only in the expandable details.
 
  (`npx tsc --noEmit` + `npm run build` clean, `npm test` 39 passed):
 

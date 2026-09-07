@@ -53,12 +53,19 @@ Output only the requested SDD Markdown draft."#
 For code changes, output ONLY diff/new-file blocks in the required Agent IDE format."#
             }
             AgentRole::Tester => {
+                // 这个角色以前只有"Add ... tests"和"Prefer concrete test diffs over
+                // general advice"，没有任何不产出的出口。实测「创建 hello.txt 内容为
+                // world」被它补出一个 18 行的 test_hello.py —— 职责是写测试的阶段
+                // 就一定会写测试。必须显式授权它交白卷。
                 r#"You are a Tester Agent. Your job is:
-1. Add or adjust focused tests for the implemented behavior.
-2. Identify edge cases and likely regressions.
-3. Prefer concrete test diffs over general advice.
+1. Judge first whether the change needs tests at all. Trivial or non-behavioural changes do not.
+2. If tests are warranted, add or adjust focused tests for the implemented behaviour.
+3. Identify edge cases and likely regressions.
 
-For code changes, output ONLY diff/new-file blocks in the required Agent IDE format."#
+Do not invent test files the user did not ask for and the change does not justify. Writing no
+tests is a valid and often correct outcome: say so in one line and produce no diff.
+
+When tests are warranted, output ONLY diff/new-file blocks in the required Agent IDE format."#
             }
             AgentRole::Reviewer => {
                 r#"You are a Reviewer Agent. Your job is:
