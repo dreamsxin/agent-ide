@@ -37,7 +37,8 @@ npm test
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, repositories with no commits, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/agent.rs` | Context-compression precedence (request override vs stored default, unknown mode rejected). This file is the IPC boundary and most of it still needs a running app; logic is being pulled out into services rather than tested in place — see below |
-| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary) |
+| `agent/orchestrator.rs` | Tool writes becoming applied diffs with an undo checkpoint, hunk status rollup, review action-log payload contents (level, phase, stage, diff summary), a full `run` against a `mock://` provider asserting the plan / state / pipeline events reach the frontend |
+
 | `services/verification.rs` | Repair-prompt construction, output truncation, `--allow-run` pattern matching, long-running command detection, verification candidate preparation (blank trimming, long-running partition, the two distinct failure messages), batch check execution when one command cannot run, action-log level/summary/detail rendering, bounded repair loop policy (iteration numbering, budget exhaustion, apply failure, repair-requires-apply) |
 
 
@@ -280,8 +281,11 @@ Emission is worth asserting rather than ignoring — the frontend's entire state
 events, so a run that is logically correct but silent looks like nothing happened.
 `agent/orchestrator.rs` now contains **no Tauri types at all**: the leaf emitters take
 `&dyn RunEvents`, and `run` / `continue_pipeline_from` take `Arc<dyn RunEvents>` (owned, because they
-spawn token-forwarding tasks). Nothing in the pipeline requires a desktop runtime any more; what is
-still missing is tests that drive it, not the ability to write them.
+spawn token-forwarding tasks). A whole `run` against a `mock://` provider is now a plain `#[test]`,
+asserting that the plan, state and pipeline events actually reach the frontend — three independent
+channels, and a missing one leaves a section of the UI frozen while the run looks fine from the
+backend's side.
+
 
 
 Two rules that come out of doing this:

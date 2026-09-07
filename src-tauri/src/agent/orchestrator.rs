@@ -2312,6 +2312,73 @@ mod tests {
 
     /// 一个只返回文字、没有产出 diff 的步骤以前会把状态硬置成 WaitingUser，
     /// 界面显示"需要处理"但审查区是空的，用户只能靠重跑脱身。
+    /// 第一条真正驱动整条流水线的测试。以前写不出来：`run` 要 `AppHandle`。
+    ///
+    /// 断言的是"界面跟不跟得上"，而不只是返回值：前端的状态、计划、阶段全靠这些
+    /// 事件，一次逻辑正确但一声不响的运行，在界面上和没跑过没有区别。
+    #[test]
+    fn a_run_announces_its_plan_and_pipeline_to_the_frontend() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/app.ts", "const value = 1;\n");
+
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "mock://orchestrator-test".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "mock-model".to_string(),
+                provider: "openai".to_string(),
+                max_output_tokens: None,
+                tool_call_mode: "text_protocol".to_string(),
+                model_type: crate::services::llm_client::ModelType::from_string("openai"),
+                local_model_config: None,
+            });
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(orchestrator.run(
+                "update the greeting".to_string(),
+                crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref()),
+                ContextCompressionMode::Focused,
+                None,
+                crate::services::context::ContextSourceOptions {
+                    include_project_tree: false,
+                    include_git_diff: false,
+                    include_project_memory: false,
+                },
+                vec![crate::agent::multi_agent::PipelineStage::new(
+                    crate::agent::multi_agent::AgentRole::Coder,
+                    "Coder",
+                )],
+                IdeMode::Code,
+                Arc::new(AtomicBool::new(false)),
+                &llm,
+                events.clone(),
+            ));
+
+        assert!(result.is_ok(), "{:?}", result);
+        let names = events.names();
+        // 计划出来了就要广播：Plan 面板只认这个事件
+        assert!(
+            names.iter().any(|name| name == "agent-plan-ready"),
+            "{:?}",
+            names
+        );
+        // 状态和阶段进度是另外两条独立的线，缺哪条界面就有一块不动
+        assert!(
+            names.iter().any(|name| name == "agent-state-changed"),
+            "{:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|name| name == "agent-pipeline-update"),
+            "{:?}",
+            names
+        );
+    }
+
     #[test]
     fn a_step_without_diffs_does_not_park_the_ui_in_waiting_user() {
         let _guard = workspace::env_test_guard();
