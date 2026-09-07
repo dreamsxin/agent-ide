@@ -63,11 +63,18 @@ export function buildProblemFixPrompt(problem?: ProblemEntry) {
 }
 
 export function buildTaskFailureFixPrompt(task: ProjectTaskRunState) {
+  // 必须带上被点击那次运行自己的输出。
+  //
+  // 之前这里只给命令名和退出码，输出靠 buildIdeRuntimeContext 附加 —— 而那边取的是
+  // "最近一次失败的任务"。于是 A 失败之后 B 又失败时点 A 的 Fix，提示里会是
+  // "Command: A" 配 B 的输出，模型照着错的证据去改。
   return [
     "Fix the failing project command. Use the command output, Problems list, recent terminal output, and logs below. Return proposed code changes as reviewable diffs when changes are needed.",
     "",
     `Command: ${task.command}`,
     `Exit code: ${task.exitCode ?? "unknown"}`,
+    "Output of this command:",
+    tail(task.output?.trim() ?? "", 4000) || "(no output captured)",
   ].join("\n");
 }
 
