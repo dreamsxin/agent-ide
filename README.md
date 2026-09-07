@@ -632,3 +632,15 @@ git status --short
 ```
 
 Do not include unrelated demo/workspace changes in feature commits.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Third-party dependencies keep their own licenses. Two worth knowing about when redistributing a build:
+
+- Tauri and the Rust/npm dependency tree are permissively licensed (mostly MIT or Apache-2.0).
+- The `llama-cpp` Cargo feature links llama.cpp (MIT) and **is in the default feature set** (`default = ["llama-cpp"]`), so a plain `cargo build` or `npm run tauri dev` includes it. CI builds with `--no-default-features`, which leaves it out. Check which way you built before redistributing.
+
+Model weights and LLM provider endpoints are not part of this repository and are governed by whatever terms you obtain them under.
+
