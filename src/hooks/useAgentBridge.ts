@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { isReviewableDiff, useAgentStore } from "../stores/useAgentStore";
-import { useLayoutStore } from "../stores/useLayoutStore";
+import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
@@ -62,17 +61,9 @@ export function useAgentBridge() {
           }),
 
           listen<DiffEntry[]>("agent-diff-ready", (e) => {
-            // 从「没有待审查改动」变成「有」时，把面板直接切到 Changes。
-            // Suggest / Ask 模式下 Agent 只提交待审查的 diff，不落盘；标签上那个
-            // 11px 的角标不足以让人注意到，用户会以为 Agent 什么都没做。
-            const hadReviewable = useAgentStore.getState().diffs.some(isReviewableDiff);
-            const hasReviewable = e.payload.some(isReviewableDiff);
+            // 不再强制切到 Changes：待审查改动现在直接出现在对话流里
+            // （PendingChangesCard），把用户从刚读的回复上拽走反而更差。
             setDiffs(e.payload);
-            if (!hadReviewable && hasReviewable) {
-              const layout = useLayoutStore.getState();
-              layout.setAgentView("changes");
-              if (!layout.rightVisible) layout.toggleRightPanel();
-            }
             upsertProblems(
               "agent",
               e.payload
