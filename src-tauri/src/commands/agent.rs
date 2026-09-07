@@ -352,18 +352,12 @@ pub async fn send_agent_prompt(
         .await
     {
         Ok(()) => {
-            orch.finish_run();
-            // 写入登记放在所有分支里：取消或失败之前发生的写入照样在磁盘上，
-            // 不登记就等于磁盘变了而审查区看不到、也没有撤销入口
-            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.record_conversation_turn(&prompt_for_history);
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
         }
         Err(err) if is_cancelled_error(&err) => {
-            orch.finish_run();
-            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
                 "agent-state-changed",
@@ -378,9 +372,7 @@ pub async fn send_agent_prompt(
             return Ok("Agent task cancelled".to_string());
         }
         Err(err) => {
-            orch.finish_run();
-            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             return Err(err);
         }
     }
@@ -468,6 +460,26 @@ fn publish_tool_writes(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
+}
+
+/// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
+///
+/// 三个命令共九条退出分支以前各抄一遍这段。抄漏确实发生了：`run_agent_step` 的
+/// 取消分支和失败分支都没有记账，于是一个跑到一半被取消的步骤花掉的 token 在
+/// action log 里查不到 —— token 已经花了，取消不退款。
+///
+/// 登记工具写入必须落在每条退出路径上：取消或失败之前发生的写入照样在磁盘上，
+/// 不登记就等于磁盘变了而审查区看不到、也没有撤销入口。重复调用是安全的，
+/// `take_writes` 会把记录取空，第二次直接返回。
+fn finish_agent_run(
+    orch: &mut crate::agent::orchestrator::AgentOrchestrator,
+    app_handle: &AppHandle,
+    permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
+    meter: &crate::services::llm_client::RunUsageMeter,
+) {
+    orch.finish_run();
+    publish_tool_writes(orch, app_handle, permissions);
+    emit_usage_action_log(orch, app_handle, meter);
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -710,7 +722,11 @@ pub async fn run_agent_step(
     .await;
     let mut orch = agent_state.orchestrator.lock().await;
     // 登记写入放在分支之前：步骤失败或被取消之前发生的写入照样在磁盘上，
-    // 不登记就等于磁盘变了而审查区看不到、也没有撤销入口
+    // 不登记就等于磁盘变了而审查区看不到、也没有撤销入口。
+    //
+    // 这一步没有并进下面的 `finish_agent_run`：它必须发生在 `record_step_success`
+    // 之前，否则工具写入产生的 diff 会被算进"这一步新增了几个 diff"的计数里。
+    // `finish_agent_run` 里那次登记因此是空操作，留着是为了别的入口不必记得这条顺序。
     publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
     match response {
         Ok(response) => {
@@ -739,8 +755,7 @@ pub async fn run_agent_step(
                 "agent-diff-ready",
                 serde_json::to_value(&orch.diffs).unwrap_or_default(),
             );
-            orch.finish_run();
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
             let _ = app_handle.emit(
                 "agent-state-changed",
@@ -765,7 +780,7 @@ pub async fn run_agent_step(
             Ok("Agent step completed".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
-            orch.finish_run();
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.record_step_status(&step, "todo", "Single step execution cancelled");
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit(
@@ -780,7 +795,7 @@ pub async fn run_agent_step(
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
-            orch.finish_run();
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             let failed = orch.record_step_status(&step, "error", &format!("Error: {}", err));
             let _ = app_handle.emit(
                 "agent-step-update",
@@ -872,15 +887,11 @@ pub async fn continue_agent_pipeline(
         .await
     {
         Ok(()) => {
-            orch.finish_run();
-            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             Ok("Agent pipeline continued".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
-            orch.finish_run();
-            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
             let ide_mode = orch.ide_mode;
             let _ = app_handle.emit(
@@ -896,9 +907,7 @@ pub async fn continue_agent_pipeline(
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
-            orch.finish_run();
-            publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
-            emit_usage_action_log(&orch, &app_handle, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             Err(err)
         }
     }
