@@ -987,6 +987,8 @@ mod tests {
         assert!(err.contains("outside workspace"));
     }
 
+    // `\\?\` 前缀只在 Windows 上有意义，Unix 上拼出来的路径不存在。
+    #[cfg(target_os = "windows")]
     #[test]
     fn git_status_accepts_windows_verbatim_workspace_path() {
         let _guard = workspace::env_test_guard();
