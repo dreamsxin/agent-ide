@@ -311,6 +311,7 @@ Implemented:
 - `doctor`, `context estimate`, `plan`, and `run` command shape.
 - `smoke ide-backend` for IDE backend integration smoke.
 - `smoke ide-surface` for read-only probes of the panel backends the Agent flow does not touch (workspace resolution, project tasks, verification candidates, Git status/diff, context packing). No provider required, so it runs in CI. Each probe reports `ok` / `unavailable` / `failed`; only `failed` affects the exit code, and results are written to `surface-probes.json`.
+- `--allow-run` does two things, not one. It authorizes the repair loop's own commands **and** it decides whether the model gets a tool: with it the CLI switches to native tool calling and exposes `workspace_run_command`, restricted to the same patterns, so the Agent can run a check and read the real output mid-run. Without it no invoker is attached and the request stays on the text protocol, so an arbitrary OpenAI-compatible endpoint never receives a `tools` parameter. The CLI never exposes the write tool: `--allow-edit` / `--allow-create` control whether produced diffs may be applied, which is not the same permission.
 - `--output text|json|ndjson`.
 - run-id and artifact directory output.
 - stable exit-code contract.

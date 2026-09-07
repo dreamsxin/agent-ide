@@ -772,6 +772,24 @@ async fn run_agent_command(
     let prompt = read_prompt(&args, positional_prompt)?;
     validate_repair_permissions(&args)?;
     let llm = build_llm_client(&args)?;
+    // CLI 的工具面。`--allow-run` 给了允许清单才暴露验证工具 —— 在此之前 CLI 传的
+    // 是 `None` invoker，所以 headless 运行里模型是"盲"的：这也是 CLI 需要
+    // `--max-iterations` 修复循环兜底的原因。
+    //
+    // 写入工具刻意不在这里给：`--allow-edit` / `--allow-create` 管的是"产出的 diff
+    // 能否落盘"，把它们重新解释成"模型可以直接写文件"是偷偷提权。
+    let (llm, tool_invoker) = if args.allow_run.is_empty() {
+        (llm, None)
+    } else {
+        crate::agent::workspace_tools::attach_workspace_tools(
+            llm,
+            None,
+            None,
+            crate::agent::workspace_tools::WorkspaceToolPermissions::with_commands(
+                args.allow_run.clone(),
+            ),
+        )
+    };
     let mut context = build_workspace_context(&workspace_path, &args.include);
     context.enrich_from_workspace_with_sources(&source_options(&args.include));
     let context_options = ContextBuildOptions::new(args.context_mode.into(), None);
@@ -886,6 +904,7 @@ async fn run_agent_command(
         &mut output,
         cancel_flag,
         args.timeout_seconds,
+        tool_invoker.clone(),
     )
     .await?;
     validate_diff_limit(&diffs, args.max_diff_files)?;
@@ -949,6 +968,7 @@ async fn run_agent_command(
                 &mut output,
                 Arc::new(AtomicBool::new(false)),
                 args.timeout_seconds,
+                tool_invoker.clone(),
             )
             .await?;
             validate_diff_limit(&repair_diffs, args.max_diff_files)?;
@@ -1324,6 +1344,7 @@ async fn execute_steps(
     output: &mut CliOutput,
     cancel_flag: Arc<AtomicBool>,
     timeout_seconds: Option<u64>,
+    tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
 ) -> Result<Vec<FileDiff>, (ExitCode, String)> {
     let output_mode = output.mode;
     let deferred_events = RefCell::new(Vec::<CliEvent>::new());
@@ -1333,8 +1354,7 @@ async fn execute_steps(
         context_text,
         workspace_path,
         steps,
-        // CLI 暂不暴露 MCP 工具：headless 自动化的权限模型还未落地（Phase 9.0.4）
-        None,
+        tool_invoker.as_deref(),
         cancel_flag,
         |index, total, step| {
             if output_mode == OutputMode::Text {
@@ -1945,7 +1965,13 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         model: model.clone(),
         provider: "custom".to_string(),
         max_output_tokens: None,
-        tool_call_mode: "text_protocol".to_string(),
+        // 只有给了 `--allow-run` 才切到原生工具：否则任意 provider 都会突然收到
+        // `tools` 参数，而 CLI 的默认目标是"能对着任何 OpenAI 兼容端点跑"。
+        tool_call_mode: if args.allow_run.is_empty() {
+            "text_protocol".to_string()
+        } else {
+            "native_tools".to_string()
+        },
         model_type: crate::services::llm_client::ModelType::from_string(&model),
         local_model_config: None,
     }))
@@ -2937,5 +2963,91 @@ console.log("ok");
         .unwrap();
         assert_eq!(summary["status"], "ok");
         assert_eq!(summary["command"], "smoke ide-surface");
+    }
+
+    /// 工具循环此前在**任何**自动化路径里都跑不到：mock provider 只能回文本
+    /// （`stream_mock_chat` 返回 `String`），CLI 又给执行器传 `None` invoker。
+    /// 这是那条链路的第一份端到端证据：模型发出工具调用 → 执行器真的跑了命令 →
+    /// 结果作为 `tool` 消息回填 → 下一轮产出 diff。
+    ///
+    /// 断言选的是"命令的副作用"而不是"这一轮完成了"：工具报错时同样会进入下一轮
+    /// 并产出 diff，所以只看 diff 分不出真假。命令用 shell 重定向写文件，
+    /// `run_project_command` 在两个平台上都过 shell，因此不依赖 node。
+    #[tokio::test]
+    async fn smoke_tool_loop_runs_an_allow_listed_command() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("toolloop", "broken");
+        let command = "echo yes > tool-ran.txt";
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_run_command");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({ "command": command }).to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--allow-run".to_string(),
+            command.to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        let exit = result.unwrap();
+
+        assert!(
+            workspace.path("tool-ran.txt").exists(),
+            "the allow-listed command never ran, so the tool loop did not complete"
+        );
+        assert_eq!(exit, ExitCode::ChangesProposed);
+    }
+
+    /// 未授权时命令工具不通告，所以模型即使"想"调也调不到 —— 这条约束必须在
+    /// CLI 这条路径上也成立，不能只在桌面端成立。
+    #[tokio::test]
+    async fn smoke_tool_loop_is_absent_without_allow_run() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("notools", "broken");
+        let command = "echo yes > tool-ran.txt";
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_run_command");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({ "command": command }).to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        let exit = result.unwrap();
+
+        assert!(
+            !workspace.path("tool-ran.txt").exists(),
+            "a command ran without --allow-run: the tool was reachable when it should not exist"
+        );
+        assert_eq!(exit, ExitCode::ChangesProposed);
     }
 }

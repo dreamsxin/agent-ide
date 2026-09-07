@@ -811,6 +811,17 @@ impl LlmClient {
 
         // 检查是否为 Mock 模式
         if self.config.endpoint.starts_with("mock://") {
+            // mock provider 原本只能回文本，于是工具循环在**任何**自动化路径里都
+            // 跑不到：CLI smoke 和桌面 E2E 都用 mock，真实 provider 又不能进 CI。
+            // 这里让它按需发出一次工具调用，把"通告 → 调用 → 执行 → tool 消息 →
+            // 下一轮"整条链路变成可测的。
+            if let Some(call) = mock_tool_call(&messages, &self.extra_tools) {
+                return Ok(LlmStreamOutput {
+                    content: String::new(),
+                    tool_calls: vec![call],
+                    usage: None,
+                });
+            }
             return stream_mock_chat(messages, cancel_flag, tx)
                 .await
                 .map(LlmStreamOutput::from_content);
@@ -1330,6 +1341,39 @@ Capture a lightweight design artifact before implementation.
         .await
         .map_err(|_| "LLM stream receiver dropped".to_string())?;
     Ok(response)
+}
+
+/// mock provider 要发出的工具调用，由环境变量指定。
+///
+/// 为什么需要它：`workspace_run_command` / `workspace_write_file` 只有在模型真的
+/// 调用时才会执行，而唯一不依赖网络、能进 CI 的驱动源就是 mock provider ——
+/// 它原本只能回文本，所以工具循环在任何自动化路径里都跑不到。
+///
+/// - `AGENT_IDE_MOCK_TOOL`：要调用的工具名，必须在本次通告的工具列表里
+/// - `AGENT_IDE_MOCK_TOOL_ARGS`：原样透传的 JSON 参数，缺省 `{}`
+///
+/// 只发一轮：消息里已经出现过 `tool` 角色就说明这一轮走完了，接着回文本，
+/// 否则会一直调到 12 轮上限。
+fn mock_tool_call(messages: &[ChatMessage], tools: &[ToolDefinition]) -> Option<LlmToolCall> {
+    let name = std::env::var("AGENT_IDE_MOCK_TOOL").ok()?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if messages.iter().any(|message| message.role == "tool") {
+        return None;
+    }
+    // 没被通告的工具不能调：真实供应商也只能从工具列表里选，绕过它就测不出
+    // "未授权时工具不出现"这条约束
+    if !tools.iter().any(|tool| tool.name == name) {
+        return None;
+    }
+    let arguments = std::env::var("AGENT_IDE_MOCK_TOOL_ARGS").unwrap_or_else(|_| "{}".to_string());
+    Some(LlmToolCall {
+        id: format!("mock-tool-{}", name),
+        name: name.to_string(),
+        arguments,
+    })
 }
 
 fn is_workflow_mock(messages: &[ChatMessage]) -> bool {
