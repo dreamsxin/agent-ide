@@ -9,6 +9,10 @@ use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::llm_profiles;
 use crate::services::problem_parser::ProblemEntry;
 use crate::services::project_tasks::{self, RunProjectTaskResult};
+// 修复循环的措辞和截断规则和桌面端共用，避免两套实现慢慢漂移
+use crate::services::verification::{
+    build_repair_prompt, collect_command_problems, failed_command_results,
+};
 use crate::services::{context::AgentContext, workspace};
 use chrono::Utc;
 use clap::error::ErrorKind;
@@ -1581,13 +1585,6 @@ fn trim_text_bytes(value: &str, max_bytes: usize) -> String {
     format!("{}\n... output truncated ...", &value[..end])
 }
 
-fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec<ProblemEntry> {
-    command_results
-        .iter()
-        .flat_map(|result| result.problems.clone())
-        .collect()
-}
-
 fn collect_all_observed_problems(
     command_results: &[RunProjectTaskResult],
     repair_chain: &[RepairIterationRecord],
@@ -1606,14 +1603,6 @@ fn collect_all_observed_problems(
     problems
 }
 
-fn failed_command_results(command_results: &[RunProjectTaskResult]) -> Vec<RunProjectTaskResult> {
-    command_results
-        .iter()
-        .filter(|result| result.exit_code.unwrap_or(-1) != 0)
-        .cloned()
-        .collect()
-}
-
 fn merge_apply_results(results: Vec<ApplyDiffsResult>) -> Option<ApplyDiffsResult> {
     if results.is_empty() {
         return None;
@@ -1627,83 +1616,6 @@ fn merge_apply_results(results: Vec<ApplyDiffsResult>) -> Option<ApplyDiffsResul
         merged.failed.extend(result.failed);
     }
     Some(merged)
-}
-
-fn build_repair_prompt(
-    original_prompt: &str,
-    iteration: u8,
-    command_results: &[RunProjectTaskResult],
-    problems: &[ProblemEntry],
-) -> String {
-    let mut lines = vec![
-        format!(
-            "Repair iteration {} for the original Agent IDE CLI task.",
-            iteration
-        ),
-        "Original task:".to_string(),
-        original_prompt.to_string(),
-        String::new(),
-        "Checks failed after applying the generated changes. Fix only the failures below."
-            .to_string(),
-        "Return reviewable Agent IDE diffs only.".to_string(),
-        String::new(),
-        "Parsed Problems:".to_string(),
-    ];
-
-    if problems.is_empty() {
-        lines.push("(none parsed)".to_string());
-    } else {
-        for problem in problems.iter().take(40) {
-            lines.push(format!(
-                "- {}:{}:{} [{}] {}: {}",
-                problem.file,
-                problem.line,
-                problem.column,
-                problem.severity,
-                problem.source,
-                problem.message
-            ));
-        }
-        if problems.len() > 40 {
-            lines.push(format!(
-                "... {} more problem(s) omitted",
-                problems.len() - 40
-            ));
-        }
-    }
-
-    lines.push(String::new());
-    lines.push("Failed command output:".to_string());
-    for result in command_results
-        .iter()
-        .filter(|result| result.exit_code.unwrap_or(-1) != 0)
-    {
-        let output = [result.stdout.as_str(), result.stderr.as_str()]
-            .into_iter()
-            .filter(|value| !value.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        lines.push(format!(
-            "\n$ {} (exit {})\n```text\n{}\n```",
-            result.command,
-            result
-                .exit_code
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            truncate_for_prompt(&output, 16_000)
-        ));
-    }
-
-    lines.join("\n")
-}
-
-fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
-    if value.len() <= max_chars {
-        return value.to_string();
-    }
-    let mut truncated = value.chars().take(max_chars).collect::<String>();
-    truncated.push_str("\n... truncated ...");
-    truncated
 }
 
 fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
