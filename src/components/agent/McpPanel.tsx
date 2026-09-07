@@ -189,8 +189,21 @@ export default function McpPanel() {
                 />
                 <span className="font-medium text-surface-text">{server.name}</span>
                 {status && (
-                  <span className={status.connected ? "text-accent-green" : "text-diff-remove"}>
-                    {status.connected ? `${status.toolCount} tool(s)` : status.error ?? "failed"}
+                  <span
+                    className={
+                      !status.connected
+                        ? "text-diff-remove"
+                        : status.error
+                          ? "text-diff-modify"
+                          : "text-accent-green"
+                    }
+                    title={status.error ?? undefined}
+                  >
+                    {!status.connected
+                      ? status.error ?? "failed"
+                      : status.error
+                        ? `${status.toolCount} tool(s), ${status.error}`
+                        : `${status.toolCount} tool(s)`}
                   </span>
                 )}
                 <button

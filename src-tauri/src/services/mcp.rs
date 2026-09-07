@@ -23,6 +23,14 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const CONFIG_FILE: &str = "mcp.json";
 
+/// 单次 MCP 工具调用回灌模型的最大字符数。
+///
+/// MCP server 是外部进程，返回体大小完全不受我们控制：一个 `read_file` 工具
+/// 可以吐出整个 lockfile，一个 `search` 工具可以吐出上万行匹配。内置 workspace
+/// 工具有 `MAX_READ_BYTES` 之类的上限，MCP 路径此前没有对等物，等于把上下文
+/// 长度和 token 账单的控制权交给了第三方 server。
+pub const MAX_TOOL_RESULT_CHARS: usize = 64_000;
+
 fn default_true() -> bool {
     true
 }
@@ -390,7 +398,7 @@ impl McpConnection {
                 serde_json::json!({ "name": tool, "arguments": arguments }),
             )
             .await?;
-        let text = flatten_tool_content(&result);
+        let text = cap_tool_result(&flatten_tool_content(&result));
         if result
             .get("isError")
             .and_then(serde_json::Value::as_bool)
@@ -437,6 +445,53 @@ fn flatten_tool_content(result: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
+/// 把 MCP 工具返回体截到上限内，并明确告知模型被截断了。
+///
+/// 保留头部而不是尾部：MCP 工具语义未知，最常见的是"读文件/列目录/查询"，
+/// 开头信息量最大。这和 `services::verification::truncate_for_prompt` 故意保留
+/// 尾部是不同场景 —— 那里截的是命令输出，报错在最后。
+fn cap_tool_result(value: &str) -> String {
+    let total = value.chars().count();
+    if total <= MAX_TOOL_RESULT_CHARS {
+        return value.to_string();
+    }
+    let head: String = value.chars().take(MAX_TOOL_RESULT_CHARS).collect();
+    format!(
+        "{}\n... MCP tool result truncated: {} of {} character(s) omitted. Narrow the tool arguments if you need the rest ...",
+        head,
+        total - MAX_TOOL_RESULT_CHARS,
+        total
+    )
+}
+
+/// 丢弃与已注册工具限定名冲突的工具，返回 (保留的工具, 冲突说明)。
+///
+/// 冲突真实存在：`sanitize_name_part` 把非字母数字统一换成 `_`，所以
+/// server `a-b` 的 `x` 与 server `a_b` 的 `x` 会得到同一个 `mcp__a_b__x`；
+/// 分隔符本身也是 `__`，server `p__q` + tool `r` 撞上 server `p` + tool `q__r`。
+/// `McpRegistry::call` 用 `find` 取第一个匹配项，若不处理，模型以为在调 A
+/// 实际调到了 B —— 跨 server 静默错投比直接拒绝危险得多。
+fn drop_conflicting_tools(
+    tools: Vec<McpToolDescriptor>,
+    claimed: &mut HashMap<String, String>,
+) -> (Vec<McpToolDescriptor>, Vec<String>) {
+    let mut accepted = Vec::new();
+    let mut conflicts = Vec::new();
+    for tool in tools {
+        match claimed.get(&tool.qualified_name) {
+            Some(owner) => conflicts.push(format!(
+                "tool '{}' maps to '{}', already claimed by server '{}'",
+                tool.tool, tool.qualified_name, owner
+            )),
+            None => {
+                claimed.insert(tool.qualified_name.clone(), tool.server.clone());
+                accepted.push(tool);
+            }
+        }
+    }
+    (accepted, conflicts)
+}
+
 /// 已连接 MCP server 与已发现工具的注册表
 #[derive(Default)]
 pub struct McpRegistry {
@@ -455,14 +510,24 @@ impl McpRegistry {
         self.shutdown_all().await;
 
         let mut result = McpDiscoveryResult::default();
+        let mut claimed: HashMap<String, String> = HashMap::new();
         for server in config.servers.iter().filter(|server| server.enabled) {
             match Self::connect_and_list(server).await {
                 Ok((connection, tools)) => {
+                    let (tools, conflicts) = drop_conflicting_tools(tools, &mut claimed);
                     result.servers.push(McpServerStatus {
                         name: server.name.clone(),
                         connected: true,
                         tool_count: tools.len(),
-                        error: None,
+                        error: if conflicts.is_empty() {
+                            None
+                        } else {
+                            Some(format!(
+                                "Skipped {} name conflict(s): {}",
+                                conflicts.len(),
+                                conflicts.join("; ")
+                            ))
+                        },
                     });
                     result.tools.extend(tools);
                     self.connections
@@ -729,5 +794,98 @@ mod tests {
         assert!(parsed.servers[0].enabled);
         // 缺省即"没有任何工具被自动批准"
         assert!(parsed.servers[0].auto_approve.is_empty());
+    }
+
+    #[test]
+    fn short_tool_results_pass_through_unchanged() {
+        assert_eq!(cap_tool_result(""), "");
+        assert_eq!(cap_tool_result("ok"), "ok");
+        let exact = "x".repeat(MAX_TOOL_RESULT_CHARS);
+        assert_eq!(cap_tool_result(&exact), exact);
+    }
+
+    #[test]
+    fn oversized_tool_results_are_capped_and_announced() {
+        let huge = "x".repeat(MAX_TOOL_RESULT_CHARS + 500);
+        let capped = cap_tool_result(&huge);
+
+        assert!(capped.chars().count() < huge.chars().count());
+        assert!(capped.starts_with(&"x".repeat(64)));
+        assert!(capped.contains("500 of 64500 character(s) omitted"));
+        // 头部保留：模型仍能看到返回体的开头
+        assert_eq!(
+            capped
+                .chars()
+                .take(MAX_TOOL_RESULT_CHARS)
+                .collect::<String>(),
+            huge.chars().take(MAX_TOOL_RESULT_CHARS).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn multibyte_tool_results_are_capped_without_panicking() {
+        let huge = "工".repeat(MAX_TOOL_RESULT_CHARS + 10);
+        let capped = cap_tool_result(&huge);
+        assert!(capped.starts_with("工工工"));
+        assert!(capped.contains("10 of 64010 character(s) omitted"));
+    }
+
+    #[test]
+    fn conflicting_qualified_names_are_dropped_not_silently_misrouted() {
+        let mut claimed = HashMap::new();
+
+        let (first, conflicts) = drop_conflicting_tools(
+            vec![McpToolDescriptor {
+                server: "a.b".to_string(),
+                tool: "read".to_string(),
+                qualified_name: qualify_tool_name("a.b", "read"),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                auto_approved: true,
+            }],
+            &mut claimed,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].qualified_name, "mcp__a_b__read");
+        assert!(conflicts.is_empty());
+
+        // 不同 server 名，sanitize 后撞成同一个限定名（`-` 会被保留，`.` 和空格都变 `_`）
+        let (second, conflicts) = drop_conflicting_tools(
+            vec![McpToolDescriptor {
+                server: "a b".to_string(),
+                tool: "read".to_string(),
+                qualified_name: qualify_tool_name("a b", "read"),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                auto_approved: true,
+            }],
+            &mut claimed,
+        );
+        assert!(second.is_empty());
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("already claimed by server 'a.b'"));
+        assert_eq!(claimed.len(), 1);
+    }
+
+    #[test]
+    fn one_server_colliding_with_itself_keeps_only_the_first_tool() {
+        let mut claimed = HashMap::new();
+        let tools = vec!["read.file", "read_file"]
+            .into_iter()
+            .map(|tool| McpToolDescriptor {
+                server: "files".to_string(),
+                tool: tool.to_string(),
+                qualified_name: qualify_tool_name("files", tool),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                auto_approved: false,
+            })
+            .collect();
+
+        let (accepted, conflicts) = drop_conflicting_tools(tools, &mut claimed);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].tool, "read.file");
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("tool 'read_file'"));
     }
 }

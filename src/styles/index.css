@@ -22,6 +22,7 @@
   --text-muted-rgb: 87 96 106;
   --accent-blue-rgb: 9 105 218;
   --accent-purple-rgb: 130 80 223;
+  --accent-green-rgb: 26 127 55;
   --diff-add-rgb: 26 127 55;
   --diff-remove-rgb: 207 34 46;
   --diff-modify-rgb: 154 103 0;
@@ -49,6 +50,7 @@
   --text-muted-rgb: 139 148 158;
   --accent-blue-rgb: 59 130 246;
   --accent-purple-rgb: 139 92 246;
+  --accent-green-rgb: 35 134 54;
   --diff-add-rgb: 35 134 54;
   --diff-remove-rgb: 218 54 51;
   --diff-modify-rgb: 210 153 34;
