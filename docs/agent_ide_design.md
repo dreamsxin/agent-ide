@@ -98,8 +98,11 @@ Key modules:
 - `src-tauri/src/commands/agent.rs`: Agent command API, LLM config, mode, pipeline, diff apply.
 - `src-tauri/src/services/workspace.rs`: saved workspace, config directory, path resolution.
 - `src-tauri/src/services/context.rs`: `AgentContext` and compression modes.
-- `src-tauri/src/services/llm_client.rs`: OpenAI-compatible streaming chat client.
+- `src-tauri/src/services/llm_client.rs`: OpenAI-compatible streaming chat client with native tool calling.
+- `src-tauri/src/services/mcp.rs`: MCP stdio client, tool discovery, and tool approval policy.
 - `src-tauri/src/agent/orchestrator.rs`: Agent state machine integration and pipeline execution.
+- `src-tauri/src/agent/executor.rs`: role execution and the bounded tool-call loop.
+- `src-tauri/src/agent/workspace_tools.rs`: built-in read-only workspace tools.
 - `src-tauri/src/agent/multi_agent.rs`: roles, role prompts, pipeline stages.
 - `src-tauri/src/agent/diff_apply.rs`: structured diff application and failure reporting.
 
@@ -184,6 +187,41 @@ Backend scheduling responsibilities:
 | `agent/executor.rs` | Runs role-specific model calls and streams output. |
 | `agent/multi_agent.rs` | Defines role prompts and pipeline stage semantics. |
 | `agent/diff_apply.rs` | Applies validated pending diffs inside the workspace. |
+
+### 4.3.1 Tool Call Loop
+
+Each pipeline stage runs a bounded tool loop in `agent/executor.rs::stream_with_tool_loop`, not a single prompt:
+
+```text
+stream_chat_with_tools
+  -> model returns tool_calls
+  -> ToolInvoker executes each call
+  -> results are appended as role: "tool" messages
+  -> next round
+  -> repeat until the model stops calling tools, or 12 rounds
+```
+
+Transport: `services/llm_client.rs` sends native OpenAI `tools` + `tool_choice: "auto"` when the profile uses `native_tools`. Streaming `delta.tool_calls` fragments are reassembled by `ToolCallAccumulator`. If a provider rejects the tool parameters (400/404/422/501 naming `tools`/`tool_choice`), the client retries without them and flags `tools_rejected`, and the command layer emits a warning action log.
+
+Two tool families are exposed:
+
+| Family | Source | Scope |
+|--------|--------|-------|
+| Output protocol | `emit_agent_changes`, `emit_sdd_draft` | Not side effects. Their arguments are synthesized back into `agent-changes` blocks so the diff parser stays transport-agnostic. |
+| Workspace read | `workspace_read_file`, `workspace_search_text`, `workspace_list_files` | Read-only, resolved through `workspace::resolve_existing`, credential files refused, 64 KB read cap, 60 search hits, 200 listed entries. |
+| Workspace verify | `workspace_run_command` | Only advertised when the run grants `allowCommandRun`. The allow-list is derived by the backend from the project's declared tasks, never from model input. Long-running commands are refused regardless of the list. Output tail-truncated to 12,000 chars. |
+| MCP | `mcp__{server}__{tool}` | External stdio servers, gated by `McpToolPolicy`. |
+
+Notes:
+
+- `workspace_run_command` is the only Agent path to process execution outside MCP. When the permission is absent the tool is neither advertised nor claimed by the invoker — a tool that would always fail is worse than an absent one, because the model spends a round discovering that.
+- The long-running-command refusal is a safety invariant, not a preference: verification runs a command to completion, and a dev server never exits. It is checked before the allow-list, so listing `npm run dev` does not enable it.
+- Tool failures do not abort the stage; the error text is returned to the model so it can adapt.
+- Cancellation is checked before each tool call.
+- Tool definitions and the executing `ToolInvoker` are always attached together. `send_agent_prompt`, `run_agent_step`, and `continue_agent_pipeline` all build both; the MCP policy and command allow-list used by a run are remembered on the orchestrator (`tool_policy`, `tool_permissions`) so a resumed pipeline rebuilds the same tool surface.
+- `agent_cli` currently passes no invoker, so headless runs expose no tools. That asymmetry is intentional today but is why the CLI needs its own repair loop.
+
+
 
 ### 4.4 Agent Pipeline
 
@@ -395,11 +433,17 @@ Runtime failure prompts can also include recent Problems, failed command output,
 Context compression is implemented in `src-tauri/src/services/context.rs`.
 
 | Mode | Intent |
-|------|--------|
+|------|-------|
 | `full` | Include complete active context. Best fidelity, largest prompt. |
 | `focused` | Include selection and active-file excerpt. Default practical mode. |
 | `compact` | Include outline/metadata-style summary. Lowest token use. |
 | `budgeted` | Token-budget-aware packing using the active provider profile budget or a safe default budget. |
+
+Budget packing is priority-quota based, not sequential. Each section has a priority and a share of the input budget (`section_budget_rule`): project header and active-file path first, then project memory and selection, then conversation digest, then active-file content, Git diff, project tree, and open-file list. Allocation runs in two passes — quota first, then unused allowance is redistributed to sections that were truncated. A section granted less than 240 bytes is excluded rather than filled with a truncation marker.
+
+This replaced sequential greedy trimming, where the first oversized section consumed the remaining budget and every later section was dropped as "budget exhausted" purely because of its position in the list.
+
+Token estimation counts non-ASCII characters as one token each and ASCII as roughly four characters per token (`estimate_tokens_for_text`). The token budget is converted to a byte budget using the measured byte-per-token ratio of the actual context, so Chinese-heavy prompts are not systematically under-estimated.
 
 ### 5.3 Context Boundaries
 
@@ -433,11 +477,15 @@ Current provenance level:
 
 Safety rules:
 
-- Filesystem writes must go through workspace path resolution.
+- Filesystem writes must go through workspace path resolution (`workspace::resolve_for_agent_write` for Agent writes, which also enforces path deny rules and refuses credential files).
+- Credential-looking files are withheld from prompt context and from the Git diff section, because egress is irreversible.
 - Agent-generated HTML is not rendered directly; markdown rendering skips HTML.
 - Diff application returns structured failures and preserves failed file content.
+- `ApplyCheckpoint` snapshots files before an apply (20 levels), and `undo_last_apply` restores them, returns hunks to pending, and restamps `baseHash`.
 - Cancellation is cooperative through a shared atomic flag and streaming checks.
-- LLM API keys are stored through the OS credential store; local JSON profile config stores credential references only. This still needs cross-OS runtime validation and recovery UX for inaccessible credentials.
+- MCP tools are gated by `McpToolPolicy` (`deny` / `auto_approved_only` / `allow_all`); unrecognized values fall back to the most conservative usable policy. MCP arguments have no schema constraint, which is why the built-in workspace tools are not routed through MCP.
+- `RunUsageMeter` enforces the per-run token cap before every provider request; retries are not double-counted.
+- LLM API keys are stored through the OS credential store; local JSON profile config stores credential references only. Validated on Windows; macOS/Linux still unverified.
 
 ---
 
@@ -496,31 +544,36 @@ error
 
 Highest-impact gaps:
 
-1. **Structured Agent protocol**
-   - `agent-changes` JSON blocks are supported with a versioned schema and validation diagnostics.
-   - Schema details live in `docs/agent_changes_schema.md`.
-   - Future work is a provider-native tool-call transport, not basic schema support.
+1. **Agent write loop** (largest remaining gap)
+   - The model can now read the workspace and run the project's own check commands (`workspace_run_command`, gated by `allowCommandRun`), so it can observe real failure output instead of guessing.
+   - It still cannot write. Edits are produced as `agent-changes` output and applied by the user afterwards, so the model cannot observe the result of its *own* change — only the state before it.
+   - A stage failure aborts the pipeline (`orchestrator.rs` returns `Err`). `agent_cli` has a bounded repair loop (`--max-iterations`, default 0 = off); the desktop app has `verify_workspace` + `agent_repair_prompt` and a `Verify All` / `Fix with Agent` path, but each is a single user-triggered round rather than an autonomous loop.
+   - Target: a write tool behind the existing permission model, plus an orchestrator-level bounded repair loop.
 
 2. **Version-aware diff application**
-   - Optional `baseHash` metadata is now supported and checked before edit diffs are applied.
-   - Support per-file and per-hunk apply/reject.
-   - Show conflicts with clear recovery options.
+   - `baseHash` is stamped by the backend from real file content, so stale detection works.
+   - Per-file and per-hunk apply/reject are wired.
+   - Remaining: line-offset tolerance, and rejecting edit diffs that carry no stamp at all.
 
-3. **Context expansion**
-   - Git diff and project tree summary are now included.
-   - Add terminal/log excerpts and selected file packing.
-   - Add token budget packing.
+3. **Context retrieval**
+   - No symbol index, embedding, or relevance ranking. Context is the active file, selection, open-file list, a bounded project tree (160 entries, 4 levels), and a bounded Git diff.
+   - The project tree cap does not scale to large workspaces; a tree-sitter symbol index feeding `budgeted` packing is the planned replacement.
 
-4. **Action log**
-   - Persist prompt, compressed context summary, stage outputs, diffs, apply results, and errors.
-   - Make Agent actions auditable in the UI.
+4. **Session memory**
+   - Cross-prompt memory is a 6-turn digest (prompt trimmed to 400 chars, outcome to 300) carried in `context.conversation`.
+   - Stage prompts are rebuilt per stage as system + user, with prior stage output concatenated as prose. There is no persistent message thread, so tool results do not survive the stage that produced them.
 
-5. **Secret storage**
-   - Runtime-validate OS credential storage and add recovery UX for inaccessible or missing LLM credentials.
+5. **Action log persistence**
+   - Action logs are emitted as events and rendered in the UI, but not persisted. Run history and replay are still missing.
 
-6. **Runtime hardening**
+6. **Cost accounting**
+   - `RunUsageMeter` enforces a per-run token cap (`maxRunTokens`) before every provider request, and reports under-counting honestly when providers omit usage.
+   - There is no monetary cost model or per-run spend cap.
+
+7. **Runtime hardening**
    - Interactive Tauri smoke tests for boot, workspace open, file read/write, terminal, Agent prompt, diff apply.
    - Frontend store/component tests for Agent events and diff status updates.
+
 
 ---
 
@@ -541,486 +594,61 @@ Current known build note:
 
 ---
 
-## 10. Performance Optimization & Open-Source Model Integration (Phase 9)
-
-### 10.1 Incremental Rendering Architecture
-
-Inspired by **Zed Editor's** high-performance rendering approach, Agent IDE implements incremental rendering to handle large files efficiently:
-
-```text
-Monaco Editor (Web Worker)
-  -> IncrementalRenderer
-    -> Viewport tracking
-      -> Dirty line detection
-        -> Frame-budget rendering
-          -> Multi-threaded text operations
-```
-
-**Key Components:**
-
-- **Viewport Management**: Track visible lines and prioritize rendering
-- **Dirty Line Detection**: Only re-render changed lines
-- **Frame Budget**: Allocate time per frame (16ms for 60fps)
-- **Multi-threading**: Offload heavy operations to worker threads
-
-```rust
-pub struct IncrementalRenderer {
-    viewport: Viewport,
-    dirty_lines: HashSet<LineNumber>,
-    frame_budget: Duration,
-    target_fps: u32,
-}
-
-impl IncrementalRenderer {
-    pub fn render_with_budget(&mut self, changes: Vec<TextChange>) -> RenderResult {
-        let start = Instant::now();
-
-        // Mark affected lines as dirty
-        for change in changes {
-            self.dirty_lines.extend(change.affected_lines());
-        }
-
-        // Render critical content first
-        let critical = self.render_critical_elements();
-
-        // Render secondary content if time allows
-        if start.elapsed() < self.frame_budget {
-            self.render_secondary_elements();
-        }
-
-        RenderResult::new(critical)
-    }
-
-    pub fn render_dirty_regions(&mut self, budget: Duration) {
-        let start = Instant::now();
-        for line in &self.dirty_lines {
-            if start.elapsed() > budget { break; }
-            self.render_line(line);
-        }
-    }
-}
-```
-
-### 10.2 Intelligent Code Completion System
-
-Inspired by **Comate's** intelligent code completion, Agent IDE provides context-aware suggestions with Chinese optimization:
-
-```text
-Code Completion Trigger
-  -> Context Analyzer
-    -> Surrounding Code Analysis
-      -> Project Structure Awareness
-        -> Recent Edits Context
-          -> Suggestion Generation
-            -> Chinese-Optimized Prompts
-              -> Local/Cloud Model Selection
-```
-
-**Components:**
-
-```typescript
-export class IntelligentCodeCompletion {
-    private contextAnalyzer: ContextAnalyzer;
-    private suggestionCache: Map<string, Suggestion[]>;
-    private modelSelector: ModelSelector;
-
-    async getSuggestions(
-        file: string,
-        position: Position,
-        surroundingCode: string
-    ): Promise<Suggestion[]> {
-        const context = await this.contextAnalyzer.analyze({
-            file,
-            position,
-            surroundingCode,
-            projectStructure: await this.getProjectContext(),
-            recentEdits: this.getRecentEdits(),
-            language: this.detectLanguage(file)
-        });
-
-        // Build Chinese-optimized prompts
-        const prompt = this.buildChineseOptimizedPrompt(context);
-
-        // Select appropriate model based on task complexity
-        const model = this.modelSelector.selectBestModel(context.complexity);
-
-        return this.generateSuggestions(model, prompt);
-    }
-
-    private buildChineseOptimizedPrompt(context: CodeContext): string {
-        // Comate-style Chinese prompt engineering
-        return `
-分析以下代码上下文，提供智能代码补全建议：
-
-文件: ${context.file}
-位置: ${context.position.line}:${context.position.character}
-语言: ${context.language}
-
-周围代码:
-${context.surroundingCode}
-
-项目结构:
-${context.projectStructure.summary}
-
-请基于中文编程习惯提供以下建议：
-1. 当前上下文最可能的代码补全
-2. 考虑项目中的相似代码模式
-3. 提供符合中文开发者习惯的命名建议
-`;
-    }
-}
-```
-
-### 10.3 Open-Source Model Integration
-
-Agent IDE supports multiple open-source code models to provide cost-effective and privacy-preserving AI assistance:
-
-```text
-EnhancedLlmClient
-  -> Cloud Models (OpenAI, DeepSeek, etc.)
-  -> Local Models
-    -> StarCoder (Hugging Face)
-    -> CodeLlama (Meta)
-    -> DeepSeek Coder (DeepSeek)
-    -> CodeGemma (Google)
-```
-
-**Architecture:**
-
-```rust
-pub struct EnhancedLlmClient {
-    openai_client: Option<LlmClient>,
-    local_models: Vec<LocalModel>,
-    model_selector: ModelSelector,
-}
-
-pub struct LocalModel {
-    name: String,
-    model_type: ModelType,
-    engine: Box<dyn ModelEngine>,
-    capabilities: ModelCapabilities,
-}
-
-pub enum ModelType {
-    StarCoder,      // Hugging Face open-source, good for Python/JS
-    CodeLlama,      // Meta open-source, strong multi-language support
-    DeepSeekCoder,  // DeepSeek open-source, optimized for code completion
-    CodeGemma,      // Google open-source, efficient inference
-}
-
-pub struct ModelCapabilities {
-    max_context_tokens: u32,
-    supported_languages: Vec<String>,
-    inference_speed_ms: u32,
-    memory_requirement_mb: u32,
-}
-
-impl EnhancedLlmClient {
-    // Local model inference
-    pub async fn generate_code_local(
-        &self,
-        prompt: &str,
-        model: &LocalModel
-    ) -> Result<String> {
-        model.engine.generate(prompt).await
-    }
-
-    // Smart model selection
-    pub async fn smart_generate(&self, prompt: &str, context: &TaskContext) -> Result<String> {
-        let model = self.model_selector.select_best_model(context);
-
-        match model {
-            ModelSource::Local(local_model) => {
-                self.generate_code_local(prompt, local_model).await
-            }
-            ModelSource::Cloud(cloud_client) => {
-                cloud_client.stream_chat(/* ... */).await
-            }
-        }
-    }
-}
-
-pub struct ModelSelector;
-
-impl ModelSelector {
-    pub fn select_best_model(&self, context: &TaskContext) -> ModelSource {
-        match context.complexity {
-            Complexity::Low => self.find_fastest_local_model(),
-            Complexity::Medium => self.find_balanced_model(),
-            Complexity::High => self.find_most_capable_cloud_model(),
-        }
-    }
-}
-```
-
-**Model Integration Benefits:**
-
-- **Cost Reduction**: Use local models for simple tasks
-- **Privacy**: Keep code on local machine
-- **Latency**: Faster responses for local inference
-- **Reliability**: Work offline with local models
-- **Hybrid Strategy**: Smart selection based on task needs
-
-### 10.4 Plugin Architecture (DeepSeek Harness Inspired)
-
-Inspired by **DeepSeek Harness's** "everything is a plugin" philosophy, Agent IDE introduces a modular plugin system:
-
-```text
-PluginManager
-  -> Model Plugins (OpenAI, Local Models)
-  -> Tool Plugins (File operations, Git, Terminal)
-  -> Skill Plugins (Code generation, Debugging, Testing)
-  -> UI Plugins (Custom panels, Commands)
-  -> Pipeline Plugins (Custom Agent roles)
-```
-
-**Plugin Interface:**
-
-```typescript
-export interface Plugin {
-    name: string;
-    version: string;
-    description?: string;
-
-    // Lifecycle hooks
-    onActivate?(context: PluginContext): void;
-    onDeactivate?(): void;
-
-    // Extension points
-    registerCommands?(registry: CommandRegistry): void;
-    registerLanguageSupport?(provider: LanguageProvider): void;
-    enhanceAgentPipeline?(pipeline: Pipeline): void;
-    registerModelProvider?(provider: ModelProvider): void;
-    registerTool?(tool: Tool): void;
-}
-
-export interface PluginContext {
-    workspace: Workspace;
-    editor: Editor;
-    agentStore: AgentStore;
-    logger: Logger;
-}
-
-export class PluginManager {
-    private plugins: Map<string, Plugin> = new Map();
-    private commandRegistry: CommandRegistry;
-    private modelProviders: ModelProviderRegistry;
-
-    async loadPlugin(pluginPath: string): Promise<void> {
-        const plugin = await import(pluginPath);
-        this.plugins.set(plugin.name, plugin);
-
-        const context = this.createContext();
-        plugin.onActivate?.(context);
-
-        plugin.registerCommands?.(this.commandRegistry);
-        plugin.registerModelProvider?.(this.modelProviders);
-    }
-
-    unloadPlugin(name: string): void {
-        const plugin = this.plugins.get(name);
-        if (plugin) {
-            plugin.onDeactivate?.();
-            this.plugins.delete(name);
-        }
-    }
-}
-```
-
-**Example Plugin: Local Model Provider**
-
-```typescript
-export class StarCoderPlugin implements Plugin {
-    name = 'starcoder-provider';
-    version = '1.0.0';
-
-    onActivate(context: PluginContext): void {
-        const provider = new StarCoderProvider({
-            modelPath: '~/.agent-ide/models/starcoder',
-            maxTokens: 4096,
-        });
-        context.modelProviders.register(provider);
-    }
-
-    registerModelProvider(registry: ModelProviderRegistry): void {
-        registry.register(new StarCoderProvider());
-    }
-}
-```
-
-### 10.5 Performance Profiling Tools
-
-Agent IDE includes comprehensive performance monitoring inspired by Zed's profiling capabilities:
-
-```rust
-pub struct PerformanceProfiler {
-    flamegraph: FlamegraphRecorder,
-    frame_times: Vec<Duration>,
-    memory_tracker: MemoryTracker,
-}
-
-impl PerformanceProfiler {
-    pub fn start_frame(&mut self) {
-        let start = Instant::now();
-        // Record frame start
-    }
-
-    pub fn end_frame(&mut self) {
-        let duration = Instant::now() - self.frame_start;
-        self.frame_times.push(duration);
-        self.check_performance_regression();
-    }
-
-    pub fn profile_function<F, R>(&mut self, name: &str, f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        let start = Instant::now();
-        let result = f();
-        let duration = start.elapsed();
-        self.flamegraph.record(name, duration);
-        result
-    }
-}
-```
-
-**Performance Targets:**
-
-- **Startup Time**: < 3 seconds
-- **Memory Usage**: < 300MB idle, < 1GB with 10+ files
-- **Editor Latency**: < 50ms input response
-- **Frame Rate**: > 60fps during scrolling
-- **Code Completion**: < 200ms response time
-
-### 10.6 Chinese Optimization Strategy
-
-Inspired by **Comate's** Chinese developer experience, Agent IDE includes Chinese-specific optimizations:
-
-```typescript
-export class ChinesePromptOptimizer {
-    optimizeCodeCompletion(context: CodeContext): string {
-        return `
-基于以下中文编程上下文提供代码补全：
-
-文件: ${context.file}
-语言: ${context.language}
-
-当前代码:
-${context.surroundingCode}
-
-项目结构:
-${context.projectStructure.summary}
-
-请提供符合以下要求的补全:
-1. 遵循中文变量命名习惯 (拼音 vs 英文)
-2. 考虑中文注释风格
-3. 适配中文开发者的常用模式
-4. 提供中英文双语注释建议
-`;
-    }
-
-    optimizeErrorMessage(error: Error): string {
-        return `
-错误信息: ${error.message}
-位置: ${error.location}
-
-请用中文解释:
-1. 错误的具体原因
-2. 可能的解决方案
-3. 预防类似错误的建议
-`;
-    }
-}
-```
-
-### 10.7 Hybrid Model Strategy
-
-Agent IDE implements intelligent model selection to balance cost, performance, and quality:
-
-```rust
-pub struct HybridModelStrategy {
-    local_models: Vec<LocalModel>,
-    cloud_models: Vec<CloudModel>,
-    cost_tracker: CostTracker,
-}
-
-impl HybridModelStrategy {
-    pub fn select_model_for_task(&self, task: &Task) -> ModelSelection {
-        match task.task_type {
-            TaskType::SimpleCompletion => {
-                // Use fastest local model
-                self.select_fastest_local_model(&task.language)
-            }
-            TaskType::CodeGeneration => {
-                // Use balanced model
-                self.select_balanced_model(&task.complexity)
-            }
-            TaskType::ComplexRefactoring => {
-                // Use most capable cloud model
-                self.select_cloud_model(&task.language, ModelCapability::High)
-            }
-            TaskType::OfflineTask => {
-                // Must use local model
-                self.select_best_local_model(&task.language)
-            }
-        }
-    }
-
-    pub fn estimate_cost(&self, task: &Task, model: &Model) -> CostEstimate {
-        let tokens = self.estimate_tokens(task);
-        let cost_per_token = model.cost_per_token;
-        CostEstimate {
-            estimated_tokens: tokens,
-            estimated_cost: tokens as f64 * cost_per_token,
-            latency: model.estimated_latency,
-        }
-    }
-}
-```
-
-### 10.8 Implementation Benefits
-
-These Phase 9 improvements provide:
-
-1. **Performance**: Zed-inspired incremental rendering enables handling large files smoothly
-2. **Intelligence**: Comate-style context-aware completion improves developer productivity
-3. **Cost**: Open-source models reduce dependency on expensive cloud APIs
-4. **Privacy**: Local model support keeps code on developer machines
-5. **Extensibility**: Plugin architecture allows community contributions
-6. **Localization**: Chinese optimization improves experience for Chinese developers
-7. **Reliability**: Hybrid strategy provides fallback options when cloud services fail
+## 10. Model Access and Performance Decisions
+
+This section records what is implemented and which earlier proposals were rejected. `ROADMAP.md` holds the task-level status; the notes here exist so the design document stops describing abandoned designs.
+
+### 10.1 Model Access
+
+There is one provider path: an OpenAI-compatible HTTP client in `services/llm_client.rs`.
+
+- Cloud providers and local runtimes (Ollama, LM Studio, vLLM) are the same code path, differing only in profile endpoint and model.
+- No native in-process inference engine is linked. This was removed, not deferred: linking an inference engine would pull its license and build toolchain into the binary for a capability an OpenAI-compatible local server already provides.
+- Profiles carry the endpoint, model, tool-call mode, context budget, and `maxRunTokens`. API keys live in the OS credential store; the JSON profile file stores references only.
+- Local engine profiles report `supports_tool_calls: false`; for them the message list is flattened into a single prompt and the `agent-changes` text protocol is the transport.
+
+Hybrid routing (route simple tasks to a cheap local model, complex tasks to a cloud model) is not implemented. It stays a roadmap item because it needs a task-complexity signal the pipeline does not currently produce.
+
+### 10.2 Rejected: Custom Rendering Engine
+
+A viewport/dirty-line incremental renderer was designed earlier and dropped. Monaco already virtualizes rendering, so a second renderer would duplicate it without measurable gain. The remaining editor performance work is bundle code splitting and Monaco model/tab memory management.
+
+### 10.3 Rejected: Separate Completion Framework and Prompt-Optimizer Layer
+
+A standalone completion framework and a separate Chinese prompt-optimizer class were designed earlier and dropped in favor of:
+
+- an inline completion channel over the existing provider client, and
+- per-profile language presets for naming and comment conventions.
+
+Chinese-language handling that does exist and is load-bearing: `estimate_tokens_for_text` counts non-ASCII characters as one token each, so Chinese context is not silently under-budgeted.
+
+### 10.4 Extensibility
+
+MCP is the extension mechanism that ships. External stdio servers contribute tools into the same native tool surface the model already uses, gated by `McpToolPolicy`.
+
+A general in-process plugin API (model adapters, UI panels, custom agent roles as loadable plugins) is not implemented. Pipeline stages and roles are configurable data (`get_pipeline` / `update_pipeline`), not plugins.
+
+### 10.5 Performance Targets
+
+These are targets, not verified measurements. Baseline tests are a Phase 10 item.
+
+- Startup: < 3 s
+- Memory: < 300 MB idle
+- Editor input latency: < 50 ms
 
 ---
 
-## 11. Future Enhancements Beyond Phase 9
+## 11. Known Direction Beyond the Current Loop
 
-### 11.1 Real-time Collaboration (Zed-inspired)
+Ordered by dependency, not by appeal:
 
-- Multi-user editing sessions
-- Conflict resolution UI
-- Shareable workspace states
-- Agent collaboration between users
-
-### 11.2 Advanced Code Analysis
-
-- Static analysis integration
-- Security vulnerability scanning
-- Performance bottleneck detection
-- Code smell identification
-
-### 11.3 Ecosystem Integration
-
-- Package manager integration (npm, cargo, pip)
-- CI/CD pipeline visualization
-- Project template marketplace
-- Community plugin repository
-
-### 11.4 Cross-Platform Mobile Support
-
-- Mobile-optimized interface
-- Touch gestures for code editing
-- Cloud sync for workspace state
-- Offline mode with local models
+1. **Write tool.** A write tool behind `resolve_for_agent_write` and permission flags, checkpointed for undo. Reading and verifying already work; writing is what still leaves the model blind to the effect of its own change.
+2. **Autonomous bounded repair loop.** The prompt builder and check runner are already shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `Verify All` / `Fix with Agent` already send a repair prompt — but each is one user-triggered round. What is missing is the orchestrator running verify → repair → re-verify itself, bounded by an iteration count, so a failed stage or failed check does not abort the pipeline.
+3. **Persistent message thread per run.** Replace prose concatenation of prior stage output with a real message list so tool results survive across stages and prompt caching becomes possible.
+4. **Symbol index and retrieval.** tree-sitter symbol index plus local retrieval feeding `budgeted` packing. Prerequisite for large workspaces, where the 160-entry project tree is not a usable map.
+5. **Parallel subagents with worktree isolation.** Depends on (1): parallel agents that cannot write have nothing to isolate.
+6. **Hooks and skills.** User-configurable hooks at stage and pre-apply points, and lazily loaded `SKILL.md` packages.
+7. **Persisted run artifacts.** IDE runs should produce the same artifact model as `agent_cli`, enabling replay and comparison.
 
 ---
 
@@ -1028,7 +656,7 @@ These Phase 9 improvements provide:
 
 Use the documents as follows:
 
-- `ROADMAP.md`: current implementation state, known issues, next tasks, and strategic direction including performance optimization and open-source model integration.
-- `docs/agent_ide_design.md`: detailed technical design including incremental rendering, intelligent completion, and plugin architecture.
+- `ROADMAP.md`: current implementation state, known issues, and next tasks. Task-level status lives there, not here.
+- `docs/agent_ide_design.md`: detailed technical design of what is implemented, including the tool-call loop, context budgeting, permissions, and recorded design rejections.
 - `docs/agent_ide_ui_design.md`: product/UI target and design intent.
 - `docs/agent_ide_plan.md`: original technical plan; useful historically, but should be refreshed when major implementation milestones land.
