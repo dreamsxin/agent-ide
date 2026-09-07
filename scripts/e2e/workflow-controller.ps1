@@ -21,8 +21,10 @@ public static class Win32E2E {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 }
 "@
+
 
 function Log($message) {
   $line = "$(Get-Date -Format o) $message"
@@ -52,9 +54,37 @@ function Focus-App() {
   $hwnd = Window
   [Win32E2E]::ShowWindow($hwnd, 9) | Out-Null
   [Win32E2E]::MoveWindow($hwnd, 40, 40, 1440, 900, $true) | Out-Null
-  [Win32E2E]::SetForegroundWindow($hwnd) | Out-Null
+  $requested = [Win32E2E]::SetForegroundWindow($hwnd)
   Start-Sleep -Milliseconds 500
+  # `SetForegroundWindow` 在调用进程不持有前台权限时会**静默失败**，返回 false。
+  # 原来这里把返回值 `| Out-Null` 丢掉了，于是脚本以为自己抢到了焦点，继续对着
+  # 别的窗口点击，最后在 30 秒后报"元素找不到" —— 把环境问题伪装成产品缺陷。
+  # 所以这里必须真的确认前台窗口是不是 app。
+  $script:AppIsForeground = $requested -and ([Win32E2E]::GetForegroundWindow() -eq $hwnd)
+  return $script:AppIsForeground
 }
+
+## 这套 harness 需要独占的交互式桌面。
+##
+## 抢不到前台就没有任何后续步骤是可信的：截图抓的是主屏幕（会拍到别的窗口），
+## 而 `Click-Element` 的退化路径用 SendKeys —— 那是发给**当前有焦点的窗口**的，
+## 会把按键打进无关程序。所以这里提前失败，而不是继续跑完一堆假动作。
+function Require-Foreground($step) {
+  if (Focus-App) { return }
+  Fail $step @"
+Agent IDE window could not be brought to the foreground.
+
+This harness drives the real desktop app through UI Automation and SendKeys, so it
+needs an exclusive interactive desktop: no RDP/terminal window stealing focus, no
+locked session, and nobody else using the machine. Windows silently refuses
+SetForegroundWindow when another process owns the foreground.
+
+Nothing below this point would have been trustworthy: screenshots capture the
+primary screen rather than the app window, and SendKeys would have gone to
+whichever window does hold focus.
+"@
+}
+
 
 function Screenshot($name) {
   $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -98,7 +128,9 @@ function Find-FirstByName($name) {
 function Wait-Element($name, [int]$seconds = 20) {
   $deadline = (Get-Date).AddSeconds($seconds)
   do {
-    Focus-App
+    # `Focus-App` 现在返回 bool；不丢掉的话它会混进 `Wait-Element` 的返回值里，
+    # 调用方拿到的就是 [bool, element] 数组而不是元素。
+    Focus-App | Out-Null
     $item = Find-FirstByName $name
     if ($item) { return $item }
     Start-Sleep -Milliseconds 500
@@ -113,6 +145,11 @@ function Click-Element($element) {
     $pattern.Invoke()
     Start-Sleep -Milliseconds 500
     return
+  }
+  # 退化路径用 SendKeys，而 SendKeys 发给的是**当前有焦点的窗口**。app 不在前台时
+  # 这一按键会打进无关程序（实测打进过别的应用窗口），所以宁可失败也不能乱发。
+  if (-not (Focus-App)) {
+    Fail "click-without-foreground" "Element '$($element.Current.Name)' exposes no InvokePattern and the app is not in the foreground, so SendKeys would have gone to another window."
   }
   $rect = $element.Current.BoundingRectangle
   [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(
@@ -159,7 +196,7 @@ function Commit-SmokeChange() {
 }
 
 Log "Starting Windows desktop workflow E2E"
-Focus-App
+Require-Foreground "environment"
 Screenshot "01-boot"
 
 Click-Name "Commands"

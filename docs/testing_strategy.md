@@ -142,7 +142,7 @@ Current CI status: GitHub Actions workflow (`windows-package.yml`) handles Windo
 | Mount-time wiring | Thin | `useAppBootstrap` is covered (jsdom + React Testing Library). Every other component's mount behaviour is still unobserved — this is the gap that let the startup "LLM Not Configured" bug ship |
 | IDE panel backends | Good | `agent_cli smoke ide-surface` probes workspace, project tasks, verification candidates, Git status/diff, and context packing through the same functions the desktop calls; runs in CI as both an in-process test and the real binary |
 | LSP server integration | None | LSP URI/indexing helpers are tested; actual server spawn requires runtime validation |
-| Tauri runtime (E2E) | Manual only | Smoke checklist in `docs/smoke_test.md` |
+| Tauri runtime (E2E) | Manual only | Smoke checklist in `docs/smoke_test.md`, plus `npm run e2e:workflow` — which **requires an exclusive interactive desktop**, see below |
 | LSP indexing at scale | None | Pending Phase 8.5/9 runtime validation on large TypeScript/Go workspaces |
 | Windows credentials | Manual only | Pending cross-OS runtime validation of `keyring` crate behavior |
 | SSH Git remote operations | Manual only | SSH/passphrase UX requires manual validation |
@@ -204,3 +204,35 @@ cargo test --bin agent_cli
 - **`npm run tauri -- dev`**: Real IDE runtime with Rust backend and Tauri APIs. Required for all smoke and E2E validation.
 - **Rust tests** use temporary directories with UUID-based names and a mutex guard (`env_test_guard`) to prevent concurrent workspace config mutation across test threads.
 - **Frontend tests** run in Vitest's default node environment and do not require a Tauri runtime. `src/hooks/useAppBootstrap.test.tsx` is the exception: it opts into jsdom with a `// @vitest-environment jsdom` docblock because it renders a hook. The global environment is deliberately left as node — only files that need a DOM pay for one.
+
+## Desktop workflow E2E (`npm run e2e:workflow`)
+
+`scripts/e2e/` builds the frontend and the debug Tauri binary, launches the real app against the
+`mock://workflow` provider, and drives it through UI Automation: run the failing project command,
+open Problems, click Fix, apply the Agent's hunk, rerun the command, then commit through the Git
+panel. It asserts file content and Git status, and captures screenshots at each step.
+
+**It requires an exclusive interactive desktop.** The controller must bring the app window to the
+foreground; Windows silently refuses `SetForegroundWindow` when another process owns the
+foreground, and the harness then has no trustworthy path forward: screenshots capture the primary
+screen rather than the app window, and the `Click-Element` fallback sends keystrokes to whichever
+window does hold focus. So:
+
+- It cannot run in CI. GitHub runners have no interactive desktop session.
+- It cannot run on a machine someone is using. It takes over the foreground window, the mouse
+  position and the clipboard, and a stray `{ENTER}` can land in an unrelated application.
+- A run under RDP, on a locked session, or alongside another focused window is invalid, not failed.
+
+The harness now detects this and fails immediately at an `environment` step with that explanation.
+It previously discarded the `SetForegroundWindow` result, clicked into the void, and reported
+`Element 'workflow' not found` 30 seconds later — an environment problem disguised as a product
+defect.
+
+Treat this as a **manually triggered check on an idle machine**, not a regression net. The
+automated regression net for backend behaviour is `agent_cli` (`smoke ide-backend`,
+`smoke ide-surface`), which needs no desktop and does run in CI.
+
+Known gap: the E2E profile uses `toolCallMode = "text_protocol"` and the mock provider cannot
+emit `tool_calls` at all (`stream_mock_chat` returns a plain `String`), so neither this harness nor
+the CLI smoke exercises the native tool loop — `workspace_run_command` and `workspace_write_file`
+have no automated end-to-end coverage yet.
