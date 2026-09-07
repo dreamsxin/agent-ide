@@ -165,9 +165,20 @@ pub fn is_long_running_command(command: &str) -> bool {
         "tauri dev",
     ];
     let lowered = command.to_lowercase();
-    LONG_RUNNING_HINTS
+    if LONG_RUNNING_HINTS
         .iter()
         .any(|hint| lowered.split_whitespace().any(|word| word == *hint) || lowered.contains(hint))
+    {
+        return true;
+    }
+    // `cargo run` 启动的是这个项目的应用本身，对本仓库就是 Tauri 桌面端 ——
+    // 它不会退出。它躲过了上面的关键词表，而 `run` 不能加进那张表：判定里有
+    // `contains` 兜底，加了会把 `npm run test` 也一起挡掉。
+    //
+    // 只按前两个 token 判定，所以 `npm run x` 不受影响。发现方式：
+    // `smoke ide-surface` 把 `cargo run` 列成了验证候选命令。
+    let mut tokens = lowered.split_whitespace();
+    matches!((tokens.next(), tokens.next()), (Some("cargo"), Some("run")))
 }
 
 /// 一次验证的结论，回给前端。
@@ -223,6 +234,11 @@ mod tests {
             "vite preview",
             "cargo watch -x test",
             "npm run tauri dev",
+            // `cargo run` 启动这个项目的应用本身（本仓库是 Tauri 桌面端），不会退出。
+            // 它躲过了关键词表，被 `smoke ide-surface` 列成验证候选才发现。
+            "cargo run",
+            "cargo run --release",
+            "cargo run --bin agent_cli",
         ] {
             assert!(
                 is_long_running_command(command),
@@ -238,6 +254,9 @@ mod tests {
             "cargo test",
             "cargo clippy -- -D warnings",
             "tsc --noEmit",
+            // `run` 不能进关键词表：判定有 `contains` 兜底，加了会把这些一起挡掉
+            "npm run test",
+            "npm run typecheck",
         ] {
             assert!(
                 !is_long_running_command(command),

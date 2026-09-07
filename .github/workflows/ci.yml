@@ -63,6 +63,15 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # `smoke ide-surface` needs no LLM provider and no fixture, so the shipped
+      # binary can be pointed at the checkout itself. The in-process test covers
+      # the code path; this covers argument parsing and the real binary, which is
+      # what a user actually runs. It exits non-zero only on a `failed` probe —
+      # `unavailable` (nothing to show, e.g. no Git repository) is not a failure.
+      - name: IDE surface probe (real binary)
+        working-directory: src-tauri
+        run: cargo run --bin agent_cli -- smoke ide-surface --output json
+
 
   rust-linux:
     name: Rust on Linux (clippy + tests)
