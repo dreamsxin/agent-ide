@@ -267,7 +267,7 @@ Ordered by how much they would matter to an operator. Each was confirmed by read
 4. **Workspace-local language server binaries are executed in preference to `PATH`**, so opening an untrusted repository runs code it supplies.
 5. **MCP argument redaction keys on field names**, so a secret passed under a key that does not look secret is still written to the action log. Tool *results* are logged without redaction.
 6. **Broad `fs:allow-read` / `fs:allow-write` / `fs:allow-mkdir`** remain in `capabilities/default.json`. The unscoped `shell:allow-spawn` and `shell:allow-execute` have been removed — no first-party frontend code imports `plugin-shell`, so they were pure attack surface. `shell:allow-open` is retained for opening external links.
-7. **`run_project_command` passes the command string to `cmd /C` or `sh -lc`** with no allow-list and no escaping. It is user-initiated in the GUI, but the CLI runs commands from the workspace's own `package.json` scripts autonomously.
+7. **`run_project_command` passes the command string to `cmd /C` or `sh -lc`** with no allow-list and no escaping. Two callers reach it: the GUI task runner and `verify_workspace`, both driven by commands the user supplies. The CLI additionally runs commands taken from the workspace's own `package.json` scripts autonomously.
 8. **Recursive traversal follows symlinks.** `search_recursive` and `copy_dir_recursive` re-check nothing per entry.
 9. **`resolve_for_write` does not canonicalize the final component** when the target does not exist, so a symlink created between check and write is not caught (TOCTOU). Not tested.
 10. **Cancellation is cooperative** — a shared `AtomicBool` checked in the request and streaming paths. There is no transport-level abort.

@@ -7,4 +7,5 @@ pub mod mcp;
 pub mod problem_parser;
 pub mod project_memory;
 pub mod project_tasks;
+pub mod verification;
 pub mod workspace;

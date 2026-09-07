@@ -965,6 +965,106 @@ pub async fn undo_last_apply(
     Ok(result)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyWorkspaceRequest {
+    /// 要跑的检查命令，按顺序执行
+    pub commands: Vec<String>,
+    /// 原始任务描述；不给就用最近一轮对话的 prompt
+    #[serde(default)]
+    pub original_prompt: Option<String>,
+}
+
+/// 跑一遍检查命令，失败时给出一段可以直接发出去的修复提示。
+///
+/// CLI 早就有"跑命令 → 失败喂回模型"的修复循环，桌面端一直没有 —— 桌面端能
+/// 生成代码，但不能生成"能通过检查的代码"。这里和 CLI 共用同一套 verification
+/// 服务，措辞和截断规则不会各自漂移。
+#[tauri::command]
+pub async fn verify_workspace(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+    request: VerifyWorkspaceRequest,
+) -> Result<crate::services::verification::VerificationReport, String> {
+    let commands: Vec<String> = request
+        .commands
+        .into_iter()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .collect();
+    if commands.is_empty() {
+        return Err("No verification commands were provided.".to_string());
+    }
+
+    let root = workspace::workspace_root()?;
+    // 没给原始任务描述时退回最近一轮对话，这样修复提示里带着用户真正的诉求，
+    // 而不是只有一堆报错
+    let original_prompt = match request.original_prompt {
+        Some(prompt) if !prompt.trim().is_empty() => prompt,
+        _ => {
+            let orch = agent_state.orchestrator.lock().await;
+            orch.conversation
+                .last()
+                .map(|turn| turn.prompt.clone())
+                .unwrap_or_else(|| "(original task not recorded)".to_string())
+        }
+    };
+
+    let mut results = Vec::new();
+    for command in commands {
+        match crate::services::project_tasks::run_project_command(command.clone(), root.clone())
+            .await
+        {
+            Ok(result) => results.push(result),
+            // 命令本身没能启动（比如可执行文件不存在）也是验证失败，
+            // 不能因为一条命令起不来就整体报错、把已经跑完的结果丢掉
+            Err(message) => results.push(crate::services::project_tasks::RunProjectTaskResult {
+                command,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                problems: Vec::new(),
+                duration_ms: 0,
+            }),
+        }
+    }
+
+    let report = crate::services::verification::summarize(&original_prompt, results);
+
+    let orch = agent_state.orchestrator.lock().await;
+    orch.emit_review_action_log(
+        &app_handle,
+        if report.failed == 0 {
+            "success"
+        } else {
+            "warn"
+        },
+        "verification_run",
+        &format!(
+            "Verification: {} of {} check(s) failed",
+            report.failed,
+            report.results.len()
+        ),
+        &report
+            .results
+            .iter()
+            .map(|result| {
+                format!(
+                    "$ {} -> exit {}",
+                    result.command,
+                    result
+                        .exit_code
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    Ok(report)
+}
+
 fn is_cancelled_error(err: &str) -> bool {
     err == "Agent task cancelled"
 }
