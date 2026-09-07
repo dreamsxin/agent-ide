@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+// PartialEq 是为了让 `resolve_context_compression` 的测试能直接断言模式。
+// 没有加 Copy：加了之后现有的 9 处 `.clone()` 全部变成 clippy 错误，
+// 为一个测试的便利去动那些无关代码不值得。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCompressionMode {
     Full,

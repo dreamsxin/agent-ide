@@ -7,6 +7,7 @@
 use crate::services::problem_parser::ProblemEntry;
 use crate::services::project_tasks::RunProjectTaskResult;
 use serde::Serialize;
+use std::path::PathBuf;
 
 /// 单条失败输出进提示词的字符上限
 const MAX_COMMAND_OUTPUT_CHARS: usize = 16_000;
@@ -219,9 +220,198 @@ pub fn summarize(
     }
 }
 
+/// 把请求里的候选命令整理成"要跑的"和"跳过的"两份。
+///
+/// 从 `commands::agent::verify_workspace` 抽出来的。留在命令体里意味着这段逻辑
+/// 只能靠启动整个桌面应用才能验证，而它包含一条安全不变量：长驻命令一律挡掉。
+/// 验证是逐条跑完再看结果，混进一个 `npm run dev` 就永远卡住。
+///
+/// 两种 Err 是分开的，因为原因不同：一种是调用方什么都没给，一种是给的全都长驻。
+/// 合成一句话的话，用户不知道该补命令还是该换命令。
+pub fn prepare_commands(requested: Vec<String>) -> Result<(Vec<String>, Vec<String>), String> {
+    let commands: Vec<String> = requested
+        .into_iter()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .collect();
+    if commands.is_empty() {
+        return Err("No verification commands were provided.".to_string());
+    }
+
+    let (commands, skipped): (Vec<String>, Vec<String>) = commands
+        .into_iter()
+        .partition(|command| !is_long_running_command(command));
+    if commands.is_empty() {
+        return Err(format!(
+            "Every candidate looks long-running, so nothing could be verified: {}",
+            skipped.join(", ")
+        ));
+    }
+    Ok((commands, skipped))
+}
+
+/// 逐条跑检查命令，收集结果。
+///
+/// 命令没能启动（可执行文件不存在之类）也记成一条失败的检查，而不是让整批中断：
+/// 否则第一条起不来就会把前面已经跑完的结果一起丢掉，用户看到的是"验证失败"
+/// 而不是"哪几条过了、哪一条根本没跑起来"。
+pub async fn run_checks(commands: Vec<String>, root: PathBuf) -> Vec<RunProjectTaskResult> {
+    let mut results = Vec::new();
+    for command in commands {
+        match crate::services::project_tasks::run_project_command(command.clone(), root.clone())
+            .await
+        {
+            Ok(result) => results.push(result),
+            Err(message) => results.push(RunProjectTaskResult {
+                command,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: message,
+                problems: Vec::new(),
+                duration_ms: 0,
+            }),
+        }
+    }
+    results
+}
+
+/// 验证结果渲染成 action log 的三段：等级、一句话结论、逐条明细。
+///
+/// 等级由"有没有失败"决定，而不是由"有没有跳过"：跳过的命令已经在报告里列出，
+/// 把它算成 warn 会让一次全过的验证看起来像出了问题。
+pub fn format_report_log(report: &VerificationReport) -> (&'static str, String, String) {
+    let level = if report.failed == 0 {
+        "success"
+    } else {
+        "warn"
+    };
+    let summary = format!(
+        "Verification: {} of {} check(s) failed",
+        report.failed,
+        report.results.len()
+    );
+    let details = report
+        .results
+        .iter()
+        .map(|result| {
+            format!(
+                "$ {} -> exit {}",
+                result.command,
+                result
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (level, summary, details)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 候选整理：空白项丢掉，长驻命令进 skipped 而不是进执行队列。
+    #[test]
+    fn prepare_commands_trims_blanks_and_skips_long_running() {
+        let (commands, skipped) = prepare_commands(vec![
+            "  cargo test  ".to_string(),
+            "   ".to_string(),
+            "npm run dev".to_string(),
+            "npm test".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(commands, vec!["cargo test", "npm test"]);
+        assert_eq!(skipped, vec!["npm run dev"]);
+    }
+
+    /// 两种失败必须说不同的话：什么都没给 vs 给的全是长驻命令。
+    /// 合成一句的话，用户不知道该补命令还是该换命令。
+    #[test]
+    fn prepare_commands_separates_empty_from_all_skipped() {
+        let empty = prepare_commands(vec!["  ".to_string()]).unwrap_err();
+        assert!(empty.contains("No verification commands"), "{}", empty);
+
+        let all_skipped =
+            prepare_commands(vec!["npm run dev".to_string(), "cargo watch".to_string()])
+                .unwrap_err();
+        assert!(
+            all_skipped.contains("long-running"),
+            "应当点明是因为长驻而没跑: {}",
+            all_skipped
+        );
+        // 跳过的命令要列出来，否则用户不知道是哪几条被判定成长驻的
+        assert!(all_skipped.contains("npm run dev"), "{}", all_skipped);
+    }
+
+    /// 一条跑不起来的命令不能让整批中断：前面已经跑完的结果必须还在，
+    /// 那条坏的记成一次失败的检查。
+    ///
+    /// 这里不断言 `exit_code == None`。命令是经 shell 执行的，"找不到可执行文件"
+    /// 在不同平台上分两种结局：shell 自己报错并给出非零退出码（Windows 就是这样），
+    /// 或者进程根本没起来、`run_project_command` 返回 Err。两条路都要落成"失败的
+    /// 检查"，所以断言在这一层，而不是在退出码的具体形状上。
+    #[test]
+    fn run_checks_keeps_earlier_results_when_one_command_cannot_run() {
+        let root = std::env::current_dir().unwrap();
+        let results = tokio::runtime::Runtime::new().unwrap().block_on(run_checks(
+            vec![
+                "cargo --version".to_string(),
+                "definitely-not-a-real-binary-9f2c".to_string(),
+            ],
+            root,
+        ));
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, Some(0));
+        assert_eq!(results[0].command, "cargo --version");
+        assert_eq!(results[1].command, "definitely-not-a-real-binary-9f2c");
+        let failures = failed_command_results(&results);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].command, "definitely-not-a-real-binary-9f2c");
+    }
+
+    /// 全过是 success，有失败才是 warn。跳过的命令不影响等级：
+    /// 报告里已经列了 skipped，把它算成 warn 会让一次全过的验证看起来出了问题。
+    #[test]
+    fn format_report_log_levels_track_failures_not_skips() {
+        let passing = summarize(
+            "task",
+            vec![RunProjectTaskResult {
+                command: "cargo test".to_string(),
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                problems: Vec::new(),
+                duration_ms: 1,
+            }],
+            vec!["npm run dev".to_string()],
+        );
+        let (level, summary, details) = format_report_log(&passing);
+        assert_eq!(level, "success");
+        assert!(summary.contains("0 of 1"), "{}", summary);
+        assert_eq!(details, "$ cargo test -> exit 0");
+
+        let failing = summarize(
+            "task",
+            vec![RunProjectTaskResult {
+                command: "cargo test".to_string(),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: "could not launch".to_string(),
+                problems: Vec::new(),
+                duration_ms: 1,
+            }],
+            Vec::new(),
+        );
+        let (level, summary, details) = format_report_log(&failing);
+        assert_eq!(level, "warn");
+        assert!(summary.contains("1 of 1"), "{}", summary);
+        // 没有退出码时写 unknown，而不是留空或假装是 0
+        assert_eq!(details, "$ cargo test -> exit unknown");
+    }
 
     /// 长驻命令必须挡在验证批次之外：验证是逐条跑完再看结果，
     /// 混进一个不退出的开发服务器就永远卡住。

@@ -253,8 +253,10 @@ pub async fn estimate_agent_context(
         .context_sources
         .unwrap_or_else(default_context_sources);
     context.enrich_from_workspace_with_sources(&context_sources);
-    let compression =
-        resolve_context_compression(&agent_state, request.context_compression.as_deref())?;
+    let compression = resolve_context_compression(
+        &agent_state.context_compression,
+        request.context_compression.as_deref(),
+    )?;
 
     Ok(context.estimate_prompt_context(&ContextBuildOptions::new(compression, context_budget)))
 }
@@ -307,8 +309,10 @@ pub async fn send_agent_prompt(
     context.enrich_from_workspace_with_sources(&context_sources);
 
     // The async mutex can be held safely while the orchestrator runs.
-    let compression =
-        resolve_context_compression(&agent_state, request.context_compression.as_deref())?;
+    let compression = resolve_context_compression(
+        &agent_state.context_compression,
+        request.context_compression.as_deref(),
+    )?;
     let pipeline = agent_state
         .pipeline_stages
         .lock()
@@ -489,54 +493,24 @@ fn emit_tool_degradation_log(
     );
 }
 
-/// 把本次运行的 token 用量写进 action log。
-///
-/// 用量未知（供应商没回报）时明说 "not reported"，而不是打印 0 —— 后者会让人
-/// 以为这次运行是免费的。
+/// 把本次运行的 token 用量写进 action log。措辞和分支判断在
+/// `RunUsageSnapshot::action_log_summary` / `action_log_details` 里，那里有测试。
 fn emit_usage_action_log(
     orch: &AgentOrchestrator,
     app_handle: &AppHandle,
     meter: &crate::services::llm_client::RunUsageMeter,
 ) {
     let snapshot = meter.snapshot();
+    // 一次请求都没发出去就不写这条记录：写一句 "0 calls" 只是噪音。
     if snapshot.calls == 0 {
         return;
     }
-    let summary = if snapshot.usage_is_unknown() {
-        format!(
-            "Token usage not reported by provider across {} LLM call(s)",
-            snapshot.calls
-        )
-    } else if snapshot.reported_calls < snapshot.calls {
-        // 部分回报比完全不回报更危险：总数看起来正常，但漏掉的调用不进账，
-        // per-run cap 因此偏松。以前这种情况和 5/5 显示同一句话。
-        format!(
-            "Run used at least {} tokens; only {} of {} LLM call(s) reported usage, so the per-run cap undercounts",
-            snapshot.total_tokens, snapshot.reported_calls, snapshot.calls
-        )
-    } else {
-        format!(
-            "Run used {} tokens across {} LLM call(s)",
-            snapshot.total_tokens, snapshot.calls
-        )
-    };
-    let cap = match snapshot.max_total_tokens {
-        Some(cap) => format!("{}", cap),
-        None => "not set".to_string(),
-    };
     orch.emit_review_action_log(
         app_handle,
         "info",
         "run_token_usage",
-        &summary,
-        &format!(
-            "Prompt tokens: {}\nCompletion tokens: {}\nCalls with reported usage: {} of {}\nPer-run cap: {}",
-            snapshot.prompt_tokens,
-            snapshot.completion_tokens,
-            snapshot.reported_calls,
-            snapshot.calls,
-            cap
-        ),
+        &snapshot.action_log_summary(),
+        &snapshot.action_log_details(),
     );
 }
 
@@ -678,8 +652,10 @@ pub async fn run_agent_step(
         .context_sources
         .unwrap_or_else(default_context_sources);
     context.enrich_from_workspace_with_sources(&context_sources);
-    let compression =
-        resolve_context_compression(&agent_state, request.context_compression.as_deref())?;
+    let compression = resolve_context_compression(
+        &agent_state.context_compression,
+        request.context_compression.as_deref(),
+    )?;
     let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
         compression.clone(),
         context_budget,
@@ -1113,27 +1089,7 @@ pub async fn verify_workspace(
     agent_state: State<'_, AgentGlobalState>,
     request: VerifyWorkspaceRequest,
 ) -> Result<crate::services::verification::VerificationReport, String> {
-    let commands: Vec<String> = request
-        .commands
-        .into_iter()
-        .map(|command| command.trim().to_string())
-        .filter(|command| !command.is_empty())
-        .collect();
-    if commands.is_empty() {
-        return Err("No verification commands were provided.".to_string());
-    }
-
-    // 长驻命令一律挡掉。验证是逐条跑完再看结果，混进一个 `npm run dev`
-    // 就永远卡住 —— 这是安全不变量，不是可配置的偏好。
-    let (commands, skipped): (Vec<String>, Vec<String>) = commands
-        .into_iter()
-        .partition(|command| !crate::services::verification::is_long_running_command(command));
-    if commands.is_empty() {
-        return Err(format!(
-            "Every candidate looks long-running, so nothing could be verified: {}",
-            skipped.join(", ")
-        ));
-    }
+    let (commands, skipped) = crate::services::verification::prepare_commands(request.commands)?;
 
     let root = workspace::workspace_root()?;
     // 没给原始任务描述时退回最近一轮对话，这样修复提示里带着用户真正的诉求，
@@ -1149,57 +1105,12 @@ pub async fn verify_workspace(
         }
     };
 
-    let mut results = Vec::new();
-    for command in commands {
-        match crate::services::project_tasks::run_project_command(command.clone(), root.clone())
-            .await
-        {
-            Ok(result) => results.push(result),
-            // 命令本身没能启动（比如可执行文件不存在）也是验证失败，
-            // 不能因为一条命令起不来就整体报错、把已经跑完的结果丢掉
-            Err(message) => results.push(crate::services::project_tasks::RunProjectTaskResult {
-                command,
-                exit_code: None,
-                stdout: String::new(),
-                stderr: message,
-                problems: Vec::new(),
-                duration_ms: 0,
-            }),
-        }
-    }
-
+    let results = crate::services::verification::run_checks(commands, root).await;
     let report = crate::services::verification::summarize(&original_prompt, results, skipped);
+    let (level, summary, details) = crate::services::verification::format_report_log(&report);
 
     let orch = agent_state.orchestrator.lock().await;
-    orch.emit_review_action_log(
-        &app_handle,
-        if report.failed == 0 {
-            "success"
-        } else {
-            "warn"
-        },
-        "verification_run",
-        &format!(
-            "Verification: {} of {} check(s) failed",
-            report.failed,
-            report.results.len()
-        ),
-        &report
-            .results
-            .iter()
-            .map(|result| {
-                format!(
-                    "$ {} -> exit {}",
-                    result.command,
-                    result
-                        .exit_code
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
+    orch.emit_review_action_log(&app_handle, level, "verification_run", &summary, &details);
 
     Ok(report)
 }
@@ -1413,14 +1324,17 @@ fn default_context_sources() -> ContextSourceOptions {
     }
 }
 
+/// 请求里指定的压缩模式优先，没指定才用设置里存的默认值。
+///
+/// 参数收的是那把锁本身而不是 `State<AgentGlobalState>`：这个函数只读一个字段，
+/// 而只要签名里写着 `State`，它就只能靠启动整个应用来验证。
 fn resolve_context_compression(
-    agent_state: &State<'_, AgentGlobalState>,
+    stored: &std::sync::Mutex<ContextCompressionMode>,
     requested: Option<&str>,
 ) -> Result<ContextCompressionMode, String> {
     match requested {
         Some(mode) => ContextCompressionMode::from_str(mode),
-        None => agent_state
-            .context_compression
+        None => stored
             .lock()
             .map_err(|e| e.to_string())
             .map(|mode| mode.clone()),
@@ -1428,10 +1342,29 @@ fn resolve_context_compression(
 }
 
 #[cfg(test)]
-mod llm_profile_tests {
+mod tests {
     use super::*;
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
+
+    /// 请求里给了模式就用它，没给才回落到设置里的默认值。
+    /// 这两条以前只能靠跑桌面应用才验证得到，因为函数签名收的是 `State`。
+    #[test]
+    fn context_compression_request_overrides_the_stored_default() {
+        let stored = std::sync::Mutex::new(ContextCompressionMode::Focused);
+
+        assert_eq!(
+            resolve_context_compression(&stored, Some("compact")).unwrap(),
+            ContextCompressionMode::Compact
+        );
+        assert_eq!(
+            resolve_context_compression(&stored, None).unwrap(),
+            ContextCompressionMode::Focused
+        );
+        // 无法识别的模式是错误，而不是悄悄退回默认值：那会让一次预期外的打包
+        // 看起来完全正常
+        assert!(resolve_context_compression(&stored, Some("nonsense")).is_err());
+    }
 
     fn test_hunk(status: Option<&str>) -> crate::agent::state_machine::DiffHunk {
         crate::agent::state_machine::DiffHunk {
@@ -1735,8 +1668,11 @@ fn expand_home(path: &std::path::Path) -> std::path::PathBuf {
     home.join(rest.trim_start_matches(['/', '\\']))
 }
 
-/// Test LLM connectivity with a small request.
-#[tauri::command]
+/// 解析本地模型 profile 的加载状态。
+///
+/// 不是 Tauri 命令：`get_local_model_status` 才是暴露给前端的那个。这里以前挂着
+/// 一个 `#[tauri::command]` 属性和一段抄错的文档注释（写的是 LLM 连通性测试），
+/// 而它既是私有的、也不在 `invoke_handler` 名单里 —— 属性是死的，注释是误导。
 fn local_model_status(
     profile_id: Option<String>,
     agent_state: &AgentGlobalState,
