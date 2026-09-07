@@ -518,6 +518,46 @@ impl RunUsageSnapshot {
     pub fn usage_is_unknown(&self) -> bool {
         self.calls > 0 && self.reported_calls == 0
     }
+
+    /// action log 里那一句话结论。
+    ///
+    /// 三种情况必须分开说：完全没回报时说 "not reported" 而不是打印 0（后者会让人
+    /// 以为这次运行免费）；部分回报比完全不回报更危险，总数看起来正常但漏掉的调用
+    /// 不进账、per-run cap 因此偏松，所以要点明；都回报了才是直白的总数。
+    ///
+    /// 和 `action_log_details` 一起从 `commands::agent::emit_usage_action_log` 抽出来：
+    /// 留在那里要 `AppHandle` 才能调用，于是这三个分支只能靠人肉跑桌面端才看得到。
+    pub fn action_log_summary(&self) -> String {
+        if self.usage_is_unknown() {
+            format!(
+                "Token usage not reported by provider across {} LLM call(s)",
+                self.calls
+            )
+        } else if self.reported_calls < self.calls {
+            format!(
+                "Run used at least {} tokens; only {} of {} LLM call(s) reported usage, so the per-run cap undercounts",
+                self.total_tokens, self.reported_calls, self.calls
+            )
+        } else {
+            format!(
+                "Run used {} tokens across {} LLM call(s)",
+                self.total_tokens, self.calls
+            )
+        }
+    }
+
+    /// action log 的明细段。没设上限时写 "not set" 而不是省掉这一行：
+    /// 缺行会让人以为读的是旧版本的记录。
+    pub fn action_log_details(&self) -> String {
+        let cap = match self.max_total_tokens {
+            Some(cap) => cap.to_string(),
+            None => "not set".to_string(),
+        };
+        format!(
+            "Prompt tokens: {}\nCompletion tokens: {}\nCalls with reported usage: {} of {}\nPer-run cap: {}",
+            self.prompt_tokens, self.completion_tokens, self.reported_calls, self.calls, cap
+        )
+    }
 }
 
 impl RunUsageMeter {
@@ -1717,6 +1757,80 @@ impl EnhancedLlmClientFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 三个分支说的必须是三件不同的事。以前这段逻辑在 `commands::agent` 里要
+    /// `AppHandle` 才能调用，所以"部分回报"和"全部回报"曾长期共用同一句话。
+    #[test]
+    fn usage_log_distinguishes_unknown_partial_and_complete_reporting() {
+        let unknown = RunUsageSnapshot {
+            calls: 3,
+            ..Default::default()
+        };
+        assert!(
+            unknown.action_log_summary().contains("not reported"),
+            "{}",
+            unknown.action_log_summary()
+        );
+        // 没回报时 total 是 0，但不能显示成"用了 0 个 token"
+        assert!(!unknown.action_log_summary().contains("used 0 tokens"));
+
+        let partial = RunUsageSnapshot {
+            total_tokens: 120,
+            calls: 3,
+            reported_calls: 1,
+            ..Default::default()
+        };
+        let partial_summary = partial.action_log_summary();
+        assert!(
+            partial_summary.contains("at least 120"),
+            "{}",
+            partial_summary
+        );
+        // per-run cap 因为漏账偏松，这句话是这个分支存在的唯一理由
+        assert!(
+            partial_summary.contains("undercounts"),
+            "{}",
+            partial_summary
+        );
+
+        let complete = RunUsageSnapshot {
+            total_tokens: 120,
+            calls: 3,
+            reported_calls: 3,
+            ..Default::default()
+        };
+        let complete_summary = complete.action_log_summary();
+        assert!(
+            complete_summary.contains("used 120 tokens"),
+            "{}",
+            complete_summary
+        );
+        assert!(
+            !complete_summary.contains("undercounts"),
+            "{}",
+            complete_summary
+        );
+    }
+
+    #[test]
+    fn usage_log_details_report_a_missing_cap_as_not_set() {
+        let uncapped = RunUsageSnapshot {
+            calls: 1,
+            reported_calls: 1,
+            ..Default::default()
+        };
+        assert!(uncapped
+            .action_log_details()
+            .contains("Per-run cap: not set"));
+
+        let capped = RunUsageSnapshot {
+            calls: 1,
+            reported_calls: 1,
+            max_total_tokens: Some(8_000),
+            ..Default::default()
+        };
+        assert!(capped.action_log_details().contains("Per-run cap: 8000"));
+    }
 
     fn config(provider: &str, model: &str, max_output_tokens: Option<u32>) -> LlmConfig {
         LlmConfig {

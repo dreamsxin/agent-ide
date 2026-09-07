@@ -35,7 +35,11 @@ npm test
 | `services/workspace.rs` | Workspace path resolution (`resolve_existing`, `resolve_for_write`), boundary enforcement (`ensure_within_workspace`), Windows verbatim path normalization (`shell_compatible_path`), relative traversal rejection |
 | `services/llm_profiles.rs` | Legacy config migration, profile serialization, API key masking, credential reference handling |
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
-| `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
+| `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, repositories with no commits, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
+| `commands/agent.rs` | Context-compression precedence (request override vs stored default, unknown mode rejected). This file is the IPC boundary and most of it still needs a running app; logic is being pulled out into services rather than tested in place — see below |
+| `services/verification.rs` | Repair-prompt construction, output truncation, `--allow-run` pattern matching, long-running command detection, verification candidate preparation (blank trimming, long-running partition, the two distinct failure messages), batch check execution when one command cannot run, action-log level/summary/detail rendering |
+| `services/llm_client.rs` | Provider request shaping, mock provider tool calls, run token accounting, usage action-log wording for unknown / partially reported / fully reported usage |
+
 | `commands/lsp.rs` | LSP file URI encoding/decoding, Windows verbatim path normalization, indexing-state detection |
 | `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all), repair permission requirements, `--allow-agent-write` requiring `--apply`, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, `tool-writes.json`, `smoke ide-backend` |
 
@@ -257,4 +261,29 @@ copies the repository into `artifacts/e2e/workflow/<timestamp>/workspace/`, test
 Vitest's default `include` picked those copies up, so `npm test` was running frozen snapshots of old
 code alongside the real suite — 43 files instead of 10 — and a failure there would have pointed at
 history rather than at the working tree. `vite.config.ts` now pins `test.include` to `src/**`.
+
+## The command layer
+
+`commands/agent.rs` is the largest untested file in the backend. It cannot be tested in place: every
+interesting function takes `AppHandle` or `tauri::State`, which only exist inside a running app. The
+approach is therefore not "write tests for the command layer" but **move the decisions out of it**,
+leaving adapters that are too thin to be worth testing.
+
+Two rules that come out of doing this:
+
+- A signature that mentions `State<T>` when the body only reads one field is a testability bug, not a
+  style question. `resolve_context_compression` took `State<AgentGlobalState>` to read a single
+  mutex; taking that mutex directly made the precedence rule (request override beats stored default,
+  unknown mode is an error) testable with no fixture at all.
+- Wording that encodes a judgement belongs with the data it describes, not with the emitter. The
+  three usage-log branches (usage unknown / partially reported / fully reported) exist because
+  partial reporting makes the per-run cap undercount — that distinction is the whole point, and it
+  lived inside a function that needed `AppHandle` to call. It is now
+  `RunUsageSnapshot::action_log_summary`.
+
+What remains behind the Tauri dependency in that file, deliberately for now: event emission order in
+`send_agent_prompt` / `run_agent_step` (the "register tool writes on every exit path" invariant is
+documented in comments and enforced nowhere), and the resumed-pipeline meter rule in
+`continue_agent_pipeline`.
+
 
