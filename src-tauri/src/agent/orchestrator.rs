@@ -353,13 +353,35 @@ impl AgentOrchestrator {
             Some(context_summary.clone()),
             None,
         );
+        // 只在用户没有自定义流水线时才按请求形状裁剪。显式配置过阶段的人
+        // 不该被悄悄改掉，那比多花点 token 更糟。
+        let shape = crate::agent::task_shape::classify(&prompt);
+        let trim_to_direct = ide_mode == IdeMode::Code
+            && pipeline.is_empty()
+            && shape == crate::agent::task_shape::TaskShape::Direct;
         let pipeline = if ide_mode == IdeMode::Plan {
             reset_pipeline_status(&plan_pipeline())
+        } else if trim_to_direct {
+            reset_pipeline_status(&crate::agent::multi_agent::direct_pipeline())
         } else if pipeline.is_empty() {
             reset_pipeline_status(&default_pipeline())
         } else {
             reset_pipeline_status(&pipeline)
         };
+        if trim_to_direct {
+            self.emit_action_log(
+                &app,
+                "info",
+                "pipeline_shape",
+                None,
+                None,
+                "Single-file request: running the implement stage only",
+                "Design, Test and Review were skipped because the request looks like a one-spot change. \
+                 Configure the pipeline explicitly in Settings to always run every stage.",
+                None,
+                None,
+            );
+        }
         self.emit_pipeline(&app, &pipeline);
         let (tx, mut rx) = mpsc::channel::<String>(32);
 

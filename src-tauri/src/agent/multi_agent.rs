@@ -126,6 +126,14 @@ pub fn default_pipeline() -> Vec<PipelineStage> {
     ]
 }
 
+/// 单点改动用的流水线：只跑实现阶段。
+///
+/// Architect / Tester / Reviewer 对一行改动只会产出与自己角色同形的输出 ——
+/// 一份没人要的设计说明、一个没人要的测试文件、一段没人读的复核意见。
+pub fn direct_pipeline() -> Vec<PipelineStage> {
+    vec![PipelineStage::new(AgentRole::Coder, "Implement")]
+}
+
 pub fn plan_pipeline() -> Vec<PipelineStage> {
     vec![
         PipelineStage::new(AgentRole::Designer, "Draft SDD"),

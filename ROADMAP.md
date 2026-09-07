@@ -257,14 +257,17 @@ Note that `TaskContext` and `Complexity` existed in `llm_client.rs` and looked e
 
 Acted on the finding: the Tester role prompt now has an explicit no-op exit. It previously read "Add or adjust focused tests" / "Prefer concrete test diffs over general advice" / "output ONLY diff/new-file blocks" — three unconditional instructions with no way to decline, which is why `test_hello.py` appeared. It now judges necessity first and is told in as many words that writing no tests is a valid and often correct outcome. Compare the Architect role, which has always had a clear boundary ("Do not output code diffs"); Tester never did.
 
-Not yet done, and this is the structural half: **the pipeline is still unconditional**. Precise state for whoever picks it up:
+Then done in the same session: **the pipeline is now conditional.** `agent/task_shape.rs` classifies the request from the prompt alone and `orchestrator::run` runs `direct_pipeline()` — Coder only — for a single-spot change instead of Architect → Coder → Tester → Reviewer. The measured case drops from 5 LLM calls to 2. Design decisions worth keeping:
 
-- Stage list: `agent/multi_agent.rs` `default_pipeline()` returns Architect → Coder → Tester → Reviewer. Planner is *not* in that list — it is an unconditional extra LLM call in `orchestrator::run` before the loop, so skipping stages alone still costs one planner round trip.
-- The loop is `orchestrator::continue_pipeline_from`, one `executor::execute_stage` per stage, plus a fixed 300ms sleep per iteration.
-- The only existing conditional stage selection is the `IdeMode::Plan` branch in `orchestrator::run`, which is the shape to copy.
-- The only existing short-circuit is `pause_before`, which interrupts rather than skips.
-- Complexity signals are available in `commands::agent::send_agent_prompt` (`request.prompt`, `context.context_files`, `context.active_file`) but are flattened into a rendered string before `run` sees them, so the classification has to happen in the command layer and be passed in.
-- The default stage list is duplicated in three places — `multi_agent.rs`, `src/stores/useAgentStore.ts`, and `src/components/agent/PipelineEditor.tsx`. Changing the default without changing all three desynchronises frontend and backend.
+- **Heuristic, not a classifier call.** Spending an LLM call to decide whether to spend LLM calls is self-defeating. The signals are prompt length (>200 chars → Full), broad-work markers in both English and Chinese (`refactor` / `重构` / `optimize` / `排查` / `architecture` / …), and more than one file-looking token.
+- **Asymmetric on purpose.** Misclassifying as Direct only skips review stages, and the change still cannot reach disk without human apply. Misclassifying as Full only costs money. So anything uncertain gets Full.
+- **User configuration always wins.** The trim only applies when `pipeline.is_empty()`, i.e. the user has not customised stages. Silently overriding an explicit pipeline configuration would be worse than the tokens it saves. A `pipeline_shape` action log records when the trim happened and says how to opt out.
+- Own test caught own bug: `count_file_mentions("bump to 1.2")` counted the version number as a file, so any prompt with two version numbers would have been forced to Full. Extensions now must contain a letter.
+
+Still unconditional: **the planner.** `orchestrator::run` calls `planner::plan_task` before the loop regardless of shape, so a Direct run is 2 calls rather than 1. Skipping it needs the `steps` list to be synthesised instead of parsed, which changes control flow around plan-ready emission — left for a separate change rather than bolted on here.
+
+Unchanged and still a trap for whoever touches the default stage list: it is duplicated in `multi_agent.rs`, `src/stores/useAgentStore.ts`, and `src/components/agent/PipelineEditor.tsx`. This change deliberately *added a branch* rather than editing the default, which is why it did not have to touch all three.
+
 
  "Run used N tokens across M LLM call(s)" whenever *at least one* call reported usage, because `usage_is_unknown()` is only true when `reported_calls == 0`. A run where 1 of 5 calls reported would have read as full success while the cap silently undercounted. Partial reporting now says so in the summary instead of only in the expandable details.
 
