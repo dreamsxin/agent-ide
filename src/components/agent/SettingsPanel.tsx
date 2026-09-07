@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/useAgentStore";
@@ -127,6 +127,12 @@ export default function SettingsPanel() {
   // 后端探测不到可读条目时会返回 "not configured"，那不算已保存
   const hasSavedKey = Boolean(apiKeyMasked) && apiKeyMasked !== "not configured";
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const messageRef = useRef<HTMLDivElement>(null);
+
+  // 面板很长，触发保存/测试的按钮可能已经滚出视野，反馈不滚回来就等于没有反馈
+  useEffect(() => {
+    if (message) messageRef.current?.scrollIntoView({ block: "nearest" });
+  }, [message]);
   const [localStatus, setLocalStatus] = useState<{ exists: boolean; loaded: boolean; modelPath: string } | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
 
@@ -654,6 +660,24 @@ export default function SettingsPanel() {
         {saving ? "Saving..." : "Save Profile"}
       </button>
 
+      {/* 反馈紧跟按钮。以前它渲染在 100 行 JSX 之后（Agent Permissions 和 Test
+          Connection 下面），在侧边栏里点完 Save 根本看不到，像是没有任何反应。 */}
+      {message && (
+        <div
+          ref={messageRef}
+          role="status"
+          aria-live="polite"
+          className={`mt-2 px-2 py-1 rounded text-[11px] ${
+            message.type === "ok"
+              ? "bg-accent-green/10 border border-accent-green/30 text-accent-green"
+              : "bg-diff-remove/10 border border-diff-remove/30 text-diff-remove"
+          }`}
+        >
+          {message.text}
+        </div>
+      )}
+
+
       {/* ▸▸▸▸ Agent Permission Settings ▸▸▸▸ */}
       <div className="mt-4 pt-3 border-t border-surface-border">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted tracking-wide">
@@ -742,18 +766,9 @@ export default function SettingsPanel() {
         {testing ? "Testing..." : "⚡ Test Connection"}
       </button>
 
-      {/* Message */}
-      {message && (
-        <div
-          className={`mt-2 px-2 py-1 rounded text-[11px] ${
-            message.type === "ok"
-              ? "bg-accent-green/10 border border-accent-green/30 text-accent-green"
-              : "bg-diff-remove/10 border border-diff-remove/30 text-diff-remove"
-          }`}
-        >
-          {message.text}
-        </div>
-      )}
+      {/* 反馈统一渲染在 Save Profile 按钮下方，见上。Test Connection 触发时靠
+          messageRef 滚回视野，避免同一个 live region 出现两份。 */}
+
 
       <div className="mt-4 pt-3 border-t border-surface-border">
         <div className="text-surface-muted text-[10px] leading-relaxed">
