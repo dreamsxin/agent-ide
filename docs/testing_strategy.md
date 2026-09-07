@@ -232,7 +232,16 @@ Treat this as a **manually triggered check on an idle machine**, not a regressio
 automated regression net for backend behaviour is `agent_cli` (`smoke ide-backend`,
 `smoke ide-surface`), which needs no desktop and does run in CI.
 
-Known gap: the E2E profile uses `toolCallMode = "text_protocol"` and the mock provider cannot
-emit `tool_calls` at all (`stream_mock_chat` returns a plain `String`), so neither this harness nor
-the CLI smoke exercises the native tool loop — `workspace_run_command` and `workspace_write_file`
-have no automated end-to-end coverage yet.
+The native tool loop is covered headlessly instead. `mock://` providers can now emit a tool call on
+demand (`AGENT_IDE_MOCK_TOOL` / `AGENT_IDE_MOCK_TOOL_ARGS`), and `agent_cli` exposes the workspace
+verification tool when `--allow-run` is given, so `cli::tests::smoke_tool_loop_*` drive the whole
+chain — model emits a tool call, the executor runs the command, the result returns as a `tool`
+message, the next round produces the diff. The two tests are a differential pair: identical runs
+that differ only in `--allow-run`, asserting the command's side effect appears in one and not the
+other. That distinguishes "the tool ran" from "the round completed", which a diff-only assertion
+cannot.
+
+Still not covered by the desktop harness: its profile uses `toolCallMode = "text_protocol"`, so
+`npm run e2e:workflow` continues to exercise the text protocol rather than the tool loop. The write
+tool (`workspace_write_file`) also has no end-to-end coverage — it is gated on `auto` mode in the
+desktop app and is deliberately not exposed by the CLI.
