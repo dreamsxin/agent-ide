@@ -18,3 +18,18 @@ describe("layout navigation state", () => {
     expect(useLayoutStore.getState().agentView).toBe("changes");
   });
 });
+
+describe("performance overlay", () => {
+  it("stays off until something turns it on", () => {
+    // 这个浮层驱动一个常驻 rAF 循环，默认开着等于常态白烧一帧。
+    expect(useLayoutStore.getState().performanceOverlay).toBe(false);
+  });
+
+  it("toggles both directions so the close button can actually close it", () => {
+    useLayoutStore.getState().togglePerformanceOverlay();
+    expect(useLayoutStore.getState().performanceOverlay).toBe(true);
+
+    useLayoutStore.getState().togglePerformanceOverlay();
+    expect(useLayoutStore.getState().performanceOverlay).toBe(false);
+  });
+});
