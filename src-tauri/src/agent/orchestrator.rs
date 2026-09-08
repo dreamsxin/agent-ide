@@ -147,7 +147,11 @@ pub struct PausedPipelineRun {
     pub prompt: String,
     pub context: String,
     pub context_summary: String,
-    pub stage_outputs: Vec<String>,
+    /// 已完成阶段的真实消息线程（含工具调用与工具结果）。
+    ///
+    /// 以前这里是 `stage_outputs: Vec<String>`，只有扁平文本，续跑之后模型看不到
+    /// 暂停前工具实际返回了什么。
+    pub transcript: Vec<crate::services::llm_client::ChatMessage>,
     pub pipeline: Vec<PipelineStage>,
     pub stage_index: usize,
     pub ide_mode: IdeMode,
@@ -547,13 +551,15 @@ impl AgentOrchestrator {
         );
 
         // 4. Execute the configured role pipeline.
-        let stage_outputs: Vec<String> = vec![format!("Planner:\n{}", _full_response)];
+        let transcript = vec![crate::services::llm_client::ChatMessage::assistant(
+            format!("[Planner]\n{}", _full_response),
+        )];
         self.continue_pipeline_from(
             prompt,
             ctx_str,
             context_summary,
             pipeline,
-            stage_outputs,
+            transcript,
             0,
             false,
             ide_mode,
@@ -571,7 +577,7 @@ impl AgentOrchestrator {
         ctx_str: String,
         context_summary: String,
         mut pipeline: Vec<PipelineStage>,
-        mut stage_outputs: Vec<String>,
+        mut transcript: Vec<crate::services::llm_client::ChatMessage>,
         start_index: usize,
         ignore_pause_once: bool,
         ide_mode: IdeMode,
@@ -590,7 +596,7 @@ impl AgentOrchestrator {
                     prompt: prompt.clone(),
                     context: ctx_str.clone(),
                     context_summary: context_summary.clone(),
-                    stage_outputs: stage_outputs.clone(),
+                    transcript: transcript.clone(),
                     pipeline: pipeline.clone(),
                     stage_index,
                     ide_mode,
@@ -650,7 +656,8 @@ impl AgentOrchestrator {
                 }
             });
 
-            let prior_outputs = executor::join_prior_outputs(&stage_outputs);
+            // 裁剪在 `execute_stage` 里做，这里保留完整线程：暂停/续跑要恢复的是
+            // 全部历史，而不是某一次已经裁过的快照
             let pending_diff_summary = self.summarize_pending_diffs();
 
             match executor::execute_stage(
@@ -659,7 +666,7 @@ impl AgentOrchestrator {
                 &stage.name,
                 &prompt,
                 &ctx_str,
-                &prior_outputs,
+                &transcript,
                 &pending_diff_summary,
                 self.tool_invoker.as_deref(),
                 cancel_flag.clone(),
@@ -667,19 +674,26 @@ impl AgentOrchestrator {
             )
             .await
             {
-                Ok(response) => {
+                Ok(outcome) => {
+                    let response = outcome.text;
                     self.steps[step_index].status = "done".to_string();
                     self.steps[step_index].logs.push(format!(
                         "{} response: {}...",
                         stage.role.to_string(),
                         response.chars().take(200).collect::<String>()
                     ));
-                    stage_outputs.push(format!(
-                        "{} / {}:\n{}",
-                        stage.name,
-                        stage.role.to_string(),
-                        response
-                    ));
+                    // 给这个 stage 的最后一条消息打上出处标签：下一个 stage 需要知道
+                    // 哪一句是哪个角色说的，光靠消息顺序看不出来
+                    let mut stage_messages = outcome.transcript;
+                    if let Some(last) = stage_messages.last_mut() {
+                        last.content = format!(
+                            "[{} / {}]\n{}",
+                            stage.name,
+                            stage.role.to_string(),
+                            last.content
+                        );
+                    }
+                    transcript.extend(stage_messages);
 
                     let generated_diff_count = if ide_mode == IdeMode::Plan {
                         self.handle_plan_stage_response(
@@ -2585,14 +2599,28 @@ mod tests {
             ));
         assert!(result.is_ok(), "{:?}", result);
 
-        let stage_request = |stage: &str| -> String {
-            (0..recorder.requests().len())
-                .map(|index| recorder.request_text(index))
-                .find(|text| text.contains(&format!("Pipeline stage: {}", stage)))
+        let stage_messages = |stage: &str| -> Vec<crate::services::llm_client::ChatMessage> {
+            recorder
+                .requests()
+                .into_iter()
+                .find(|messages| {
+                    messages.iter().any(|message| {
+                        message
+                            .content
+                            .contains(&format!("Pipeline stage: {}", stage))
+                    })
+                })
                 .unwrap_or_else(|| panic!("没有找到 {} 阶段的请求", stage))
         };
+        let joined = |messages: &[crate::services::llm_client::ChatMessage]| -> String {
+            messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
-        let architect = stage_request("Architect");
+        let architect = joined(&stage_messages("Architect"));
         // 用户任务必须原样出现：这是每个 stage 唯一的目标来源
         assert!(
             architect.contains("rename the greeting helper"),
@@ -2608,11 +2636,115 @@ mod tests {
         // 审查区现状要带上，否则 stage 会重复提议已经存在的改动
         assert!(architect.contains("pending diffs"), "{}", architect);
 
-        let coder = stage_request("Coder");
-        assert!(coder.contains("rename the greeting helper"), "{}", coder);
-        // 上一阶段的产出必须传下去 —— 这正是 9.0.11 重构不能弄丢的东西
-        assert!(coder.contains("Prior stage outputs"), "{}", coder);
-        assert!(coder.contains("Architect"), "{}", coder);
+        let coder = stage_messages("Coder");
+        let coder_text = joined(&coder);
+        assert!(
+            coder_text.contains("rename the greeting helper"),
+            "{}",
+            coder_text
+        );
+        // 上一阶段的产出必须传下去，而且是以真实 assistant 消息的形式 ——
+        // 不是被拼进 user 消息的一段 prose。这正是 9.0.11 换掉的东西：
+        // 只有真实消息才能同时把工具调用和工具结果带过来。
+        let architect_roles: Vec<&str> = coder
+            .iter()
+            .filter(|message| message.content.contains("[Architect"))
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(architect_roles, vec!["assistant"], "{}", coder_text);
+        // planner 的结论同样在线程里，并且带着出处标签
+        assert!(
+            coder
+                .iter()
+                .any(|message| message.role == "assistant"
+                    && message.content.contains("[Planner]")),
+            "{}",
+            coder_text
+        );
+    }
+
+    /// 续跑必须把暂停前工具**实际返回的内容**带回请求里。
+    ///
+    /// 在此之前跨阶段只传扁平文本，而扁平文本里从来没有工具返回值 ——
+    /// 下一个 stage 只能看到模型对"我跑了测试"的转述，而转述正是最不该被信任的部分。
+    /// 顺带钉住协议约束：`tool` 消息前面必须紧跟发起它的 assistant 调用，
+    /// 少了配对整个请求会被供应商拒掉。
+    #[test]
+    fn a_resumed_run_still_shows_the_model_what_the_tools_returned() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+
+        let recorder = std::sync::Arc::new(crate::services::llm_client::RequestRecorder::new());
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "mock://resumed-thread".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "mock-model".to_string(),
+                provider: "openai".to_string(),
+                max_output_tokens: None,
+                tool_call_mode: "text_protocol".to_string(),
+                model_type: crate::services::llm_client::ModelType::from_string("openai"),
+                local_model_config: None,
+            })
+            .with_request_recorder(recorder.clone());
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let transcript = vec![
+            crate::services::llm_client::ChatMessage::assistant_tool_calls(
+                "checking the tests".to_string(),
+                &[crate::services::llm_client::LlmToolCall {
+                    id: "call-1".to_string(),
+                    name: "workspace_run_command".to_string(),
+                    arguments: "{\"command\":\"npm test\"}".to_string(),
+                }],
+            ),
+            crate::services::llm_client::ChatMessage::tool_result(
+                "call-1",
+                "npm test: 1 failing in src/greet.test.ts".to_string(),
+            ),
+        ];
+
+        let result =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(orchestrator.continue_pipeline_from(
+                    "fix the failing test".to_string(),
+                    "project context".to_string(),
+                    "summary".to_string(),
+                    vec![crate::agent::multi_agent::PipelineStage::new(
+                        crate::agent::multi_agent::AgentRole::Coder,
+                        "Coder",
+                    )],
+                    transcript,
+                    0,
+                    true,
+                    IdeMode::Code,
+                    Arc::new(AtomicBool::new(false)),
+                    &llm,
+                    events.clone(),
+                ));
+        assert!(result.is_ok(), "{:?}", result);
+
+        let request = recorder
+            .requests()
+            .into_iter()
+            .next()
+            .expect("续跑至少要发出一次请求");
+        let tool_index = request
+            .iter()
+            .position(|message| message.role == "tool")
+            .unwrap_or_else(|| panic!("请求里没有 tool 消息: {:?}", request));
+        assert!(
+            request[tool_index].content.contains("1 failing"),
+            "{:?}",
+            request[tool_index]
+        );
+        assert!(
+            request[tool_index - 1].tool_calls.is_some(),
+            "tool 结果前面必须是发起它的 assistant 调用: {:?}",
+            request[tool_index - 1]
+        );
     }
 
     #[test]
@@ -2971,6 +3103,8 @@ mod tests {
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
     }
 
+    /// 暂停快照要能原样恢复历史。恢复的是真实消息线程而不是扁平文本：
+    /// 续跑之后的 stage 必须还能看到暂停前工具到底返回了什么。
     #[test]
     fn paused_pipeline_snapshot_can_be_stored_for_resume() {
         let mut orchestrator = AgentOrchestrator::new();
@@ -2980,7 +3114,13 @@ mod tests {
             prompt: "Fix issue".to_string(),
             context: "context".to_string(),
             context_summary: "summary".to_string(),
-            stage_outputs: vec!["Planner output".to_string()],
+            transcript: vec![
+                crate::services::llm_client::ChatMessage::assistant("[Planner]\nstep one"),
+                crate::services::llm_client::ChatMessage::tool_result(
+                    "call-1",
+                    "npm test: 1 failing".to_string(),
+                ),
+            ],
             pipeline: pipeline.clone(),
             stage_index: 1,
             ide_mode: IdeMode::Code,
@@ -2989,7 +3129,10 @@ mod tests {
         let paused = orchestrator.paused_run.as_ref().expect("paused run");
         assert_eq!(paused.stage_index, 1);
         assert_eq!(paused.pipeline.len(), pipeline.len());
-        assert_eq!(paused.stage_outputs[0], "Planner output");
+        assert!(paused.transcript[0].content.contains("step one"));
+        // 工具结果本身要留在快照里，而不是只留模型对它的转述
+        assert_eq!(paused.transcript[1].role, "tool");
+        assert!(paused.transcript[1].content.contains("1 failing"));
     }
 
     #[test]

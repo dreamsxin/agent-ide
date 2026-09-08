@@ -62,13 +62,18 @@ fn select_external_calls(
 ///
 /// 每一轮：请求 → 若模型调用了外部工具则执行并把结果作为 `role: "tool"` 消息回传 → 继续请求。
 /// 未启用 invoker、或模型没有调用外部工具时，行为与单次 `stream_chat_with_tools` 完全一致。
+///
+/// 返回值带上本轮之后新增的消息（assistant 的工具调用、`tool` 结果、最终回答）。
+/// 以前这些消息是这个函数的局部变量，`return` 时一起丢掉，只剩扁平文本 ——
+/// 于是工具到底返回了什么，出了这个函数就没人知道了。
 async fn stream_with_tool_loop(
     llm: &LlmClient,
     mut messages: Vec<ChatMessage>,
     invoker: Option<&dyn ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
-) -> Result<String, String> {
+) -> Result<StageOutcome, String> {
+    let prompt_len = messages.len();
     let mut merged = String::new();
 
     for iteration in 0..=MAX_TOOL_ITERATIONS {
@@ -80,14 +85,20 @@ async fn stream_with_tool_loop(
 
         let is_last_iteration = iteration == MAX_TOOL_ITERATIONS;
         if external.is_empty() || is_last_iteration {
-            merged.push_str(&merge_tool_call_output(output));
+            let mut final_text = merge_tool_call_output(output);
             if is_last_iteration && !external.is_empty() {
-                merged.push_str(&format!(
+                final_text.push_str(&format!(
                     "\n\n[agent-ide] Tool loop stopped after {} rounds; remaining tool calls were not executed.\n",
                     MAX_TOOL_ITERATIONS
                 ));
             }
-            return Ok(merged);
+            merged.push_str(&final_text);
+            let mut transcript = messages.split_off(prompt_len);
+            transcript.push(ChatMessage::assistant(final_text));
+            return Ok(StageOutcome {
+                text: merged,
+                transcript,
+            });
         }
 
         // 保留本轮文本输出，模型可能同时给出解释和工具调用
@@ -111,7 +122,12 @@ async fn stream_with_tool_loop(
         }
     }
 
-    Ok(merged)
+    // 循环里每条路径都 return 了，这里只为满足类型检查
+    let transcript = messages.split_off(prompt_len);
+    Ok(StageOutcome {
+        text: merged,
+        transcript,
+    })
 }
 
 /// 执行步骤的系统提示词
@@ -169,45 +185,94 @@ pub async fn execute_step(
         )),
     ];
 
-    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx).await
+    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx)
+        .await
+        .map(|outcome| outcome.text)
 }
 
-/// 较早的阶段输出进提示词的字符上限
-const MAX_EARLIER_STAGE_CHARS: usize = 6_000;
-/// 原样保留的最近阶段数
-const FULL_RECENT_STAGES: usize = 2;
+/// 单条消息带进下一个 stage 时的内容上限
+const MAX_CARRIED_MESSAGE_CHARS: usize = 6_000;
+/// 整条线程带进下一个 stage 时的总字符上限
+const MAX_CARRIED_THREAD_CHARS: usize = 24_000;
 
-/// 把之前几个阶段的输出拼成提示词里的 "Prior stage outputs" 段落。
+/// 一个 stage 跑完之后的产出。
 ///
-/// 以前是一句 `stage_outputs.join(...)`，没有任何上限。这一段是绕过上下文预算
-/// 直接拼进 prompt 的（预算只管 `context`），所以阶段一多、输出一长，请求就无界
-/// 增长：要么超模型上下文，要么把真正有用的项目上下文挤出窗口。
+/// `text` 是扁平文本，给人看、给 diff 解析用；`transcript` 是这个 stage 真实发生过的
+/// assistant / tool 消息，按顺序排列，交给下一个 stage 当历史。
 ///
-/// 规则：最近两个阶段原样保留 —— 下一个阶段最依赖紧邻的上一个；更早的按**尾部**
-/// 截断，因为结论和 diff 都在末尾。截断由 `truncate_for_prompt` 完成，它会写明
-/// 省掉了多少字符，所以模型看得出自己拿到的是节选，而不是以为这就是全部历史。
-pub fn join_prior_outputs(stage_outputs: &[String]) -> String {
-    join_prior_outputs_with_limits(stage_outputs, FULL_RECENT_STAGES, MAX_EARLIER_STAGE_CHARS)
+/// 分两个字段是因为它们丢失的东西不同：`text` 里从来没有工具返回值
+/// （`merge_tool_call_output` 只取模型自己的文本），所以在此之前，下一个 stage 看不到
+/// "跑了 npm test，输出是这些"，只能看到模型转述的版本 —— 而转述恰恰是不可信的那部分。
+#[derive(Clone, Debug, Default)]
+pub struct StageOutcome {
+    pub text: String,
+    pub transcript: Vec<ChatMessage>,
 }
 
-fn join_prior_outputs_with_limits(
-    stage_outputs: &[String],
-    full_recent: usize,
-    max_earlier_chars: usize,
-) -> String {
-    let earlier = stage_outputs.len().saturating_sub(full_recent);
-    stage_outputs
-        .iter()
-        .enumerate()
-        .map(|(index, output)| {
-            if index < earlier {
-                crate::services::verification::truncate_for_prompt(output, max_earlier_chars)
-            } else {
-                output.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+/// 把上游 stage 的消息线程裁进预算。
+///
+/// 之前这里是 `join_prior_outputs`：把各阶段输出拼成一段 prose 塞进 user 消息。
+/// 换成真实消息之后，工具结果能原样传下去，但两条硬约束必须守住：
+///
+/// 1. 带 `tool_calls` 的 assistant 消息和它后面的 `tool` 结果必须同进同出。供应商
+///    要求两者配对，只留一半会让整个请求 400 —— 那不是"少点历史"，是这一 stage 直接失败。
+/// 2. 丢掉了内容就要说出来。缺一段而不声明，模型会把节选当成完整历史，
+///    并据此断言"前面已经验证过了"。
+///
+/// 预算本身仍然是必要的：这条线程不经过上下文预算（预算只裁 `context`），
+/// 阶段一多就会无界增长，把真正有用的项目上下文挤出窗口。
+pub fn bound_transcript(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    bound_transcript_with_limits(
+        messages,
+        MAX_CARRIED_MESSAGE_CHARS,
+        MAX_CARRIED_THREAD_CHARS,
+    )
+}
+
+fn bound_transcript_with_limits(
+    messages: &[ChatMessage],
+    max_message_chars: usize,
+    max_thread_chars: usize,
+) -> Vec<ChatMessage> {
+    // 分组：`tool` 消息永远归到前一条 assistant 上，这样丢弃只会按组发生
+    let mut groups: Vec<Vec<ChatMessage>> = Vec::new();
+    for message in messages {
+        let mut trimmed = message.clone();
+        trimmed.content =
+            crate::services::verification::truncate_for_prompt(&message.content, max_message_chars);
+        match groups.last_mut() {
+            Some(group) if message.role == "tool" => group.push(trimmed),
+            _ => groups.push(vec![trimmed]),
+        }
+    }
+
+    let mut kept: Vec<Vec<ChatMessage>> = Vec::new();
+    let mut used = 0usize;
+    for group in groups.iter().rev() {
+        let cost: usize = group
+            .iter()
+            .map(|message| message.content.chars().count())
+            .sum();
+        // 最近的一组即使超预算也保留：紧邻的上一步是下一个 stage 最依赖的东西，
+        // 一条历史都不给比给一条超长历史更糟
+        if !kept.is_empty() && used + cost > max_thread_chars {
+            break;
+        }
+        used += cost;
+        kept.push(group.clone());
+    }
+    kept.reverse();
+
+    let omitted = groups.len() - kept.len();
+    let mut result: Vec<ChatMessage> = Vec::new();
+    if omitted > 0 {
+        result.push(ChatMessage::system(format!(
+            "[agent-ide] {} earlier exchange(s) from previous stages were omitted to fit the context budget. Do not assume work you cannot see here was done.",
+            omitted
+        )));
+    }
+    result.extend(kept.into_iter().flatten());
+    result
 }
 
 pub async fn execute_stage(
@@ -216,12 +281,12 @@ pub async fn execute_stage(
     stage_name: &str,
     user_prompt: &str,
     context: &str,
-    prior_outputs: &str,
+    prior_transcript: &[ChatMessage],
     pending_diffs: &str,
     invoker: Option<&dyn ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
-) -> Result<String, String> {
+) -> Result<StageOutcome, String> {
     let output_rules = match role {
         AgentRole::Architect => "Output a concise implementation plan. Do not output code diffs.",
         AgentRole::Designer => {
@@ -321,19 +386,17 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
         }
     };
 
-    let messages = vec![
+    // 结构：角色系统提示 → 本 stage 的任务消息 → 上游 stage 的真实消息 → 开跑指令。
+    // 上游消息里只有 assistant / tool 角色，所以"第一条 user"仍然是本 stage 的任务，
+    // 依赖这一点的 mock provider 和本地模型扁平化路径都不受影响。
+    let mut messages = vec![
         ChatMessage::system(format!("{}\n\n{}", role.system_prompt(), output_rules)),
         ChatMessage::user(format!(
-            "Pipeline stage: {}\nRole: {}\n\nUser task:\n{}\n\nProject context:\n{}\n\nPrior stage outputs:\n{}\n\nActual pending diffs for review:\n{}\n\nRun this stage now.",
+            "Pipeline stage: {}\nRole: {}\n\nUser task:\n{}\n\nProject context:\n{}\n\nActual pending diffs for review:\n{}",
             stage_name,
             role.to_string(),
             user_prompt,
             context,
-            if prior_outputs.trim().is_empty() {
-                "(none)"
-            } else {
-                prior_outputs
-            },
             if pending_diffs.trim().is_empty() {
                 "No pending diffs."
             } else {
@@ -341,6 +404,12 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
             },
         )),
     ];
+    messages.extend(bound_transcript(prior_transcript));
+    messages.push(ChatMessage::user(if prior_transcript.is_empty() {
+        "This is the first stage of the run; there is no prior stage work. Run this stage now."
+    } else {
+        "Prior stage work is in the messages above, including the actual tool results rather than a retelling of them. Run this stage now."
+    }));
 
     stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx).await
 }
@@ -1060,37 +1129,87 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
 mod tests {
     use super::*;
 
-    /// "Prior stage outputs" 是绕过上下文预算直接拼进 prompt 的，所以它自己必须
-    /// 有上限：最近两个阶段原样，更早的按尾部截断并写明省略量。
+    /// 带进下一个 stage 的线程是绕过上下文预算直接进请求的，所以它自己必须有上限：
+    /// 最近的交换原样保留，更早的整组丢弃并写明丢了多少。
     #[test]
-    fn prior_outputs_keep_recent_stages_and_trim_older_ones() {
+    fn carried_thread_keeps_recent_exchanges_and_states_what_it_dropped() {
         let old = "O".repeat(50);
-        let outputs = vec![
-            old.clone(),
-            "second".to_string(),
-            "third".to_string(),
-            "fourth".to_string(),
+        let messages = vec![
+            ChatMessage::assistant(old.clone()),
+            ChatMessage::assistant("second".to_string()),
+            ChatMessage::assistant("third".to_string()),
         ];
 
-        let joined = join_prior_outputs_with_limits(&outputs, 2, 10);
+        let bounded = bound_transcript_with_limits(&messages, 6_000, 12);
 
-        // 最近两个阶段一个字都不能少：下一个阶段最依赖紧邻的上一个
-        assert!(joined.ends_with("third\n\n---\n\nfourth"), "{}", joined);
+        // 最近的两条一个字都不能少：下一个 stage 最依赖紧邻的上一步
+        let contents: Vec<&str> = bounded
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert!(contents.contains(&"second"), "{:?}", contents);
+        assert!(contents.contains(&"third"), "{:?}", contents);
+        assert!(!contents.contains(&old.as_str()), "{:?}", contents);
 
-        // 更早的被截断，而且省略量是写出来的 —— 静默丢弃会让模型以为看到了全部
+        // 丢弃量必须写出来：静默丢弃会让模型以为自己看到了完整历史，
+        // 然后断言"前面已经验证过了"
+        assert_eq!(bounded[0].role, "system");
         assert!(
-            joined.contains("earlier character(s) omitted"),
+            bounded[0].content.contains("1 earlier exchange(s)"),
             "{}",
-            joined
+            bounded[0].content
         );
-        assert!(!joined.contains(&old), "旧输出不该原样出现");
-        // 截断保尾：结论和 diff 都在末尾
-        assert!(joined.contains(&"O".repeat(10)), "{}", joined);
+    }
+
+    /// 单条消息也要有上限，否则一个几十万字符的 tool 结果能独自撑爆请求。
+    #[test]
+    fn carried_thread_truncates_an_oversized_single_message() {
+        let huge = "T".repeat(500);
+        let bounded = bound_transcript_with_limits(
+            &[ChatMessage::tool_result("call-1", huge.clone())],
+            20,
+            0,
+        );
+
+        assert_eq!(bounded.len(), 1);
+        assert!(
+            bounded[0].content.contains("earlier character(s) omitted"),
+            "{}",
+            bounded[0].content
+        );
+        assert!(bounded[0].content.chars().count() < huge.chars().count());
+    }
+
+    /// 供应商要求带 `tool_calls` 的 assistant 消息后面必须紧跟对应的 `tool` 结果。
+    /// 只丢一半不是"少点历史"，而是整个请求 400、这一 stage 直接失败 ——
+    /// 所以裁剪只能按整组进行。
+    #[test]
+    fn carried_thread_never_splits_a_tool_call_from_its_result() {
+        let call = LlmToolCall {
+            id: "call-1".to_string(),
+            name: "workspace_read_file".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let messages = vec![
+            ChatMessage::assistant("earlier chatter".to_string()),
+            ChatMessage::assistant_tool_calls("reading the file".to_string(), &[call]),
+            ChatMessage::tool_result("call-1", "file contents".to_string()),
+        ];
+
+        // 预算只够最后一组
+        let bounded = bound_transcript_with_limits(&messages, 6_000, 30);
+
+        let roles: Vec<&str> = bounded
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(roles, vec!["system", "assistant", "tool"], "{:?}", roles);
+        assert_eq!(bounded[2].tool_call_id.as_deref(), Some("call-1"));
     }
 
     #[test]
-    fn prior_outputs_are_empty_when_no_stage_has_run() {
-        assert_eq!(join_prior_outputs(&[]), "");
+    fn carried_thread_is_empty_when_no_stage_has_run() {
+        assert!(bound_transcript(&[]).is_empty());
     }
 
     struct RecordingInvoker {
