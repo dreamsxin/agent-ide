@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 import { usePaletteCommands } from "./CommandPalette";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import { useAgentStore } from "../../stores/useAgentStore";
 
 afterEach(cleanup);
 
@@ -47,5 +48,33 @@ describe("palette coverage of the Agent panel", () => {
     expect(useLayoutStore.getState().agentView).toBe("settings");
     // 只切视图不展开面板的话，命令看起来没有反应
     expect(useLayoutStore.getState().rightVisible).toBe(true);
+  });
+});
+
+describe("undo from the palette", () => {
+  /**
+   * 唯一的 Undo 按钮在 Changes 视图里，右面板一收起就没有退路了 ——
+   * 而撤销正是"刚发现改错了"时要用的东西。
+   */
+  it("is offered but disabled when there is nothing to undo", () => {
+    useAgentStore.setState({ pendingUndo: null });
+
+    const undo = commands().find((command) => command.id === "agent.undo-apply");
+
+    expect(undo).toBeDefined();
+    expect(undo?.disabled).toBe(true);
+    expect(undo?.subtitle).toContain("Nothing has been applied");
+  });
+
+  it("names the checkpoint and the file count once there is one", () => {
+    useAgentStore.setState({
+      pendingUndo: { label: "Auto-apply", files: ["src/a.ts", "src/b.ts"] },
+    });
+
+    const undo = commands().find((command) => command.id === "agent.undo-apply");
+
+    expect(undo?.disabled).toBe(false);
+    expect(undo?.title).toContain("Auto-apply");
+    expect(undo?.subtitle).toContain("2 file(s)");
   });
 });
