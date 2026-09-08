@@ -13,6 +13,14 @@ type VerificationReport = {
   results: { command: string; exitCode: number | null }[];
 };
 
+type RepairWorkspaceReport = {
+  iterations: number;
+  stopReason: string;
+  checksFailed: boolean;
+  results: { command: string; exitCode: number | null }[];
+};
+
+
 export default function TasksPanel() {
   const lastTask = useTaskStore((s) => s.lastTask);
   const taskRuns = useTaskStore((s) => s.taskRuns);
@@ -23,7 +31,9 @@ export default function TasksPanel() {
   const { fixTaskFailure, sendFixPrompt, isAgentBusy } = useFixWithAgent();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [verifyStatus, setVerifyStatus] = useState<string | null>(null);
+
   const selectedRun = useMemo(
     () => taskRunHistory.find((run) => run.runId === selectedRunId) ?? taskRunHistory[0],
     [selectedRunId, taskRunHistory]
@@ -68,8 +78,33 @@ export default function TasksPanel() {
   };
 
 
+  // 有界自动修复：跑检查 → 失败让 Agent 改 → 落盘 → 再跑，直到通过或预算用完。
+  // 和 Verify All 的区别不只是轮数：这个会自己把修改写进工作区，所以后端只在
+  // Auto 模式下允许，别的模式直接报错——那条错误照原样显示，不在前端悄悄兜住。
+  const repairAll = async () => {
+    if (!isTauriRuntime() || tasks.length === 0) return;
+    setRepairing(true);
+    setVerifyStatus(null);
+    try {
+      const report = await invoke<RepairWorkspaceReport>("repair_workspace", {
+        request: { commands: tasks.map((item) => item.command), maxIterations: 2 },
+      });
+      const rounds = `${report.iterations} round(s)`;
+      setVerifyStatus(
+        report.checksFailed
+          ? `Repair gave up after ${rounds}: ${report.stopReason}`
+          : `Checks pass after ${rounds} · ${report.stopReason}`
+      );
+    } catch (error) {
+      setVerifyStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   return (
     <div data-testid="commands-panel" className="flex h-full flex-col bg-black text-xs">
+
       <div className="flex items-center justify-between gap-3 border-b border-surface-border px-3 py-1.5">
         <div className="min-w-0">
           <div className="font-semibold text-surface-text">Commands</div>
@@ -81,13 +116,24 @@ export default function TasksPanel() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => void verifyAll()}
-            disabled={!isTauriRuntime() || verifying || isAgentBusy || tasks.length === 0}
+            disabled={!isTauriRuntime() || verifying || repairing || isAgentBusy || tasks.length === 0}
             data-testid="verify-all"
+
             title="Run every discovered check; long-running commands like dev/watch are skipped"
             className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {verifying ? "Verifying..." : "Verify All"}
           </button>
+          <button
+            onClick={() => void repairAll()}
+            disabled={!isTauriRuntime() || verifying || repairing || isAgentBusy || tasks.length === 0}
+            data-testid="repair-all"
+            title="Run the checks, let the Agent fix failures and re-run, up to 2 rounds. Applies its own fixes, so it requires Auto mode."
+            className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {repairing ? "Repairing..." : "Auto Repair"}
+          </button>
+
           <div className="max-w-[280px] truncate text-[11px] text-surface-muted">
             {verifyStatus ??
               (usingFallback
