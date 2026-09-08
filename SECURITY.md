@@ -117,7 +117,8 @@ What the backend does **not** enforce:
 
 Consequences for the operator: treat adding an MCP server as equivalent to installing a plugin with full user privileges. Prefer `AutoApprovedOnly` and list tools explicitly. In `auto` mode the permission preset resolves to `AllowAll`, so every discovered tool is callable without a human in the loop.
 
-`call_mcp_tool` intentionally uses `AllowAll`: it backs the Settings "test this server" button and is user-initiated, not Agent-initiated.
+`call_mcp_tool` intentionally uses `AllowAll`: it is a user-initiated escape hatch, not an Agent-initiated call. Note that no UI currently invokes it — `McpPanel.tsx` only calls `get_mcp_config`, `get_mcp_tools`, `save_mcp_config` and `discover_mcp_tools` — so today the permissive policy is reachable only over IPC.
+
 
 ## Agent Write Deny List
 
@@ -145,7 +146,8 @@ Not covered: a credential file passed explicitly as a context file, or read by a
 - `maxRunTokens` on the LLM profile caps total provider-reported tokens for one run. It is enforced in `send_chat_request`, the single choke point all provider requests pass through, so it cannot be bypassed by using a different entry point. A configured `0` is treated as unset.
 - The meter is stored on the orchestrator, so resuming a paused pipeline continues against the same allowance instead of restarting the count.
 - `usage_is_unknown()` distinguishes "the provider reported no usage" from "nothing was spent". Local runtimes and mock endpoints report no usage, so a cap cannot be enforced against them; this is surfaced in the run's action log rather than being reported as zero cost.
-- The tool loop is bounded at 5 rounds per stage (`MAX_TOOL_ITERATIONS`).
+- The tool loop is bounded at 12 rounds per stage (`MAX_TOOL_ITERATIONS`, `agent/executor.rs`).
+
 
 
 ## Agent Approval Model
@@ -231,7 +233,8 @@ Filters that apply:
 Other guarantees:
 
 - No telemetry, analytics, crash reporting, or phone-home of any kind. `reqwest` is used only for LLM requests.
-- The three hardcoded URLs (`https://api.openai.com/v1`, `https://api.deepseek.com/v1`) are overridable defaults, not fixed destinations. There is no scheme or host allow-list on the configured endpoint.
+- The two hardcoded URLs (`https://api.openai.com/v1`, `https://api.deepseek.com/v1`) are overridable defaults, not fixed destinations. There is no scheme or host allow-list on the configured endpoint.
+
 - Git remote URLs come from the repository's own config, not from the app.
 - Agent output is never rendered as HTML: `ReactMarkdown skipHtml` plus `sanitizeMarkdown` before rendering.
 - API keys are masked in IPC responses, action logs, and the UI. The exception is `reveal_llm_api_key`. MCP tool arguments are redacted by key name only, and MCP tool results are not redacted at all — see the credential section.
@@ -272,8 +275,9 @@ The Agent CLI (`agent_cli`) is scoped as a headless automation runner. Security 
 
 Known gaps:
 
-- The Agent write deny list is shared with the desktop app, because both go through `diff_apply`. A CLI-specific deny-path option is not implemented.
-- Operation-level restrictions (e.g., "allow edits but not file creation") are partially implemented.
+- The Agent write deny list is shared with the desktop app, because both go through `diff_apply`. On top of that the CLI enforces `--deny-path`: any generated diff whose path matches a pattern is refused with `ExitCode::PreconditionFailed` (`cli/mod.rs`), before anything is written.
+- Operation-level restrictions are enforced separately for create, edit and delete (`--allow-create` / `--allow-edit` / `--allow-delete`), so "edits but no new files" is expressible.
+
 - MCP tools are not exposed to the CLI at all today.
 
 ## Known Limitations
@@ -293,7 +297,8 @@ Ordered by how much they would matter to an operator. Each was confirmed by read
 11. **A token cap cannot be enforced against providers that report no usage** (local runtimes, mock endpoints). This is surfaced rather than silently treated as zero.
 12. **Hunk matching is textual**, not AST-aware. Ambiguous matches are rejected rather than guessed, and `baseHash` catches stale edits, but line-offset tolerance is not implemented.
 13. **macOS and Linux credential backends are unvalidated at runtime.** Windows is verified end to end. Linux and macOS CI jobs now attempt the round trip — Linux under `dbus-run-session` with `gnome-keyring`, macOS against the login Keychain — but **neither result has been confirmed yet**. Linux's first run failed before reaching the tests, on an unrelated RGBA icon problem that has since been fixed, so both stay listed as unvalidated until a run gets that far.
-14. **The CLI deny-path model is not implemented**; the Agent write deny list covers the desktop diff path only, and both share it via `diff_apply`.
+14. **`call_mcp_tool` has no UI caller.** It is registered and uses `AllowAll` by design, but nothing in the frontend invokes it, so the permissive policy is reachable only over IPC. Either wire it to a user-initiated action or drop it — a permissive command with no visible entry point is the kind of thing that gets forgotten.
+
 
 ## Vulnerability Reporting
 

@@ -40,8 +40,9 @@ Options:
   --model <NAME>      Model name (or LLM_MODEL env)
   --workspace <DIR>   Project workspace directory (default: current dir)
   --apply             Write generated files to disk
-  --context-mode <full|focused|compact>
-  --include <git-diff,project-tree>
+  --context-mode <full|focused|compact|budgeted>
+  --include <git-diff,project-tree,project-memory>
+
   --output <text|json|ndjson>
   --artifact-dir <DIR>
   --run-id <ID>
@@ -62,15 +63,32 @@ Options:
   --profile <ID>
   --workspace <DIR>
   --apply
-  --context-mode <full|focused|compact>
-  --include <git-diff,project-tree>
+  --context-mode <full|focused|compact|budgeted>
+  --include <git-diff,project-tree,project-memory>
+
   --output <text|json|ndjson>
   --artifact-dir <DIR>
   --run-id <ID>
   --prompt-file <FILE>
   --stdin
   --run-command <COMMAND>
+
+  # 权限（默认全部关闭）
+  --allow-edit
+  --allow-create
+  --allow-delete
+  --allow-git
+  --allow-run <PATTERN>          # 可重复；同时暴露 workspace_run_command
+  --allow-agent-write            # 暴露 workspace_write_file，必须配 --apply
+  --deny-path <PATTERN>          # 命中的 diff 直接拒绝，不写盘
+
+  # 限额
+  --max-iterations <N>           # 有界修复循环的轮数预算，默认 0（不修复）
+  --timeout-seconds <N>
+  --max-output-bytes <N>
+  --max-diff-files <N>
 ```
+
 
 ## Configuration
 
@@ -293,7 +311,8 @@ It still does not test Monaco markers, xterm rendering, panel state, Tauri IPC e
 | 5 | Diff apply failed. |
 | 6 | Provider or LLM request failed. |
 | 7 | Workspace or precondition failed. |
-| 8 | Cancelled. Reserved for future cancellation support. |
+| 8 | Cancelled. Cancellation is cooperative — a shared flag checked in the request and streaming paths; there is no transport-level abort. |
+
 
 ## Completeness as an Agent IDE CLI
 
@@ -311,7 +330,8 @@ Implemented:
 - `doctor`, `context estimate`, `plan`, and `run` command shape.
 - `smoke ide-backend` for IDE backend integration smoke.
 - `smoke ide-surface` for read-only probes of the panel backends the Agent flow does not touch (workspace resolution, project tasks, verification candidates, Git status/diff, context packing). No provider required, so it runs in CI. Each probe reports `ok` / `unavailable` / `failed`; only `failed` affects the exit code, and results are written to `surface-probes.json`.
-- `--allow-run` does two things, not one. It authorizes the repair loop's own commands **and** it decides whether the model gets a tool: with it the CLI switches to native tool calling and exposes `workspace_run_command`, restricted to the same patterns, so the Agent can run a check and read the real output mid-run. Without it no invoker is attached and the request stays on the text protocol, so an arbitrary OpenAI-compatible endpoint never receives a `tools` parameter. `--allow-edit` / `--allow-create` control whether produced diffs may be applied, which is not the same permission.
+- `--allow-run` authorizes the repair loop's own commands **and** exposes `workspace_run_command` restricted to the same patterns, so the Agent can run a check and read the real output mid-run. Read-only workspace tools (`workspace_read_file`, `workspace_search_text`, `workspace_list_files`) are attached **unconditionally** and the CLI always uses native tool calling — a run without any read tool cannot quote a file verbatim, and a real DeepSeek run proved its diffs then fail to apply. Providers that reject the `tools` parameter degrade automatically after one refusal. `--allow-edit` / `--allow-create` control whether produced diffs may be applied, which is not the same permission.
+
 - `--allow-agent-write` exposes `workspace_write_file`, letting the Agent write a file directly instead of proposing a diff. It requires `--apply`: a preview run must leave the workspace untouched. Paired with `--allow-create` it may also create new files; alone, it can only rewrite existing ones. Writes are listed in `tool-writes.json` in the artifact directory, which is where you look for what the model changed — the CLI has no review area to show it.
 
 - `--output text|json|ndjson`.

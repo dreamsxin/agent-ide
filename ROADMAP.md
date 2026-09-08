@@ -21,8 +21,9 @@ After any interruption, restore context in this order:
 npm run build
 cd src-tauri
 cargo fmt --check
-cargo clippy --no-default-features --all-targets -- -D warnings
-cargo test --no-default-features
+cargo clippy --all-targets -- -D warnings
+cargo test
+
 ```
 
 These are the same commands CI runs (`.github/workflows/ci.yml`). If any of them fails locally, CI will fail too.
@@ -47,7 +48,8 @@ These are the same commands CI runs (`.github/workflows/ci.yml`). If any of them
 
 ## Current State
 
-Status as of 2026-09-05: **Phase 8 daily IDE replacement hardening in progress; Phase 9.0 market-parity foundation mostly closed (native tool calling, AGENTS.md memory, and MCP client landed; only the permission model V2 remains)**.
+Status as of 2026-09-08: **Phase 8 daily IDE replacement hardening in progress; Phase 9.0 market-parity foundation nearly closed.** Landed since the 09-05 snapshot: priority-quota context budget, CJK-aware token estimate, tool surface on resumed runs, the write and verification tools, CLI tool parity, and the bounded repair loop with its UI. Still open in 9.0: the permission model V2's monetary cap (9.0.13, no implementation) and the persistent run message thread (9.0.11, interim size bound only).
+
 
 Updated strategic direction (2026-09-03):
 
@@ -899,7 +901,8 @@ Goal: close the loop. Read, verify and write now exist; what is left is the orch
 
 
 
-| 9.0.12 CLI Tool Parity | `agent_cli` currently passes no invoker, so headless Agent runs are blind. Expose the same tool surface under the CLI permission flags | High | **Done (2026-09-07)**: `--allow-run` switches the CLI to native tool calling and attaches `workspace_run_command` limited to those patterns; `--allow-agent-write` attaches `workspace_write_file` and requires `--apply`, mirroring the desktop's Auto-mode gate — a preview run must leave the workspace untouched. With neither flag nothing changes: no invoker, `text_protocol`, so arbitrary OpenAI-compatible endpoints never receive a `tools` parameter. `--allow-edit` / `--allow-create` are still **not** write-tool grants on their own; reinterpreting them that way would be a silent privilege escalation, which is why the write grant needed its own flag. Writes are recorded in `tool-writes.json`, the CLI's stand-in for the desktop review area |
+| 9.0.12 CLI Tool Parity | `agent_cli` currently passes no invoker, so headless Agent runs are blind. Expose the same tool surface under the CLI permission flags | High | **Done (2026-09-07)**: `--allow-run` attaches `workspace_run_command` limited to those patterns; `--allow-agent-write` attaches `workspace_write_file` and requires `--apply`, mirroring the desktop's Auto-mode gate — a preview run must leave the workspace untouched. **Superseded detail (2026-09-08):** read-only tools are now attached unconditionally and the CLI always uses `native_tools`, so every provider receives a `tools` parameter (rejections degrade via `tools_rejected`). The earlier claim that "with neither flag no invoker is attached" no longer holds — a real DeepSeek run proved a toolless run cannot quote `original` and its diffs never apply. `--allow-edit` / `--allow-create` are still **not** write-tool grants on their own; reinterpreting them that way would be a silent privilege escalation. Writes are recorded in `tool-writes.json`, the CLI's stand-in for the desktop review area |
+
 
 | 9.0.13 Per-Run Spend Cap | Monetary cap alongside the existing `maxRunTokens` token cap; closes the last open item in 9.0.4 | Medium | Planned |
 
