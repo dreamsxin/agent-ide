@@ -12,8 +12,11 @@ async function loadStore(stored?: unknown) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
   }
   vi.resetModules();
-  const module = await import("./useLayoutStore");
-  return module.useLayoutStore;
+  return await import("./useLayoutStore");
+}
+
+function saved(): Record<string, unknown> {
+  return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
 }
 
 describe("layout persistence", () => {
@@ -22,15 +25,15 @@ describe("layout persistence", () => {
   });
 
   it("starts from defaults when nothing was saved", async () => {
-    const store = await loadStore();
+    const { useLayoutStore } = await loadStore();
 
-    expect(store.getState().leftWidth).toBe(240);
-    expect(store.getState().rightVisible).toBe(true);
-    expect(store.getState().bottomTab).toBe("terminal");
+    expect(useLayoutStore.getState().leftWidth).toBe(240);
+    expect(useLayoutStore.getState().rightVisible).toBe(true);
+    expect(useLayoutStore.getState().bottomTab).toBe("terminal");
   });
 
   it("restores a saved layout instead of resetting on every launch", async () => {
-    const store = await loadStore({
+    const { useLayoutStore } = await loadStore({
       leftWidth: 320,
       rightWidth: 420,
       bottomHeight: 180,
@@ -43,7 +46,7 @@ describe("layout persistence", () => {
       agentView: "changes",
     });
 
-    const state = store.getState();
+    const state = useLayoutStore.getState();
     expect(state.leftWidth).toBe(320);
     expect(state.rightWidth).toBe(420);
     expect(state.bottomHeight).toBe(180);
@@ -55,14 +58,49 @@ describe("layout persistence", () => {
   });
 
   it("writes changes back so the next launch sees them", async () => {
-    const store = await loadStore();
+    const { useLayoutStore, flushLayoutSave } = await loadStore();
 
-    store.getState().setLeftWidth(300);
-    store.getState().setBottomTab("logs");
+    useLayoutStore.getState().setLeftWidth(300);
+    useLayoutStore.getState().setBottomTab("logs");
+    flushLayoutSave();
 
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
-    expect(saved.leftWidth).toBe(300);
-    expect(saved.bottomTab).toBe("logs");
+    expect(saved().leftWidth).toBe(300);
+    expect(saved().bottomTab).toBe("logs");
+  });
+
+  /**
+   * 拖动面板时 App.tsx 每个 pointermove 都会调 setter。直接在订阅里写，一次拖动
+   * 就是几十到几百次同步 localStorage.setItem —— 用户只关心松手之后的结果。
+   */
+  it("does not write once per pointermove during a drag", async () => {
+    const { useLayoutStore, flushLayoutSave } = await loadStore();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    for (let width = 200; width < 260; width += 1) {
+      useLayoutStore.getState().setLeftWidth(width);
+    }
+
+    expect(setItem).not.toHaveBeenCalled();
+
+    flushLayoutSave();
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(saved().leftWidth).toBe(259);
+    setItem.mockRestore();
+  });
+
+  /** clamp 之后越界拖动会反复产生同一份快照，那些写入没有意义 */
+  it("skips a write when nothing actually changed", async () => {
+    const { useLayoutStore, flushLayoutSave } = await loadStore();
+
+    useLayoutStore.getState().setLeftWidth(9999);
+    flushLayoutSave();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+
+    useLayoutStore.getState().setLeftWidth(9999);
+    flushLayoutSave();
+
+    expect(setItem).not.toHaveBeenCalled();
+    setItem.mockRestore();
   });
 
   /**
@@ -70,22 +108,26 @@ describe("layout persistence", () => {
    * 面板变成不可见或不可达，而用户不知道为什么 —— 坏字段必须退回默认值。
    */
   it("clamps out-of-range sizes rather than adopting them", async () => {
-    const store = await loadStore({ leftWidth: 9999, rightWidth: 1, bottomHeight: -50 });
+    const { useLayoutStore } = await loadStore({
+      leftWidth: 9999,
+      rightWidth: 1,
+      bottomHeight: -50,
+    });
 
-    const state = store.getState();
+    const state = useLayoutStore.getState();
     expect(state.leftWidth).toBe(500);
     expect(state.rightWidth).toBe(280);
     expect(state.bottomHeight).toBe(120);
   });
 
   it("falls back to defaults for unknown tab and view names", async () => {
-    const store = await loadStore({
+    const { useLayoutStore } = await loadStore({
       leftTab: "explorer-v2",
       bottomTab: 42,
       agentView: "settings-old",
     });
 
-    const state = store.getState();
+    const state = useLayoutStore.getState();
     expect(state.leftTab).toBe("explorer");
     expect(state.bottomTab).toBe("terminal");
     expect(state.agentView).toBe("task");
@@ -105,12 +147,12 @@ describe("layout persistence", () => {
    * 会让用户在完全不知情的情况下一直付这个开销。
    */
   it("does not remember the performance overlay", async () => {
-    const store = await loadStore();
+    const { useLayoutStore, flushLayoutSave } = await loadStore();
 
-    store.getState().togglePerformanceOverlay();
-    expect(store.getState().performanceOverlay).toBe(true);
+    useLayoutStore.getState().togglePerformanceOverlay();
+    expect(useLayoutStore.getState().performanceOverlay).toBe(true);
+    flushLayoutSave();
 
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
-    expect(saved.performanceOverlay).toBeUndefined();
+    expect(saved().performanceOverlay).toBeUndefined();
   });
 });
