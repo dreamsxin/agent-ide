@@ -187,6 +187,7 @@ export default function DiffView() {
   const applyDiffHunk = useAgentStore((s) => s.applyDiffHunk);
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
   const undoLastApply = useAgentStore((s) => s.undoLastApply);
+  const pendingUndo = useAgentStore((s) => s.pendingUndo);
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
   const rejectDiffHunk = useAgentStore((s) => s.rejectDiffHunk);
   const regenerateDiff = useAgentStore((s) => s.regenerateDiff);
@@ -275,27 +276,38 @@ export default function DiffView() {
         </div>
       )}
 
-      {hasPending && (
+      {(hasPending || pendingUndo) && (
         <div className="flex flex-shrink-0 gap-2">
-          <button
-            onClick={handleApplyAll}
-            className="flex-1 rounded border border-diff-add/40 bg-diff-add/20 px-2 py-1 text-xs text-diff-add transition-colors hover:bg-diff-add/30"
-          >
-            Apply All ({pendingDiffs.length})
-          </button>
-          <button
-            onClick={handleRejectAll}
-            className="flex-1 rounded border border-diff-remove/40 bg-diff-remove/20 px-2 py-1 text-xs text-diff-remove transition-colors hover:bg-diff-remove/30"
-          >
-            Reject All
-          </button>
-          <button
-            onClick={handleUndoLastApply}
-            title="Restore files to their state before the most recent apply"
-            className="rounded border border-surface-border bg-surface-border/20 px-2 py-1 text-xs text-surface-muted transition-colors hover:bg-surface-border/40"
-          >
-            Undo Apply
-          </button>
+          {hasPending && (
+            <>
+              <button
+                onClick={handleApplyAll}
+                className="flex-1 rounded border border-diff-add/40 bg-diff-add/20 px-2 py-1 text-xs text-diff-add transition-colors hover:bg-diff-add/30"
+              >
+                Apply All ({pendingDiffs.length})
+              </button>
+              <button
+                onClick={handleRejectAll}
+                className="flex-1 rounded border border-diff-remove/40 bg-diff-remove/20 px-2 py-1 text-xs text-diff-remove transition-colors hover:bg-diff-remove/30"
+              >
+                Reject All
+              </button>
+            </>
+          )}
+          {/* 撤销按钮此前和 Apply All 共用 `hasPending` 条件，于是全部应用完之后它就
+              消失了 —— 恰好是最需要退路的那一刻。显示条件改成后端确认"确实有回滚点"，
+              和待审列表是否为空无关。 */}
+          {pendingUndo && (
+            <button
+              onClick={handleUndoLastApply}
+              title={`Undo ${pendingUndo.label}: restore ${pendingUndo.files.length} file(s) to their state before that apply`}
+              className={`rounded border border-surface-border bg-surface-border/20 px-2 py-1 text-xs text-surface-muted transition-colors hover:bg-surface-border/40 ${
+                hasPending ? "" : "flex-1"
+              }`}
+            >
+              Undo Apply ({pendingUndo.files.length})
+            </button>
+          )}
         </div>
       )}
 

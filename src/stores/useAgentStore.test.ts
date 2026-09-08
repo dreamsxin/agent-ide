@@ -190,6 +190,44 @@ describe("undoLastApply", () => {
   });
 });
 
+describe("refreshPendingUndo", () => {
+  /**
+   * Undo 按钮的显示条件必须来自后端，不能从 diff 状态推断：回滚栈在
+   * orchestrator 内存里，进程重启就没了，推断会显示一个点下去必然失败的按钮。
+   */
+  it("records the checkpoint the backend reports", async () => {
+    invokeMock.mockResolvedValueOnce({ label: "Auto-apply", files: ["src/a.ts", "src/b.ts"] });
+
+    await useAgentStore.getState().refreshPendingUndo();
+
+    expect(invokeMock).toHaveBeenCalledWith("pending_undo");
+    expect(useAgentStore.getState().pendingUndo).toEqual({
+      label: "Auto-apply",
+      files: ["src/a.ts", "src/b.ts"],
+    });
+  });
+
+  it("treats no checkpoint as no way back rather than leaving a stale one", async () => {
+    useAgentStore.setState({ pendingUndo: { label: "Auto-apply", files: ["src/a.ts"] } });
+    invokeMock.mockResolvedValueOnce(null);
+
+    await useAgentStore.getState().refreshPendingUndo();
+
+    expect(useAgentStore.getState().pendingUndo).toBeNull();
+  });
+
+  // 这是背景刷新，不是用户发起的动作：失败不该抢占 error 横幅
+  it("does not overwrite the error banner when the query fails", async () => {
+    useAgentStore.setState({ error: "apply failed for src/a.ts" });
+    invokeMock.mockRejectedValueOnce("no orchestrator");
+
+    await useAgentStore.getState().refreshPendingUndo();
+
+    expect(useAgentStore.getState().pendingUndo).toBeNull();
+    expect(useAgentStore.getState().error).toBe("apply failed for src/a.ts");
+  });
+});
+
 describe("applyAllDiffs", () => {
   const pendingDiff = {
     id: "diff-1",

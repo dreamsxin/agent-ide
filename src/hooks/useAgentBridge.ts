@@ -48,6 +48,10 @@ export function useAgentBridge() {
             if (e.payload.ideMode) {
               useAgentStore.getState().setIdeMode(e.payload.ideMode as "code" | "plan");
             }
+            // 每条应用路径（Apply All / 单文件 / 单 hunk / 自动应用 / 撤销）都会发这个
+            // 事件，而 `apply_diffs` 并不重发 agent-diff-ready —— 所以"有没有退路"
+            // 必须在这里也复查一次，否则手动 Apply All 之后 Undo 按钮不会出现。
+            void useAgentStore.getState().refreshPendingUndo();
           }),
 
           listen<Step[]>("agent-plan-ready", (e) => {
@@ -64,6 +68,9 @@ export function useAgentBridge() {
             // 不再强制切到 Changes：待审查改动现在直接出现在对话流里
             // （PendingChangesCard），把用户从刚读的回复上拽走反而更差。
             setDiffs(e.payload);
+            // 应用、自动应用、Agent 工具写文件都会重发这个事件，所以这里是
+            // "有没有可撤销的应用"唯一需要复查的地方。
+            void useAgentStore.getState().refreshPendingUndo();
             upsertProblems(
               "agent",
               e.payload

@@ -91,6 +91,7 @@ pub fn run() {
             commands::agent::reset_pipeline,
             commands::agent::clear_agent_conversation,
             commands::agent::undo_last_apply,
+            commands::agent::pending_undo,
             commands::agent::verify_workspace,
             commands::agent::repair_workspace,
             commands::agent::agent_repair_prompt,
