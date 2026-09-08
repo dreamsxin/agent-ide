@@ -893,7 +893,7 @@ pub async fn continue_agent_pipeline(
             paused.context,
             paused.context_summary,
             paused.pipeline,
-            paused.stage_outputs,
+            paused.transcript,
             paused.stage_index,
             true,
             paused.ide_mode,

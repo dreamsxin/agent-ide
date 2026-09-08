@@ -288,9 +288,20 @@ contain**. `LlmClient::with_request_recorder` captures the messages actually sen
 pins four things per stage — the user task verbatim, the role's output rules, the
 prior stage's work, and the pending-diff state.
 
-This is deliberately not a quality eval. It is the safety net for 9.0.11, which
-has to restructure every stage's prompt to replace prose concatenation with a
-real message thread: after that change, this test says which part went missing.
+This is deliberately not a quality eval. It was the safety net for 9.0.11, which
+restructured every stage's prompt to replace prose concatenation with a real
+message thread, and it earned its keep: after the change the test failed on the
+one assertion that was about the old shape (`"Prior stage outputs"` as literal
+text) while confirming the rest survived. It now asserts the stronger property —
+prior stage work must arrive as `assistant` messages rather than as prose spliced
+into a user message, since only real messages can also carry tool results.
+
+`orchestrator::tests::a_resumed_run_still_shows_the_model_what_the_tools_returned`
+covers the part that motivated the change: a resumed run's request must contain
+the actual `tool` output, and the `assistant` message that made the call must
+immediately precede it — an unpaired `tool` message makes the provider reject the
+whole request.
+
 
 ## Real-provider eval
 

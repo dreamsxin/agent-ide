@@ -1530,15 +1530,24 @@ Capture a lightweight design artifact before implementation.
 /// - `AGENT_IDE_MOCK_TOOL`：要调用的工具名，必须在本次通告的工具列表里
 /// - `AGENT_IDE_MOCK_TOOL_ARGS`：原样透传的 JSON 参数，缺省 `{}`
 ///
-/// 只发一轮：消息里已经出现过 `tool` 角色就说明这一轮走完了，接着回文本，
+/// 只发一轮：**本 stage** 的消息里已经出现过 `tool` 角色就说明这一轮走完了，接着回文本，
 /// 否则会一直调到 12 轮上限。
+///
+/// 判定范围必须限定在最后一条 `user` 消息之后。上游 stage 的消息线程会被带进请求，
+/// 里面本来就有 `tool` 结果；不切分的话，除第一个 stage 外的所有 stage 都不会再调工具，
+/// 工具循环在自动化路径上就只剩一次覆盖。
 fn mock_tool_call(messages: &[ChatMessage], tools: &[ToolDefinition]) -> Option<LlmToolCall> {
     let name = std::env::var("AGENT_IDE_MOCK_TOOL").ok()?;
     let name = name.trim();
     if name.is_empty() {
         return None;
     }
-    if messages.iter().any(|message| message.role == "tool") {
+    let current_turn = messages
+        .iter()
+        .rposition(|message| message.role == "user")
+        .map(|index| &messages[index..])
+        .unwrap_or(messages);
+    if current_turn.iter().any(|message| message.role == "tool") {
         return None;
     }
     // 没被通告的工具不能调：真实供应商也只能从工具列表里选，绕过它就测不出

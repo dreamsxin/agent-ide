@@ -253,7 +253,7 @@ Each stage receives:
 
 - Original user prompt.
 - Compressed project context.
-- Prior stage outputs.
+- Prior stages' real `assistant` / `tool` messages, tool results included.
 - Role-specific system prompt and output rules.
 
 The configured pipeline lives in `AgentGlobalState.pipeline_stages` and can be changed through `get_pipeline`, `update_pipeline`, and `reset_pipeline`.
@@ -565,7 +565,7 @@ Highest-impact gaps:
 
 4. **Session memory**
    - Cross-prompt memory is a 6-turn digest (prompt trimmed to 400 chars, outcome to 300) carried in `context.conversation`.
-   - Stage prompts are rebuilt per stage as system + user, with prior stage output concatenated as prose. There is no persistent message thread, so tool results do not survive the stage that produced them.
+   - Stage prompts are rebuilt per stage as system + the stage's task user message + the prior stages' real `assistant` / `tool` messages + a short "run this stage now" user message. Tool results therefore survive the stage that produced them, including across a pause and resume. The thread is bounded by `executor::bound_transcript`, which drops whole tool-call/tool-result groups rather than splitting a pair, and states in-band how much it omitted. The thread is in-memory only — a process restart loses it.
 
 5. **Action log persistence**
    - Action logs are emitted as events and rendered in the UI, but not persisted. Run history and replay are still missing.
@@ -648,7 +648,7 @@ Ordered by dependency, not by appeal:
 
 1. **Write tool.** Done: `workspace_write_file`, advertised only in `auto` mode, recorded as an applied+undoable diff.
 2. **Autonomous bounded repair loop.** The prompt builder and check runner are already shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `Verify All` / `Fix with Agent` already send a repair prompt — but each is one user-triggered round. What is missing is the orchestrator running verify → repair → re-verify itself, bounded by an iteration count, so a failed stage or failed check does not abort the pipeline.
-3. **Persistent message thread per run.** Replace prose concatenation of prior stage output with a real message list so tool results survive across stages and prompt caching becomes possible.
+3. **Persistent message thread per run.** Done: stages exchange real `assistant` / `tool` messages (`executor::StageOutcome`), so tool results survive across stages and a pause/resume. Prompt caching is still not implemented — no cache-control markers are sent — and the thread is not persisted across a process restart.
 4. **Symbol index and retrieval.** tree-sitter symbol index plus local retrieval feeding `budgeted` packing. Prerequisite for large workspaces, where the 160-entry project tree is not a usable map.
 5. **Parallel subagents with worktree isolation.** Depends on (1): parallel agents that cannot write have nothing to isolate.
 6. **Hooks and skills.** User-configurable hooks at stage and pre-apply points, and lazily loaded `SKILL.md` packages.
