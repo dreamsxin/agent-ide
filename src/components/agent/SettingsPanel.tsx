@@ -3,6 +3,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
 import McpPanel from "./McpPanel";
 import type { LocalModelType, ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
@@ -115,6 +116,11 @@ export default function SettingsPanel() {
   const [reservedOutputTokens, setReservedOutputTokens] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [maxRunTokens, setMaxRunTokens] = useState("");
+  // 价格和金额上限在界面上用美元，存到后端是整数微美元（见 usdToMicros）
+  const [promptPrice, setPromptPrice] = useState("");
+  const [completionPrice, setCompletionPrice] = useState("");
+  const [maxRunSpend, setMaxRunSpend] = useState("");
+  const spendCapState = spendCapStatus(promptPrice, completionPrice, maxRunSpend);
   const [modelType, setModelType] = useState<LocalModelType>("starcoder");
   const [modelPath, setModelPath] = useState("");
   const [modelFile, setModelFile] = useState("");
@@ -155,6 +161,9 @@ export default function SettingsPanel() {
         setReservedOutputTokens(numberToInput(active.reservedOutputTokens));
         setMaxOutputTokens(numberToInput(active.maxOutputTokens));
         setMaxRunTokens(numberToInput(active.maxRunTokens));
+        setPromptPrice(microsToUsdInput(active.promptMicrosPerMillion));
+        setCompletionPrice(microsToUsdInput(active.completionMicrosPerMillion));
+        setMaxRunSpend(microsToUsdInput(active.maxRunSpendMicros));
         setModelType(active.modelType ?? "starcoder");
         setModelPath(active.modelPath ?? "");
         setModelFile(active.modelFile ?? "");
@@ -266,6 +275,9 @@ export default function SettingsPanel() {
         reservedOutputTokens: inputToNumber(reservedOutputTokens),
         maxOutputTokens: inputToNumber(maxOutputTokens),
         maxRunTokens: inputToNumber(maxRunTokens),
+        promptMicrosPerMillion: usdToMicros(promptPrice),
+        completionMicrosPerMillion: usdToMicros(completionPrice),
+        maxRunSpendMicros: usdToMicros(maxRunSpend),
         toolCallMode,
         modelType: provider === "local" ? modelType : undefined,
         modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
@@ -284,7 +296,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, maxRunTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -305,6 +317,9 @@ export default function SettingsPanel() {
           reservedOutputTokens: inputToNumber(reservedOutputTokens),
           maxOutputTokens: inputToNumber(maxOutputTokens),
           maxRunTokens: inputToNumber(maxRunTokens),
+          promptMicrosPerMillion: usdToMicros(promptPrice),
+          completionMicrosPerMillion: usdToMicros(completionPrice),
+          maxRunSpendMicros: usdToMicros(maxRunSpend),
           toolCallMode,
           modelType: provider === "local" ? modelType : undefined,
           modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
@@ -329,7 +344,7 @@ export default function SettingsPanel() {
     } finally {
       setTesting(false);
     }
-  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, maxRunTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
 
   const handleProfileSelect = useCallback((id: string) => {
     const profile = llmProfiles.find((item) => item.id === id);
@@ -343,6 +358,9 @@ export default function SettingsPanel() {
     setReservedOutputTokens(numberToInput(profile.reservedOutputTokens));
     setMaxOutputTokens(numberToInput(profile.maxOutputTokens));
     setMaxRunTokens(numberToInput(profile.maxRunTokens));
+    setPromptPrice(microsToUsdInput(profile.promptMicrosPerMillion));
+    setCompletionPrice(microsToUsdInput(profile.completionMicrosPerMillion));
+    setMaxRunSpend(microsToUsdInput(profile.maxRunSpendMicros));
     setToolCallMode(profile.toolCallMode ?? "text_protocol");
     setApiKey("");
   }, [llmProfiles]);
@@ -357,6 +375,12 @@ export default function SettingsPanel() {
     setMaxContextTokens("");
     setReservedOutputTokens("");
     setMaxOutputTokens("");
+    // 上限和价格也要清掉：新 profile 通常是另一个模型，沿用上一个的价格会让
+    // 金额上限按错误的单价执行，那比没有上限更糟
+    setMaxRunTokens("");
+    setPromptPrice("");
+    setCompletionPrice("");
+    setMaxRunSpend("");
     setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
     setApiKey("");
   }, []);
@@ -631,6 +655,56 @@ export default function SettingsPanel() {
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
+          Per-Run Spend Cap
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <BudgetInput
+            label="Input $/M tokens"
+            value={promptPrice}
+            onChange={setPromptPrice}
+            placeholder="0.28"
+            step="0.000001"
+          />
+          <BudgetInput
+            label="Output $/M tokens"
+            value={completionPrice}
+            onChange={setCompletionPrice}
+            placeholder="0.42"
+            step="0.000001"
+          />
+          <BudgetInput
+            label="Spend cap $"
+            value={maxRunSpend}
+            onChange={setMaxRunSpend}
+            placeholder="no limit"
+            step="0.01"
+          />
+        </div>
+        <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
+          {spendCapState === "active" ? (
+            <>
+              Active: a run stops once its estimated cost reaches{" "}
+              <span className="font-mono text-surface-text">${maxRunSpend}</span>, checked before the
+              token cap.
+            </>
+          ) : spendCapState === "no_price" ? (
+            <span className="text-amber-300">
+              Not enforced: both prices are required. With only one, the estimate would undercount
+              and the cap would be a false guarantee, so spend is recorded as "not computable"
+              instead.
+            </span>
+          ) : (
+            <>
+              Optional. Enter both per-million prices and a cap to stop a run on cost rather than on
+              token count — useful when a model is cheap in tokens but expensive in money. Prices are
+              stored to the millionth of a dollar.
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">
           Tool Call Mode
         </div>
         <select
@@ -788,11 +862,14 @@ function BudgetInput({
   value,
   onChange,
   placeholder,
+  step,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
+  /** 金额字段要用小数步进，默认的 1 会让浏览器拒绝 "0.28" */
+  step?: string;
 }) {
   return (
     <label className="min-w-0">
@@ -800,6 +877,7 @@ function BudgetInput({
       <input
         type="number"
         min={0}
+        step={step}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}

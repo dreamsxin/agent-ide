@@ -572,7 +572,7 @@ Highest-impact gaps:
 
 6. **Cost accounting**
    - `RunUsageMeter` enforces a per-run token cap (`maxRunTokens`) before every provider request, and reports under-counting honestly when providers omit usage.
-   - A monetary cap exists as well (`maxRunSpendMicros` plus per-million prices, integer micro-USD), checked ahead of the token cap. It only takes effect when both the prompt and completion price are configured; otherwise spend is reported as "not computable" rather than as zero. Configurable in the profiles JSON only — there is no Settings field yet.
+   - A monetary cap exists as well (`maxRunSpendMicros` plus per-million prices, integer micro-USD), checked ahead of the token cap. It only takes effect when both the prompt and completion price are configured; otherwise spend is reported as "not computable" rather than as zero. Editable in Settings; the UI works in dollars and converts to micro-USD by string parsing.
 
 7. **Runtime hardening**
    - Interactive Tauri smoke tests for boot, workspace open, file read/write, terminal, Agent prompt, diff apply.

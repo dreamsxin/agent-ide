@@ -148,7 +148,7 @@ Not covered: a credential file passed explicitly as a context file, or read by a
 - `usage_is_unknown()` distinguishes "the provider reported no usage" from "nothing was spent". Local runtimes and mock endpoints report no usage, so a cap cannot be enforced against them; this is surfaced in the run's action log rather than being reported as zero cost.
 - `maxRunSpendMicros` caps the run in money rather than tokens, checked in the same `check_budget` choke point and evaluated **before** the token cap, so an expensive model stops on cost even when the token count looks modest. Amounts are integer micro-USD (1 USD = 1_000_000) and each call's cost is rounded up, so a run cannot accumulate spend that rounds to zero.
 - Spend needs both `promptMicrosPerMillion` and `completionMicrosPerMillion` on the profile. With only one of them the estimate would systematically undercount, so pricing is treated as absent: the action log reports `not computable (no pricing configured)` and the spend cap is **not** enforced. An undercounting cap is worse than a missing one because the user believes they are protected.
-- The three spend fields are profile-JSON only; the Settings UI has no field for them yet.
+- The three spend fields are editable in Settings → Per-Run Spend Cap. The UI takes dollars and converts to integer micro-USD by string parsing (`utils/money.ts`), because `Number("0.29") * 1e6` is `289999.99999999994` and this value decides when a run is cut off. Creating a new profile clears them rather than inheriting them, so a cap is never enforced using the previous model's prices.
 - The tool loop is bounded at 12 rounds per stage (`MAX_TOOL_ITERATIONS`, `agent/executor.rs`).
 
 

@@ -285,6 +285,11 @@ export interface LlmProfile {
   maxOutputTokens?: number;
   /** 单次运行的 token 上限；未设置或 0 表示不限制 */
   maxRunTokens?: number;
+  /** 每百万 prompt token 的价格，单位微美元（$0.28/M = 280000） */
+  promptMicrosPerMillion?: number;
+  completionMicrosPerMillion?: number;
+  /** 单次运行的金额上限（微美元）；两个价格都配齐才会被执行 */
+  maxRunSpendMicros?: number;
   effectiveInputTokens?: number;
   toolCallMode?: "text_protocol" | "native_tools";
 }
@@ -336,6 +341,9 @@ export interface SaveLlmProfileRequest {
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
   maxRunTokens?: number;
+  promptMicrosPerMillion?: number;
+  completionMicrosPerMillion?: number;
+  maxRunSpendMicros?: number;
   toolCallMode?: "text_protocol" | "native_tools";
   setActive?: boolean;
 }
