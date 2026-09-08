@@ -93,6 +93,8 @@ export default function EditorContainer() {
   const addLog = useLogStore((s) => s.addLog);
   const updateFileContent = useEditorStore((s) => s.updateFileContent);
   const saveCurrentFile = useEditorStore((s) => s.saveCurrentFile);
+  const saveError = useEditorStore((s) => s.saveError);
+  const clearSaveError = useEditorStore((s) => s.clearSaveError);
   const setSelectedText = useEditorStore((s) => s.setSelectedText);
   const setSelectedRange = useEditorStore((s) => s.setSelectedRange);
   const pendingRevealLocation = useEditorStore((s) => s.pendingRevealLocation);
@@ -584,6 +586,25 @@ export default function EditorContainer() {
     <div className="h-full flex flex-col bg-surface-base" ref={editorContainerRef}>
       {/* 文件标签栏 */}
       <EditorTabs />
+
+      {/* 保存失败/被拒必须看得见。以前只走 console.error，用户以为已经存下去了。 */}
+      {saveError && (
+        <div
+          role="alert"
+          className="flex flex-shrink-0 items-start gap-2 border-b border-diff-remove/40 bg-diff-remove/10 px-3 py-1.5 text-[11px] text-diff-remove"
+        >
+          <span className="min-w-0 flex-1 break-words">{saveError}</span>
+          <button
+            onClick={clearSaveError}
+            aria-label="Dismiss save error"
+            title="Dismiss"
+            className="flex-shrink-0 text-surface-muted hover:text-surface-text"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
 
       {/* Monaco 编辑器区 */}
       <div className="flex-1 relative overflow-hidden">
