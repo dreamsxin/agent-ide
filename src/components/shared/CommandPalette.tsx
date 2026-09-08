@@ -149,6 +149,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const changeMode = useAgentStore((s) => s.changeMode);
   const agentState = useAgentStore((s) => s.state);
+  const pendingUndo = useAgentStore((s) => s.pendingUndo);
+  const undoLastApply = useAgentStore((s) => s.undoLastApply);
 
   return useMemo<PaletteCommand[]>(() => {
     const commands: PaletteCommand[] = [
@@ -274,6 +276,19 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       agentModeCommand("agent.mode.edit", "Set Agent Mode: Edit", "edit", changeMode),
       agentModeCommand("agent.mode.auto", "Set Agent Mode: Auto", "auto", changeMode),
       {
+        id: "agent.undo-apply",
+        // 唯一的 Undo 按钮在 Changes 视图里，右面板一收起就没有退路了。
+        // 撤销是"刚发现改错了"时要用的东西，不能只有一个入口。
+        title: pendingUndo ? `Undo Apply: ${pendingUndo.label}` : "Undo Apply",
+        subtitle: pendingUndo
+          ? `Restore ${pendingUndo.files.length} file(s) to their state before that apply`
+          : "Nothing has been applied that can be undone",
+        group: "Agent",
+        keywords: ["revert", "restore", "rollback"],
+        disabled: !pendingUndo,
+        run: () => void undoLastApply(),
+      },
+      {
         id: "agent.stop",
         title: "Stop Agent",
         subtitle: "Cancel the current Agent run",
@@ -300,6 +315,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     bottomVisible,
     changeMode,
     leftVisible,
+    pendingUndo,
     performanceOverlay,
     rightVisible,
     runProjectTask,
@@ -315,6 +331,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     togglePerformanceOverlay,
     toggleRightPanel,
     toggleTheme,
+    undoLastApply,
   ]);
 }
 
