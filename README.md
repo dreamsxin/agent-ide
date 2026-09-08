@@ -38,6 +38,10 @@ npm run tauri -- dev
 
 Runs the real desktop IDE with the Rust backend and Tauri APIs.
 
+Once it is running, [docs/getting_started.md](docs/getting_started.md) walks through
+configuring a model, running a first task, reviewing and undoing changes, and the
+keyboard shortcuts. The rest of this file is build and architecture material.
+
 ## Setup
 
 ### Prerequisites

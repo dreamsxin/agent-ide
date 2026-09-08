@@ -36,6 +36,9 @@ npm run tauri -- dev
 
 运行真实桌面 IDE，包含 Rust 后端和 Tauri API。
 
+跑起来之后，[docs/getting_started.md](docs/getting_started.md) 讲的是怎么配置模型、
+跑第一个任务、审查和撤销改动，以及快捷键。本文件其余部分是构建和架构内容。
+
 ## 环境准备
 
 ### 前置要求
