@@ -132,25 +132,57 @@ function loadLayout(): PersistedLayout {
   }
 }
 
-function saveLayout(state: LayoutStore) {
+function snapshotOf(state: LayoutStore): PersistedLayout {
+  return {
+    leftWidth: state.leftWidth,
+    rightWidth: state.rightWidth,
+    bottomHeight: state.bottomHeight,
+    leftVisible: state.leftVisible,
+    rightVisible: state.rightVisible,
+    bottomVisible: state.bottomVisible,
+    focusMode: state.focusMode,
+    leftTab: state.leftTab,
+    bottomTab: state.bottomTab,
+    agentView: state.agentView,
+  };
+}
+
+/** 已经写进 localStorage 的那份 JSON，用来跳过无变化的写入 */
+let lastWritten: string | null = null;
+let pendingWrite: ReturnType<typeof setTimeout> | null = null;
+
+function writeNow() {
+  if (pendingWrite !== null) {
+    clearTimeout(pendingWrite);
+    pendingWrite = null;
+  }
   try {
-    const snapshot: PersistedLayout = {
-      leftWidth: state.leftWidth,
-      rightWidth: state.rightWidth,
-      bottomHeight: state.bottomHeight,
-      leftVisible: state.leftVisible,
-      rightVisible: state.rightVisible,
-      bottomVisible: state.bottomVisible,
-      focusMode: state.focusMode,
-      leftTab: state.leftTab,
-      bottomTab: state.bottomTab,
-      agentView: state.agentView,
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    const serialized = JSON.stringify(snapshotOf(useLayoutStore.getState()));
+    // 拖动到边界之后 clamp 会让后续每个事件都产生同一份快照
+    if (serialized === lastWritten) return;
+    localStorage.setItem(STORAGE_KEY, serialized);
+    lastWritten = serialized;
   } catch {
     /* 存不进去（隐私模式、配额满）不该影响正常使用 */
   }
 }
+
+/**
+ * 攒一下再写。
+ *
+ * 拖动面板时 `App.tsx` 每个 pointermove 都会调 setter，直接在订阅里写就是一次拖动
+ * 几十到几百次同步 `localStorage.setItem` + `JSON.stringify`。用户只关心松手之后的
+ * 结果，所以延后到最后一次变化之后再落盘。
+ *
+ * 代价是"最后一次改动可能没写完就退出"，所以页面隐藏和卸载时强制冲一次。
+ */
+const SAVE_DELAY_MS = 250;
+
+function scheduleSave() {
+  if (pendingWrite !== null) clearTimeout(pendingWrite);
+  pendingWrite = setTimeout(writeNow, SAVE_DELAY_MS);
+}
+
 
 export const useLayoutStore = create<LayoutStore>((set) => ({
   ...loadLayout(),
@@ -179,4 +211,17 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
 
 // 订阅一次而不是在 10 个 action 里各写一遍 save：拖动尺寸、切 tab、开关面板都要
 // 记住，逐个 action 加保存迟早漏掉一个，而漏掉的那个"有时记得有时不记得"最难查。
-useLayoutStore.subscribe(saveLayout);
+useLayoutStore.subscribe(scheduleSave);
+
+// 退出/切后台时把还欠着的那次写补上，否则松手就关窗会丢掉最后一次调整
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", writeNow);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") writeNow();
+  });
+}
+
+/** 立刻落盘，跳过防抖。测试用，也是上面两个事件处理器调用的同一条路径。 */
+export function flushLayoutSave() {
+  writeNow();
+}
