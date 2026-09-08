@@ -155,18 +155,43 @@ Not covered: a credential file passed explicitly as a context file, or read by a
 
 ## Agent Approval Model
 
+Two independent settings control what an Agent run may do, and they are easy to
+confuse because two of their three values share a name. Both are visible in the
+UI, in different places.
+
+- **Agent mode** (`AgentMode`: `suggest` | `edit` | `auto`) — decides whether the
+  Agent's diffs reach disk without a click, and whether the direct write tool is
+  advertised. Set from the mode switch in the top bar.
+- **Permission preset** (`AgentPermissionPreset`: `ask` | `suggest` | `auto`) — a
+  shortcut that sets the four fine-grained toggles (`allowFileCreate`,
+  `allowFileDelete`, `allowCommandRun`, `allowGitActions`). Set in
+  Settings → Agent Permissions, where the toggles can also be changed one by one.
+
+`suggest` and `auto` appear in both lists and mean different things; `edit` is a
+mode only and `ask` is a preset only. There is no "edit" preset to look for in
+Settings, and choosing the `suggest` preset does not put the run in `suggest`
+mode. Renaming one of the two axes would remove the trap, but the values are
+persisted in the profile config, so it is recorded here rather than changed
+silently.
+
 The Agent operates in a "suggest-then-apply" pattern with three modes:
 
 | Mode | Behavior |
 |------|----------|
 | `suggest` | Produces reviewable diffs only. User must explicitly apply. |
-| `edit` | Produces reviewable diffs. User must explicitly apply. |
+| `edit` | Identical to `suggest` today. |
 | `auto` | Applies pending diffs automatically after the pipeline run completes. |
+
+`edit` is not a distinct privilege level. Every backend gate is written as
+`matches!(mode, AgentMode::Auto)`, so no code path treats `edit` differently from
+`suggest` — the mode is parsed and displayed and nothing else. The switch offers
+three positions but grants two levels. Stated here because a user reasonably reads
+a middle setting as "more than suggest, less than auto", and it is not.
 
 Which permission toggles are actually enforced in the backend:
 
 - `allowFileCreate` — enforced twice. In `auto` mode, new-file diffs are held for review instead of being written when it is false, and `workspace_write_file` refuses to create a file that does not exist.
-- `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. `ask` / `suggest` resolve to `AutoApprovedOnly`; `auto` resolves to `AllowAll`.
+- `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. This one follows the **preset**, not the mode: the `ask` and `suggest` presets resolve to `AutoApprovedOnly`; the `auto` preset resolves to `AllowAll`.
 - `allowCommandRun` — enforced. When false, the `workspace_run_command` tool is **not advertised to the model and not claimed by the invoker**, so there is no Agent path to process execution other than MCP tools. When true, the exposed allow-list is derived by the backend from the project's own declared tasks (`package.json` scripts, Cargo), never from model input, and long-running commands (dev servers, watch tasks) are refused regardless of the list. Every call is written to the action log.
 - **Agent mode gates direct writes.** `workspace_write_file` is advertised only when the run is in `auto` mode. This is not a new privilege level: `auto` already applies pending diffs without a click, so writing during the run grants nothing it did not already have. In `suggest` / `edit` the tool is absent and the model must emit reviewable diffs, which is what those modes promise. Writes still go through `workspace::resolve_for_agent_write`, so `.git/`, `.agent-ide/`, `node_modules/` and credential files are refused on this path too.
 - **The bounded repair loop (`repair_workspace`) is gated the same way, for the same reason.** Every iteration has to reach the workspace or the re-run checks the old code, so the command is refused outside `auto` mode instead of being downgraded to a single round. Its fixes go through the normal diff application path (`apply_all_diffs`), so each round keeps its base-hash staleness check and its undo point; the iteration budget is clamped to 3, and every iteration plus the stop reason is written to the action log.

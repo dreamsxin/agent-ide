@@ -713,6 +713,10 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Interactive plan controls, Problems/Terminal/Git/LSP integration, run history, per-hunk review, context preview/source toggles, action-log view, and task recovery remain desktop IDE workflows unless a separate terminal UI is intentionally planned.
    - CLI hardening is now mostly closed; only broaden permissions if the CLI scope is intentionally widened.
 
+15. **Two settings axes share value names, and one of their values does nothing (found 2026-09-08 by a UI/doc review)**
+   - `AgentMode` is `suggest | edit | auto`; `AgentPermissionPreset` is `ask | suggest | auto`. They are orthogonal — mode decides whether diffs reach disk, the preset sets the four fine-grained toggles — but they share `suggest` and `auto`. Every doc described the presets as `suggest / edit / auto`, so a reader looking for an "edit" preset in Settings found nothing, and choosing the `suggest` preset does not put the run in `suggest` mode. Now documented in SECURITY.md § Agent Approval Model rather than renamed: the values are persisted in the profile config, so a rename needs migration.
+   - `AgentMode::Edit` is inert. Every gate in the backend is `matches!(mode, AgentMode::Auto)` (`commands/agent.rs:302`, `:660`, `:1213`, `orchestrator.rs:847`); nothing branches on `Edit`, so it is parsed, displayed, and otherwise ignored. The switch shows three positions and grants two levels. Either give `edit` a real meaning or reduce the switch to two positions — a middle setting that a user reads as "more than suggest, less than auto" while granting exactly `suggest` is the worst of the three options.
+
 ---
 
 ## Roadmap
