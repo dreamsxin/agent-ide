@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import type { AgentViewId } from "../../stores/useLayoutStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import type { AgentMode } from "../../types/agent";
 import type { ProjectTaskDefinition } from "../../stores/useTaskStore";
@@ -202,6 +203,38 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         rightVisible,
         toggleRightPanel
       ),
+      // Pipeline 和 Settings 此前只有 Agent 面板上两个 8px 宽的纯图标按钮可以进，
+      // 命令面板也不收录它们 —— 于是 provider 配置、权限、花费上限和 MCP 全都只能
+      // 靠碰对那个图标才能找到。MCP 更深一层：它在 Settings 表单的最底部，
+      // 所以这里把它当作关键词挂到 Settings 上，搜 "mcp" 能直接到。
+      agentViewCommand(
+        "panel.agent.pipeline",
+        "Configure Agent Pipeline",
+        "pipeline",
+        setAgentView,
+        rightVisible,
+        toggleRightPanel,
+        ["stages", "roles", "architect", "coder", "reviewer", "designer", "tester"]
+      ),
+      agentViewCommand(
+        "panel.agent.settings",
+        "Open Agent Settings",
+        "settings",
+        setAgentView,
+        rightVisible,
+        toggleRightPanel,
+        [
+          "provider",
+          "profile",
+          "api key",
+          "model",
+          "permissions",
+          "token cap",
+          "spend cap",
+          "mcp",
+          "context",
+        ]
+      ),
       panelCommand("panel.terminal", "Show Terminal", "Navigation", () => {
         setBottomTab("terminal");
         if (!bottomVisible) toggleBottomPanel();
@@ -292,15 +325,17 @@ function panelCommand(id: string, title: string, group: string, run: () => void)
 function agentViewCommand(
   id: string,
   title: string,
-  view: "task" | "plan" | "changes",
-  setAgentView: (view: "task" | "plan" | "changes" | "pipeline" | "settings") => void,
+  view: AgentViewId,
+  setAgentView: (view: AgentViewId) => void,
   rightVisible: boolean,
-  toggleRightPanel: () => void
+  toggleRightPanel: () => void,
+  keywords?: string[]
 ): PaletteCommand {
   return {
     id,
     title,
     group: "Agent",
+    keywords,
     run: () => {
       setAgentView(view);
       if (!rightVisible) toggleRightPanel();
