@@ -104,6 +104,22 @@ function workspaceRootNode(workspacePath: string): TreeNodeData {
   };
 }
 
+/**
+ * 打开一个文件节点。
+ *
+ * 抽出来是为了给鼠标和键盘两条路径共用：以前只有行的 `onClick` 会打开文件，
+ * `onActivate`（方向键走到位置后按 Enter）只切换目录，于是纯键盘用户能在树里
+ * 走来走去，却打不开任何文件。
+ */
+function openTreeFile(data: TreeNodeData) {
+  useEditorStore.getState().openFile({
+    path: data.path,
+    name: data.name,
+    isDirty: false,
+    language: detectLanguage(data.path),
+  });
+}
+
 // ====== 树节点渲染 ======
 function TreeNode({
   node,
@@ -122,13 +138,7 @@ function TreeNode({
       className="flex items-center gap-1 py-0.5 px-1 hover:bg-surface-border/30 cursor-pointer text-xs text-surface-text group"
       onClick={(e) => {
         if (!data.isDir) {
-          const lang = detectLanguage(data.path);
-          useEditorStore.getState().openFile({
-            path: data.path,
-            name: data.name,
-            isDirty: false,
-            language: lang,
-          });
+          openTreeFile(data);
         } else {
           e.stopPropagation();
           node.toggle();
@@ -615,9 +625,12 @@ export default function Explorer() {
             openByDefault={false}
             onToggle={handleToggle}
             onActivate={(node) => {
-              // 只处理目录切换（键盘 Enter），文件打开由 TreeNode onClick 处理
+              // 方向键导航之后按 Enter 走到这里。目录切换，文件打开 ——
+              // 以前这里只处理目录，键盘用户因此打不开文件。
               if (node.data.isDir) {
                 node.toggle();
+              } else {
+                openTreeFile(node.data);
               }
             }}
             onContextMenu={(e) => {
@@ -631,7 +644,17 @@ export default function Explorer() {
           </Tree>
         )}
         {!loading && !error && rootData.length === 0 && (
-          <div className="p-2 text-xs text-surface-muted">No files found.</div>
+          // "No files found." 对没打开工作区和空目录说的是同一句话，而前者的真实原因
+          // 和解决办法完全不同。TopBar 在同一状态下说的是 "No folder opened"。
+          <div className="p-2 text-xs text-surface-muted">
+            {workspacePath ? (
+              "No files found."
+            ) : (
+              <>
+                No folder opened. Press <span className="font-mono">Ctrl+O</span> to choose one.
+              </>
+            )}
+          </div>
         )}
       </div>
 

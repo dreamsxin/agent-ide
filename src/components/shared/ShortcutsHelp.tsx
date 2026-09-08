@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { Shortcut } from "../../hooks/useShortcuts";
 
 interface ShortcutsHelpProps {
@@ -15,6 +16,17 @@ const GROUP_LABELS: Record<string, string> = {
 };
 
 export default function ShortcutsHelp({ shortcuts, visible, onClose }: ShortcutsHelpProps) {
+  // Esc 关闭。此前只能点背景或再按一次 F1 —— 一个讲快捷键的弹窗自己不响应 Esc
+  // 是最难自圆其说的一处。
+  useEffect(() => {
+    if (!visible) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [visible, onClose]);
+
   if (!visible) return null;
 
   // Group shortcuts
@@ -31,6 +43,9 @@ export default function ShortcutsHelp({ shortcuts, visible, onClose }: Shortcuts
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard Shortcuts"
         className="bg-surface-panel border border-surface-border rounded-lg shadow-2xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden animate-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
@@ -39,6 +54,8 @@ export default function ShortcutsHelp({ shortcuts, visible, onClose }: Shortcuts
           <h2 className="text-sm font-semibold text-surface-text">Keyboard Shortcuts</h2>
           <button
             onClick={onClose}
+            aria-label="Close keyboard shortcuts"
+            title="Close (Esc)"
             className="text-surface-muted hover:text-surface-text text-lg leading-none px-1"
           >
             ✕
