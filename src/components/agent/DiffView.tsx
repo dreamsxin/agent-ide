@@ -188,6 +188,8 @@ export default function DiffView() {
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
   const undoLastApply = useAgentStore((s) => s.undoLastApply);
   const pendingUndo = useAgentStore((s) => s.pendingUndo);
+  const error = useAgentStore((s) => s.error);
+  const setError = useAgentStore((s) => s.setError);
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
   const rejectDiffHunk = useAgentStore((s) => s.rejectDiffHunk);
   const regenerateDiff = useAgentStore((s) => s.regenerateDiff);
@@ -252,6 +254,25 @@ export default function DiffView() {
 
   return (
     <div data-testid="diff-view" className="flex h-full flex-col space-y-3 p-2 animate-fade-in">
+      {/* store 的 `error` 此前只在 ChatView 的横幅里渲染，而 Undo / Apply All 的
+          失败原因都写在那里 —— 在 Changes 里点，失败了屏幕上什么都不显示。
+          在动作发生的视图里也要能看到。 */}
+      {error && (
+        <div
+          role="alert"
+          className="flex flex-shrink-0 items-start gap-2 rounded border border-diff-remove/40 bg-diff-remove/10 p-2 text-xs text-diff-remove"
+        >
+          <span className="min-w-0 flex-1 break-words">{error}</span>
+          <button
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+            className="flex-shrink-0 rounded border border-diff-remove/30 px-1.5 py-0.5 text-[10px] hover:bg-diff-remove/10"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {lastApplyResult && lastApplyResult.failed.length > 0 && (
         <div className="flex-shrink-0 rounded border border-diff-remove/40 bg-diff-remove/10 p-2 text-xs text-diff-remove">
           <div className="mb-1 flex items-center justify-between gap-2">
