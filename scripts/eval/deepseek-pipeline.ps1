@@ -59,7 +59,13 @@ $cliArgs = @(
     "--model", $Model,
     "--output", "json"
 )
-if ($Apply) { $cliArgs += "--apply" }
+# 一次真正落盘的评测该把写权限给齐：`--apply` 允许应用这一步，`--allow-edit` /
+# `--allow-create` 授权具体能改和能建文件。（第一次带 -Apply 的运行失败不是因为
+# 少了这两个开关 —— 那次是 CRLF 匹配的问题，已单独修掉。）
+if ($Apply) { $cliArgs += @("--apply", "--allow-edit", "--allow-create") }
+
+
+
 
 # 选项一律排在任务前面。任务是可变长位置参数（`prompt: Vec<String>`，
 # `num_args = 0..`），clap 目前仍会把它后面的 `--api-key` 认成选项，但这种顺序
