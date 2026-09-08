@@ -315,20 +315,32 @@ covers one non-streaming request, not the pipeline. Neither the runner nor that
 test runs without a key being supplied explicitly.
 
 
-**First real runs (2026-09-07, `deepseek-v4-flash`).** Three preview runs against
-the live provider. The pipeline works end to end — plan, stages, parsed diffs,
-`changes_proposed` / exit 3 — and the eval immediately paid for itself by finding
-something the mock provider structurally cannot show: a single run proposes
-**overlapping diffs for the same file**, mixing whole-file rewrites with targeted
-snippet replacements, all stamped against the same pre-run `baseHash`. They cannot
-all apply, so a completed run reports partial failure. Recorded under Known Issues
-1 in `ROADMAP.md` with the evidence; two content-equality fixes were tried and
-reverted as wrong for this shape of data.
+**First real runs (2026-09-07, `deepseek-v4-flash`).** Several preview runs plus two
+`-Apply` runs against the live provider. They found three defects in a row that
+the mock suite structurally cannot show, each one hidden behind the previous:
 
-The lesson for this document: the mock provider returns one canned diff per run,
-so *any* defect that depends on the model proposing the same work more than once
-is invisible to the entire automated suite. That class of bug needs the real
-provider, which is what this runner is for.
+1. A CLI run attached no tools unless `--allow-run` was given, and the packed
+   context was 228 characters of file tree with no file bodies. The model was
+   asked to edit code it had never seen, so it invented the `original` block.
+   Read-only workspace tools are now attached unconditionally.
+2. With reads available the model quoted `original` byte-for-byte — and every hunk
+   still failed, because the file was CRLF and the model emitted LF. On Windows,
+   edit diffs essentially never applied. `replace_unique` now matches with line
+   endings folded and writes back using the file's own endings.
+3. In prefix renames (`greet` → `greeting`) the naive substring match hit the
+   already-renamed text and produced `greetinging` — silent corruption, not a
+   failed apply.
+
+After the fixes, a live run ends with exit 0, both files correctly renamed and
+line endings intact. The order matters as a lesson: the first diagnosis I wrote
+down ("models don't quote verbatim") was wrong, and only the next real run showed
+why.
+
+The mock provider returns one canned LF diff against an LF fixture, so none of
+the three was reachable from the automated suite. That is the standing argument
+for keeping this runner and using it after any change to prompts, context packing,
+or diff application.
+
 
 
 

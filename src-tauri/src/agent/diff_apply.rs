@@ -320,7 +320,72 @@ fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, S
         return Ok(text.to_string());
     }
 
+    // 行尾不一致时再试一次。Windows 上工作区文件普遍是 CRLF，而模型（哪怕是逐字
+    // 读过文件之后）输出的 ORIGINAL 段一律是 LF，于是逐字节匹配必然失败。
+    // 真实 provider 评测里就是这样：模型读了文件、引用得一字不差，四个 hunk 仍然
+    // 全部报 "Could not find original content"，因为文件里是 `\r\n`。
+    //
+    // 折叠 `\r\n` 只用于**定位**；替换文本按文件原本的行尾写回，所以不会顺手把
+    // 整个文件的行尾改掉 —— 那会让 diff 看起来动了每一行。
+    if let Some(result) = replace_unique_ignoring_line_endings(text, orig_trim, updated) {
+        return Ok(result);
+    }
+
     Err("Could not find original content".to_string())
+}
+
+/// 忽略 CRLF/LF 差异定位原文，并保持文件原有行尾写回替换内容
+fn replace_unique_ignoring_line_endings(
+    text: &str,
+    original: &str,
+    updated: &str,
+) -> Option<String> {
+    if !text.contains('\r') || original.is_empty() {
+        return None;
+    }
+    let normalized_text = text.replace("\r\n", "\n");
+    let normalized_original = original.replace("\r\n", "\n");
+    if normalized_original.is_empty() || normalized_text.matches(&normalized_original).count() != 1
+    {
+        return None;
+    }
+    let normalized_start = normalized_text.find(&normalized_original)?;
+    let normalized_end = normalized_start + normalized_original.len();
+
+    // 把折叠后的下标映射回原文本的下标：`\r\n` 折叠成一个字符，所以要一边走一边数
+    let mut raw_start = None;
+    let mut raw_end = None;
+    let mut normalized_pos = 0usize;
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index <= bytes.len() {
+        if normalized_pos == normalized_start && raw_start.is_none() {
+            raw_start = Some(index);
+        }
+        if normalized_pos == normalized_end && raw_end.is_none() {
+            raw_end = Some(index);
+            break;
+        }
+        if index == bytes.len() {
+            break;
+        }
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 2;
+        } else {
+            index += 1;
+        }
+        normalized_pos += 1;
+    }
+    let (raw_start, raw_end) = (raw_start?, raw_end?);
+
+    // 按文件原本的行尾写回：这里能走到说明文件用的是 CRLF
+    let updated_crlf = updated.replace("\r\n", "\n").replace('\n', "\r\n");
+    Some(format!(
+        "{}{}{}",
+        &text[..raw_start],
+        updated_crlf,
+        &text[raw_end..]
+    ))
 }
 
 #[cfg(test)]
@@ -350,6 +415,38 @@ mod tests {
         let text = "export function greet(name: string) {}\n";
 
         let result = replace_unique(text, "class Greeter", "class Greeting");
+
+        assert!(result.is_err(), "{:?}", result);
+    }
+
+    /// Windows 工作区文件是 CRLF，而模型输出的 ORIGINAL 段是 LF。
+    ///
+    /// 这条是真实 provider 评测里最贵的一个发现：模型逐字读过文件、引用一字不差，
+    /// 每个 hunk 仍然报 "Could not find original content"，因为文件里是 `\r\n`。
+    /// 也就是说在 Windows 上编辑类 diff 基本没有一次能应用成功。
+    #[test]
+    fn crlf_file_matches_an_lf_original_and_keeps_its_line_endings() {
+        let text = "export function greet(name: string) {\r\n  return name;\r\n}\r\n";
+
+        let result = replace_unique(
+            text,
+            "export function greet(name: string) {\n  return name;\n}",
+            "export function greeting(name: string) {\n  return name;\n}",
+        )
+        .expect("应当能定位到原文");
+
+        assert!(result.contains("greeting"), "{:?}", result);
+        // 行尾必须保持 CRLF：顺手换掉会让 diff 看起来动了每一行
+        assert!(!result.contains("\n\n"), "{:?}", result);
+        assert_eq!(result.matches("\r\n").count(), 3, "{:?}", result);
+    }
+
+    /// 折叠行尾之后出现多处匹配时仍然拒绝：宁可报错，也不能猜改哪一处。
+    #[test]
+    fn crlf_tolerance_still_refuses_ambiguous_matches() {
+        let text = "let a = 1;\r\nlet a = 1;\r\n";
+
+        let result = replace_unique(text, "let a = 1;", "let a = 2;");
 
         assert!(result.is_err(), "{:?}", result);
     }

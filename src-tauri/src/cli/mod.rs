@@ -789,22 +789,26 @@ async fn run_agent_command(
     //
     // 不复用 `--allow-edit` / `--allow-create`：那两个管的是"产出的 diff 能否落盘"，
     // 把它们重新解释成"模型可以直接写文件"是偷偷提权。
+    //
+    // 只读工具则**无条件**挂上。读工作区里的文件不是特权：工作区本来就是这次任务的
+    // 对象，而模型看不到文件内容就只能靠猜写 ORIGINAL 段。真实 provider 评测证实了
+    // 这一点：一次不带任何工具权限的运行，打包出的 context 只有 228 个字符的文件树，
+    // 模型于是"引用"了一段它从未见过的代码（把 `Hello, ${name}` 写成
+    // `Hello, ${name}!`、单引号写成双引号），四个 hunk 全部以
+    // "Could not find original content" 失败。提示词里早就写着"逐字复制原文"，
+    // 但没有读的手段时那条要求无从遵守。
     let tool_permissions = crate::agent::workspace_tools::WorkspaceToolPermissions::new(
         args.allow_run.clone(),
         args.allow_agent_write,
         args.allow_agent_write && args.allow_create,
     );
-    let expose_tools = !args.allow_run.is_empty() || args.allow_agent_write;
-    let (llm, tool_invoker) = if expose_tools {
-        crate::agent::workspace_tools::attach_workspace_tools(
-            llm,
-            None,
-            None,
-            tool_permissions.clone(),
-        )
-    } else {
-        (llm, None)
-    };
+    let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        None,
+        None,
+        tool_permissions.clone(),
+    );
+
     let mut context = build_workspace_context(&workspace_path, &args.include);
     context.enrich_from_workspace_with_sources(&source_options(&args.include));
     let context_options = ContextBuildOptions::new(args.context_mode.into(), None);
@@ -2019,13 +2023,12 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         model: model.clone(),
         provider: "custom".to_string(),
         max_output_tokens: None,
-        // 只有真的要给工具时才切到原生工具：否则任意 provider 都会突然收到
-        // `tools` 参数，而 CLI 的默认目标是"能对着任何 OpenAI 兼容端点跑"。
-        tool_call_mode: if args.allow_run.is_empty() && !args.allow_agent_write {
-            "text_protocol".to_string()
-        } else {
-            "native_tools".to_string()
-        },
+        // 只读工作区工具现在无条件挂上，所以一律走原生工具调用。任意 OpenAI 兼容
+        // 端点因此都会收到 `tools` 参数 —— 明确拒绝的那些由 `tools_rejected` 记下
+        // 并自动降级重试，代价是一次 400；换来的是模型能读到真实文件内容，而不是
+        // 靠猜写 ORIGINAL 段。
+        tool_call_mode: "native_tools".to_string(),
+
         model_type: crate::services::llm_client::ModelType::from_string(&model),
         local_model_config: None,
     }))
