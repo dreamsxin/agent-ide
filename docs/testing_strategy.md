@@ -309,11 +309,27 @@ Three properties of that script are deliberate:
   anywhere else, and options are ordered ahead of the task text so the key can
   never be parsed as part of the prompt.
 
-This has not been run yet: no DeepSeek key is configured in this environment
-(`agent_cli doctor` reports `LLM_ENDPOINT, LLM_API_KEY, and LLM_MODEL are not all
-configured`), so the eval is set up but unexecuted. There is also an older
-`#[ignore]`d live test, `llm_client::tests::deepseek_v4_flash_live_smoke`, gated on
-`DEEPSEEK_TEST_KEY`; it covers one non-streaming request, not the pipeline.
+There is also an older `#[ignore]`d live test,
+`llm_client::tests::deepseek_v4_flash_live_smoke`, gated on `DEEPSEEK_TEST_KEY`; it
+covers one non-streaming request, not the pipeline. Neither the runner nor that
+test runs without a key being supplied explicitly.
+
+
+**First real runs (2026-09-07, `deepseek-v4-flash`).** Three preview runs against
+the live provider. The pipeline works end to end — plan, stages, parsed diffs,
+`changes_proposed` / exit 3 — and the eval immediately paid for itself by finding
+something the mock provider structurally cannot show: a single run proposes
+**overlapping diffs for the same file**, mixing whole-file rewrites with targeted
+snippet replacements, all stamped against the same pre-run `baseHash`. They cannot
+all apply, so a completed run reports partial failure. Recorded under Known Issues
+1 in `ROADMAP.md` with the evidence; two content-equality fixes were tried and
+reverted as wrong for this shape of data.
+
+The lesson for this document: the mock provider returns one canned diff per run,
+so *any* defect that depends on the model proposing the same work more than once
+is invisible to the entire automated suite. That class of bug needs the real
+provider, which is what this runner is for.
+
 
 
 ## The command layer

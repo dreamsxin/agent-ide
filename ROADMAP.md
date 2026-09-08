@@ -605,6 +605,9 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Partial apply errors are returned structurally and shown inline on failed diff cards.
    - Per-file and per-hunk apply/reject are now wired in the backend and Diff view.
    - Mixed applied/rejected hunk state currently closes the file diff; add clearer partial status next.
+   - **Overlapping proposals for one file (found 2026-09-07 by the first real DeepSeek eval, unfixed).** A single run produced 5 pending diffs for 2 files: two whole-file rewrites (`original` = the entire file) plus three targeted snippet replacements (`export function greet`, `{ greet }`, `greet(`). All five carry the same two `baseHash` values, i.e. every one of them targets the pre-run content. They cannot all apply: the whole-file rewrite lands first and the snippets no longer match, so a run that in fact completed reports "2 applied, 3 failed" — and in the opposite order the file gets only a partial rename. Different plan steps each proposed their own way of doing the same edit; the mock provider never showed this because it returns one canned diff.
+   - Two content-equality fixes were tried and **reverted**, because the proposals are semantically overlapping but textually unrelated: keying on `file` + hunk `original`/`updated` catches only byte-identical repeats, and keying on `file` + `baseHash` would collapse the three snippets in one file, two of which are genuinely different edits. The real fix is one of: resolve snippet diffs against current file content at apply time instead of the frozen base, or make a run emit a single proposal per file. That is a design decision, so it is recorded here rather than guessed at.
+
 
 2. **Agent protocol still needs stronger schema and persistence**
    - Pipeline stages now drive backend execution.
