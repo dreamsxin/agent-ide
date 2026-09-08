@@ -12,13 +12,15 @@ Two things are required, and the app tells you when either is missing:
   Open one with `Ctrl+O`, or from the command palette (`Ctrl+Shift+P` →
   "Open Workspace Folder"). Every Agent write, command, and file read is confined
   to this folder.
-- **A model profile.** The LLM indicator in the top bar is red and reads
-  "LLM Not Configured" until one exists. Without it the Agent panel accepts input
-  but every run fails at the first request.
+- **A model profile.** The LLM indicator at the right of the top bar turns red
+  until one exists. It is a small dot with no visible text — hover it to read
+  "LLM Not Configured". Without a profile the Agent panel accepts input but every
+  run fails at the first request.
 
-The Run / Debug / Build / Test buttons stay disabled until the project declares
-tasks the app can discover (`package.json` scripts, Cargo targets). That is not an
-error state.
+The Run / Debug / Build / Test buttons are disabled unless the project declares
+tasks the app can discover (`package.json` scripts, Cargo targets) **and** you are
+running the desktop app. In browser preview (`npm run dev`) they are always
+disabled, because they need the Tauri runtime.
 
 ## 1. Configure a model
 
@@ -26,27 +28,18 @@ Open the Agent panel (`Ctrl+Shift+X`), then reach Settings from the command
 palette: `Ctrl+Shift+P` → "Open Agent Settings". It is also the gear icon at the
 right end of the Agent panel's tab row.
 
-Fill in, top to bottom:
+Fill in, top to bottom. Field labels are quoted as they appear:
 
-- **Profile name** — free text, e.g. `Work OpenAI`.
-- **Provider** — picking one fills in a default endpoint and model.
-- **Endpoint** — e.g. `https://api.openai.com/v1`. Any OpenAI-compatible base URL
-  works, including a local server.
-- **Secret key** — stored in the OS credential store, not in the config file. The
+- **Profile** — the selector at the top, with a **New** button beside it. Use New
+  for a first profile.
+- **Profile Name** — free text, e.g. `Work OpenAI`.
+- **AI Provider** — picking one fills in a default base URL and model.
+- **API Base URL** — e.g. `https://api.openai.com/v1`. Any OpenAI-compatible base
+  URL works, including a local server.
+- **Secret Key** — stored in the OS credential store, not in the config file. The
   field shows a masked value once saved; the eye icon fetches the real value on
   demand.
-- **Model** — e.g. `gpt-4o`, `deepseek-chat`.
-- **Tool Call Mode** — leave on "Provider-native tools". The Agent needs it to read
-  your files during a run; without it the model only sees the context bundle
-  assembled at the start and has to guess file contents. If your endpoint rejects
-  the `tools` parameter, the request is retried without it and the run is flagged
-  in the action log.
-
-Then **Save Profile**, and optionally **⚡ Test Connection** to confirm the endpoint
-and key actually work before spending a real run on finding out.
-
-Optional, in the same panel:
-
+- **Model Name** — e.g. `gpt-4o`, `deepseek-chat`.
 - **Context Budget Estimate** — model metadata used for budgeting, plus **Per-run
   cap**, which stops a run once provider-reported tokens reach it. Empty means no
   limit.
@@ -54,7 +47,20 @@ Optional, in the same panel:
   plus a cap. It only takes effect when **both** prices are filled in; with one
   missing, the estimate would undercount and the panel says the cap is not
   enforced rather than showing one that does nothing.
+- **Tool Call Mode** — leave on "Provider-native tools". The Agent needs it to read
+  your files during a run; without it the model only sees the context bundle
+  assembled at the start and has to guess file contents. If your endpoint rejects
+  the `tools` parameter, the request is retried without it and the run is flagged
+  in the action log.
+
+Then **Save Profile**. Feedback appears directly under that button.
+
+Below it, still in the same panel:
+
 - **Agent Permissions** — see [How much freedom to give it](#4-how-much-freedom-to-give-it).
+- **Set Default** / **Delete** for the selected profile.
+- **⚡ Test Connection** — worth doing before spending a real run on finding out
+  that the URL or key is wrong.
 - **MCP** — at the very bottom of the panel. `Ctrl+Shift+P` → search "mcp" is the
   fastest way there.
 
@@ -115,8 +121,7 @@ a tool already granted for that run; stop the run instead.
 
 ## 5. Keyboard shortcuts
 
-Press **F1** in the app for this list (F1 itself is only mentioned in that panel's
-footer, not listed as a row).
+Press **F1** in the app for this list.
 
 - `Ctrl+Shift+P` — Command palette
 - `Ctrl+O` — Open folder
