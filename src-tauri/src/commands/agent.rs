@@ -1096,6 +1096,30 @@ pub async fn undo_last_apply(
     Ok(result)
 }
 
+/// 栈顶回滚点，供界面判断"现在有没有东西可撤销"。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUndo {
+    pub label: String,
+    pub files: Vec<String>,
+}
+
+/// 查询当前是否有可撤销的应用，以及它会恢复哪些文件。
+///
+/// 界面此前把 Undo 按钮挂在"还有待审 diff"这个条件上，于是全部应用完之后按钮就
+/// 消失了 —— 恰好是最需要退路的那一刻。回滚栈在 orchestrator 内存里，进程重启即
+/// 失效，所以可用性只能问后端，不能靠前端从 diff 状态推断（推断会在重启后显示一个
+/// 点下去必然失败的按钮）。
+#[tauri::command]
+pub async fn pending_undo(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Option<PendingUndo>, String> {
+    let orch = agent_state.orchestrator.lock().await;
+    Ok(orch
+        .pending_undo()
+        .map(|(label, files)| PendingUndo { label, files }))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyWorkspaceRequest {

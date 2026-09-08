@@ -45,6 +45,13 @@ interface AgentStore {
   steps: Step[];
   error: string | null;
   lastApplyResult: ApplyDiffsResult | null;
+  /**
+   * 当前可撤销的那次应用，`null` 表示没有退路。
+   *
+   * 由后端查询而来，不从 diff 状态推断：回滚栈在 orchestrator 内存里，进程重启
+   * 就没了，推断会在重启后显示一个点下去必然失败的 Undo 按钮。
+   */
+  pendingUndo: { label: string; files: string[] } | null;
   streamContent: string;
   isStreaming: boolean;
   agentRunId: string | null;
@@ -125,6 +132,8 @@ interface AgentStore {
   applyAllDiffs: () => Promise<DiffEntry[]>;
   /** 撤销最近一次应用，把文件恢复到那次应用之前；返回是否全部恢复成功 */
   undoLastApply: () => Promise<boolean>;
+  /** 向后端确认现在有没有可撤销的应用，用来决定是否显示 Undo 按钮 */
+  refreshPendingUndo: () => Promise<void>;
   applyDiff: (diffId: string) => Promise<DiffEntry[]>;
   applyDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry[]>;
   clearApplyResult: () => void;
@@ -235,6 +244,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   steps: [],
   error: null,
   lastApplyResult: null,
+  pendingUndo: null,
   streamContent: "",
   isStreaming: false,
   agentRunId: null,
@@ -652,13 +662,29 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
             ? `Undo restored ${result.restored.length} file(s); ${result.failed.length} could not be restored.`
             : null,
       });
+      await get().refreshPendingUndo();
       return result.failed.length === 0;
     } catch (err: unknown) {
       // "没有可撤销的操作"也走这里，作为提示展示出来是合理反馈
       set({ error: err instanceof Error ? err.message : String(err) });
+      await get().refreshPendingUndo();
       return false;
     }
   },
+
+  refreshPendingUndo: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const pending = await invoke<{ label: string; files: string[] } | null>("pending_undo");
+      set({ pendingUndo: pending ?? null });
+    } catch (err: unknown) {
+      // 查询失败不该覆盖 error 横幅：这是背景刷新，不是用户发起的动作。
+      // 保守起见按"没有退路"处理，宁可不显示按钮，也不显示一个点不动的按钮。
+      console.warn("[AgentStore] pending_undo failed:", err);
+      set({ pendingUndo: null });
+    }
+  },
+
 
   applyDiff: async (diffId) => {
     try {
