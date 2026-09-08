@@ -280,6 +280,19 @@ fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, S
         return Err("Original content is empty".to_string());
     }
 
+    let orig_trim = original.trim();
+    let updated_trim = updated.trim();
+
+    // 改名类替换里 original 常常是 updated 的前缀（`greet` → `greeting`）。如果
+    // 另一份提议已经把文件改成目标状态，天真的子串匹配会在新文本里再次命中
+    // original，把 `greeting` 写成 `greetinging` —— 不是报错，是把文件改坏。
+    //
+    // 这种交叠是真实模型的常态：planner 拆出的一步整文件重写，另一步给出片段
+    // 替换，两者做的是同一件事。所以在替换之前先确认目标状态是否已经在场。
+    if !updated_trim.is_empty() && updated_trim.contains(orig_trim) && text.contains(updated_trim) {
+        return Ok(text.to_string());
+    }
+
     let exact_count = text.matches(original).count();
     if exact_count == 1 {
         return Ok(text.replacen(original, updated, 1));
@@ -288,15 +301,23 @@ fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, S
         return Err("Original content matched more than once".to_string());
     }
 
-    let orig_trim = original.trim();
     if orig_trim != original && !orig_trim.is_empty() {
         let trim_count = text.matches(orig_trim).count();
         if trim_count == 1 {
-            return Ok(text.replacen(orig_trim, updated.trim(), 1));
+            return Ok(text.replacen(orig_trim, updated_trim, 1));
         }
         if trim_count > 1 {
             return Err("Original content matched more than once".to_string());
         }
+    }
+
+    // 原文不在场，但目标内容已经在了：这一处的改动已经由别的提议完成，不是失败。
+    // 以前一律报 "Could not find original content"，于是一次其实完全成功的应用
+    // 被报成"2 成功 3 失败"，用户无从判断到底落地没有。
+    //
+    // 原文和目标都不在场仍然是错误 —— 那才是模型引用了不存在的代码。
+    if !updated_trim.is_empty() && text.contains(updated_trim) {
+        return Ok(text.to_string());
     }
 
     Err("Could not find original content".to_string())
@@ -306,8 +327,32 @@ fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, S
 mod tests {
     use super::*;
     use crate::agent::state_machine::DiffHunk;
-    use std::path::PathBuf;
     use uuid::Uuid;
+
+    /// 目标内容已经在场时，这一处算已完成，而不是失败 —— 更不能再替换一次。
+    ///
+    /// `greet` → `greeting` 这种改名里 original 是 updated 的前缀：另一份提议已经
+    /// 改完之后，天真的子串匹配会在新文本里再次命中，把 `greeting` 写成
+    /// `greetinging`。这不是误报，是把文件改坏。
+    #[test]
+    fn hunk_already_satisfied_by_another_proposal_is_not_reapplied() {
+        let text = "export function greeting(name: string) {}\n";
+
+        let result = replace_unique(text, "export function greet", "export function greeting");
+
+        assert_eq!(result.as_deref(), Ok(text), "内容必须保持原样");
+        assert!(!result.unwrap().contains("greetinging"));
+    }
+
+    /// 原文和目标都不在场：这才是真正的失败 —— 模型引用了不存在的代码。
+    #[test]
+    fn hunk_matching_nothing_at_all_still_fails() {
+        let text = "export function greet(name: string) {}\n";
+
+        let result = replace_unique(text, "class Greeter", "class Greeting");
+
+        assert!(result.is_err(), "{:?}", result);
+    }
 
     fn temp_dir() -> PathBuf {
         let dir =
