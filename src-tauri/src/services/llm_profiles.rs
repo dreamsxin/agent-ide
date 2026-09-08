@@ -1,6 +1,6 @@
 use crate::services::context::{ContextBudget, ContextCompressionMode};
 use crate::services::credentials;
-use crate::services::llm_client::{LlmConfig, LocalModelConfig, ModelType};
+use crate::services::llm_client::{LlmConfig, LocalModelConfig, ModelType, TokenPricing};
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,16 @@ pub struct LlmProfile {
     /// 单次运行允许消耗的总 token 上限（prompt + completion）。None 表示不限制。
     #[serde(default, rename = "maxRunTokens")]
     pub max_run_tokens: Option<u64>,
+    /// 每百万 prompt token 的价格，单位微美元（$0.28/M 就写 280000）。
+    /// 用整数是为了让钱的累加不带浮点误差。
+    #[serde(default, rename = "promptMicrosPerMillion")]
+    pub prompt_micros_per_million: Option<u64>,
+    #[serde(default, rename = "completionMicrosPerMillion")]
+    pub completion_micros_per_million: Option<u64>,
+    /// 单次运行的金额上限（微美元）。没配价格时这个上限无法执行 ——
+    /// 那种情况会在运行记录里写明"not computable"，而不是当成没有上限。
+    #[serde(default, rename = "maxRunSpendMicros")]
+    pub max_run_spend_micros: Option<u64>,
     #[serde(default = "default_tool_call_mode", rename = "toolCallMode")]
     pub tool_call_mode: String,
     #[serde(default, rename = "modelType")]
@@ -75,6 +85,12 @@ pub struct LlmProfileResponse {
     pub max_output_tokens: Option<u32>,
     #[serde(rename = "maxRunTokens")]
     pub max_run_tokens: Option<u64>,
+    #[serde(rename = "promptMicrosPerMillion")]
+    pub prompt_micros_per_million: Option<u64>,
+    #[serde(rename = "completionMicrosPerMillion")]
+    pub completion_micros_per_million: Option<u64>,
+    #[serde(rename = "maxRunSpendMicros")]
+    pub max_run_spend_micros: Option<u64>,
     #[serde(rename = "effectiveInputTokens")]
     pub effective_input_tokens: Option<u32>,
     #[serde(rename = "toolCallMode")]
@@ -126,6 +142,12 @@ pub struct SaveLlmProfileRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(rename = "maxRunTokens")]
     pub max_run_tokens: Option<u64>,
+    #[serde(rename = "promptMicrosPerMillion")]
+    pub prompt_micros_per_million: Option<u64>,
+    #[serde(rename = "completionMicrosPerMillion")]
+    pub completion_micros_per_million: Option<u64>,
+    #[serde(rename = "maxRunSpendMicros")]
+    pub max_run_spend_micros: Option<u64>,
     #[serde(rename = "toolCallMode")]
     pub tool_call_mode: Option<String>,
     #[serde(rename = "setActive")]
@@ -212,6 +234,9 @@ impl LlmProfile {
             reserved_output_tokens: self.reserved_output_tokens,
             max_output_tokens: self.max_output_tokens,
             max_run_tokens: self.max_run_tokens,
+            prompt_micros_per_million: self.prompt_micros_per_million,
+            completion_micros_per_million: self.completion_micros_per_million,
+            max_run_spend_micros: self.max_run_spend_micros,
             effective_input_tokens: self.effective_input_tokens(),
             tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
             model_type: self.model_type.clone(),
@@ -327,6 +352,9 @@ fn default_config_from_env() -> LlmProfilesConfig {
             reserved_output_tokens: None,
             max_output_tokens: None,
             max_run_tokens: None,
+            prompt_micros_per_million: None,
+            completion_micros_per_million: None,
+            max_run_spend_micros: None,
             tool_call_mode: default_tool_call_mode(),
             model_type: None,
             model_path: None,
@@ -396,6 +424,9 @@ fn parse_llm_profiles_config_with_migration(
         reserved_output_tokens: None,
         max_output_tokens: None,
         max_run_tokens: None,
+        prompt_micros_per_million: None,
+        completion_micros_per_million: None,
+        max_run_spend_micros: None,
         tool_call_mode: default_tool_call_mode(),
         model_type: None,
         model_path: None,
@@ -507,6 +538,39 @@ pub fn run_token_cap(config: &LlmProfilesConfig, profile_id: Option<&str>) -> Op
         .filter(|cap| *cap > 0)
 }
 
+/// 单次运行的价格与金额上限。
+///
+/// 价格必须两半都配齐才算配置成功：只配输入价的估算会系统性低估花费，用它执行
+/// 上限等于给用户一个假的保障。缺配时返回 `None` 价格，`RunUsageMeter` 会把花费
+/// 记成"算不出来"并明说上限未执行，而不是当成免费。
+pub fn run_spend_cap(
+    config: &LlmProfilesConfig,
+    profile_id: Option<&str>,
+) -> (Option<TokenPricing>, Option<u64>) {
+    let selected_id = profile_id.unwrap_or(&config.active_profile_id);
+    let Some(profile) = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == selected_id)
+        .or_else(|| config.profiles.first())
+    else {
+        return (None, None);
+    };
+    let pricing = match (
+        profile.prompt_micros_per_million,
+        profile.completion_micros_per_million,
+    ) {
+        (Some(prompt), Some(completion)) => Some(TokenPricing {
+            prompt_micros_per_million: prompt,
+            completion_micros_per_million: completion,
+        }),
+        _ => None,
+    };
+    // 和 token 上限一致：0 当作"没设置"，否则一个手写的 0 会锁死所有运行
+    let cap = profile.max_run_spend_micros.filter(|cap| *cap > 0);
+    (pricing, cap)
+}
+
 pub fn update_default_profile(
     config: &mut LlmProfilesConfig,
     endpoint: String,
@@ -526,6 +590,9 @@ pub fn update_default_profile(
         reserved_output_tokens: None,
         max_output_tokens: None,
         max_run_tokens: None,
+        prompt_micros_per_million: None,
+        completion_micros_per_million: None,
+        max_run_spend_micros: None,
         tool_call_mode: default_tool_call_mode(),
         model_type: None,
         model_path: None,
@@ -611,6 +678,9 @@ pub fn save_profile(
         reserved_output_tokens: request.reserved_output_tokens,
         max_output_tokens: request.max_output_tokens,
         max_run_tokens: request.max_run_tokens,
+        prompt_micros_per_million: request.prompt_micros_per_million,
+        completion_micros_per_million: request.completion_micros_per_million,
+        max_run_spend_micros: request.max_run_spend_micros,
         tool_call_mode: request
             .tool_call_mode
             .as_deref()
@@ -806,6 +876,9 @@ mod tests {
             reserved_output_tokens: Some(4096),
             max_output_tokens: Some(4096),
             max_run_tokens: Some(250_000),
+            prompt_micros_per_million: None,
+            completion_micros_per_million: None,
+            max_run_spend_micros: None,
             tool_call_mode: "native_tools".to_string(),
             model_type: None,
             model_path: None,
@@ -839,6 +912,9 @@ mod tests {
             reserved_output_tokens: None,
             max_output_tokens: None,
             max_run_tokens: None,
+            prompt_micros_per_million: None,
+            completion_micros_per_million: None,
+            max_run_spend_micros: None,
             tool_call_mode: default_tool_call_mode(),
             model_type: None,
             model_path: None,
@@ -889,6 +965,51 @@ mod tests {
         assert_eq!(run_token_cap(&config, Some("capped")), Some(120_000));
         assert_eq!(run_token_cap(&config, Some("zeroed")), None);
         assert_eq!(run_token_cap(&config, Some("unset")), None);
+    }
+
+    /// 金额上限要么两半价格都配齐、要么就算没配。只配一半时用它执行上限会系统性
+    /// 低估花费，那比不执行更糟——用户以为有保障。
+    #[test]
+    fn run_spend_cap_needs_both_halves_of_the_price() {
+        let full: LlmProfile = serde_json::from_value(serde_json::json!({
+            "id": "full",
+            "name": "Full",
+            "provider": "deepseek",
+            "endpoint": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "promptMicrosPerMillion": 280_000,
+            "completionMicrosPerMillion": 420_000,
+            "maxRunSpendMicros": 500_000
+        }))
+        .expect("profile");
+        let mut half = full.clone();
+        half.id = "half".to_string();
+        half.completion_micros_per_million = None;
+        let mut zeroed = full.clone();
+        zeroed.id = "zeroed".to_string();
+        zeroed.max_run_spend_micros = Some(0);
+
+        let config = LlmProfilesConfig {
+            profiles: vec![full, half, zeroed],
+            active_profile_id: "full".to_string(),
+            context_compression: ContextCompressionMode::default(),
+        };
+
+        assert_eq!(
+            run_spend_cap(&config, None),
+            (
+                Some(TokenPricing {
+                    prompt_micros_per_million: 280_000,
+                    completion_micros_per_million: 420_000,
+                }),
+                Some(500_000)
+            )
+        );
+        // 价格只配了一半：上限还在，但价格算不出来，于是不会被执行
+        assert_eq!(run_spend_cap(&config, Some("half")).0, None);
+        assert_eq!(run_spend_cap(&config, Some("half")).1, Some(500_000));
+        // 0 当作没设置，和 token 上限一致
+        assert_eq!(run_spend_cap(&config, Some("zeroed")).1, None);
     }
 
     /// 云端 profile 默认走原生工具，否则内置的工作区读取工具永远不会被声明。

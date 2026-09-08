@@ -146,6 +146,9 @@ Not covered: a credential file passed explicitly as a context file, or read by a
 - `maxRunTokens` on the LLM profile caps total provider-reported tokens for one run. It is enforced in `send_chat_request`, the single choke point all provider requests pass through, so it cannot be bypassed by using a different entry point. A configured `0` is treated as unset.
 - The meter is stored on the orchestrator, so resuming a paused pipeline continues against the same allowance instead of restarting the count.
 - `usage_is_unknown()` distinguishes "the provider reported no usage" from "nothing was spent". Local runtimes and mock endpoints report no usage, so a cap cannot be enforced against them; this is surfaced in the run's action log rather than being reported as zero cost.
+- `maxRunSpendMicros` caps the run in money rather than tokens, checked in the same `check_budget` choke point and evaluated **before** the token cap, so an expensive model stops on cost even when the token count looks modest. Amounts are integer micro-USD (1 USD = 1_000_000) and each call's cost is rounded up, so a run cannot accumulate spend that rounds to zero.
+- Spend needs both `promptMicrosPerMillion` and `completionMicrosPerMillion` on the profile. With only one of them the estimate would systematically undercount, so pricing is treated as absent: the action log reports `not computable (no pricing configured)` and the spend cap is **not** enforced. An undercounting cap is worse than a missing one because the user believes they are protected.
+- The three spend fields are profile-JSON only; the Settings UI has no field for them yet.
 - The tool loop is bounded at 12 rounds per stage (`MAX_TOOL_ITERATIONS`, `agent/executor.rs`).
 
 

@@ -63,9 +63,11 @@ impl AgentGlobalState {
         profile_id: Option<&str>,
     ) -> Result<(LlmClient, Arc<crate::services::llm_client::RunUsageMeter>), String> {
         let config = self.get_llm_config(profile_id)?;
-        let meter = Arc::new(crate::services::llm_client::RunUsageMeter::new(
-            self.get_run_token_cap(profile_id),
-        ));
+        let (pricing, max_spend_micros) = self.get_run_spend_cap(profile_id);
+        let meter = Arc::new(
+            crate::services::llm_client::RunUsageMeter::new(self.get_run_token_cap(profile_id))
+                .with_spend_cap(pricing, max_spend_micros),
+        );
         if let Some(local) = config.local_model_config.clone() {
             let key = profile_id.unwrap_or("active").to_string();
             let engine = {
@@ -94,6 +96,21 @@ impl AgentGlobalState {
     pub fn get_run_token_cap(&self, profile_id: Option<&str>) -> Option<u64> {
         let profiles = self.llm_profiles.lock().ok()?;
         llm_profiles::run_token_cap(&profiles, profile_id)
+    }
+
+    /// 当前 profile 的价格与单次运行金额上限。锁拿不到时退回"没配置"：
+    /// 这只会让上限不执行，而 unwrap 会让整次运行崩掉。
+    pub fn get_run_spend_cap(
+        &self,
+        profile_id: Option<&str>,
+    ) -> (
+        Option<crate::services::llm_client::TokenPricing>,
+        Option<u64>,
+    ) {
+        let Ok(profiles) = self.llm_profiles.lock() else {
+            return (None, None);
+        };
+        llm_profiles::run_spend_cap(&profiles, profile_id)
     }
 
     pub fn get_llm_config(&self, profile_id: Option<&str>) -> Result<LlmConfig, String> {

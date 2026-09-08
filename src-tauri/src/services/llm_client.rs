@@ -485,7 +485,29 @@ impl LlmUsage {
     }
 }
 
-/// 一次运行内的累计 token 用量，以及可选的用量上限。
+/// 每百万 token 的价格，单位是"微美元"（1 USD = 1_000_000 micros）。
+///
+/// 用整数而不是浮点：钱的累加和比较不该带浮点误差，而且 f64 序列化往返会出现
+/// 0.029999999 这种值，写进运行记录就是假账。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenPricing {
+    pub prompt_micros_per_million: u64,
+    pub completion_micros_per_million: u64,
+}
+
+impl TokenPricing {
+    /// 按已用 token 算出花费（微美元）。向上取整：宁可略高估，也不要让
+    /// 上限被四舍五入绕过去。
+    pub fn spend_micros(&self, prompt_tokens: u64, completion_tokens: u64) -> u64 {
+        let cost = |tokens: u64, per_million: u64| -> u64 {
+            tokens.saturating_mul(per_million).saturating_add(999_999) / 1_000_000
+        };
+        cost(prompt_tokens, self.prompt_micros_per_million)
+            .saturating_add(cost(completion_tokens, self.completion_micros_per_million))
+    }
+}
+
+/// 一次运行内的累计 token 用量与花费，以及可选的用量／金额上限。
 ///
 /// 放在 `LlmClient` 上而不是让 `execute_stage` / `execute_step` 把用量层层返回：
 /// 一次运行会经过 planner、每个 pipeline stage、以及每个 stage 内最多 5 轮工具回合，
@@ -500,6 +522,10 @@ pub struct RunUsageMeter {
     /// 其中供应商回报了用量的请求数
     reported_calls: AtomicU64,
     max_total_tokens: Option<u64>,
+    /// 当前模型的价格；没配就算不出花费
+    pricing: Option<TokenPricing>,
+    /// 单次运行的金额上限（微美元）
+    max_spend_micros: Option<u64>,
 }
 
 /// 某一时刻的用量快照
@@ -511,6 +537,10 @@ pub struct RunUsageSnapshot {
     pub calls: u64,
     pub reported_calls: u64,
     pub max_total_tokens: Option<u64>,
+    /// 已花费的金额（微美元）。`None` 表示"算不出来"——没配价格，
+    /// 而不是"没花钱"。
+    pub spend_micros: Option<u64>,
+    pub max_spend_micros: Option<u64>,
 }
 
 impl RunUsageSnapshot {
@@ -548,14 +578,31 @@ impl RunUsageSnapshot {
 
     /// action log 的明细段。没设上限时写 "not set" 而不是省掉这一行：
     /// 缺行会让人以为读的是旧版本的记录。
+    ///
+    /// 花费同理，且必须区分"没配价格所以算不出来"和"花了 0"：前者写
+    /// "not computable"，否则一次真花了钱的运行会显示成免费。
     pub fn action_log_details(&self) -> String {
         let cap = match self.max_total_tokens {
             Some(cap) => cap.to_string(),
             None => "not set".to_string(),
         };
+        let spend = match self.spend_micros {
+            Some(spent) => format_micros_usd(spent),
+            None => "not computable (no pricing configured)".to_string(),
+        };
+        let spend_cap = match self.max_spend_micros {
+            Some(cap) => format_micros_usd(cap),
+            None => "not set".to_string(),
+        };
         format!(
-            "Prompt tokens: {}\nCompletion tokens: {}\nCalls with reported usage: {} of {}\nPer-run cap: {}",
-            self.prompt_tokens, self.completion_tokens, self.reported_calls, self.calls, cap
+            "Prompt tokens: {}\nCompletion tokens: {}\nCalls with reported usage: {} of {}\nPer-run cap: {}\nEstimated spend: {}\nPer-run spend cap: {}",
+            self.prompt_tokens,
+            self.completion_tokens,
+            self.reported_calls,
+            self.calls,
+            cap,
+            spend,
+            spend_cap
         )
     }
 }
@@ -568,12 +615,34 @@ impl RunUsageMeter {
         }
     }
 
+    /// 给这次运行配上价格和金额上限。价格缺失时上限无法执行 —— 那种情况会在
+    /// action log 里明说，而不是当成"没有上限"悄悄放过。
+    pub fn with_spend_cap(
+        mut self,
+        pricing: Option<TokenPricing>,
+        max_spend_micros: Option<u64>,
+    ) -> Self {
+        self.pricing = pricing;
+        self.max_spend_micros = max_spend_micros;
+        self
+    }
+
     /// 发请求前检查上限。超了就直接拒绝，而不是等这次请求也花完再说。
     pub fn check_budget(&self) -> Result<(), String> {
+        let snapshot = self.snapshot();
+        if let (Some(limit), Some(spent)) = (self.max_spend_micros, snapshot.spend_micros) {
+            if spent >= limit {
+                return Err(format!(
+                    "Run spend cap reached: {} of {} used across {} LLM call(s). Raise the per-run cap or start a new run.",
+                    format_micros_usd(spent),
+                    format_micros_usd(limit),
+                    snapshot.calls
+                ));
+            }
+        }
         let Some(limit) = self.max_total_tokens else {
             return Ok(());
         };
-        let snapshot = self.snapshot();
         if snapshot.total_tokens >= limit {
             return Err(format!(
                 "Run token cap reached: {} of {} tokens used across {} LLM call(s). Raise the per-run cap or start a new run.",
@@ -614,8 +683,18 @@ impl RunUsageMeter {
             calls: self.calls.load(Ordering::SeqCst),
             reported_calls: self.reported_calls.load(Ordering::SeqCst),
             max_total_tokens: self.max_total_tokens,
+            spend_micros: self
+                .pricing
+                .map(|pricing| pricing.spend_micros(prompt_tokens, completion_tokens)),
+            max_spend_micros: self.max_spend_micros,
         }
     }
+}
+
+/// 把微美元格式化成 `$0.0234`。固定 4 位小数：单次运行的花费常常远小于 1 分钱，
+/// 按 2 位小数显示会全部变成 `$0.00`，看着像没花钱。
+pub fn format_micros_usd(micros: u64) -> String {
+    format!("${}.{:04}", micros / 1_000_000, (micros % 1_000_000) / 100)
 }
 
 /// 流式/非流式请求的统一输出：文本内容 + 原生工具调用 + token 用量
@@ -2069,6 +2148,86 @@ mod tests {
 
         assert!(meter.check_budget().is_ok());
         assert_eq!(meter.snapshot().max_total_tokens, None);
+    }
+
+    /// 金额上限要在 token 上限之前拦住运行：给一个宽松的 token 上限和一个紧的
+    /// 金额上限，触发的必须是后者，报错也要说的是钱而不是 token。
+    #[test]
+    fn spend_cap_stops_a_run_before_the_token_cap_does() {
+        let pricing = TokenPricing {
+            // DeepSeek 量级：输入 $0.28/M、输出 $0.42/M
+            prompt_micros_per_million: 280_000,
+            completion_micros_per_million: 420_000,
+        };
+        let meter =
+            RunUsageMeter::new(Some(10_000_000)).with_spend_cap(Some(pricing), Some(1_000_000)); // $1.00
+
+        meter.record_call();
+        meter.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(2_000_000),
+            completion_tokens: Some(1_100_000),
+            total_tokens: None,
+        }));
+
+        // 0.28*2.0 + 0.42*1.1 = $1.022 > $1.00
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.spend_micros, Some(1_022_000));
+        assert_eq!(snapshot.max_spend_micros, Some(1_000_000));
+        assert!(snapshot.total_tokens < 10_000_000);
+
+        let err = meter.check_budget().unwrap_err();
+        assert!(err.contains("spend cap"), "{}", err);
+        assert!(err.contains("$1.0220 of $1.0000"), "{}", err);
+    }
+
+    /// 没配价格时花费是"算不出来"，不是 0。这必须写进 action log，否则一次
+    /// 真花了钱的运行会显示成免费；同时金额上限也不该凭空触发。
+    #[test]
+    fn spend_is_reported_as_not_computable_when_pricing_is_missing() {
+        let meter = RunUsageMeter::new(None).with_spend_cap(None, Some(1));
+        meter.record_call();
+        meter.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(500),
+            completion_tokens: Some(500),
+            total_tokens: None,
+        }));
+
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.spend_micros, None);
+        assert!(meter.check_budget().is_ok());
+
+        let details = snapshot.action_log_details();
+        assert!(
+            details.contains("Estimated spend: not computable (no pricing configured)"),
+            "{}",
+            details
+        );
+        assert!(
+            details.contains("Per-run spend cap: $0.0000"),
+            "{}",
+            details
+        );
+    }
+
+    /// 花费一律向上取整，且用整数运算：不然半分钱级别的花费会被抹成 0，
+    /// 上限就能被反复"免费"绕过。
+    #[test]
+    fn spend_rounds_up_so_tiny_costs_are_never_free() {
+        let pricing = TokenPricing {
+            prompt_micros_per_million: 1,
+            completion_micros_per_million: 0,
+        };
+        assert_eq!(pricing.spend_micros(1, 0), 1);
+        assert_eq!(pricing.spend_micros(0, 999), 0);
+        assert_eq!(pricing.spend_micros(1_000_000, 0), 1);
+        assert_eq!(
+            TokenPricing::default().spend_micros(1_000_000, 1_000_000),
+            0
+        );
+
+        assert_eq!(format_micros_usd(0), "$0.0000");
+        assert_eq!(format_micros_usd(1), "$0.0000");
+        assert_eq!(format_micros_usd(1_234_500), "$1.2345");
     }
 
     /// 供应商不支持 tools 时整次运行不该直接失败：摘掉参数重试一次，

@@ -572,7 +572,7 @@ Highest-impact gaps:
 
 6. **Cost accounting**
    - `RunUsageMeter` enforces a per-run token cap (`maxRunTokens`) before every provider request, and reports under-counting honestly when providers omit usage.
-   - There is no monetary cost model or per-run spend cap.
+   - A monetary cap exists as well (`maxRunSpendMicros` plus per-million prices, integer micro-USD), checked ahead of the token cap. It only takes effect when both the prompt and completion price are configured; otherwise spend is reported as "not computable" rather than as zero. Configurable in the profiles JSON only — there is no Settings field yet.
 
 7. **Runtime hardening**
    - Interactive Tauri smoke tests for boot, workspace open, file read/write, terminal, Agent prompt, diff apply.
@@ -608,7 +608,7 @@ There is one provider path: an OpenAI-compatible HTTP client in `services/llm_cl
 
 - Cloud providers and local runtimes (Ollama, LM Studio, vLLM) are the same code path, differing only in profile endpoint and model.
 - No native in-process inference engine is linked. This was removed, not deferred: linking an inference engine would pull its license and build toolchain into the binary for a capability an OpenAI-compatible local server already provides.
-- Profiles carry the endpoint, model, tool-call mode, context budget, and `maxRunTokens`. API keys live in the OS credential store; the JSON profile file stores references only.
+- Profiles carry the endpoint, model, tool-call mode, context budget, `maxRunTokens`, and the spend-cap trio (`promptMicrosPerMillion`, `completionMicrosPerMillion`, `maxRunSpendMicros`). API keys live in the OS credential store; the JSON profile file stores references only.
 - Local engine profiles report `supports_tool_calls: false`; for them the message list is flattened into a single prompt and the `agent-changes` text protocol is the transport.
 
 Hybrid routing (route simple tasks to a cheap local model, complex tasks to a cloud model) is not implemented. It stays a roadmap item because it needs a task-complexity signal the pipeline does not currently produce.
