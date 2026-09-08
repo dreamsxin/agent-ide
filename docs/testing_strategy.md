@@ -14,6 +14,9 @@ Agent IDE uses a multi-layer testing approach covering unit tests, integration t
 |------|---------------|
 | `src/utils/paths.test.ts` | Windows/file-URI path normalization, `file:///` URI parsing, path-to-URI conversion |
 | `src/hooks/useAppBootstrap.test.tsx` | Mount-time wiring: LLM config loaded on mount, loaded even with no workspace to restore, workspace restore in the Tauri runtime, and survival when the workspace lookup rejects. Runs under jsdom via a per-file docblock |
+| `src/components/panels/TasksPanel.test.tsx` | `Auto Repair`: the call payload (discovered checks plus the 2-round budget), the give-up wording, and that a backend refusal is surfaced verbatim rather than reworded into a generic failure. Also jsdom via docblock; registers `cleanup()` itself since there is no Vitest setup file |
+
+
 | `src/utils/terminalProblemParser.test.ts` | Terminal output parsing into Problems entries for TypeScript/lint/test-style `file:line:column` formats, Vitest/Jest-style `FAIL` summaries, and stack traces |
 | `src/hooks/useLspDiagnostics.test.ts` | LSP diagnostics hook behavior — bridging LSP diagnostics into the Problems store |
 | `src/stores/useProblemStore.test.ts` | Problem store behavior — adding, replacing, clearing, and deduplicating problems across diagnostic/lsp/test/agent/system sources |
