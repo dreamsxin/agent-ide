@@ -52,7 +52,10 @@ export default function GitPanel() {
   const resolveConflict = useGitStore((s) => s.resolveConflict);
   const addLog = useLogStore((s) => s.addLog);
 
-  const projectPath = workspacePath || ".";
+  // 以前这里是 `workspacePath || "."`：没打开工作区时会对进程 CWD 跑 git，
+  // 于是面板可能显示另一个仓库的分支和改动，而用户以为看的是自己的项目。
+  // 没有工作区就什么都不做，界面明确说明原因。
+  const projectPath = workspacePath;
   const [message, setMessage] = useState("");
   const [selectedEntryKey, setSelectedEntryKey] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -70,6 +73,7 @@ export default function GitPanel() {
   } | null>(null);
 
   useEffect(() => {
+    if (!projectPath) return;
     fetchStatus(projectPath);
   }, [fetchStatus, projectPath]);
 
@@ -619,7 +623,15 @@ export default function GitPanel() {
         )}
 
         {!status && !loading && !error && (
-          <div className="px-3 py-4 text-surface-muted text-center">No git repository found.</div>
+          <div className="px-3 py-4 text-surface-muted text-center">
+            {projectPath ? (
+              "No git repository found."
+            ) : (
+              <>
+                No folder opened. Press <span className="font-mono">Ctrl+O</span> to choose one.
+              </>
+            )}
+          </div>
         )}
       </div>
 

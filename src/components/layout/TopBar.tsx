@@ -190,6 +190,8 @@ export default function TopBar() {
               <button
                 type="button"
                 onClick={() => setLspDetailsOpen(false)}
+                aria-label="Close language server details"
+                title="Close"
                 className="text-surface-muted hover:text-surface-text"
               >
                 x

@@ -135,13 +135,21 @@ export default function TasksPanel() {
           </button>
 
           <div className="max-w-[280px] truncate text-[11px] text-surface-muted">
-            {verifyStatus ??
-              (usingFallback
-                ? "No workspace tasks discovered yet. Showing fallback commands."
-                : "Tasks discovered from the current workspace configuration.")}
+            {usingFallback
+              ? "No workspace tasks discovered yet. Showing fallback commands."
+              : "Tasks discovered from the current workspace configuration."}
           </div>
         </div>
       </div>
+
+      {/* verifyStatus 会装完整的后端错误（含 "requires Auto mode" 那类拒绝理由）。
+          以前它和上面那句提示共用一个 `max-w-[280px] truncate`，几个词就被截断，
+          而截断掉的正是原因。 */}
+      {verifyStatus && (
+        <div className="border-b border-surface-border px-2 py-1.5 text-[11px] leading-relaxed text-surface-muted whitespace-pre-wrap break-words">
+          {verifyStatus}
+        </div>
+      )}
 
       {!isTauriRuntime() && (
         <div className="border-b border-surface-border px-3 py-2 text-[11px] text-diff-modify">
