@@ -175,8 +175,13 @@ Explain | Fix | Refactor | Optimize
 ### 3.4 AI Control Level Toggle `[Implemented]`
 
 - Suggest (suggestions only)
-- Edit (can modify code)
+- Edit (currently identical to Suggest — every backend gate tests for Auto only)
 - Auto (automatic execution)
+
+This is `AgentMode`, and it is separate from the permission preset in
+Settings → Agent Permissions (`ask` / `suggest` / `auto`), which sets the
+fine-grained toggles instead. The two share the value names `suggest` and `auto`
+while meaning different things; see SECURITY.md § Agent Approval Model.
 
 ### 3.5 Ghost Mode (Background AI) `[Future - Phase 10]`
 
