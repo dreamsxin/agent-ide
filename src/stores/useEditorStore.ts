@@ -13,6 +13,14 @@ interface EditorStore {
   // 文件内容缓存 (path → content)
   fileContents: Record<string, string>;
 
+  /**
+   * 最近一次保存失败的原因，`null` 表示没有。
+   *
+   * 保存失败以前只走 `console.error`，界面上毫无反应 —— 用户以为存下去了。
+   */
+  saveError: string | null;
+  clearSaveError: () => void;
+
   // Explorer 刷新触发器
   explorerKey: number;
   workspacePath: string;
@@ -74,6 +82,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   openFiles: [],
   activeFile: null,
   fileContents: {},
+  saveError: null,
   explorerKey: 0,
   workspacePath: "",
   inlineSuggestion: null,
@@ -98,16 +107,20 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }
 
     let content = "";
+    let loadError: string | undefined;
     try {
       content = isTauriRuntime()
         ? await invoke<string>("read_file_content", { path: normalizedTab.path })
         : `// File loading is available in the Tauri app runtime.\n// ${normalizedTab.path}`;
-    } catch {
-      content = `// Failed to load: ${normalizedTab.path}`;
+    } catch (err: unknown) {
+      // 读取失败时缓冲区留空并记下原因，不再伪造一行注释当文件内容。
+      // 缓冲区是保存的事实来源，伪造内容会在下一次保存时覆盖真文件。
+      content = "";
+      loadError = err instanceof Error ? err.message : String(err);
     }
 
     set((prev) => ({
-      openFiles: [...prev.openFiles, normalizedTab],
+      openFiles: [...prev.openFiles, { ...normalizedTab, loadError }],
       activeFile: normalizedTab.path,
       fileContents: { ...prev.fileContents, [normalizedTab.path]: content },
     }));
@@ -163,22 +176,40 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       };
     }),
 
+  clearSaveError: () => set({ saveError: null }),
+
   saveCurrentFile: async () => {
-    const { activeFile, fileContents } = get();
+    const { activeFile, fileContents, openFiles } = get();
     if (!activeFile) return;
     const content = fileContents[activeFile];
     if (content === undefined) return;
     if (!isTauriRuntime()) return;
 
+    // 打开时读取失败过就不能保存：缓冲区里的内容不代表磁盘上的文件，
+    // 写回去等于用一个空/残缺的缓冲区覆盖真文件。
+    const tab = openFiles.find((file) => pathsEqual(file.path, activeFile));
+    if (tab?.loadError) {
+      set({
+        saveError: `Not saved: ${tab.name} failed to load (${tab.loadError}), so the editor does not hold its real content. Close the tab and reopen it.`,
+      });
+      return;
+    }
+
     try {
       await invoke("write_file_content", { path: activeFile, content });
       set((s) => ({
+        saveError: null,
         openFiles: s.openFiles.map((f) =>
           f.path === activeFile ? { ...f, isDirty: false } : f
         ),
       }));
     } catch (e) {
+      // 以前这里只有 console.error：保存失败在界面上毫无反应，
+      // 而 dirty 标记也不会清除，看起来像"存了但还是脏的"。
       console.error("Failed to save file:", e);
+      set({
+        saveError: `Failed to save ${activeFile}: ${e instanceof Error ? e.message : String(e)}`,
+      });
     }
   },
 
@@ -189,11 +220,19 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       set((s) => ({
         fileContents: { ...s.fileContents, [path]: content },
         openFiles: s.openFiles.map((f) =>
-          f.path === path ? { ...f, isDirty: false } : f
+          // 重新读成功就清掉 loadError，否则这个标签会永久停在"不可保存"
+          f.path === path ? { ...f, isDirty: false, loadError: undefined } : f
         ),
       }));
     } catch (e) {
       console.error(`Failed to reload ${path}:`, e);
+      set((s) => ({
+        openFiles: s.openFiles.map((f) =>
+          f.path === path
+            ? { ...f, loadError: e instanceof Error ? e.message : String(e) }
+            : f
+        ),
+      }));
     }
   },
 
@@ -310,7 +349,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         const content = isTauriRuntime()
           ? await invoke<string>("read_file_content", { path: tab.path })
           : `// File loading is available in the Tauri app runtime.\n// ${tab.path}`;
-        restoredFiles.push({ ...tab, isDirty: false });
+        // 这一分支意味着读取成功了，所以要清掉存档里可能带着的旧 loadError，
+        // 否则一个曾经读失败的标签恢复之后会永久停在"不可保存"
+        restoredFiles.push({ ...tab, isDirty: false, loadError: undefined });
         restoredContents[tab.path] = content;
       } catch {
         // Skip files that no longer exist or cannot be read.
@@ -377,7 +418,9 @@ function persistEditorSession() {
   const { workspacePath, openFiles, activeFile } = useEditorStore.getState();
   const session: PersistedEditorSession = {
     workspacePath,
-    openFiles: openFiles.map((file) => ({ ...file, isDirty: false })),
+    // loadError 是"这一次打开失败了"，不是文件的属性：下次启动会重新读，
+    // 存进去只会让一个恢复成功的标签带着过期的不可保存标记
+    openFiles: openFiles.map((file) => ({ ...file, isDirty: false, loadError: undefined })),
     activeFile,
   };
   localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(session));
