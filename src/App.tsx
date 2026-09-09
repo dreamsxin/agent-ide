@@ -3,6 +3,7 @@ import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
 import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
+import StatusBar from "./components/layout/StatusBar";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import CommandPalette, { usePaletteCommands } from "./components/shared/CommandPalette";
@@ -192,6 +193,9 @@ export default function App() {
           </div>
         </div>
       </AnimatedPanel>
+
+      {/* 状态栏在底部面板**外面**：它不是面板，focus mode 收起的是面板 */}
+      <StatusBar />
     </div>
   );
 }
