@@ -1252,14 +1252,33 @@ impl AgentOrchestrator {
         }
     }
 
-    /// Emit the current state to the frontend.
-    fn emit_state(&self, events: &dyn RunEvents) {
-        let payload = serde_json::json!({
+    /// `agent-state-changed` 的规范 payload。所有发这个事件的地方都必须走这里。
+    ///
+    /// 以前 12 个发送点各自手写 `json!`：有的只带 `state`，有的带五个字段，而前端
+    /// 无条件读 `ideMode` —— 同一个事件的形状取决于谁发的。
+    ///
+    /// 更要紧的是 `pendingUndo`。撤销可用性必须随每次状态变化一起送出去，否则界面
+    /// 只能反过来查询，而查询要抢 orchestrator 锁 —— 运行期间那把锁被整条流水线占着。
+    /// 放进 payload 就没有这个问题：它由刚刚改完撤销栈的同一段代码在同一个临界区里
+    /// 计算，物理上不可能和真实栈漂移，也不需要第二份事实来源。
+    /// 而如果把这个字段散在 12 处手写，一定会漏，漏掉的那处会让撤销按钮静默停在旧值。
+    pub fn state_payload(&self) -> serde_json::Value {
+        serde_json::json!({
             "state": self.state_mgr.state.to_string(),
             "mode": self.mode.to_string(),
             "ideMode": self.ide_mode.to_string(),
-        });
-        events.emit_json("agent-state-changed", payload);
+            "currentRunId": self.current_run_id,
+            "lastRunId": self.last_run_id,
+            "pendingUndo": self.pending_undo().map(|(label, files)| serde_json::json!({
+                "label": label,
+                "files": files,
+            })),
+        })
+    }
+
+    /// Emit the current state to the frontend.
+    fn emit_state(&self, events: &dyn RunEvents) {
+        events.emit_json("agent-state-changed", self.state_payload());
     }
 
     fn emit_pipeline(&self, events: &dyn RunEvents, pipeline: &[PipelineStage]) {

@@ -132,8 +132,10 @@ interface AgentStore {
   applyAllDiffs: () => Promise<DiffEntry[]>;
   /** 撤销最近一次应用，把文件恢复到那次应用之前；返回是否全部恢复成功 */
   undoLastApply: () => Promise<boolean>;
-  /** 向后端确认现在有没有可撤销的应用，用来决定是否显示 Undo 按钮 */
+  /** 向后端确认现在有没有可撤销的应用。只用于首次挂载取初值；之后由 agent-state-changed 推送 */
   refreshPendingUndo: () => Promise<void>;
+  /** 由 agent-state-changed 的 payload 驱动 */
+  setPendingUndo: (undo: { label: string; files: string[] } | null) => void;
   applyDiff: (diffId: string) => Promise<DiffEntry[]>;
   applyDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry[]>;
   clearApplyResult: () => void;
@@ -672,18 +674,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
 
+  setPendingUndo: (pendingUndo) => set({ pendingUndo }),
+
   refreshPendingUndo: async () => {
     if (!isTauriRuntime()) return;
     try {
-      const result = await invoke<{
-        known: boolean;
-        undo: { label: string; files: string[] } | null;
-      }>("pending_undo");
-      // known === false 表示"运行中问不出来"，不是"没有退路"。这时保留上一次的
-      // 答案：把按钮藏起来会恰好在最需要撤销的时刻让它消失。运行结束后的
-      // agent-state-changed 会再刷一次，届时答案是准的。
-      if (!result?.known) return;
-      set({ pendingUndo: result.undo ?? null });
+      const pending = await invoke<{ label: string; files: string[] } | null>("pending_undo");
+      set({ pendingUndo: pending ?? null });
     } catch (err: unknown) {
       // 查询失败不该覆盖 error 横幅：这是背景刷新，不是用户发起的动作。
       // 保守起见按"没有退路"处理，宁可不显示按钮，也不显示一个点不动的按钮。

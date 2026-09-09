@@ -12,6 +12,8 @@ interface StateChangedPayload {
   ideMode?: string;
   currentRunId?: string | null;
   lastRunId?: string | null;
+  /** 当前可撤销的那次应用，`null` 表示没有退路。由后端在锁内计算，见 state_payload */
+  pendingUndo?: { label: string; files: string[] } | null;
 }
 
 /**
@@ -48,10 +50,10 @@ export function useAgentBridge() {
             if (e.payload.ideMode) {
               useAgentStore.getState().setIdeMode(e.payload.ideMode as "code" | "plan");
             }
-            // 每条应用路径（Apply All / 单文件 / 单 hunk / 自动应用 / 撤销）都会发这个
-            // 事件，而 `apply_diffs` 并不重发 agent-diff-ready —— 所以"有没有退路"
-            // 必须在这里也复查一次，否则手动 Apply All 之后 Undo 按钮不会出现。
-            void useAgentStore.getState().refreshPendingUndo();
+            // 撤销可用性跟在这个事件的 payload 里，不再回头去 invoke 查询：查询要抢
+            // orchestrator 锁，而运行期间那把锁被整条流水线占着。payload 由刚改完
+            // 撤销栈的同一段代码在同一个临界区里算出，既新鲜也不可能漂移。
+            useAgentStore.getState().setPendingUndo(e.payload.pendingUndo ?? null);
           }),
 
           listen<Step[]>("agent-plan-ready", (e) => {
@@ -68,9 +70,6 @@ export function useAgentBridge() {
             // 不再强制切到 Changes：待审查改动现在直接出现在对话流里
             // （PendingChangesCard），把用户从刚读的回复上拽走反而更差。
             setDiffs(e.payload);
-            // 应用、自动应用、Agent 工具写文件都会重发这个事件，所以这里是
-            // "有没有可撤销的应用"唯一需要复查的地方。
-            void useAgentStore.getState().refreshPendingUndo();
             upsertProblems(
               "agent",
               e.payload
