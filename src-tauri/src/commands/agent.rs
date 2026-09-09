@@ -296,7 +296,7 @@ pub async fn send_agent_prompt(
     // 命令执行和写入按本次运行的权限决定是否暴露。
     //
     // 写权限只跟 Auto 模式挂钩，且在这里就取好快照：Auto 本来就会在流水线结束后
-    // 自动落盘，运行途中写不构成新的特权等级；Suggest/Edit 的约定是"人先看再落盘"。
+    // 自动落盘，运行途中写不构成新的特权等级；Suggest 的约定是"人先看再落盘"。
     let allow_write = {
         let orch = agent_state.orchestrator.lock().await;
         matches!(orch.mode, AgentMode::Auto)
@@ -921,13 +921,8 @@ pub async fn set_agent_mode(
     mode: String,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<(), String> {
-    let mut orch = agent_state.orchestrator.lock().await;
-    orch.mode = match mode.as_str() {
-        "suggest" => AgentMode::Suggest,
-        "edit" => AgentMode::Edit,
-        "auto" => AgentMode::Auto,
-        _ => return Err(format!("Invalid mode: {}", mode)),
-    };
+    let parsed = AgentMode::from_str(&mode)?;
+    agent_state.orchestrator.lock().await.mode = parsed;
     Ok(())
 }
 

@@ -156,10 +156,10 @@ Not covered: a credential file passed explicitly as a context file, or read by a
 ## Agent Approval Model
 
 Two independent settings control what an Agent run may do, and they are easy to
-confuse because two of their three values share a name. Both are visible in the
-UI, in different places.
+confuse because their values share names. Both are visible in the UI, in
+different places.
 
-- **Agent mode** (`AgentMode`: `suggest` | `edit` | `auto`) — decides whether the
+- **Agent mode** (`AgentMode`: `suggest` | `auto`) — decides whether the
   Agent's diffs reach disk without a click, and whether the direct write tool is
   advertised. Set from the mode switch in the top bar.
 - **Permission preset** (`AgentPermissionPreset`: `ask` | `suggest` | `auto`) — a
@@ -167,33 +167,38 @@ UI, in different places.
   `allowFileDelete`, `allowCommandRun`, `allowGitActions`). Set in
   Settings → Agent Permissions, where the toggles can also be changed one by one.
 
-`suggest` and `auto` appear in both lists and mean different things; `edit` is a
-mode only and `ask` is a preset only. There is no "edit" preset to look for in
-Settings, and choosing the `suggest` preset does not put the run in `suggest`
-mode. Renaming one of the two axes would remove the trap, but the values are
-persisted in the profile config, so it is recorded here rather than changed
-silently.
+Both mode values also exist as preset names and mean different things there:
+choosing the `suggest` **preset** does not put the run in `suggest` **mode**, and
+`ask` is a preset only. Renaming one of the two axes would remove the trap; until
+then it is recorded here rather than left for a user to discover.
 
-The Agent operates in a "suggest-then-apply" pattern with three modes:
+The Agent mode is not persisted by the backend — it resets to `suggest` on every
+launch. The frontend session snapshot in `localStorage` remembers the last
+selection and normalizes anything it does not recognize back to `suggest`, so a
+stale value cannot restore a privilege level the user cannot see.
+
+The Agent operates in a "suggest-then-apply" pattern with two modes:
 
 | Mode | Behavior |
 |------|----------|
 | `suggest` | Produces reviewable diffs only. User must explicitly apply. |
-| `edit` | Identical to `suggest` today. |
 | `auto` | Applies pending diffs automatically after the pipeline run completes. |
 
-`edit` is not a distinct privilege level. Every backend gate is written as
-`matches!(mode, AgentMode::Auto)`, so no code path treats `edit` differently from
-`suggest` — the mode is parsed and displayed and nothing else. The switch offers
-three positions but grants two levels. Stated here because a user reasonably reads
-a middle setting as "more than suggest, less than auto", and it is not.
+Two modes, not three, because there is exactly one gate: every check in the
+backend is written as `matches!(mode, AgentMode::Auto)`. An earlier `edit`
+position sat between them and was byte-identical to `suggest` — the switch
+offered three positions but granted two levels, and a user reasonably reads a
+middle setting as "more than suggest, less than auto". It was removed rather
+than given a meaning, because every candidate meaning ("may edit existing files
+but not create", "may write during the run but not auto-apply") is already
+expressed more precisely by the permission toggles below.
 
 Which permission toggles are actually enforced in the backend:
 
 - `allowFileCreate` — enforced twice. In `auto` mode, new-file diffs are held for review instead of being written when it is false, and `workspace_write_file` refuses to create a file that does not exist.
 - `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. This one follows the **preset**, not the mode: the `ask` and `suggest` presets resolve to `AutoApprovedOnly`; the `auto` preset resolves to `AllowAll`.
 - `allowCommandRun` — enforced. When false, the `workspace_run_command` tool is **not advertised to the model and not claimed by the invoker**, so there is no Agent path to process execution other than MCP tools. When true, the exposed allow-list is derived by the backend from the project's own declared tasks (`package.json` scripts, Cargo), never from model input, and long-running commands (dev servers, watch tasks) are refused regardless of the list. Every call is written to the action log.
-- **Agent mode gates direct writes.** `workspace_write_file` is advertised only when the run is in `auto` mode. This is not a new privilege level: `auto` already applies pending diffs without a click, so writing during the run grants nothing it did not already have. In `suggest` / `edit` the tool is absent and the model must emit reviewable diffs, which is what those modes promise. Writes still go through `workspace::resolve_for_agent_write`, so `.git/`, `.agent-ide/`, `node_modules/` and credential files are refused on this path too.
+- **Agent mode gates direct writes.** `workspace_write_file` is advertised only when the run is in `auto` mode. This is not a new privilege level: `auto` already applies pending diffs without a click, so writing during the run grants nothing it did not already have. In `suggest` the tool is absent and the model must emit reviewable diffs, which is what that mode promises. Writes still go through `workspace::resolve_for_agent_write`, so `.git/`, `.agent-ide/`, `node_modules/` and credential files are refused on this path too.
 - **The bounded repair loop (`repair_workspace`) is gated the same way, for the same reason.** Every iteration has to reach the workspace or the re-run checks the old code, so the command is refused outside `auto` mode instead of being downgraded to a single round. Its fixes go through the normal diff application path (`apply_all_diffs`), so each round keeps its base-hash staleness check and its undo point; the iteration budget is clamped to 3, and every iteration plus the stop reason is written to the action log.
 
 - Every tool write is recorded as an `applied` diff entry in the review area with the pre-write content, and is covered by an undo checkpoint, so `Undo Apply` restores it. A write that would bypass the review area entirely is the failure mode this avoids: the file changes and the user has no way to see what changed.

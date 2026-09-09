@@ -318,3 +318,43 @@ describe("restoreDiffs", () => {
     expect(useAgentStore.getState().error).toContain("cannot be applied");
   });
 });
+
+describe("restoreAgentSession", () => {
+  // "edit" 曾经是第三档模式，现在不是合法值了。`?? "suggest"` 只挡 undefined，
+  // 挡不住一个真实但已废弃的值 —— 它会一路进到 store，让分段控件渲染出一个
+  // 哪一段都没选中的状态，而用户完全不知道自己处在什么权限下。
+  it("drops a mode that no longer exists instead of restoring it verbatim", () => {
+    localStorage.setItem(
+      "agent-ide-agent-session",
+      JSON.stringify({
+        workspacePath: "/tmp/ws",
+        mode: "edit",
+        currentTask: "跟进上一轮",
+        steps: [],
+        pipeline: [],
+      })
+    );
+
+    useAgentStore.getState().restoreAgentSession("/tmp/ws");
+
+    expect(useAgentStore.getState().mode).toBe("suggest");
+  });
+
+  it("keeps auto, because that one is a real privilege level", () => {
+    localStorage.setItem(
+      "agent-ide-agent-session",
+      JSON.stringify({
+        workspacePath: "/tmp/ws",
+        mode: "auto",
+        currentTask: "跟进上一轮",
+        steps: [],
+        pipeline: [],
+      })
+    );
+
+    useAgentStore.getState().restoreAgentSession("/tmp/ws");
+
+    expect(useAgentStore.getState().mode).toBe("auto");
+  });
+});
+

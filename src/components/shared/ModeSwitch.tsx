@@ -1,9 +1,8 @@
 import type { AgentMode } from "../../types/agent";
 
 const modes: { key: AgentMode; label: string; desc: string }[] = [
-  { key: "suggest", label: "Suggest", desc: "仅建议" },
-  { key: "edit", label: "Edit", desc: "可编辑" },
-  { key: "auto", label: "Auto", desc: "全自动" },
+  { key: "suggest", label: "Suggest", desc: "改动等审查" },
+  { key: "auto", label: "Auto", desc: "改动直接落盘" },
 ];
 
 interface ModeSwitchProps {

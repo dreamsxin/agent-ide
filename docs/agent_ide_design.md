@@ -217,7 +217,7 @@ Notes:
 
 - `workspace_run_command` is the only Agent path to process execution outside MCP. When the permission is absent the tool is neither advertised nor claimed by the invoker — a tool that would always fail is worse than an absent one, because the model spends a round discovering that.
 - The long-running-command refusal is a safety invariant, not a preference: verification runs a command to completion, and a dev server never exits. It is checked before the allow-list, so listing `npm run dev` does not enable it.
-- Gating writes on `auto` mode is deliberate rather than a new permission flag. `auto` already applies pending diffs without a click, so writing mid-run grants nothing it did not already have; `suggest` / `edit` promise "review before it lands", so the tool is absent there and the model emits diffs.
+- Gating writes on `auto` mode is deliberate rather than a new permission flag. `auto` already applies pending diffs without a click, so writing mid-run grants nothing it did not already have; `suggest` promises "review before it lands", so the tool is absent there and the model emits diffs.
 - Tool writes are published back into the review area (`AgentOrchestrator::record_tool_writes`) on every exit path — success, failure, and cancellation — because a write that happened before a failure is still on disk. Without that, the file changes and the Diff view shows nothing, which is the auditability the product exists for.
 - Tool failures do not abort the stage; the error text is returned to the model so it can adapt.
 - Cancellation is checked before each tool call.
@@ -476,8 +476,11 @@ Current provenance level:
 | Mode | Intended Behavior | Current Behavior |
 |------|-------------------|------------------|
 | `suggest` | Suggest changes only | Produces reviewable diffs |
-| `edit` | Can prepare edits for user confirmation | Produces reviewable diffs |
 | `auto` | Can apply accepted Agent diffs automatically | Applies pending diffs after pipeline run |
+
+Two positions, because there is one gate. An `edit` mode existed between them and
+was byte-identical to `suggest`; see SECURITY.md § Agent Approval Model for why it
+was removed instead of being given a meaning.
 
 Safety rules:
 

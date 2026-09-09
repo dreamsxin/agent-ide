@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
+import type { AgentMode } from "../../types/agent";
 import { isTauriRuntime } from "../../utils/tauri";
 import { getLspStatus, probeLsp, type LspStatusSnapshot } from "../../utils/lspClient";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
@@ -76,7 +77,7 @@ export default function TopBar() {
   }, []);
 
   const handleModeChange = useCallback(
-    (mode: "suggest" | "edit" | "auto") => {
+    (mode: AgentMode) => {
       changeMode(mode);
     },
     [changeMode]

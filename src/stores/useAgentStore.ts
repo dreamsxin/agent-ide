@@ -28,6 +28,7 @@ import type {
 import {
   DEFAULT_PERMISSIONS,
   mcpApprovalForPermissions,
+  normalizeAgentMode,
   permissionsForPreset,
 } from "../types/agent";
 
@@ -1299,7 +1300,7 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
     const interrupted = isInFlightState(parsed.state);
     return {
       state: normalizeRestoredAgentState(parsed.state),
-      mode: parsed.mode ?? "suggest",
+      mode: normalizeAgentMode(parsed.mode),
       ideMode: parsed.ideMode ?? "code",
       currentTask: parsed.currentTask ?? null,
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],

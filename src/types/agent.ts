@@ -9,8 +9,27 @@ export type AgentState =
   | "done"
   | "error";
 
-/** Agent 控制模式 */
-export type AgentMode = "suggest" | "edit" | "auto";
+/**
+ * Agent 控制模式：改动是等人审查，还是跑完直接落盘。
+ *
+ * 只有两档。后端所有权限门都只问"是不是 auto"，所以曾经的第三档 `edit` 和
+ * `suggest` 逐位相同 —— 一个拨了不会有任何区别的位置。更细的授权在
+ * SettingsPanel 的权限开关里（能不能新建文件、能不能跑命令）。
+ */
+export type AgentMode = "suggest" | "auto";
+
+/**
+ * 把外部来源的模式字符串收敛成合法值。
+ *
+ * 需要它的地方有两处，都是不受本进程控制的输入：localStorage 里上个版本存下的
+ * 会话（可能是已删掉的 `"edit"`），以及后端事件里的模式字段。两处原本都是
+ * `as AgentMode` 硬转，那不是校验，只是让类型检查闭嘴 —— 真值仍然会漏进 store，
+ * 让分段控件渲染出一个哪一段都没选中的状态。
+ */
+export function normalizeAgentMode(value: unknown): AgentMode {
+  return value === "auto" ? "auto" : "suggest";
+}
+
 
 /** IDE 工作模式，独立于 Agent 权限模式 */
 export type IdeMode = "code" | "plan";

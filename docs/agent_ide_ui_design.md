@@ -31,7 +31,7 @@
 ### Area 1: Top Control Bar (Global Control) `[Implemented]`
 
 **Functions:**
-- Agent mode switch: Suggest / Edit / Auto
+- Agent mode switch: Suggest / Auto
 - Current task status (Idle / Thinking / Acting)
 - One-click Run (Run Task / Stop)
 - Scope control (Current File / Project / Multi-file)
@@ -174,9 +174,12 @@ Explain | Fix | Refactor | Optimize
 
 ### 3.4 AI Control Level Toggle `[Implemented]`
 
-- Suggest (suggestions only)
-- Edit (currently identical to Suggest — every backend gate tests for Auto only)
-- Auto (automatic execution)
+- Suggest (changes wait in the review area)
+- Auto (changes are applied when the run finishes)
+
+Two positions, not three. A middle `Edit` position existed and was byte-identical
+to Suggest — every backend gate tests for Auto only — so it was removed rather
+than given a meaning it would have duplicated from the permission toggles.
 
 This is `AgentMode`, and it is separate from the permission preset in
 Settings → Agent Permissions (`ask` / `suggest` / `auto`), which sets the
@@ -262,7 +265,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 - **Icon Button** (Run / Stop / Diff / Apply)
 - **Tag / Chip** (Scope / Mode / Agent)
 - **Input**: Chat Input (multiline + attachments), Command Input (single line)
-- **Toggle / Segment** (Suggest | Edit | Auto)
+- **Toggle / Segment** (Suggest | Auto)
 - **Status Dot** (Idle / Thinking / Acting)
 
 ### 7.3 Composite Components

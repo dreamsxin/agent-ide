@@ -4,6 +4,7 @@ import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
+import { normalizeAgentMode } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
@@ -45,7 +46,7 @@ export function useAgentBridge() {
             const { state, mode } = e.payload;
             setState(state as AgentState);
             if (mode) {
-              useAgentStore.getState().setMode(mode as "suggest" | "edit" | "auto");
+              useAgentStore.getState().setMode(normalizeAgentMode(mode));
             }
             if (e.payload.ideMode) {
               useAgentStore.getState().setIdeMode(e.payload.ideMode as "code" | "plan");
