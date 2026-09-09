@@ -777,10 +777,10 @@ export default function SettingsPanel() {
         </div>
         <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
           {permissionPreset === "ask"
-            ? "Always confirm before any file or command operation."
+            ? "Read-only: the Agent can read the workspace and propose changes, nothing else."
             : permissionPreset === "suggest"
-            ? "Allow file creation; confirm destructive operations."
-            : "Allow all operations without confirmation."}
+            ? "Also lets the Agent create new files. Changes still wait in the review area."
+            : "Also lets the Agent run the project's own declared commands (tests, build)."}
         </p>
 
         {/* Granular Toggles */}
@@ -792,25 +792,14 @@ export default function SettingsPanel() {
             onChange={() => togglePermission("allowFileCreate")}
           />
           <PermissionToggle
-            label="File Deletion"
-            desc="Allow Agent to delete files (destructive)"
-            checked={permissions.allowFileDelete}
-            onChange={() => togglePermission("allowFileDelete")}
-          />
-          <PermissionToggle
             label="Command Execution"
-            desc="Allow Agent to run shell commands (destructive)"
+            desc="Allow Agent to run the project's declared commands"
             checked={permissions.allowCommandRun}
             onChange={() => togglePermission("allowCommandRun")}
           />
-          <PermissionToggle
-            label="Git Actions"
-            desc="Allow Agent to perform git push/force operations"
-            checked={permissions.allowGitActions}
-            onChange={() => togglePermission("allowGitActions")}
-          />
         </div>
       </div>
+
 
       <div className="mt-2 grid grid-cols-2 gap-2">
         <button

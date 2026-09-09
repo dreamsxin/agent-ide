@@ -37,37 +37,38 @@ export type IdeMode = "code" | "plan";
 /** Agent 权限预设 */
 export type AgentPermissionPreset = "ask" | "suggest" | "auto";
 
-/** 细粒度 Agent 权限 */
+/**
+ * 一次运行授予 Agent 的细粒度权限。
+ *
+ * 只有两项，因为只有两项真的过 IPC 并在后端被检查。曾经还有
+ * `allowFileDelete` 和 `allowGitActions`：两个界面上拨得动、后端没有任何读者的
+ * 开关。它们比没有更糟 —— 关掉"文件删除"会让人以为堵上了一条路，而那条路
+ * 从来不存在；打开"Git 操作"会让人以为开了一条路，而 Agent 根本不跑 Git。
+ * 等真的出现对应的后端路径时再把开关加回来，那时它才有东西可守。
+ */
 export interface AgentPermission {
   allowFileCreate: boolean;
-  allowFileDelete: boolean;
   allowCommandRun: boolean;
-  allowGitActions: boolean;
 }
 
-/** 默认权限（ask 模式下的全手动确认） */
+/** `ask` 预设：只读。既不新建文件，也不跑命令。 */
 export const DEFAULT_PERMISSIONS: AgentPermission = {
   allowFileCreate: false,
-  allowFileDelete: false,
   allowCommandRun: false,
-  allowGitActions: false,
 };
 
-/** suggest 预设：审查但不自动执行 */
+/** `suggest` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
 export const SUGGEST_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
-  allowFileDelete: false,
   allowCommandRun: false,
-  allowGitActions: false,
 };
 
-/** auto 预设：全部放行 */
+/** `auto` 预设：可以新建文件，也可以跑项目自己声明的命令。 */
 export const AUTO_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
-  allowFileDelete: true,
   allowCommandRun: true,
-  allowGitActions: true,
 };
+
 
 /** 根据预设获取权限 */
 export function permissionsForPreset(preset: AgentPermissionPreset): AgentPermission {

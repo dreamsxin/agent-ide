@@ -163,8 +163,8 @@ different places.
   Agent's diffs reach disk without a click, and whether the direct write tool is
   advertised. Set from the mode switch in the top bar.
 - **Permission preset** (`AgentPermissionPreset`: `ask` | `suggest` | `auto`) — a
-  shortcut that sets the four fine-grained toggles (`allowFileCreate`,
-  `allowFileDelete`, `allowCommandRun`, `allowGitActions`). Set in
+  shortcut that sets the two fine-grained toggles (`allowFileCreate`,
+  `allowCommandRun`). Set in
   Settings → Agent Permissions, where the toggles can also be changed one by one.
 
 Both mode values also exist as preset names and mean different things there:
@@ -202,7 +202,7 @@ Which permission toggles are actually enforced in the backend:
 - **The bounded repair loop (`repair_workspace`) is gated the same way, for the same reason.** Every iteration has to reach the workspace or the re-run checks the old code, so the command is refused outside `auto` mode instead of being downgraded to a single round. Its fixes go through the normal diff application path (`apply_all_diffs`), so each round keeps its base-hash staleness check and its undo point; the iteration budget is clamped to 3, and every iteration plus the stop reason is written to the action log.
 
 - Every tool write is recorded as an `applied` diff entry in the review area with the pre-write content, and is covered by an undo checkpoint, so `Undo Apply` restores it. A write that would bypass the review area entirely is the failure mode this avoids: the file changes and the user has no way to see what changed.
-- `allowFileDelete`, `allowGitActions` — **not enforced, because no Agent-reachable backend path performs those operations today.** Adding checks for them would be theatre until such a path exists. Agent runs never invoke Git commands, and neither diff application nor the write tool deletes files.
+- There used to be `allowFileDelete` and `allowGitActions` toggles here, documented as "not enforced". They are now **removed from the UI entirely**, because an unenforced permission toggle is worse than an absent one: switching off "File Deletion" implies a path was closed, and no such path exists — neither diff application nor the write tool deletes files, and Agent runs never invoke Git. They will come back when there is something for them to guard.
 - Permissions are captured as a per-run snapshot when the run starts. Narrowing a permission mid-run does not revoke a tool that was already advertised for that run; stop the run instead.
 - In the CLI, command execution is gated by `--allow-run` patterns instead. Both entry points now share one matcher (`services::verification::is_command_allowed`), so what counts as authorized cannot drift between them. **Read-only workspace tools are attached unconditionally**: reading files inside the workspace is not a privilege, it is the subject of the task, and without it the model has to guess the `original` block of any edit it proposes — a real DeepSeek run did exactly that and produced diffs that could not apply. `--allow-run` still decides whether `workspace_run_command` exists, and `--allow-edit` / `--allow-create` are deliberately *not* reinterpreted as write-tool grants — they govern whether produced diffs may be applied, and treating them as "the model may write files directly" would be a silent privilege escalation.
 
