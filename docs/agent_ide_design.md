@@ -222,7 +222,7 @@ Notes:
 - Tool failures do not abort the stage; the error text is returned to the model so it can adapt.
 - Cancellation is checked before each tool call.
 - Tool definitions and the executing `ToolInvoker` are always attached together. `send_agent_prompt`, `run_agent_step`, and `continue_agent_pipeline` all build both; the MCP policy and tool permissions used by a run are remembered on the orchestrator (`tool_policy`, `tool_permissions`) so a resumed pipeline rebuilds the same tool surface. The write log is shared through the same `Arc`, so a resumed run's writes are still published.
-- `agent_cli` currently passes no invoker, so headless runs expose no tools. That asymmetry is intentional today but is why the CLI needs its own repair loop.
+- `agent_cli` attaches the read-only workspace tools unconditionally (`cli/mod.rs` calls `attach_workspace_tools` on every agent command), so headless runs have the same read surface as the desktop app. Write and command tools still require the matching permission flags.
 
 
 
@@ -550,7 +550,7 @@ Highest-impact gaps:
 
 1. **Autonomous repair loop** (largest remaining gap)
    - The model can read the workspace, run the project's check commands, and — in `auto` mode — write files, so a full observe/change/verify cycle is now possible within one stage's tool loop.
-   - What is still missing is the orchestrator driving that cycle: a stage failure or a failed check aborts the pipeline (`orchestrator.rs` returns `Err`) instead of feeding the failure back for a bounded number of retries.
+   - The orchestrator does drive that cycle now: `repair_until_checks_pass` (`orchestrator.rs`) runs verify → repair → re-verify under a shared `RepairPolicy`, exposed as the `repair_workspace` command and reachable from `Auto Repair` in the Commands panel. What remains is that a *stage* failure still aborts the pipeline (`orchestrator.rs` returns `Err`) rather than being fed back as a repair round.
    - `agent_cli` has a bounded repair loop (`--max-iterations`, default 0 = off); the desktop app has `verify_workspace` + `agent_repair_prompt` and a `Verify All` / `Fix with Agent` path, but each is a single user-triggered round.
    - Target: an orchestrator-level bounded repair loop reusing `services/verification.rs`.
 
@@ -647,7 +647,7 @@ These are targets, not verified measurements. Baseline tests are a Phase 10 item
 Ordered by dependency, not by appeal:
 
 1. **Write tool.** Done: `workspace_write_file`, advertised only in `auto` mode, recorded as an applied+undoable diff.
-2. **Autonomous bounded repair loop.** The prompt builder and check runner are already shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `Verify All` / `Fix with Agent` already send a repair prompt — but each is one user-triggered round. What is missing is the orchestrator running verify → repair → re-verify itself, bounded by an iteration count, so a failed stage or failed check does not abort the pipeline.
+2. **Autonomous bounded repair loop.** Landed. The prompt builder and check runner are shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `repair_until_checks_pass` runs verify → repair → re-verify bounded by `RepairPolicy`, reachable as `Auto Repair` in the Commands panel and as the CLI's `--repair-iterations`. Still open: a failed *stage* aborts the pipeline instead of becoming a repair round.
 3. **Persistent message thread per run.** Done: stages exchange real `assistant` / `tool` messages (`executor::StageOutcome`), so tool results survive across stages and a pause/resume. Prompt caching is still not implemented — no cache-control markers are sent — and the thread is not persisted across a process restart.
 4. **Symbol index and retrieval.** tree-sitter symbol index plus local retrieval feeding `budgeted` packing. Prerequisite for large workspaces, where the 160-entry project tree is not a usable map.
 5. **Parallel subagents with worktree isolation.** Depends on (1): parallel agents that cannot write have nothing to isolate.
