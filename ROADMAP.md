@@ -746,6 +746,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Kept at ~6 KB against the 8 000-character bound in `services/project_memory.rs`, because the loader truncates the tail silently. Every claim in it was verified against the code or by running the command, which is the standard the file itself sets.
    - `CONTRIBUTING.md` is still absent. Deliberately not written as a copy of this: a human-facing contributing guide should cover setup and PR expectations, which are different content, not the same content in a second place.
 
+19. **One 40px row was doing both jobs (resolved 2026-09-09)**
+   - The top bar held **21 interactive controls and 6 passive indicators** on a single 40px row, with no status bar anywhere. Two of the indicators were unlabelled coloured dots: whether an LLM profile is configured — the single fact that decides whether the Agent can run at all — required hovering to read. Diagnostic counts were worse: visible only after opening the bottom panel's Problems tab, so "how many errors does the code have" needed a deliberate trip to go find.
+   - Added `src/components/layout/StatusBar.tsx`, 24px at the bottom edge. Top bar keeps actions; passive status moves down and gets **text**. Problem counts are a button that opens the Problems panel, because a number that tells you something is wrong without telling you where to look is half a feature.
+   - Mounted as the last child of the root flex column, **outside** the bottom `AnimatedPanel`. Inside it, the status bar would vanish with the terminal and with focus mode — and focus mode's actual semantic here is "collapse the three panels", which a status bar is not. No separate visibility toggle either: that would have meant a persisted flag across six touch points in `useLayoutStore` plus a palette entry, to duplicate a control that already exists.
+   - **Only data that already exists.** Cursor position needs an `onDidChangeCursorPosition` subscription that does not exist (`useEditorStore` tracks *selection*, and only when non-empty); encoding and line-ending are not modelled at all; Git branch is fetched only from inside `GitPanel`, so a branch segment would read empty until the user opened that tab; per-run token spend has no store. Each of those is its own change. A segment that is blank most of the time is worse than no segment.
+   - Three tests, and the third is the one that matters: `toggleBottomPanel()` is the obvious way to write "open the panel", and it **closes** an already-open panel — clicking "go look at the problems" would collapse the view you were trying to reach.
+   - Doc drift found while updating `agent_ide_ui_design.md`: the Area 1 list, marked `[Implemented]`, claimed the top bar had a scope control (Current File / Project / Multi-file) and a Git status segment. Neither exists. Corrected rather than left, and the section now says explicitly what is absent.
+
+
 
 
 

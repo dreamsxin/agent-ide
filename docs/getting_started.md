@@ -144,8 +144,10 @@ the command palette.
 ## 6. Where things are
 
 - **Top bar** — project name, LSP status, run/build/test buttons, the code/plan
-  mode switch, the Agent mode switch, the LLM indicator, and the panel toggles.
-  There is no separate status bar; this row carries all of it.
+  mode switch, the Agent mode switch, and the panel toggles. Actions live here.
+- **Status bar** (bottom edge) — passive status: problem counts by severity
+  (click to open the Problems panel), the active file's language, whether an LLM
+  profile is configured, and the Agent's current state.
 - **Left panel** — Explorer and Source Control.
 - **Editor** — tabs, inline suggestions, and a floating action bar on selected
   text.

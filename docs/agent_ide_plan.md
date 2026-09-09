@@ -94,6 +94,7 @@ agent-ide/
 │   │   │   ├── LeftPanel.tsx
 │   │   │   ├── AgentPanel.tsx
 │   │   │   ├── BottomPanel.tsx
+│   │   │   ├── StatusBar.tsx
 │   │   │   └── ResizeHandle.tsx
 │   │   ├── editor/
 │   │   │   ├── EditorContainer.tsx
@@ -184,7 +185,7 @@ agent-ide/
 │   ├── Project Run/Build/Test/Debug buttons
 │   ├── <ModeSwitch />                         # Suggest | Auto
 │   ├── LSP Status
-│   └── <StatusDot /> + Run/Stop/Settings
+│   └── Run/Stop + panel toggles + window controls
 │
 ├── <LeftPanel>                                # grid-row:2 / col-start:1
 │   ├── <Explorer />                           # File tree (react-arborist)
@@ -216,6 +217,12 @@ agent-ide/
 │   ├── <TasksPanel />                         # Project commands & run history
 │   ├── <ProblemsPanel />                      # Unified diagnostics/problems
 │   └── <LogView />                            # Agent & system action logs
+│
+├── <StatusBar>                                # last row, outside the bottom panel
+│   ├── Problem counts by severity             # click -> Problems panel
+│   ├── Active file language
+│   ├── LLM configured / not configured
+│   └── <StatusDot />                          # Agent state
 │
 ├── <CommandPalette />                         # Ctrl+Shift+P overlay
 ├── <ShortcutsHelp />

@@ -30,12 +30,42 @@
 
 ### Area 1: Top Control Bar (Global Control) `[Implemented]`
 
+The top bar carries **actions**. Passive status moved to the status bar (Area 1b)
+so that one 40px row is not doing both jobs.
+
 **Functions:**
 - Agent mode switch: Suggest / Auto
-- Current task status (Idle / Thinking / Acting)
-- One-click Run (Run Task / Stop)
-- Scope control (Current File / Project / Multi-file)
-- Git status
+- IDE mode switch: Code / Plan
+- Run / Debug / Build / Test, from the project's own declared commands
+- Stop, while a run is in flight
+- Panel toggles (Explorer / Agent / Terminal), focus mode, theme, command
+  palette, shortcuts help
+- LSP status entry point — a badge that opens a details popover. It is the one
+  status-shaped thing that stays, because it is also the way in to that popover.
+- Window controls (minimize / maximize / close)
+
+Not present despite earlier drafts claiming otherwise: scope control
+(Current File / Project / Multi-file) and a Git status segment. Scope is chosen
+per prompt in the Agent panel; Git state lives in the Source Control panel.
+
+### Area 1b: Status Bar (Passive Status) `[Implemented]`
+
+A 24px row at the bottom edge, outside the bottom panel — it is not a panel, and
+focus mode collapses panels.
+
+- Problem counts by severity, clickable to open the Problems panel. Previously
+  these were only visible once that panel was already open.
+- Active file's language.
+- Whether an LLM profile is configured, **with text**. This used to be an
+  unlabelled coloured dot in the top bar: the single most consequential piece of
+  state in the app — whether the Agent can run at all — required hovering to read.
+- Agent state (Idle / Thinking / Planning / Acting / Reviewing / Waiting / Done /
+  Error).
+
+Deliberately absent until the data exists: cursor position, encoding and
+line-ending, Git branch, and per-run token spend. An empty segment is worse than
+no segment.
+
 
 **Design points:**
 - Always visible

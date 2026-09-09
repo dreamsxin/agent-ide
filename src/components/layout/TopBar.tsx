@@ -8,7 +8,6 @@ import { useTaskStore, type ProjectTaskDefinition } from "../../stores/useTaskSt
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import StatusDot from "../shared/StatusDot";
 import ModeSwitch from "../shared/ModeSwitch";
 import type { AgentMode } from "../../types/agent";
 import { isTauriRuntime } from "../../utils/tauri";
@@ -35,7 +34,6 @@ export default function TopBar() {
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
   const ideMode = useAgentStore((s) => s.ideMode);
-  const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const changeMode = useAgentStore((s) => s.changeMode);
   const setIdeMode = useAgentStore((s) => s.setIdeMode);
   const stopAgent = useAgentStore((s) => s.stopAgent);
@@ -314,16 +312,8 @@ export default function TopBar() {
         <ModeSwitch mode={agentMode} onChange={handleModeChange} />
       </div>
 
-      {/* 右侧：状态 + 控制按钮 + 窗口控件 */}
+      {/* 右侧：控制按钮 + 窗口控件。被动状态在底部状态栏里 */}
       <div className="flex items-center gap-2">
-        {/* LLM 连接状态 */}
-        <span
-          className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${llmConfigured ? "bg-green-500 animate-pulse-dot" : "bg-red-500"}`}
-          title={llmConfigured ? "LLM Connected" : "LLM Not Configured — open Settings panel to set API credentials"}
-        />
-
-        <StatusDot state={agentState} />
-
         {isRunning && (
           <button
             onClick={handleStop}
