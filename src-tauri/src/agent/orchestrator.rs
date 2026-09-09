@@ -160,6 +160,23 @@ pub struct PipelineRun {
     pub ide_mode: IdeMode,
 }
 
+/// `prepare_stage` 的结论：这个阶段可以跑，还是运行已经在它前面停住。
+///
+/// `Ready` 刻意把 `execute_stage` 需要的一切都装成**自有值**（含克隆出的
+/// `tool_invoker` Arc）。一旦它不再借用 orchestrator，调用方就能在 await
+/// 期间放开锁 —— 这是锁粒度治理要的形状。
+pub enum StagePlan {
+    Ready {
+        stage: PipelineStage,
+        step_index: usize,
+        pending_diff_summary: String,
+        tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
+    },
+    /// `pause_before` 命中：暂停快照已写好，状态已置 `WaitingUser`。
+    /// 调用方必须就此结束本次运行。
+    Paused,
+}
+
 #[derive(Debug, Clone)]
 pub struct PausedPipelineRun {
     pub prompt: String,
@@ -599,87 +616,33 @@ impl AgentOrchestrator {
         .await
     }
 
+    /// 驱动整条流水线。
+    ///
+    /// 这里刻意只留三件事：调 `prepare_stage`、await `execute_stage`、调
+    /// `record_stage_outcome`。所有状态变更都在那三个**同步**方法里，await 点之间
+    /// 不碰 `self` —— 这是把锁收窄到"每阶段三小段"的前提。
     #[allow(clippy::too_many_arguments)]
     pub async fn continue_pipeline_from(
         &mut self,
-        run: PipelineRun,
+        mut run: PipelineRun,
         start_index: usize,
         ignore_pause_once: bool,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
         events: std::sync::Arc<dyn RunEvents>,
     ) -> Result<(), String> {
-        use crate::agent::state_machine::AgentEvent;
-
-        let PipelineRun {
-            prompt,
-            ctx_str,
-            context_summary,
-            mut pipeline,
-            mut transcript,
-            ide_mode,
-        } = run;
-
-        self.ide_mode = ide_mode;
-        for stage_index in start_index..pipeline.len() {
-            let stage = pipeline[stage_index].clone();
-            if stage.pause_before && !(ignore_pause_once && stage_index == start_index) {
-                mark_pipeline_stage(&mut pipeline, stage_index, "paused");
-                self.paused_run = Some(PausedPipelineRun {
-                    prompt: prompt.clone(),
-                    context: ctx_str.clone(),
-                    context_summary: context_summary.clone(),
-                    transcript: transcript.clone(),
-                    pipeline: pipeline.clone(),
-                    stage_index,
-                    ide_mode,
-                });
-                self.emit_pipeline(events.as_ref(), &pipeline);
-                self.emit_action_log(
-                    events.as_ref(),
-                    "info",
-                    "stage_paused",
-                    Some(stage.role.to_string()),
-                    Some(&stage.name),
-                    &format!("Paused before {}", stage.name),
-                    "Pipeline paused before this stage by user configuration. Disable pause before this stage and rerun or continue with single-step controls.",
-                    Some(context_summary.clone()),
-                    Some(self.summarize_pending_diffs()),
-                );
-                self.state_mgr
-                    .set(crate::agent::state_machine::AgentState::WaitingUser);
-                self.emit_state(events.as_ref());
+        self.ide_mode = run.ide_mode;
+        for stage_index in start_index..run.pipeline.len() {
+            let skip_pause = ignore_pause_once && stage_index == start_index;
+            let StagePlan::Ready {
+                stage,
+                step_index,
+                pending_diff_summary,
+                tool_invoker,
+            } = self.prepare_stage(&mut run, stage_index, skip_pause, events.as_ref())
+            else {
                 return Ok(());
-            }
-            mark_pipeline_stage(&mut pipeline, stage_index, "active");
-            self.emit_pipeline(events.as_ref(), &pipeline);
-            self.emit_action_log(
-                events.as_ref(),
-                "info",
-                "stage_start",
-                Some(stage.role.to_string()),
-                Some(&stage.name),
-                &format!("{} stage started", stage.name),
-                &format!(
-                    "Role: {}\nStage index: {}",
-                    stage.role.to_string(),
-                    stage_index + 1
-                ),
-                Some(context_summary.clone()),
-                Some(self.summarize_pending_diffs()),
-            );
-
-            let step_index = self.ensure_stage_step(&stage);
-            self.steps[step_index].status = "doing".to_string();
-            self.steps[step_index]
-                .logs
-                .push(format!("{} stage started", stage.role.to_string()));
-            self.emit_step(events.as_ref(), step_index);
-
-            let _ = self
-                .state_mgr
-                .transition(&AgentEvent::StepStart(stage.name.clone()));
-            self.emit_state(events.as_ref());
+            };
 
             let (tx2, mut rx2) = mpsc::channel::<String>(32);
             let events_clone2 = events.clone();
@@ -689,138 +652,266 @@ impl AgentOrchestrator {
                 }
             });
 
-            // 裁剪在 `execute_stage` 里做，这里保留完整线程：暂停/续跑要恢复的是
-            // 全部历史，而不是某一次已经裁过的快照
-            let pending_diff_summary = self.summarize_pending_diffs();
-
-            match executor::execute_stage(
+            let outcome = executor::execute_stage(
                 llm,
                 stage.role,
                 &stage.name,
-                &prompt,
-                &ctx_str,
-                &transcript,
+                &run.prompt,
+                &run.ctx_str,
+                &run.transcript,
                 &pending_diff_summary,
-                self.tool_invoker.as_deref(),
+                tool_invoker.as_deref(),
                 cancel_flag.clone(),
                 tx2,
             )
-            .await
-            {
-                Ok(outcome) => {
-                    let response = outcome.text;
-                    self.steps[step_index].status = "done".to_string();
-                    self.steps[step_index].logs.push(format!(
-                        "{} response: {}...",
-                        stage.role.to_string(),
-                        response.chars().take(200).collect::<String>()
-                    ));
-                    // 给这个 stage 的最后一条消息打上出处标签：下一个 stage 需要知道
-                    // 哪一句是哪个角色说的，光靠消息顺序看不出来
-                    let mut stage_messages = outcome.transcript;
-                    if let Some(last) = stage_messages.last_mut() {
-                        last.content = format!(
-                            "[{} / {}]\n{}",
-                            stage.name,
-                            stage.role.to_string(),
-                            last.content
-                        );
-                    }
-                    transcript.extend(stage_messages);
+            .await;
 
-                    let generated_diff_count = if ide_mode == IdeMode::Plan {
-                        self.handle_plan_stage_response(
-                            events.as_ref(),
-                            &stage,
-                            &response,
-                            &prompt,
-                            context_summary.clone(),
-                        )
-                    } else {
-                        let parsed = executor::parse_diffs_with_diagnostics(&response);
-                        let mut step_diffs = parsed.diffs;
-                        attach_stage_provenance(
-                            &mut step_diffs,
-                            stage.role.to_string(),
-                            &stage.name,
-                        );
-                        // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
-                        crate::agent::diff_apply::stamp_base_hashes(&mut step_diffs);
-                        let generated_diff_count = step_diffs.len();
-                        self.diffs.extend(step_diffs);
-                        if !parsed.diagnostics.is_empty() {
-                            self.emit_action_log(
-                                events.as_ref(),
-                                "warn",
-                                "agent_changes_validation",
-                                Some(stage.role.to_string()),
-                                Some(&stage.name),
-                                "Agent changes validation reported issues",
-                                &parsed.diagnostics.join("\n"),
-                                Some(context_summary.clone()),
-                                Some(self.summarize_pending_diffs()),
-                            );
-                        }
-                        generated_diff_count
-                    };
-                    mark_pipeline_stage(&mut pipeline, stage_index, "completed");
-                    self.emit_action_log(
-                        events.as_ref(),
-                        "success",
-                        "stage_complete",
-                        Some(stage.role.to_string()),
-                        Some(&stage.name),
-                        &format!(
-                            "{} stage completed with {} new {}{}",
-                            stage.name,
-                            generated_diff_count,
-                            if ide_mode == IdeMode::Plan {
-                                "artifact"
-                            } else {
-                                "diff"
-                            },
-                            if generated_diff_count == 1 { "" } else { "s" }
-                        ),
-                        &response,
-                        Some(context_summary.clone()),
-                        Some(self.summarize_pending_diffs()),
-                    );
-                }
-                Err(e) => {
-                    self.steps[step_index].status = "error".to_string();
-                    self.steps[step_index].logs.push(format!("Error: {}", e));
-                    mark_pipeline_stage(&mut pipeline, stage_index, "failed");
-                    self.emit_step(events.as_ref(), step_index);
-                    self.emit_pipeline(events.as_ref(), &pipeline);
-                    self.emit_action_log(
-                        events.as_ref(),
-                        "error",
-                        "stage_error",
-                        Some(stage.role.to_string()),
-                        Some(&stage.name),
-                        &format!("{} stage failed", stage.name),
-                        &e,
-                        Some(context_summary.clone()),
-                        Some(self.summarize_pending_diffs()),
-                    );
-                    return Err(e);
-                }
-            }
-
-            self.ensure_not_cancelled(&cancel_flag, events.as_ref())?;
-            self.emit_step(events.as_ref(), step_index);
-            self.emit_pipeline(events.as_ref(), &pipeline);
-
-            let _ = self
-                .state_mgr
-                .transition(&AgentEvent::StepDone(stage.name.clone()));
-            self.emit_state(events.as_ref());
+            self.record_stage_outcome(
+                &mut run,
+                stage_index,
+                &stage,
+                step_index,
+                outcome,
+                &cancel_flag,
+                events.as_ref(),
+            )?;
 
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         }
 
-        // 5. Auto applies diffs immediately; other modes wait for review.
-        if ide_mode == IdeMode::Plan {
+        self.finish_pipeline(&run, events.as_ref())
+    }
+
+    /// 进入某个阶段前的全部状态变更，同步完成。
+    ///
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。命中 `pause_before` 时它
+    /// 要写暂停快照（`paused_run`）、把阶段标成 `paused`、置 `WaitingUser` 三件事 ——
+    /// 三者之间被别的命令插入，会出现"快照已存但状态还在 running"或反之的窗口，
+    /// 前端据此判断能否续跑，读到中间态就会给出错误的按钮。
+    ///
+    /// 返回 `Paused` 时调用方必须直接结束本次运行，不要再往后推进。
+    pub fn prepare_stage(
+        &mut self,
+        run: &mut PipelineRun,
+        stage_index: usize,
+        skip_pause: bool,
+        events: &dyn RunEvents,
+    ) -> StagePlan {
+        use crate::agent::state_machine::AgentEvent;
+
+        let stage = run.pipeline[stage_index].clone();
+        if stage.pause_before && !skip_pause {
+            mark_pipeline_stage(&mut run.pipeline, stage_index, "paused");
+            self.paused_run = Some(PausedPipelineRun {
+                prompt: run.prompt.clone(),
+                context: run.ctx_str.clone(),
+                context_summary: run.context_summary.clone(),
+                transcript: run.transcript.clone(),
+                pipeline: run.pipeline.clone(),
+                stage_index,
+                ide_mode: run.ide_mode,
+            });
+            self.emit_pipeline(events, &run.pipeline);
+            self.emit_action_log(
+                events,
+                "info",
+                "stage_paused",
+                Some(stage.role.to_string()),
+                Some(&stage.name),
+                &format!("Paused before {}", stage.name),
+                "Pipeline paused before this stage by user configuration. Disable pause before this stage and rerun or continue with single-step controls.",
+                Some(run.context_summary.clone()),
+                Some(self.summarize_pending_diffs()),
+            );
+            self.state_mgr
+                .set(crate::agent::state_machine::AgentState::WaitingUser);
+            self.emit_state(events);
+            return StagePlan::Paused;
+        }
+
+        mark_pipeline_stage(&mut run.pipeline, stage_index, "active");
+        self.emit_pipeline(events, &run.pipeline);
+        self.emit_action_log(
+            events,
+            "info",
+            "stage_start",
+            Some(stage.role.to_string()),
+            Some(&stage.name),
+            &format!("{} stage started", stage.name),
+            &format!(
+                "Role: {}\nStage index: {}",
+                stage.role.to_string(),
+                stage_index + 1
+            ),
+            Some(run.context_summary.clone()),
+            Some(self.summarize_pending_diffs()),
+        );
+
+        let step_index = self.ensure_stage_step(&stage);
+        self.steps[step_index].status = "doing".to_string();
+        self.steps[step_index]
+            .logs
+            .push(format!("{} stage started", stage.role.to_string()));
+        self.emit_step(events, step_index);
+
+        let _ = self
+            .state_mgr
+            .transition(&AgentEvent::StepStart(stage.name.clone()));
+        self.emit_state(events);
+
+        StagePlan::Ready {
+            stage,
+            step_index,
+            // 裁剪在 `execute_stage` 里做，这里保留完整线程：暂停/续跑要恢复的是
+            // 全部历史，而不是某一次已经裁过的快照
+            pending_diff_summary: self.summarize_pending_diffs(),
+            // 克隆出 Arc 而不是借 `self`：调用方要在 await 期间放开锁，
+            // 借用会把 orchestrator 的生命周期钉在整个阶段上
+            tool_invoker: self.tool_invoker.clone(),
+        }
+    }
+
+    /// 收敛一个阶段的结果，同步完成。
+    ///
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。成功路径要一起落地
+    /// 「step 状态 + transcript + 新 diff + 阶段标记」；这几样是同一份事实的不同
+    /// 投影，拆开会让审查区里出现"diff 已到但阶段还没完成"之类的自相矛盾状态。
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_stage_outcome(
+        &mut self,
+        run: &mut PipelineRun,
+        stage_index: usize,
+        stage: &PipelineStage,
+        step_index: usize,
+        outcome: Result<executor::StageOutcome, String>,
+        cancel_flag: &Arc<AtomicBool>,
+        events: &dyn RunEvents,
+    ) -> Result<(), String> {
+        use crate::agent::state_machine::AgentEvent;
+
+        match outcome {
+            Ok(outcome) => {
+                let response = outcome.text;
+                self.steps[step_index].status = "done".to_string();
+                self.steps[step_index].logs.push(format!(
+                    "{} response: {}...",
+                    stage.role.to_string(),
+                    response.chars().take(200).collect::<String>()
+                ));
+                // 给这个 stage 的最后一条消息打上出处标签：下一个 stage 需要知道
+                // 哪一句是哪个角色说的，光靠消息顺序看不出来
+                let mut stage_messages = outcome.transcript;
+                if let Some(last) = stage_messages.last_mut() {
+                    last.content = format!(
+                        "[{} / {}]\n{}",
+                        stage.name,
+                        stage.role.to_string(),
+                        last.content
+                    );
+                }
+                run.transcript.extend(stage_messages);
+
+                let generated_diff_count = if run.ide_mode == IdeMode::Plan {
+                    self.handle_plan_stage_response(
+                        events,
+                        stage,
+                        &response,
+                        &run.prompt,
+                        run.context_summary.clone(),
+                    )
+                } else {
+                    let parsed = executor::parse_diffs_with_diagnostics(&response);
+                    let mut step_diffs = parsed.diffs;
+                    attach_stage_provenance(&mut step_diffs, stage.role.to_string(), &stage.name);
+                    // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
+                    crate::agent::diff_apply::stamp_base_hashes(&mut step_diffs);
+                    let generated_diff_count = step_diffs.len();
+                    self.diffs.extend(step_diffs);
+                    if !parsed.diagnostics.is_empty() {
+                        self.emit_action_log(
+                            events,
+                            "warn",
+                            "agent_changes_validation",
+                            Some(stage.role.to_string()),
+                            Some(&stage.name),
+                            "Agent changes validation reported issues",
+                            &parsed.diagnostics.join("\n"),
+                            Some(run.context_summary.clone()),
+                            Some(self.summarize_pending_diffs()),
+                        );
+                    }
+                    generated_diff_count
+                };
+                mark_pipeline_stage(&mut run.pipeline, stage_index, "completed");
+                self.emit_action_log(
+                    events,
+                    "success",
+                    "stage_complete",
+                    Some(stage.role.to_string()),
+                    Some(&stage.name),
+                    &format!(
+                        "{} stage completed with {} new {}{}",
+                        stage.name,
+                        generated_diff_count,
+                        if run.ide_mode == IdeMode::Plan {
+                            "artifact"
+                        } else {
+                            "diff"
+                        },
+                        if generated_diff_count == 1 { "" } else { "s" }
+                    ),
+                    &response,
+                    Some(run.context_summary.clone()),
+                    Some(self.summarize_pending_diffs()),
+                );
+            }
+            Err(e) => {
+                self.steps[step_index].status = "error".to_string();
+                self.steps[step_index].logs.push(format!("Error: {}", e));
+                mark_pipeline_stage(&mut run.pipeline, stage_index, "failed");
+                self.emit_step(events, step_index);
+                self.emit_pipeline(events, &run.pipeline);
+                self.emit_action_log(
+                    events,
+                    "error",
+                    "stage_error",
+                    Some(stage.role.to_string()),
+                    Some(&stage.name),
+                    &format!("{} stage failed", stage.name),
+                    &e,
+                    Some(run.context_summary.clone()),
+                    Some(self.summarize_pending_diffs()),
+                );
+                return Err(e);
+            }
+        }
+
+        self.ensure_not_cancelled(cancel_flag, events)?;
+        self.emit_step(events, step_index);
+        self.emit_pipeline(events, &run.pipeline);
+
+        let _ = self
+            .state_mgr
+            .transition(&AgentEvent::StepDone(stage.name.clone()));
+        self.emit_state(events);
+
+        Ok(())
+    }
+
+    /// 所有阶段跑完后的收尾，同步完成。
+    ///
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。Auto 模式在这里
+    /// 压回滚点、翻 diff 状态、再置终态；`apply_diffs_to_fs` 自身的不变量
+    /// （见其文档）要求它和随后的状态翻转不被打断。
+    pub fn finish_pipeline(
+        &mut self,
+        run: &PipelineRun,
+        events: &dyn RunEvents,
+    ) -> Result<(), String> {
+        use crate::agent::state_machine::AgentEvent;
+
+        // Auto applies diffs immediately; other modes wait for review.
+        if run.ide_mode == IdeMode::Plan {
             if let Some(artifact) = self.sdd_artifacts.last() {
                 events.emit_json(
                     "agent-sdd-ready",
@@ -828,14 +919,14 @@ impl AgentOrchestrator {
                 );
 
                 self.emit_action_log(
-                    events.as_ref(),
+                    events,
                     "info",
                     "sdd_ready",
                     None,
                     None,
                     &format!("SDD draft ready: {}", artifact.title),
                     "Plan mode completed without producing file diffs.",
-                    Some(context_summary.clone()),
+                    Some(run.context_summary.clone()),
                     None,
                 );
             }
@@ -844,7 +935,7 @@ impl AgentOrchestrator {
             }
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
-            self.emit_state(events.as_ref());
+            self.emit_state(events);
             return Ok(());
         }
 
@@ -854,7 +945,7 @@ impl AgentOrchestrator {
                 serde_json::to_value(&self.diffs).unwrap_or_default(),
             );
             self.emit_action_log(
-                events.as_ref(),
+                events,
                 "info",
                 "diff_ready",
                 None,
@@ -869,7 +960,7 @@ impl AgentOrchestrator {
                     }
                 ),
                 "Diff review is waiting for user action.",
-                Some(context_summary.clone()),
+                Some(run.context_summary.clone()),
                 Some(self.summarize_pending_diffs()),
             );
         }
@@ -901,14 +992,14 @@ impl AgentOrchestrator {
                 )
             };
             self.emit_action_log(
-                events.as_ref(),
+                events,
                 level,
                 "auto_apply",
                 None,
                 None,
                 &summary,
                 &details,
-                Some(context_summary.clone()),
+                Some(run.context_summary.clone()),
                 Some(self.summarize_pending_diffs()),
             );
             // 还有被拦下的新建文件时不能算 Done，否则用户看不到需要审查的内容
@@ -923,7 +1014,7 @@ impl AgentOrchestrator {
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
         }
-        self.emit_state(events.as_ref());
+        self.emit_state(events);
 
         Ok(())
     }
