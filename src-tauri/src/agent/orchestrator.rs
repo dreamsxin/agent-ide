@@ -142,6 +142,24 @@ const MAX_CONVERSATION_TURNS: usize = 6;
 const MAX_TURN_PROMPT_CHARS: usize = 400;
 const MAX_TURN_OUTCOME_CHARS: usize = 300;
 
+/// 一次 pipeline 运行的**本地**状态。
+///
+/// 刻意不放进 `AgentOrchestrator`：这些字段只属于这一次运行，而 orchestrator 是
+/// 跨运行长期存在的共享状态。`PausedPipelineRun` 早就是这份状态的快照 —— 暂停要存
+/// 的就是它，这说明边界本来就在这里。
+///
+/// 把它拿出来是锁粒度治理的第一步：只有当"运行本地状态"不再借用 orchestrator，
+/// 驱动器才能在 `execute_stage` 的 await 期间放开锁。
+#[derive(Debug, Clone)]
+pub struct PipelineRun {
+    pub prompt: String,
+    pub ctx_str: String,
+    pub context_summary: String,
+    pub pipeline: Vec<PipelineStage>,
+    pub transcript: Vec<crate::services::llm_client::ChatMessage>,
+    pub ide_mode: IdeMode,
+}
+
 #[derive(Debug, Clone)]
 pub struct PausedPipelineRun {
     pub prompt: String,
@@ -564,14 +582,16 @@ impl AgentOrchestrator {
             format!("[Planner]\n{}", _full_response),
         )];
         self.continue_pipeline_from(
-            prompt,
-            ctx_str,
-            context_summary,
-            pipeline,
-            transcript,
+            PipelineRun {
+                prompt,
+                ctx_str,
+                context_summary,
+                pipeline,
+                transcript,
+                ide_mode,
+            },
             0,
             false,
-            ide_mode,
             cancel_flag,
             llm,
             events,
@@ -582,19 +602,23 @@ impl AgentOrchestrator {
     #[allow(clippy::too_many_arguments)]
     pub async fn continue_pipeline_from(
         &mut self,
-        prompt: String,
-        ctx_str: String,
-        context_summary: String,
-        mut pipeline: Vec<PipelineStage>,
-        mut transcript: Vec<crate::services::llm_client::ChatMessage>,
+        run: PipelineRun,
         start_index: usize,
         ignore_pause_once: bool,
-        ide_mode: IdeMode,
         cancel_flag: Arc<AtomicBool>,
         llm: &LlmClient,
         events: std::sync::Arc<dyn RunEvents>,
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
+
+        let PipelineRun {
+            prompt,
+            ctx_str,
+            context_summary,
+            mut pipeline,
+            mut transcript,
+            ide_mode,
+        } = run;
 
         self.ide_mode = ide_mode;
         for stage_index in start_index..pipeline.len() {
@@ -2745,17 +2769,19 @@ mod tests {
             tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(orchestrator.continue_pipeline_from(
-                    "fix the failing test".to_string(),
-                    "project context".to_string(),
-                    "summary".to_string(),
-                    vec![crate::agent::multi_agent::PipelineStage::new(
-                        crate::agent::multi_agent::AgentRole::Coder,
-                        "Coder",
-                    )],
-                    transcript,
+                    PipelineRun {
+                        prompt: "fix the failing test".to_string(),
+                        ctx_str: "project context".to_string(),
+                        context_summary: "summary".to_string(),
+                        pipeline: vec![crate::agent::multi_agent::PipelineStage::new(
+                            crate::agent::multi_agent::AgentRole::Coder,
+                            "Coder",
+                        )],
+                        transcript,
+                        ide_mode: IdeMode::Code,
+                    },
                     0,
                     true,
-                    IdeMode::Code,
                     Arc::new(AtomicBool::new(false)),
                     &llm,
                     events.clone(),

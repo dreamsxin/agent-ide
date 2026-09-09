@@ -858,16 +858,19 @@ pub async fn continue_agent_pipeline(
         "Continuing paused Agent pipeline",
         &format!("Continuing from stage {}", paused.stage_index + 1),
     );
+    let stage_index = paused.stage_index;
     match orch
         .continue_pipeline_from(
-            paused.prompt,
-            paused.context,
-            paused.context_summary,
-            paused.pipeline,
-            paused.transcript,
-            paused.stage_index,
+            crate::agent::orchestrator::PipelineRun {
+                prompt: paused.prompt,
+                ctx_str: paused.context,
+                context_summary: paused.context_summary,
+                pipeline: paused.pipeline,
+                transcript: paused.transcript,
+                ide_mode: paused.ide_mode,
+            },
+            stage_index,
             true,
-            paused.ide_mode,
             cancel_flag,
             &llm,
             std::sync::Arc::new(app_handle.clone()),
