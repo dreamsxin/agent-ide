@@ -376,16 +376,7 @@ pub async fn send_agent_prompt(
         Err(err) if is_cancelled_error(&err) => {
             finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
-            let _ = app_handle.emit(
-                "agent-state-changed",
-                serde_json::json!({
-                    "state": orch.state_mgr.state.to_string(),
-                    "mode": orch.mode.to_string(),
-                    "ideMode": ide_mode.to_string(),
-                    "currentRunId": orch.current_run_id,
-                    "lastRunId": orch.last_run_id,
-                }),
-            );
+            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             return Ok("Agent task cancelled".to_string());
         }
         Err(err) => {
@@ -477,6 +468,10 @@ fn publish_tool_writes(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
+    // 工具写入刚往撤销栈里压了一个 checkpoint，但它本身不改变运行状态，所以要
+    // 显式发一次 state：撤销可用性挂在这个事件的 payload 上，不发就意味着运行期间
+    // 每次工具写入之后界面上的 Undo 都还停在旧的那个 checkpoint 上。
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
 }
 
 /// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
@@ -774,15 +769,7 @@ pub async fn run_agent_step(
             );
             finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
-            let _ = app_handle.emit(
-                "agent-state-changed",
-                serde_json::json!({
-                    "state": orch.state_mgr.state.to_string(),
-                    "mode": orch.mode.to_string(),
-                    "currentRunId": orch.current_run_id,
-                    "lastRunId": orch.last_run_id,
-                }),
-            );
+            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             orch.emit_review_action_log(
                 &app_handle,
                 "success",
@@ -800,15 +787,7 @@ pub async fn run_agent_step(
             finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.record_step_status(&step, "todo", "Single step execution cancelled");
             orch.state_mgr.set(AgentState::Idle);
-            let _ = app_handle.emit(
-                "agent-state-changed",
-                serde_json::json!({
-                    "state": orch.state_mgr.state.to_string(),
-                    "mode": orch.mode.to_string(),
-                    "currentRunId": orch.current_run_id,
-                    "lastRunId": orch.last_run_id,
-                }),
-            );
+            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
@@ -819,15 +798,7 @@ pub async fn run_agent_step(
                 serde_json::to_value(&failed).unwrap_or_default(),
             );
             orch.state_mgr.set(AgentState::Error(err.clone()));
-            let _ = app_handle.emit(
-                "agent-state-changed",
-                serde_json::json!({
-                    "state": orch.state_mgr.state.to_string(),
-                    "mode": orch.mode.to_string(),
-                    "currentRunId": orch.current_run_id,
-                    "lastRunId": orch.last_run_id,
-                }),
-            );
+            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             orch.emit_review_action_log(
                 &app_handle,
                 "error",
@@ -910,17 +881,7 @@ pub async fn continue_agent_pipeline(
         Err(err) if is_cancelled_error(&err) => {
             finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.state_mgr.set(AgentState::Idle);
-            let ide_mode = orch.ide_mode;
-            let _ = app_handle.emit(
-                "agent-state-changed",
-                serde_json::json!({
-                    "state": orch.state_mgr.state.to_string(),
-                    "mode": orch.mode.to_string(),
-                    "ideMode": ide_mode.to_string(),
-                    "currentRunId": orch.current_run_id,
-                    "lastRunId": orch.last_run_id,
-                }),
-            );
+            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
@@ -964,10 +925,7 @@ pub async fn apply_diffs(
     } else {
         orch.state_mgr.set(AgentState::WaitingUser);
     }
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         if failed.is_empty() { "success" } else { "warn" },
@@ -998,10 +956,7 @@ pub async fn apply_diff(
     // 审查区状态由 `orch.apply_diff` 自己刷新（`apply_diff_hunk` 同理）。这里
     // 以前又调了一次：无害，但它暗示 orchestrator 不刷新，读的人会照抄到别的
     // 命令里，或者反过来以为这个不变量是命令层维持的。
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         if failed.is_empty() { "success" } else { "warn" },
@@ -1031,10 +986,7 @@ pub async fn apply_diff_hunk(
     let result = orch.apply_diff_hunk(&diff_id, hunk_index)?;
     let failed = result.failed.clone();
 
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         if failed.is_empty() { "success" } else { "warn" },
@@ -1069,10 +1021,7 @@ pub async fn undo_last_apply(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         if result.failed.is_empty() {
@@ -1104,44 +1053,21 @@ pub struct PendingUndo {
     pub files: Vec<String>,
 }
 
-/// `pending_undo` 的回答。`known == false` 表示"这次问不出来"，不是"没有退路"。
+/// 查询当前是否有可撤销的应用。**只用于界面首次挂载时取初值。**
 ///
-/// 三态是必要的：运行期间 `send_agent_prompt` 全程持有 orchestrator 锁
-/// （`orch.run` 是 `&mut self`，整条流水线都在改写 orchestrator 状态，那把锁
-/// 把流水线和用户的 apply 串行化，是有意为之）。这里若为了不阻塞而返回 `None`，
-/// 界面就会在运行中把 Undo 按钮**藏起来** —— 而那正是最可能需要它的时候。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingUndoQuery {
-    pub known: bool,
-    pub undo: Option<PendingUndo>,
-}
-
-/// 查询当前是否有可撤销的应用，以及它会恢复哪些文件。
-///
-/// 界面此前把 Undo 按钮挂在"还有待审 diff"这个条件上，于是全部应用完之后按钮就
-/// 消失了 —— 恰好是最需要退路的那一刻。回滚栈在 orchestrator 内存里，进程重启即
-/// 失效，所以可用性只能问后端，不能靠前端从 diff 状态推断（推断会在重启后显示一个
-/// 点下去必然失败的按钮）。
-///
-/// 用 `try_lock` 而不是 `lock().await`：这是个只读查询，不该排在一次可能跑几分钟的
-/// 运行后面。拿不到锁就如实说"不知道"，让界面保留上一次的答案。
+/// 之后的更新不走查询，而是跟在 `agent-state-changed` 的 payload 里（见
+/// `AgentOrchestrator::state_payload`）。原因是这个命令要抢 orchestrator 锁，而
+/// `send_agent_prompt` 在整条流水线期间都持有它 —— 查询会排在一次可能跑几分钟的
+/// 运行后面。把值放进事件就没有这个问题：它由刚改完撤销栈的同一段代码在同一个
+/// 临界区里算出来，既新鲜又不可能漂移。
 #[tauri::command]
 pub async fn pending_undo(
     agent_state: State<'_, AgentGlobalState>,
-) -> Result<PendingUndoQuery, String> {
-    let Ok(orch) = agent_state.orchestrator.try_lock() else {
-        return Ok(PendingUndoQuery {
-            known: false,
-            undo: None,
-        });
-    };
-    Ok(PendingUndoQuery {
-        known: true,
-        undo: orch
-            .pending_undo()
-            .map(|(label, files)| PendingUndo { label, files }),
-    })
+) -> Result<Option<PendingUndo>, String> {
+    let orch = agent_state.orchestrator.lock().await;
+    Ok(orch
+        .pending_undo()
+        .map(|(label, files)| PendingUndo { label, files }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1343,10 +1269,7 @@ pub async fn reject_diffs(
 
     orch.state_mgr
         .transition(&crate::agent::state_machine::AgentEvent::UserReject);
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
 
     orch.emit_review_action_log(
         &app_handle,
@@ -1374,10 +1297,7 @@ pub async fn reject_diff(
     // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
     let rejected = orch.reject_diff(&diff_id)?;
 
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         "info",
@@ -1401,10 +1321,7 @@ pub async fn reject_diff_hunk(
     // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
     let updated = orch.reject_diff_hunk(&diff_id, hunk_index)?;
 
-    let _ = app_handle.emit(
-        "agent-state-changed",
-        serde_json::json!({ "state": orch.state_mgr.state.to_string() }),
-    );
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         "info",

@@ -196,10 +196,7 @@ describe("refreshPendingUndo", () => {
    * orchestrator 内存里，进程重启就没了，推断会显示一个点下去必然失败的按钮。
    */
   it("records the checkpoint the backend reports", async () => {
-    invokeMock.mockResolvedValueOnce({
-      known: true,
-      undo: { label: "Auto-apply", files: ["src/a.ts", "src/b.ts"] },
-    });
+    invokeMock.mockResolvedValueOnce({ label: "Auto-apply", files: ["src/a.ts", "src/b.ts"] });
 
     await useAgentStore.getState().refreshPendingUndo();
 
@@ -212,7 +209,7 @@ describe("refreshPendingUndo", () => {
 
   it("treats no checkpoint as no way back rather than leaving a stale one", async () => {
     useAgentStore.setState({ pendingUndo: { label: "Auto-apply", files: ["src/a.ts"] } });
-    invokeMock.mockResolvedValueOnce({ known: true, undo: null });
+    invokeMock.mockResolvedValueOnce(null);
 
     await useAgentStore.getState().refreshPendingUndo();
 
@@ -220,20 +217,24 @@ describe("refreshPendingUndo", () => {
   });
 
   /**
-   * 运行期间后端拿不到 orchestrator 锁，只能回答"不知道"。这时必须保留上一次的
-   * 答案 —— 按 `null` 处理会在运行中把 Undo 按钮藏起来，而那正是最需要它的时候。
+   * 挂载之后撤销可用性由 `agent-state-changed` 的 payload 推送，不再回头查询 ——
+   * 查询要抢 orchestrator 锁，而运行期间那把锁被整条流水线占着。
    */
-  it("keeps the last answer when the backend cannot tell during a run", async () => {
-    useAgentStore.setState({ pendingUndo: { label: "Auto-apply", files: ["src/a.ts"] } });
-    invokeMock.mockResolvedValueOnce({ known: false, undo: null });
+  it("is driven by the event payload after mount, without another query", async () => {
+    invokeMock.mockClear();
 
-    await useAgentStore.getState().refreshPendingUndo();
+    useAgentStore.getState().setPendingUndo({ label: "Tool write", files: ["src/c.ts"] });
 
     expect(useAgentStore.getState().pendingUndo).toEqual({
-      label: "Auto-apply",
-      files: ["src/a.ts"],
+      label: "Tool write",
+      files: ["src/c.ts"],
     });
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    useAgentStore.getState().setPendingUndo(null);
+    expect(useAgentStore.getState().pendingUndo).toBeNull();
   });
+
 
 
   // 这是背景刷新，不是用户发起的动作：失败不该抢占 error 横幅
