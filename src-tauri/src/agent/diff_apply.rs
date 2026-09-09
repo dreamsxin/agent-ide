@@ -91,7 +91,15 @@ fn build_updated_content(
                 "{} in {}: {}",
                 message,
                 file_path.display(),
-                hunk.original[..hunk.original.len().min(200)].replace('\n', "\\n")
+                // 按字符截断。以前是 `hunk.original[..min(200)]` —— 对模型生成的文本做
+                // 字节切片，第 200 字节落在多字节 UTF-8 中间就 panic，而这里正是
+                // "某个 hunk 没应用上"的错误构造路径：同批次更早的 diff 已经落盘，
+                // 命令任务却直接崩掉，前端的 invoke 永远等不到结果。
+                hunk.original
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+                    .replace('\n', "\\n")
             )
         })?;
     }
@@ -417,6 +425,51 @@ mod tests {
         let result = replace_unique(text, "class Greeter", "class Greeting");
 
         assert!(result.is_err(), "{:?}", result);
+    }
+
+    /// 一个应用不上的 hunk，其错误信息里要摘录 original 的开头。摘录必须按字符切，
+    /// 不能按字节。
+    ///
+    /// 以前是 `hunk.original[..min(200)]`：第 200 字节落在多字节 UTF-8 中间就 panic。
+    /// 而这条路径本身就是"某个 hunk 没应用上"的错误构造路径 —— 同一批次里更早的 diff
+    /// 已经写进磁盘，命令任务却直接崩掉，前端的 invoke 永远等不到结果。中文注释在
+    /// 这个仓库里到处都是，触发它不需要什么特殊输入。
+    #[test]
+    fn a_failing_hunk_with_multibyte_text_reports_an_error_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("agent-ide-diff-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file_path = dir.join("multibyte.ts");
+        std::fs::write(&file_path, "export function greet() {}\n").expect("write file");
+
+        // 每个汉字 3 字节，第 200 字节必然落在某个字符中间
+        let original = "「".repeat(300);
+        let diff = FileDiff {
+            id: Uuid::new_v4().to_string(),
+            file: "multibyte.ts".to_string(),
+            base_hash: None,
+            provenance: None,
+            status: "pending".to_string(),
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                content: String::new(),
+                original,
+                updated: "whatever".to_string(),
+                provenance: None,
+                status: None,
+            }],
+        };
+
+        let result = build_updated_content(&file_path, &diff, true);
+
+        assert!(result.is_err(), "{:?}", result);
+        let message = result.unwrap_err();
+        assert!(message.contains("multibyte.ts"), "{}", message);
+        assert!(message.contains('「'), "摘录应当保留可读字符: {}", message);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Windows 工作区文件是 CRLF，而模型输出的 ORIGINAL 段是 LF。
