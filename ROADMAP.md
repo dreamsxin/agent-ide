@@ -732,6 +732,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
      - `stop_agent` clears `steps`, and it can now actually run mid-stage — which is the point, but a cached `step_index` would then index out of bounds and panic. `StagePlan` carries the step **id**; `record_stage_outcome` resolves it and treats "gone" as cancelled, landing nothing.
    - Verified: 265 lib tests (2 new — `a_second_run_is_refused_while_one_is_in_flight`, `a_stage_finishing_after_stop_lands_nothing`), clippy clean on all targets. The three tests that drove a pipeline end-to-end now wrap the orchestrator in a `Mutex` and call the drivers, so they exercise the same path production does; their assertions are unchanged because behaviour is unchanged.
 
+17. **Two permission toggles guarded nothing (resolved 2026-09-09)**
+   - `allowFileDelete` and `allowGitActions` were switches in Settings → Agent Permissions with **no reader anywhere in `src-tauri`**. Only `allowFileCreate` and `allowCommandRun` cross IPC. This had been documented as "not enforced" since the 9.0.4 audit, which made the docs honest and left the UI lying.
+   - **Removed rather than wired.** An unenforced permission toggle is worse than an absent one, and in the opposite direction from the `Edit` mode above: `Edit` merely did nothing, whereas switching off "File Deletion" actively implies a path was closed. It manufactures the exact false confidence a permission UI exists to prevent. There is no delete path to guard (`executor::normalized_operation` maps `"delete"` to `"unknown"`, and the write tool deliberately cannot delete), and every mutating Git command is user-initiated UI.
+   - The preset descriptions were wrong in the same direction and were rewritten: `ask` claimed "always confirm before any file or command operation" and `auto` claimed "allow all operations without confirmation" — there is no confirmation prompt anywhere in the product. They now say what the presets do, which is toggling those two flags.
+   - `AgentPermission` is down to two fields, so three presets over two booleans. That is still a meaningful ladder (read-only → may create files → may also run the project's declared commands) and it now matches what the backend actually checks.
+   - Still open from the same audit: `AgentMode`'s values (`suggest`/`auto`) collide by name with `AgentPermissionPreset`'s. Two axes, four of five values shared, different meanings. Renaming the preset axis is the fix — the mode's two words already describe behaviour accurately, so the preset side is the one that should move.
+
+
 
 ---
 

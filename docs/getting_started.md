@@ -107,7 +107,7 @@ worth knowing before you rely on either.
   changes reach disk without a click. `auto` applies pending diffs when the run
   finishes and lets the Agent write files during the run.
 - **Permission preset** — Settings → Agent Permissions: `ask`, `suggest`, `auto`.
-  Sets four toggles (create files, delete files, run commands, Git actions),
+  Sets two toggles (create files, run commands),
   which you can also flip individually.
 
 Choosing the `suggest` preset does not put the run in `suggest` mode — the two
