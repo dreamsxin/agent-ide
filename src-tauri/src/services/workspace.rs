@@ -125,15 +125,34 @@ pub fn resolve_for_agent_write(path: &str) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+/// 把路径组件规范成 "Win32 实际会打开的那个名字"，再拿去比对清单。
+///
+/// `resolve_for_write` 对**还不存在**的文件不做 canonicalize（没有真实条目可查），
+/// 返回的是调用方的原始拼写。而 Win32 会忽略组件尾部的 `.` 和空格，并把
+/// `name::$DATA` 当作 `name` 的默认数据流。于是这些名字都不在清单里，落地却是被禁的目标：
+///
+/// - `.git./hooks/pre-commit` → 写进 `.git/hooks/pre-commit`，下次 commit 即任意代码执行
+/// - `.env `（尾部空格）、`certs/server.pem.` → 覆盖凭据
+/// - `.env::$DATA` → 同一份内容，名字不匹配
+///
+/// 归一化只会让判断更严，不会放宽：Windows 上本来就不存在真的叫 `foo.` 的文件，
+/// 而 Linux 上多拒一个字面量 `.git.` 的代价可以忽略。
+fn normalize_component_for_denial(component: &str) -> String {
+    let without_stream = component.split("::").next().unwrap_or(component);
+    without_stream.trim_end_matches(['.', ' ']).to_lowercase()
+}
+
 /// 命中拒绝清单时返回具体原因，否则返回 None
 fn agent_write_denial(path: &Path) -> Option<String> {
     /// 目录名：出现在路径任意一层都拒绝（子模块的 `.git`、嵌套的 node_modules）
     const DENIED_DIRS: [&str; 3] = [".git", ".agent-ide", "node_modules"];
 
-    // 大小写不敏感比较：Windows 上 `.GIT/hooks/pre-commit` 指向同一个文件
+    // 大小写不敏感比较：Windows 上 `.GIT/hooks/pre-commit` 指向同一个文件。
+    // 同时抹掉 Win32 会忽略的尾部 `.`/空格和 ADS 后缀，见
+    // `normalize_component_for_denial`。
     let components: Vec<String> = path
         .components()
-        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .map(|component| normalize_component_for_denial(&component.as_os_str().to_string_lossy()))
         .collect();
 
     let (file_name, dirs) = components.split_last()?;
@@ -403,6 +422,52 @@ mod tests {
             let err = resolve_for_agent_write(path)
                 .expect_err(&format!("expected {} to be denied", path));
             assert!(err.contains("not allowed"), "{}: {}", path, err);
+        }
+    }
+
+    /// 尾部 `.`／空格和 ADS 后缀会被 Win32 忽略，所以它们是清单的绕过口。
+    ///
+    /// 关键前提：`resolve_for_write` 只对**已存在**的文件 canonicalize，新建文件返回的是
+    /// 调用方的原始拼写。所以 `.git./hooks/pre-commit` 这种"目标还不存在"的路径过去能以
+    /// 不在清单里的名字通过检查，落地却是 `.git/hooks/pre-commit` —— 下次 commit 即任意
+    /// 代码执行。这里刻意都用不存在的路径，走的就是那条分支。
+    #[test]
+    fn agent_writes_cannot_evade_the_deny_list_with_windows_name_quirks() {
+        let _guard = env_test_guard();
+        let _env = TestEnv::new();
+
+        for path in [
+            ".git./hooks/pre-commit",
+            ".git ./hooks/pre-commit",
+            ".GIT./config",
+            ".env.",
+            ".env ",
+            ".env::$DATA",
+            "certs/server.pem.",
+            "secrets/api.key ",
+            "node_modules./pkg/index.js",
+            ".agent-ide./state.json",
+        ] {
+            let err = resolve_for_agent_write(path)
+                .expect_err(&format!("expected {:?} to be denied", path));
+            assert!(err.contains("not allowed"), "{:?}: {}", path, err);
+        }
+    }
+
+    /// 归一化不能反过来误伤正常文件名。
+    #[test]
+    fn normalizing_names_does_not_deny_ordinary_files() {
+        let _guard = env_test_guard();
+        let _env = TestEnv::new();
+
+        for path in [
+            "src/environment.ts",
+            "src/keyboard.ts",
+            "src/git/status.ts",
+            "docs/env.md",
+            "src/gitignore-parser.ts",
+        ] {
+            assert!(resolve_for_agent_write(path).is_ok(), "{} 不该被拒", path);
         }
     }
 
