@@ -1104,20 +1104,44 @@ pub struct PendingUndo {
     pub files: Vec<String>,
 }
 
+/// `pending_undo` 的回答。`known == false` 表示"这次问不出来"，不是"没有退路"。
+///
+/// 三态是必要的：运行期间 `send_agent_prompt` 全程持有 orchestrator 锁
+/// （`orch.run` 是 `&mut self`，整条流水线都在改写 orchestrator 状态，那把锁
+/// 把流水线和用户的 apply 串行化，是有意为之）。这里若为了不阻塞而返回 `None`，
+/// 界面就会在运行中把 Undo 按钮**藏起来** —— 而那正是最可能需要它的时候。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUndoQuery {
+    pub known: bool,
+    pub undo: Option<PendingUndo>,
+}
+
 /// 查询当前是否有可撤销的应用，以及它会恢复哪些文件。
 ///
 /// 界面此前把 Undo 按钮挂在"还有待审 diff"这个条件上，于是全部应用完之后按钮就
 /// 消失了 —— 恰好是最需要退路的那一刻。回滚栈在 orchestrator 内存里，进程重启即
 /// 失效，所以可用性只能问后端，不能靠前端从 diff 状态推断（推断会在重启后显示一个
 /// 点下去必然失败的按钮）。
+///
+/// 用 `try_lock` 而不是 `lock().await`：这是个只读查询，不该排在一次可能跑几分钟的
+/// 运行后面。拿不到锁就如实说"不知道"，让界面保留上一次的答案。
 #[tauri::command]
 pub async fn pending_undo(
     agent_state: State<'_, AgentGlobalState>,
-) -> Result<Option<PendingUndo>, String> {
-    let orch = agent_state.orchestrator.lock().await;
-    Ok(orch
-        .pending_undo()
-        .map(|(label, files)| PendingUndo { label, files }))
+) -> Result<PendingUndoQuery, String> {
+    let Ok(orch) = agent_state.orchestrator.try_lock() else {
+        return Ok(PendingUndoQuery {
+            known: false,
+            undo: None,
+        });
+    };
+    Ok(PendingUndoQuery {
+        known: true,
+        undo: orch
+            .pending_undo()
+            .map(|(label, files)| PendingUndo { label, files }),
+    })
 }
 
 #[derive(Debug, Deserialize)]

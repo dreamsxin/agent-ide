@@ -675,8 +675,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   refreshPendingUndo: async () => {
     if (!isTauriRuntime()) return;
     try {
-      const pending = await invoke<{ label: string; files: string[] } | null>("pending_undo");
-      set({ pendingUndo: pending ?? null });
+      const result = await invoke<{
+        known: boolean;
+        undo: { label: string; files: string[] } | null;
+      }>("pending_undo");
+      // known === false 表示"运行中问不出来"，不是"没有退路"。这时保留上一次的
+      // 答案：把按钮藏起来会恰好在最需要撤销的时刻让它消失。运行结束后的
+      // agent-state-changed 会再刷一次，届时答案是准的。
+      if (!result?.known) return;
+      set({ pendingUndo: result.undo ?? null });
     } catch (err: unknown) {
       // 查询失败不该覆盖 error 横幅：这是背景刷新，不是用户发起的动作。
       // 保守起见按"没有退路"处理，宁可不显示按钮，也不显示一个点不动的按钮。
