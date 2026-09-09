@@ -182,7 +182,7 @@ agent-ide/
 ├── <TopBar>                                   # grid-row:1 / col-span:3
 │   ├── Logo + ProjectName
 │   ├── Project Run/Build/Test/Debug buttons
-│   ├── <ModeSwitch />                         # Suggest | Edit | Auto
+│   ├── <ModeSwitch />                         # Suggest | Auto
 │   ├── LSP Status
 │   └── <StatusDot /> + Run/Stop/Settings
 │
@@ -314,7 +314,7 @@ struct MultiAgentPipeline {
 // stores/useAgentStore.ts
 interface AgentStore {
   state: AgentState;
-  mode: 'suggest' | 'edit' | 'auto';
+  mode: 'suggest' | 'auto';
   currentTask: Task | null;
   steps: Step[];
   diffs: Diff[];

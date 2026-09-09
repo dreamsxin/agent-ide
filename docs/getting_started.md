@@ -103,18 +103,18 @@ response.
 Two separate settings, in two different places. They share value names, which is
 worth knowing before you rely on either.
 
-- **Agent mode** — the switch in the top bar: `suggest`, `edit`, `auto`.
-  Controls whether changes reach disk without a click. `auto` applies pending
-  diffs when the run finishes and lets the Agent write files during the run.
-  `edit` currently behaves exactly like `suggest`.
+- **Agent mode** — the switch in the top bar: `suggest`, `auto`. Controls whether
+  changes reach disk without a click. `auto` applies pending diffs when the run
+  finishes and lets the Agent write files during the run.
 - **Permission preset** — Settings → Agent Permissions: `ask`, `suggest`, `auto`.
   Sets four toggles (create files, delete files, run commands, Git actions),
   which you can also flip individually.
 
-Choosing the `suggest` preset does not put the run in `suggest` mode, and there is
-no "edit" preset. [SECURITY.md](../SECURITY.md#agent-approval-model) documents
-which toggles the backend actually enforces — several are deliberately inert
-because no Agent-reachable code path performs those operations yet.
+Choosing the `suggest` preset does not put the run in `suggest` mode — the two
+settings are independent despite sharing value names.
+[SECURITY.md](../SECURITY.md#agent-approval-model) documents which toggles the
+backend actually enforces — several are deliberately inert because no
+Agent-reachable code path performs those operations yet.
 
 Permissions are captured when a run starts. Narrowing one mid-run does not revoke
 a tool already granted for that run; stop the run instead.

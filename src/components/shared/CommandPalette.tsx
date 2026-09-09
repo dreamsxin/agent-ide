@@ -273,7 +273,6 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         run: togglePerformanceOverlay,
       },
       agentModeCommand("agent.mode.suggest", "Set Agent Mode: Suggest", "suggest", changeMode),
-      agentModeCommand("agent.mode.edit", "Set Agent Mode: Edit", "edit", changeMode),
       agentModeCommand("agent.mode.auto", "Set Agent Mode: Auto", "auto", changeMode),
       {
         id: "agent.undo-apply",

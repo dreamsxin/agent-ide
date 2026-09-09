@@ -81,7 +81,7 @@ const WELCOME_CODE = `//  Welcome to Agent IDE
 //    • Chat with Agent in the right panel
 //    • Drag files into Agent context
 //
-//  Mode: Suggest | Edit | Auto
+//  Mode: Suggest | Auto
 `;
 
 export default function EditorContainer() {

@@ -29,15 +29,20 @@ impl fmt::Display for AgentState {
     }
 }
 
-/// Agent 控制模式
+/// Agent 控制模式：改动是等人审查，还是跑完直接落盘。
+///
+/// 只有两档，因为后端只有一个判据 —— 所有权限门都在问"是不是 Auto"。
+/// 曾经有过第三档 `Edit`，它和 `Suggest` 逐位相同：开关给出三个位置却只有两级
+/// 权限，用户拨动它什么都不会变。更细的授权由 `WorkspaceToolPermissions`
+/// 那几个开关表达（能不能新建文件、能不能跑命令），那里才是真正分级的地方。
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentMode {
     Suggest,
-    Edit,
     Auto,
 }
 
-/// IDE work mode. This is separate from Agent permissions such as suggest/edit/auto.
+
+/// IDE work mode. This is separate from the Agent's suggest/auto permission mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdeMode {
     Code,
@@ -63,11 +68,27 @@ impl fmt::Display for IdeMode {
     }
 }
 
+impl AgentMode {
+    /// 解析前端传来的模式名。
+    ///
+    /// 旧版本存过 `"edit"`，它现在不是有效值了。这里不静默当成 `suggest`：
+    /// 拨到一个不存在的档位却看不出区别，正是当初要删掉它的原因。
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "suggest" => Ok(AgentMode::Suggest),
+            "auto" => Ok(AgentMode::Auto),
+            other => Err(format!(
+                "Invalid Agent mode: {} (expected suggest or auto)",
+                other
+            )),
+        }
+    }
+}
+
 impl fmt::Display for AgentMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AgentMode::Suggest => write!(f, "suggest"),
-            AgentMode::Edit => write!(f, "edit"),
             AgentMode::Auto => write!(f, "auto"),
         }
     }
