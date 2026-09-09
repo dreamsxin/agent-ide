@@ -229,6 +229,33 @@ pub fn bound_transcript(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     )
 }
 
+/// 截断一条要带进下一个 stage 的消息：保留第一行，其余按尾部截断。
+///
+/// `truncate_for_prompt` 保尾部，这对结论和 diff 是对的（它们都在末尾）。但出处标签
+/// `[Stage / role]` 由 orchestrator 加在**头部**，于是任何超过上限的阶段输出，第一个被
+/// 丢掉的就是归属信息 —— 恰好是长输出最需要标签的时候。所以第一行单独保住。
+fn truncate_carried_message(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    match value.split_once('\n') {
+        Some((first, rest)) => {
+            let first_len = first.chars().count();
+            // 第一行本身就超预算时没什么可保的，退回统一的尾部截断
+            if first_len + 1 >= max_chars {
+                return crate::services::verification::truncate_for_prompt(value, max_chars);
+            }
+            let budget = max_chars - first_len - 1;
+            format!(
+                "{}\n{}",
+                first,
+                crate::services::verification::truncate_for_prompt(rest, budget)
+            )
+        }
+        None => crate::services::verification::truncate_for_prompt(value, max_chars),
+    }
+}
+
 fn bound_transcript_with_limits(
     messages: &[ChatMessage],
     max_message_chars: usize,
@@ -238,10 +265,13 @@ fn bound_transcript_with_limits(
     let mut groups: Vec<Vec<ChatMessage>> = Vec::new();
     for message in messages {
         let mut trimmed = message.clone();
-        trimmed.content =
-            crate::services::verification::truncate_for_prompt(&message.content, max_message_chars);
+        trimmed.content = truncate_carried_message(&message.content, max_message_chars);
         match groups.last_mut() {
             Some(group) if message.role == "tool" => group.push(trimmed),
+            // 开头就是 `tool` 说明它的 assistant 调用不在这段历史里。带上去会让供应商
+            // 拒掉整个请求（tool 必须紧跟发起它的调用），所以直接丢掉 —— 少一条历史，
+            // 而不是这一 stage 整体失败。当前没有入口会产生这种线程，这里是护栏。
+            None if message.role == "tool" => continue,
             _ => groups.push(vec![trimmed]),
         }
     }
@@ -1161,15 +1191,13 @@ mod tests {
         );
     }
 
-    /// 单条消息也要有上限，否则一个几十万字符的 tool 结果能独自撑爆请求。
+    /// 单条消息也要有上限，否则一个几十万字符的输出能独自撑爆请求。
     #[test]
     fn carried_thread_truncates_an_oversized_single_message() {
         let huge = "T".repeat(500);
-        let bounded = bound_transcript_with_limits(
-            &[ChatMessage::tool_result("call-1", huge.clone())],
-            20,
-            0,
-        );
+        // 用 assistant 而不是 tool：开头的 tool 消息会被上面那条护栏丢掉，
+        // 而这条测试要验证的是"单条超长消息被截断"，角色是无关变量
+        let bounded = bound_transcript_with_limits(&[ChatMessage::assistant(huge.clone())], 20, 0);
 
         assert_eq!(bounded.len(), 1);
         assert!(
@@ -1210,6 +1238,68 @@ mod tests {
     #[test]
     fn carried_thread_is_empty_when_no_stage_has_run() {
         assert!(bound_transcript(&[]).is_empty());
+    }
+
+    /// orchestrator 把 `[Stage / role]` 标签加在消息**头部**，而尾部截断会先吃掉头部。
+    /// 于是超长阶段输出恰好丢掉归属 —— 长输出正是最需要知道"这是谁说的"的时候。
+    #[test]
+    fn carried_thread_keeps_the_provenance_label_of_a_long_message() {
+        let long = format!("[Architect / architect]\n{}", "detail\n".repeat(400));
+        let long_len = long.chars().count();
+
+        let bounded = bound_transcript_with_limits(
+            &[ChatMessage::assistant(long)],
+            120,
+            crate::agent::executor::MAX_CARRIED_THREAD_CHARS,
+        );
+
+        assert_eq!(bounded.len(), 1);
+        assert!(
+            bounded[0].content.starts_with("[Architect / architect]\n"),
+            "{}",
+            bounded[0].content
+        );
+        // 仍然要保尾部并写明省略量：结论和 diff 都在末尾
+        assert!(
+            bounded[0].content.contains("earlier character(s) omitted"),
+            "{}",
+            bounded[0].content
+        );
+        assert!(
+            bounded[0].content.ends_with("detail\n"),
+            "{}",
+            bounded[0].content
+        );
+        // 不断言精确长度：`truncate_for_prompt` 会在预算之外再加一行省略标记，
+        // 写死一个数字只会变成测实现细节。够短就行。
+        assert!(
+            bounded[0].content.chars().count() < long_len / 4,
+            "{}",
+            bounded[0].content
+        );
+    }
+
+    /// 供应商要求每条 `tool` 消息前面必须有发起它的 assistant 调用。分组逻辑依赖
+    /// "线程不会以 tool 消息开头"这个前提；这条测试把前提本身钉住，避免以后某个
+    /// 新的续跑入口传进一段以 tool 开头的历史，导致整个请求被拒。
+    #[test]
+    fn carried_thread_never_emits_a_tool_message_without_its_assistant_call() {
+        let orphan = vec![
+            ChatMessage::tool_result("call-1", "orphaned result".to_string()),
+            ChatMessage::assistant("later answer".to_string()),
+        ];
+
+        let bounded = bound_transcript(&orphan);
+
+        let first_tool = bounded.iter().position(|message| message.role == "tool");
+        if let Some(index) = first_tool {
+            assert!(index > 0, "tool 消息不能是第一条: {:?}", bounded);
+            assert!(
+                bounded[index - 1].tool_calls.is_some(),
+                "tool 消息前面必须是发起它的 assistant 调用: {:?}",
+                bounded
+            );
+        }
     }
 
     struct RecordingInvoker {
