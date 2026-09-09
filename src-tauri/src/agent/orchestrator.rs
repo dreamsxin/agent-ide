@@ -214,6 +214,15 @@ impl AgentOrchestrator {
     /// 同一文件被写多次时合并成一条：original 取**第一次**写之前的内容，
     /// updated 取**最后一次**写入的内容。撤销要回到"这次运行之前"，而不是
     /// 回到中间某一步。
+    ///
+    /// **锁不变量**：压回滚点（293）、挂 diff（294）、重刷 baseHash（297）必须在
+    /// **一个**临界区里完成，而且上游 `permissions.take_writes()` 的排空也要算在
+    /// 同一段里（`commands/agent.rs::publish_tool_writes`）。写入日志一旦排空就没了
+    /// 第二次机会：中途被打断意味着文件已经在磁盘上，而审查区没有卡片、撤销栈没有
+    /// 那一笔 —— 没有任何地方还能补回来。
+    ///
+    /// `stamp_base_hashes` 会重写**所有** diff 的 baseHash，所以 `diffs` 不能按
+    /// 单条 diff 拆锁：一个正在校验 staleness 的 `apply_diff` 会读到写了一半的哈希。
     pub fn record_tool_writes(
         &mut self,
         writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
@@ -899,6 +908,14 @@ impl AgentOrchestrator {
     ///
     /// 返回被权限拦下、仍保持 pending 的文件路径。这不是失败：新建文件的
     /// diff 在未授权时留给人工审查，编辑已有文件照常应用。
+    ///
+    /// **锁不变量**：这个函数从头到尾必须在**一个**临界区里跑完。它先压回滚点
+    /// （920）再翻转 diff 状态（922-928），两步之间不能让别的命令插进来 ——
+    /// 插进来的 `undo_last_apply` 会弹掉这个刚压进去的 checkpoint，而此时 diff 还
+    /// 写着 `pending`：磁盘已经改了，审查区说没改，撤销栈里也没有那一笔。
+    ///
+    /// 之后如果把 orchestrator 拆成多把锁（见 ROADMAP 的锁粒度条目），
+    /// `diffs` 和 `undo_stack` 必须共用一把，或者这里显式按固定顺序取两把。
     pub fn apply_diffs_to_fs(&mut self) -> Result<Vec<String>, String> {
         let mut blocked: Vec<String> = Vec::new();
         let applicable: Vec<crate::agent::state_machine::FileDiff> = self
@@ -3069,6 +3086,53 @@ mod tests {
         assert_eq!(undone.restored, vec!["created.ts".to_string()]);
         // 原本不存在的文件，撤销就是删掉它，而不是留下一个空文件
         assert!(!env.root.join("created.ts").exists());
+    }
+
+    /// 自动应用里"先压回滚点、再翻状态"的顺序是有约束的，不是随手写的。
+    ///
+    /// 一批 diff 里只要有一条失败，`apply_diffs_to_fs` 就返回 `Err` —— 但成功的那几条
+    /// 已经落盘了。回滚点在返回之前就必须存在，否则一次部分失败会让已经改掉的文件
+    /// 失去唯一的退路。这也是把两步拆到不同临界区最危险的地方：中间插进来的
+    /// `undo_last_apply` 会弹掉这个 checkpoint，而 diff 还写着 pending。
+    #[test]
+    fn a_partly_failed_auto_apply_still_leaves_a_way_back() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("lands.ts", "const value = 1;\n");
+        env.write_file("misses.ts", "const other = 1;\n");
+
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.diffs = vec![
+            make_diff("lands.ts", "const value = 1;", "const value = 2;"),
+            // 引用了文件里不存在的内容：这一条必然应用失败
+            make_diff("misses.ts", "const missing = 9;", "const missing = 10;"),
+        ];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
+
+        let result = orchestrator.apply_diffs_to_fs();
+
+        assert!(result.is_err(), "有一条失败时应当返回 Err: {:?}", result);
+        // 成功的那条确实落盘了
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("lands.ts")).unwrap(),
+            "const value = 2;\n"
+        );
+        // 而且它有退路 —— 这是这条测试的全部意义
+        let (_, files) = orchestrator
+            .pending_undo()
+            .expect("部分失败也必须留下回滚点");
+        assert!(
+            files.iter().any(|file| file.contains("lands.ts")),
+            "回滚点要覆盖已经落盘的文件: {:?}",
+            files
+        );
+
+        // 撤销之后内容回到应用之前
+        orchestrator.undo_last_apply().expect("undo");
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("lands.ts")).unwrap(),
+            "const value = 1;\n"
+        );
     }
 
     #[test]
