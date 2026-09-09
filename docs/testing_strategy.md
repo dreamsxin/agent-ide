@@ -2,7 +2,7 @@
 
 ## Overview
 
-Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. The project is currently in Phase 8 (IDE Workflow Completion) with automated unit tests on both frontend and backend, CLI smoke coverage, and a manual smoke checklist. Full E2E automation is planned for Phase 9.
+Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-08: **74 frontend tests across 15 files** (`npm test`) and **260 Rust lib tests, 1 ignored** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
 
 ## Test Layers
 
@@ -114,30 +114,40 @@ Run command:
 
 ```bash
 cd src-tauri
-cargo test --bin agent_cli
+cargo test --lib
 ```
 
-## CI Pipeline (Target — Phase 9)
+## CI Pipeline
+
+`.github/workflows/ci.yml` runs four jobs. There is no `npm run lint` script in
+`package.json`, so linting on the frontend side is whatever `tsc` catches.
 
 ```yaml
 jobs:
-  check:
-    - npm run lint
-    - npx tsc --noEmit
-    - npm test (Vitest)
-    - cargo check
+  frontend:            # ubuntu
+    - npm ci
+    - npm run build
+    - npm test
+  rust:                # windows
+    - cargo fmt --check
+    - cargo clippy --all-targets -- -D warnings
     - cargo test
-    - cargo clippy
-  smoke:
-    - npm run tauri -- build
-    - Run tauri-driver E2E suite
-  package:
-    - Windows MSI/NSIS (scripts/package-windows.ps1)
-    - macOS .dmg (planned)
-    - Linux AppImage (planned)
+    - agent_cli smoke ide-surface      # against the real built binary
+  rust-linux:          # under dbus-run-session + gnome-keyring
+    - cargo clippy --all-targets -- -D warnings
+    - cargo test
+  rust-macos:
+    - cargo clippy --all-targets -- -D warnings
+    - cargo test
 ```
 
-Current CI status: GitHub Actions workflow (`windows-package.yml`) handles Windows packaging only. Full check/smoke/package pipeline is a Phase 9 deliverable.
+`.github/workflows/windows-package.yml` is separate and handles Windows
+packaging (`scripts/package-windows.ps1`). macOS `.dmg` and Linux AppImage are
+still unbuilt.
+
+Not in CI: the desktop E2E suite (`npm run e2e:workflow`) and any real-provider
+eval, both of which need credentials or a display.
+
 
 ## Current Coverage Status
 
@@ -165,7 +175,7 @@ Current CI status: GitHub Actions workflow (`windows-package.yml`) handles Windo
 
 ## Manual Smoke Test
 
-See `docs/smoke_test.md` for the current manual verification checklist covering 13 sections:
+See `docs/smoke_test.md` for the current manual verification checklist covering 15 sections:
 
 1. Baseline verification (automated)
 2. Runtime mode
@@ -211,7 +221,7 @@ npm run verify:workflow
 
 # CLI binary tests
 cd src-tauri
-cargo test --bin agent_cli
+cargo test --lib
 ```
 
 ## Test Environment Notes
@@ -219,7 +229,8 @@ cargo test --bin agent_cli
 - **`npm run dev`**: Vite web preview only. Tauri IPC, filesystem, terminal, Git, and Agent backend are disabled or stubbed. Do not rely on this for testing backend functionality.
 - **`npm run tauri -- dev`**: Real IDE runtime with Rust backend and Tauri APIs. Required for all smoke and E2E validation.
 - **Rust tests** use temporary directories with UUID-based names and a mutex guard (`env_test_guard`) to prevent concurrent workspace config mutation across test threads.
-- **Frontend tests** run in Vitest's default node environment and do not require a Tauri runtime. `src/hooks/useAppBootstrap.test.tsx` is the exception: it opts into jsdom with a `// @vitest-environment jsdom` docblock because it renders a hook. The global environment is deliberately left as node — only files that need a DOM pay for one.
+- **Frontend tests** run in Vitest's default node environment and do not require a Tauri runtime. Four files opt into jsdom with a `// @vitest-environment jsdom` docblock because they render components or need `localStorage`: `src/hooks/useAppBootstrap.test.tsx`, `src/components/panels/TasksPanel.test.tsx`, `src/components/shared/CommandPalette.test.tsx`, `src/stores/useLayoutStore.persistence.test.ts`. The global environment is deliberately left as node — only files that need a DOM pay for one.
+- `test.include` in `vite.config.ts` lists `src/**` **and** `tests/**` rather than relying on the default. The narrow pin exists because E2E artifacts under `artifacts/` contain whole repo copies including `*.test.tsx`; the default would run those historical snapshots, inflating the count and reporting failures against old code. `tests/` has to be named explicitly — while it was omitted, `tests/ipc-contract.test.ts` existed but never executed, and it is exactly the kind of test that is worthless unrun: it checks that every command the frontend `invoke`s is registered in `lib.rs`, a seam neither `tsc` nor `cargo` can see.
 
 ## Desktop workflow E2E (`npm run e2e:workflow`)
 
@@ -271,7 +282,7 @@ covered at the orchestrator level, not end to end through the UI.
 One trap worth knowing about, since it produced a false green for a while: `npm run e2e:workflow`
 copies the repository into `artifacts/e2e/workflow/<timestamp>/workspace/`, test files included.
 Vitest's default `include` picked those copies up, so `npm test` was running frozen snapshots of old
-code alongside the real suite — 43 files instead of 10 — and a failure there would have pointed at
+code alongside the real suite — 43 files instead of the 10 that existed then — and a failure there would have pointed at
 history rather than at the working tree. `vite.config.ts` now pins `test.include` to `src/**`.
 
 ## Prompt contracts

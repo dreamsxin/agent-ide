@@ -32,24 +32,18 @@ Commands:
   plan     Generate a plan only
   run      Run the Agent. This is also the default command when no subcommand is used
   smoke    Run deterministic backend smoke workflows for IDE integration paths
-  help     Print help
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
-  --endpoint <URL>    LLM API endpoint (or LLM_ENDPOINT env)
-  --api-key <KEY>     API key (or LLM_API_KEY env)
-  --model <NAME>      Model name (or LLM_MODEL env)
-  --workspace <DIR>   Project workspace directory (default: current dir)
-  --apply             Write generated files to disk
-  --context-mode <full|focused|compact|budgeted>
-  --include <git-diff,project-tree,project-memory>
-
-  --output <text|json|ndjson>
-  --artifact-dir <DIR>
-  --run-id <ID>
-  --prompt-file <FILE>
-  --stdin
-  --help, -h          Print help
+  -h, --help     Print help
+  -V, --version  Print version
 ```
+
+There are **no global options**. `--endpoint`, `--api-key`, `--model`, `--workspace`,
+`--apply` and the rest belong to individual subcommands — see `run --help` below.
+They still work when written before a subcommand only because `normalize_legacy_args`
+rewrites bare argv into `run ...`; they are not accepted by other subcommands.
+
 
 `run --help` shows Agent execution options:
 
@@ -73,14 +67,15 @@ Options:
   --stdin
   --run-command <COMMAND>
 
-  # 权限（默认全部关闭）
+  # 权限
   --allow-edit
   --allow-create
   --allow-delete
-  --allow-git
+  --allow-git <PATTERN>          # 可重复。目前只写进日志，不执行任何限制
   --allow-run <PATTERN>          # 可重复；同时暴露 workspace_run_command
   --allow-agent-write            # 暴露 workspace_write_file，必须配 --apply
   --deny-path <PATTERN>          # 命中的 diff 直接拒绝，不写盘
+
 
   # 限额
   --max-iterations <N>           # 有界修复循环的轮数预算，默认 0（不修复）
@@ -88,6 +83,21 @@ Options:
   --max-output-bytes <N>
   --max-diff-files <N>
 ```
+
+### 权限标志的实际语义
+
+有两处和字面读法不一样，都值得先知道：
+
+- **`--apply` 自身就授予 create 和 edit。** 代码里是
+  `allow_create: args.allow_create || args.apply` 和
+  `allow_edit: args.allow_edit || args.apply`。所以 `--apply` 不是"允许写盘"这一件事，
+  而是"允许写盘并且允许新建和修改文件"。`--allow-delete` 是唯一独立的那个。
+  也就是说"只许改、不许新建"在 CLI 上**表达不出来**。
+- **不带 `--apply` 时这些权限位都不生效**，因为整段权限检查只在应用路径上跑。
+  预览运行不会写盘，加不加 `--allow-edit` 没有区别。
+
+`--allow-git` 目前只被记进日志，不会限制任何 git 操作 —— 它是占位，不是防护。
+
 
 
 ## Configuration

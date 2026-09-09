@@ -304,7 +304,8 @@ The Agent CLI (`agent_cli`) is scoped as a headless automation runner. Security 
 Known gaps:
 
 - The Agent write deny list is shared with the desktop app, because both go through `diff_apply`. On top of that the CLI enforces `--deny-path`: any generated diff whose path matches a pattern is refused with `ExitCode::PreconditionFailed` (`cli/mod.rs`), before anything is written.
-- Operation-level restrictions are enforced separately for create, edit and delete (`--allow-create` / `--allow-edit` / `--allow-delete`), so "edits but no new files" is expressible.
+- Operation-level flags exist for create, edit and delete (`--allow-create` / `--allow-edit` / `--allow-delete`), but only delete is independent. `--apply` itself sets create and edit (`allow_create: args.allow_create || args.apply`, same for edit), so **"edits but no new files" is not expressible** on the CLI. The whole permission check also only runs on the apply path, so without `--apply` these flags have no effect in either direction.
+- `--allow-git` is accepted and logged but enforces nothing.
 
 - MCP tools are not exposed to the CLI at all today.
 
