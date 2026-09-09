@@ -99,6 +99,8 @@ pub struct AgentOrchestrator {
     /// 还没应用的改动，却对已经应用的无能为力 —— 而"应用了才发现不对"恰恰是
     /// 最需要退路的时刻。
     undo_stack: Vec<ApplyCheckpoint>,
+    /// 是否已有运行占着执行权。见 `try_begin_run`。
+    run_active: bool,
 }
 
 /// 一次应用操作的回滚点
@@ -160,6 +162,12 @@ pub struct PipelineRun {
     pub ide_mode: IdeMode,
 }
 
+/// 取消时统一返回的错误串。
+///
+/// 命令层靠它把"用户主动停止"和真正的失败区分开，所以两边必须用同一个常量：
+/// 各写一遍字面量的话，改动一处就会让取消被当成错误弹给用户。
+pub const CANCELLED_ERROR: &str = "Agent task cancelled";
+
 /// `prepare_stage` 的结论：这个阶段可以跑，还是运行已经在它前面停住。
 ///
 /// `Ready` 刻意把 `execute_stage` 需要的一切都装成**自有值**（含克隆出的
@@ -168,7 +176,12 @@ pub struct PipelineRun {
 pub enum StagePlan {
     Ready {
         stage: PipelineStage,
-        step_index: usize,
+        /// 按 **id** 而不是下标记住这个阶段对应的计划条目。
+        ///
+        /// 驱动器在 `execute_stage` 期间不持锁，`stop_agent` 可以在此期间清空
+        /// `steps` —— 那时任何缓存下来的下标都会越界 panic。id 找不到就说明
+        /// 这次运行已经被中止，收尾时什么都不该再落地。
+        step_id: String,
         pending_diff_summary: String,
         tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
     },
@@ -198,6 +211,131 @@ impl Default for AgentOrchestrator {
     }
 }
 
+/// 跑完一次完整的 Agent 流程：prompt -> 规划 -> 逐阶段执行 -> 产出 diff -> 等用户。
+///
+/// 拿 `&Mutex<AgentOrchestrator>` 而不是 `&mut AgentOrchestrator`：**由驱动器决定
+/// 什么时候持锁**，这是整个改造的要点。以前命令层在整段运行期间持锁，于是
+/// `stop_agent`、`apply_diffs`、状态查询全都要排在几分钟的模型调用后面 —— 界面
+/// 上表现为按钮点了没反应。现在锁只在每个同步步骤内短暂持有，模型调用期间放开。
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_run(
+    orch: &tokio::sync::Mutex<AgentOrchestrator>,
+    prompt: String,
+    context: AgentContext,
+    context_compression: ContextCompressionMode,
+    context_budget: Option<ContextBudget>,
+    context_sources: ContextSourceOptions,
+    pipeline: Vec<PipelineStage>,
+    ide_mode: IdeMode,
+    cancel_flag: Arc<AtomicBool>,
+    llm: &LlmClient,
+    events: Arc<dyn RunEvents>,
+) -> Result<(), String> {
+    let mut run = orch.lock().await.begin_planning(
+        prompt,
+        &context,
+        context_compression,
+        context_budget,
+        &context_sources,
+        pipeline,
+        ide_mode,
+        events.as_ref(),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(32);
+    let events_clone = events.clone();
+    tokio::spawn(async move {
+        while let Some(token) = rx.recv().await {
+            events_clone.emit_json("agent-stream-token", serde_json::json!(token));
+        }
+    });
+
+    let (steps, planner_response) =
+        planner::plan_task(llm, &run.prompt, &run.ctx_str, cancel_flag.clone(), tx).await?;
+
+    orch.lock().await.record_plan(
+        &mut run,
+        steps,
+        &planner_response,
+        &cancel_flag,
+        events.as_ref(),
+    )?;
+
+    drive_pipeline(orch, run, 0, false, cancel_flag, llm, events).await
+}
+
+/// 从 `start_index` 起驱动流水线，每个阶段三次短持锁。
+///
+/// 每一次 `lock().await` 都是语句级临时借用，出了语句就释放；`execute_stage`
+/// 的 await 期间没有任何锁在手。三个同步方法各自是一个临界区，它们的不变量
+/// 写在各自的文档里。
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_pipeline(
+    orch: &tokio::sync::Mutex<AgentOrchestrator>,
+    mut run: PipelineRun,
+    start_index: usize,
+    ignore_pause_once: bool,
+    cancel_flag: Arc<AtomicBool>,
+    llm: &LlmClient,
+    events: Arc<dyn RunEvents>,
+) -> Result<(), String> {
+    orch.lock().await.ide_mode = run.ide_mode;
+
+    for stage_index in start_index..run.pipeline.len() {
+        let skip_pause = ignore_pause_once && stage_index == start_index;
+        let plan =
+            orch.lock()
+                .await
+                .prepare_stage(&mut run, stage_index, skip_pause, events.as_ref());
+        let StagePlan::Ready {
+            stage,
+            step_id,
+            pending_diff_summary,
+            tool_invoker,
+        } = plan
+        else {
+            // 暂停快照已经写好了，接着跑就会覆盖掉它
+            return Ok(());
+        };
+
+        let (tx2, mut rx2) = mpsc::channel::<String>(32);
+        let events_clone2 = events.clone();
+        tokio::spawn(async move {
+            while let Some(token) = rx2.recv().await {
+                events_clone2.emit_json("agent-stream-token", serde_json::json!(token));
+            }
+        });
+
+        let outcome = executor::execute_stage(
+            llm,
+            stage.role,
+            &stage.name,
+            &run.prompt,
+            &run.ctx_str,
+            &run.transcript,
+            &pending_diff_summary,
+            tool_invoker.as_deref(),
+            cancel_flag.clone(),
+            tx2,
+        )
+        .await;
+
+        orch.lock().await.record_stage_outcome(
+            &mut run,
+            stage_index,
+            &stage,
+            &step_id,
+            outcome,
+            &cancel_flag,
+            events.as_ref(),
+        )?;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    }
+
+    orch.lock().await.finish_pipeline(&run, events.as_ref())
+}
+
 impl AgentOrchestrator {
     pub fn new() -> Self {
         Self {
@@ -217,6 +355,7 @@ impl AgentOrchestrator {
             run_usage: None,
             conversation: Vec::new(),
             undo_stack: Vec::new(),
+            run_active: false,
         }
     }
 
@@ -451,6 +590,26 @@ impl AgentOrchestrator {
     pub fn begin_run(&mut self, run_id: Option<String>) {
         self.current_run_id = run_id.clone();
         self.last_run_id = run_id;
+        self.run_active = true;
+    }
+
+    /// 抢占本次运行的执行权，抢不到就拒绝。
+    ///
+    /// "同一时刻只有一个运行"以前是命令层整段持锁**顺带**保证的。锁收窄到每阶段
+    /// 之后，两个 prompt 能真正并发进来，而它们共用 `steps`、`diffs` 和状态机 ——
+    /// 后进来的那个 `record_plan` 会把前一个的计划整个换掉，前一个的阶段则往一份
+    /// 已经不属于它的计划里写状态。所以把这条约束显式化，而不是继续依赖锁的副作用。
+    ///
+    /// 不看 `current_run_id`：run id 是调用方可选传的，缺省时它一直是 `None`，
+    /// 拿它当"在跑"的判据会让守卫在最需要的时候失效。
+    pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<(), String> {
+        if self.run_active {
+            return Err(
+                "An Agent run is already in progress. Stop it before starting another.".to_string(),
+            );
+        }
+        self.begin_run(run_id);
+        Ok(())
     }
 
     /// 开启一个新的用量记账周期（一次全新运行）
@@ -468,33 +627,37 @@ impl AgentOrchestrator {
 
     pub fn finish_run(&mut self) {
         self.current_run_id = None;
+        self.run_active = false;
     }
 
-    /// Run the full Agent flow:
-    /// prompt -> LLM plan -> execute steps -> generate diffs -> await user
-    pub async fn run(
+    /// 规划阶段之前的全部状态变更，同步完成。
+    ///
+    /// 返回的 `PipelineRun` 还没有 transcript —— 那要等 planner 回话，见
+    /// `record_plan`。中间的模型调用不该占着锁，所以这里就断开。
+    ///
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。它把 `ide_mode`、状态机
+    /// 和"本次运行用哪条流水线"一起定下来；前端拿到 pipeline 事件时状态必须已经
+    /// 是 Thinking，否则界面会显示一条无人在跑的流水线。
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_planning(
         &mut self,
         prompt: String,
-        context: AgentContext,
+        context: &AgentContext,
         context_compression: ContextCompressionMode,
         context_budget: Option<ContextBudget>,
-        context_sources: ContextSourceOptions,
+        context_sources: &ContextSourceOptions,
         pipeline: Vec<PipelineStage>,
         ide_mode: IdeMode,
-        cancel_flag: Arc<AtomicBool>,
-        llm: &LlmClient,
-        events: std::sync::Arc<dyn RunEvents>,
-    ) -> Result<(), String> {
+        events: &dyn RunEvents,
+    ) -> PipelineRun {
         use crate::agent::state_machine::AgentEvent;
 
         self.ide_mode = ide_mode;
-        // 1. Transition to Thinking
         let _ = self
             .state_mgr
             .transition(&AgentEvent::UserPrompt(prompt.clone()));
-        self.emit_state(events.as_ref());
+        self.emit_state(events);
 
-        // 2. Call LLM Streaming for planning
         let raw_ctx_str = context.to_prompt_context_with_mode(&context_compression);
         let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
             context_compression.clone(),
@@ -507,7 +670,7 @@ impl AgentOrchestrator {
             ctx_str.len(),
         );
         self.emit_action_log(
-            events.as_ref(),
+            events,
             "info",
             "prompt",
             None,
@@ -518,7 +681,7 @@ impl AgentOrchestrator {
                 prompt,
                 context_compression,
                 budget_summary,
-                format_context_sources(&context_sources)
+                format_context_sources(context_sources)
             ),
             Some(context_summary.clone()),
             None,
@@ -540,7 +703,7 @@ impl AgentOrchestrator {
         };
         if trim_to_direct {
             self.emit_action_log(
-                events.as_ref(),
+                events,
                 "info",
                 "pipeline_shape",
                 None,
@@ -552,21 +715,35 @@ impl AgentOrchestrator {
                 None,
             );
         }
-        self.emit_pipeline(events.as_ref(), &pipeline);
-        let (tx, mut rx) = mpsc::channel::<String>(32);
+        self.emit_pipeline(events, &pipeline);
 
-        // Forward planner stream tokens to the frontend.
-        let events_clone = events.clone();
-        tokio::spawn(async move {
-            while let Some(token) = rx.recv().await {
-                events_clone.emit_json("agent-stream-token", serde_json::json!(token));
-            }
-        });
+        PipelineRun {
+            prompt,
+            ctx_str,
+            context_summary,
+            pipeline,
+            transcript: Vec::new(),
+            ide_mode,
+        }
+    }
 
-        let (steps, _full_response) =
-            planner::plan_task(llm, &prompt, &ctx_str, cancel_flag.clone(), tx).await?;
+    /// 收下 planner 的结果，同步完成。
+    ///
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。`steps` 落地、状态翻到
+    /// Planning、`agent-plan-ready` 事件必须一起发生 —— 前端收到计划事件后会照
+    /// `steps` 渲染，读到只写了一半的组合就会画出空计划。
+    pub fn record_plan(
+        &mut self,
+        run: &mut PipelineRun,
+        steps: Vec<TaskStep>,
+        planner_response: &str,
+        cancel_flag: &Arc<AtomicBool>,
+        events: &dyn RunEvents,
+    ) -> Result<(), String> {
+        use crate::agent::state_machine::AgentEvent;
+
         self.emit_action_log(
-            events.as_ref(),
+            events,
             "success",
             "planner",
             None,
@@ -576,110 +753,28 @@ impl AgentOrchestrator {
                 steps.len(),
                 if steps.len() == 1 { "" } else { "s" }
             ),
-            &_full_response,
-            Some(context_summary.clone()),
+            planner_response,
+            Some(run.context_summary.clone()),
             None,
         );
 
         self.steps = steps;
-        self.ensure_not_cancelled(&cancel_flag, events.as_ref())?;
+        self.ensure_not_cancelled(cancel_flag, events)?;
 
-        // 3. Transition to Planning
         let _ = self
             .state_mgr
             .transition(&AgentEvent::PlanReady(self.steps.clone()));
-        self.emit_state(events.as_ref());
+        self.emit_state(events);
         events.emit_json(
             "agent-plan-ready",
             serde_json::to_value(&self.steps).unwrap_or_default(),
         );
 
-        // 4. Execute the configured role pipeline.
-        let transcript = vec![crate::services::llm_client::ChatMessage::assistant(
-            format!("[Planner]\n{}", _full_response),
-        )];
-        self.continue_pipeline_from(
-            PipelineRun {
-                prompt,
-                ctx_str,
-                context_summary,
-                pipeline,
-                transcript,
-                ide_mode,
-            },
-            0,
-            false,
-            cancel_flag,
-            llm,
-            events,
-        )
-        .await
-    }
-
-    /// 驱动整条流水线。
-    ///
-    /// 这里刻意只留三件事：调 `prepare_stage`、await `execute_stage`、调
-    /// `record_stage_outcome`。所有状态变更都在那三个**同步**方法里，await 点之间
-    /// 不碰 `self` —— 这是把锁收窄到"每阶段三小段"的前提。
-    #[allow(clippy::too_many_arguments)]
-    pub async fn continue_pipeline_from(
-        &mut self,
-        mut run: PipelineRun,
-        start_index: usize,
-        ignore_pause_once: bool,
-        cancel_flag: Arc<AtomicBool>,
-        llm: &LlmClient,
-        events: std::sync::Arc<dyn RunEvents>,
-    ) -> Result<(), String> {
-        self.ide_mode = run.ide_mode;
-        for stage_index in start_index..run.pipeline.len() {
-            let skip_pause = ignore_pause_once && stage_index == start_index;
-            let StagePlan::Ready {
-                stage,
-                step_index,
-                pending_diff_summary,
-                tool_invoker,
-            } = self.prepare_stage(&mut run, stage_index, skip_pause, events.as_ref())
-            else {
-                return Ok(());
-            };
-
-            let (tx2, mut rx2) = mpsc::channel::<String>(32);
-            let events_clone2 = events.clone();
-            tokio::spawn(async move {
-                while let Some(token) = rx2.recv().await {
-                    events_clone2.emit_json("agent-stream-token", serde_json::json!(token));
-                }
-            });
-
-            let outcome = executor::execute_stage(
-                llm,
-                stage.role,
-                &stage.name,
-                &run.prompt,
-                &run.ctx_str,
-                &run.transcript,
-                &pending_diff_summary,
-                tool_invoker.as_deref(),
-                cancel_flag.clone(),
-                tx2,
-            )
-            .await;
-
-            self.record_stage_outcome(
-                &mut run,
-                stage_index,
-                &stage,
-                step_index,
-                outcome,
-                &cancel_flag,
-                events.as_ref(),
-            )?;
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        }
-
-        self.finish_pipeline(&run, events.as_ref())
+        run.transcript
+            .push(crate::services::llm_client::ChatMessage::assistant(
+                format!("[Planner]\n{}", planner_response),
+            ));
+        Ok(())
     }
 
     /// 进入某个阶段前的全部状态变更，同步完成。
@@ -761,7 +856,7 @@ impl AgentOrchestrator {
 
         StagePlan::Ready {
             stage,
-            step_index,
+            step_id: self.steps[step_index].id.clone(),
             // 裁剪在 `execute_stage` 里做，这里保留完整线程：暂停/续跑要恢复的是
             // 全部历史，而不是某一次已经裁过的快照
             pending_diff_summary: self.summarize_pending_diffs(),
@@ -776,18 +871,25 @@ impl AgentOrchestrator {
     /// **锁不变量**：整个函数必须在**一个**临界区里跑完。成功路径要一起落地
     /// 「step 状态 + transcript + 新 diff + 阶段标记」；这几样是同一份事实的不同
     /// 投影，拆开会让审查区里出现"diff 已到但阶段还没完成"之类的自相矛盾状态。
+    ///
+    /// 阶段执行期间没有持锁，所以 `step_id` 可能已经不存在了（`stop_agent` 清了
+    /// 计划）。那种情况按"已取消"处理：不落地任何结果。
     #[allow(clippy::too_many_arguments)]
     pub fn record_stage_outcome(
         &mut self,
         run: &mut PipelineRun,
         stage_index: usize,
         stage: &PipelineStage,
-        step_index: usize,
+        step_id: &str,
         outcome: Result<executor::StageOutcome, String>,
         cancel_flag: &Arc<AtomicBool>,
         events: &dyn RunEvents,
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
+
+        let Some(step_index) = self.steps.iter().position(|step| step.id == step_id) else {
+            return Err(CANCELLED_ERROR.to_string());
+        };
 
         match outcome {
             Ok(outcome) => {
@@ -1562,7 +1664,7 @@ impl AgentOrchestrator {
                 .set(crate::agent::state_machine::AgentState::Idle);
             self.emit_state(events);
 
-            return Err("Agent task cancelled".to_string());
+            return Err(CANCELLED_ERROR.to_string());
         }
         Ok(())
     }
@@ -2642,29 +2744,28 @@ mod tests {
                 model_type: crate::services::llm_client::ModelType::from_string("openai"),
                 local_model_config: None,
             });
-        let mut orchestrator = AgentOrchestrator::new();
+        let orchestrator = tokio::sync::Mutex::new(AgentOrchestrator::new());
 
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(orchestrator.run(
-                "update the greeting".to_string(),
-                crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref()),
-                ContextCompressionMode::Focused,
-                None,
-                crate::services::context::ContextSourceOptions {
-                    include_project_tree: false,
-                    include_git_diff: false,
-                    include_project_memory: false,
-                },
-                vec![crate::agent::multi_agent::PipelineStage::new(
-                    crate::agent::multi_agent::AgentRole::Coder,
-                    "Coder",
-                )],
-                IdeMode::Code,
-                Arc::new(AtomicBool::new(false)),
-                &llm,
-                events.clone(),
-            ));
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(drive_run(
+            &orchestrator,
+            "update the greeting".to_string(),
+            crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref()),
+            ContextCompressionMode::Focused,
+            None,
+            crate::services::context::ContextSourceOptions {
+                include_project_tree: false,
+                include_git_diff: false,
+                include_project_memory: false,
+            },
+            vec![crate::agent::multi_agent::PipelineStage::new(
+                crate::agent::multi_agent::AgentRole::Coder,
+                "Coder",
+            )],
+            IdeMode::Code,
+            Arc::new(AtomicBool::new(false)),
+            &llm,
+            events.clone(),
+        ));
 
         assert!(result.is_ok(), "{:?}", result);
         let names = events.names();
@@ -2719,35 +2820,34 @@ mod tests {
                 local_model_config: None,
             })
             .with_request_recorder(recorder.clone());
-        let mut orchestrator = AgentOrchestrator::new();
+        let orchestrator = tokio::sync::Mutex::new(AgentOrchestrator::new());
 
-        let result = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(orchestrator.run(
-                "rename the greeting helper".to_string(),
-                crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref()),
-                ContextCompressionMode::Focused,
-                None,
-                crate::services::context::ContextSourceOptions {
-                    include_project_tree: false,
-                    include_git_diff: false,
-                    include_project_memory: false,
-                },
-                vec![
-                    crate::agent::multi_agent::PipelineStage::new(
-                        crate::agent::multi_agent::AgentRole::Architect,
-                        "Architect",
-                    ),
-                    crate::agent::multi_agent::PipelineStage::new(
-                        crate::agent::multi_agent::AgentRole::Coder,
-                        "Coder",
-                    ),
-                ],
-                IdeMode::Code,
-                Arc::new(AtomicBool::new(false)),
-                &llm,
-                events.clone(),
-            ));
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(drive_run(
+            &orchestrator,
+            "rename the greeting helper".to_string(),
+            crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref()),
+            ContextCompressionMode::Focused,
+            None,
+            crate::services::context::ContextSourceOptions {
+                include_project_tree: false,
+                include_git_diff: false,
+                include_project_memory: false,
+            },
+            vec![
+                crate::agent::multi_agent::PipelineStage::new(
+                    crate::agent::multi_agent::AgentRole::Architect,
+                    "Architect",
+                ),
+                crate::agent::multi_agent::PipelineStage::new(
+                    crate::agent::multi_agent::AgentRole::Coder,
+                    "Coder",
+                ),
+            ],
+            IdeMode::Code,
+            Arc::new(AtomicBool::new(false)),
+            &llm,
+            events.clone(),
+        ));
         assert!(result.is_ok(), "{:?}", result);
 
         let stage_messages = |stage: &str| -> Vec<crate::services::llm_client::ChatMessage> {
@@ -2839,7 +2939,7 @@ mod tests {
                 local_model_config: None,
             })
             .with_request_recorder(recorder.clone());
-        let mut orchestrator = AgentOrchestrator::new();
+        let orchestrator = tokio::sync::Mutex::new(AgentOrchestrator::new());
 
         let transcript = vec![
             crate::services::llm_client::ChatMessage::assistant_tool_calls(
@@ -2856,27 +2956,27 @@ mod tests {
             ),
         ];
 
-        let result =
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(orchestrator.continue_pipeline_from(
-                    PipelineRun {
-                        prompt: "fix the failing test".to_string(),
-                        ctx_str: "project context".to_string(),
-                        context_summary: "summary".to_string(),
-                        pipeline: vec![crate::agent::multi_agent::PipelineStage::new(
-                            crate::agent::multi_agent::AgentRole::Coder,
-                            "Coder",
-                        )],
-                        transcript,
-                        ide_mode: IdeMode::Code,
-                    },
-                    0,
-                    true,
-                    Arc::new(AtomicBool::new(false)),
-                    &llm,
-                    events.clone(),
-                ));
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(drive_pipeline(
+                &orchestrator,
+                PipelineRun {
+                    prompt: "fix the failing test".to_string(),
+                    ctx_str: "project context".to_string(),
+                    context_summary: "summary".to_string(),
+                    pipeline: vec![crate::agent::multi_agent::PipelineStage::new(
+                        crate::agent::multi_agent::AgentRole::Coder,
+                        "Coder",
+                    )],
+                    transcript,
+                    ide_mode: IdeMode::Code,
+                },
+                0,
+                true,
+                Arc::new(AtomicBool::new(false)),
+                &llm,
+                events.clone(),
+            ));
         assert!(result.is_ok(), "{:?}", result);
 
         let request = recorder
@@ -3301,6 +3401,81 @@ mod tests {
 
         assert_eq!(orchestrator.current_run_id, None);
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
+    }
+
+    /// 同一时刻只能有一个运行。
+    ///
+    /// 这条约束以前是命令层整段持锁**顺带**保证的；锁收窄到每阶段之后就必须
+    /// 自己守住，否则第二个 prompt 会把第一个的计划和工具面覆盖掉。
+    #[test]
+    fn a_second_run_is_refused_while_one_is_in_flight() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        orchestrator
+            .try_begin_run(Some("run-1".to_string()))
+            .expect("第一个运行应当抢到执行权");
+
+        let second = orchestrator.try_begin_run(Some("run-2".to_string()));
+        assert!(second.is_err(), "并发的第二个运行必须被拒绝");
+        // 被拒绝不能顺手改掉在跑那个运行的身份
+        assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
+
+        orchestrator.finish_run();
+        orchestrator
+            .try_begin_run(Some("run-2".to_string()))
+            .expect("上一个运行结束后应当能再开一个");
+    }
+
+    /// 阶段执行期间用户点了 Stop：结果不能再往一份已经不存在的计划里落地。
+    ///
+    /// `stop_agent` 会清空 `steps`。驱动器在模型调用期间不持锁，所以这件事真的
+    /// 会发生 —— 按下标写回去就是越界 panic，把整个后端带走。
+    #[test]
+    fn a_stage_finishing_after_stop_lands_nothing() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+
+        let events = crate::agent::events::RecordingEvents::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        let mut run = PipelineRun {
+            prompt: "fix the bug".to_string(),
+            ctx_str: "context".to_string(),
+            context_summary: "summary".to_string(),
+            pipeline: vec![crate::agent::multi_agent::PipelineStage::new(
+                crate::agent::multi_agent::AgentRole::Coder,
+                "Coder",
+            )],
+            transcript: Vec::new(),
+            ide_mode: IdeMode::Code,
+        };
+
+        let StagePlan::Ready { stage, step_id, .. } =
+            orchestrator.prepare_stage(&mut run, 0, false, &events)
+        else {
+            panic!("这个阶段没有配置 pause_before，应当可以执行");
+        };
+
+        // 用户按了 Stop
+        orchestrator.steps.clear();
+
+        let landed = orchestrator.record_stage_outcome(
+            &mut run,
+            0,
+            &stage,
+            &step_id,
+            Ok(executor::StageOutcome {
+                text: "```diff\n--- a/src/app.ts\n+++ b/src/app.ts\n```".to_string(),
+                transcript: vec![crate::services::llm_client::ChatMessage::assistant(
+                    "done".to_string(),
+                )],
+            }),
+            &Arc::new(AtomicBool::new(false)),
+            &events,
+        );
+
+        assert_eq!(landed.err().as_deref(), Some(CANCELLED_ERROR));
+        assert!(orchestrator.diffs.is_empty(), "被停掉的阶段不该留下 diff");
+        assert!(run.transcript.is_empty(), "被停掉的阶段不该续写线程");
     }
 
     /// 暂停快照要能原样恢复历史。恢复的是真实消息线程而不是扁平文本：

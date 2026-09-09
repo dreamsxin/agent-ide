@@ -325,7 +325,6 @@ pub async fn send_agent_prompt(
         .unwrap_or_else(default_context_sources);
     context.enrich_from_workspace_with_sources(&context_sources);
 
-    // The async mutex can be held safely while the orchestrator runs.
     let compression = resolve_context_compression(
         &agent_state.context_compression,
         request.context_compression.as_deref(),
@@ -343,31 +342,39 @@ pub async fn send_agent_prompt(
         .unwrap_or(IdeMode::Code);
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
-    let mut orch = agent_state.orchestrator.lock().await;
-    orch.tool_invoker = tool_invoker;
-    orch.tool_policy = tool_policy;
-    orch.tool_permissions = tool_permissions.clone();
-    orch.allow_file_create = request.allow_file_create;
-    orch.begin_run(request.run_id.clone());
-    orch.start_usage_accounting(usage_meter.clone());
-    // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
-    context.conversation = orch.conversation_digest();
-    let prompt_for_history = request.prompt.clone();
-    match orch
-        .run(
-            request.prompt,
-            context,
-            compression,
-            context_budget,
-            context_sources,
-            pipeline,
-            ide_mode,
-            cancel_flag,
-            &llm,
-            std::sync::Arc::new(app_handle.clone()),
-        )
-        .await
+    // 只在准备阶段持锁。运行本身由 `drive_run` 自己按阶段短持锁 —— 整段持锁会让
+    // stop / apply / 状态查询全部排在模型调用后面。
     {
+        let mut orch = agent_state.orchestrator.lock().await;
+        // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
+        // 覆写它的工具面或记账器会把那次运行改坏
+        orch.try_begin_run(request.run_id.clone())?;
+        orch.tool_invoker = tool_invoker;
+        orch.tool_policy = tool_policy;
+        orch.tool_permissions = tool_permissions.clone();
+        orch.allow_file_create = request.allow_file_create;
+        orch.start_usage_accounting(usage_meter.clone());
+        // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
+        context.conversation = orch.conversation_digest();
+    }
+    let prompt_for_history = request.prompt.clone();
+    let outcome = crate::agent::orchestrator::drive_run(
+        &agent_state.orchestrator,
+        request.prompt,
+        context,
+        compression,
+        context_budget,
+        context_sources,
+        pipeline,
+        ide_mode,
+        cancel_flag,
+        &llm,
+        std::sync::Arc::new(app_handle.clone()),
+    )
+    .await;
+
+    let mut orch = agent_state.orchestrator.lock().await;
+    match outcome {
         Ok(()) => {
             finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             orch.record_conversation_turn(&prompt_for_history);
@@ -820,63 +827,77 @@ pub async fn continue_agent_pipeline(
     let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
-    let mut orch = agent_state.orchestrator.lock().await;
-    let Some(paused) = orch.paused_run.take() else {
-        return Err("No paused Agent pipeline to continue.".to_string());
+
+    // 一个临界区里完成"有暂停的运行吗 -> 抢执行权 -> 取走快照"。顺序不能反：
+    // 先取走快照再发现抢不到执行权，那份快照就没了，续跑的唯一凭据被销毁。
+    let (paused, tool_policy, tool_permissions) = {
+        let mut orch = agent_state.orchestrator.lock().await;
+        if orch.paused_run.is_none() {
+            return Err("No paused Agent pipeline to continue.".to_string());
+        }
+        let run_id = orch.last_run_id.clone();
+        orch.try_begin_run(run_id)?;
+        let paused = orch
+            .paused_run
+            .take()
+            .expect("paused run checked in this critical section");
+        let policy = orch.tool_policy;
+        let permissions = orch.tool_permissions.clone();
+        orch.emit_review_action_log(
+            &app_handle,
+            "info",
+            "pipeline_continue",
+            "Continuing paused Agent pipeline",
+            &format!("Continuing from stage {}", paused.stage_index + 1),
+        );
+        (paused, policy, permissions)
     };
+
     // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
     // 必须一起装：只装定义会让恢复后的 stage 看到工具，却由上次运行残留的执行器
     // 处理调用，或者根本没人处理。
-    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
-        &mcp_state.registry,
-        &app_handle,
-        llm,
-        orch.tool_policy,
-    )
-    .await;
+    let (llm, tool_invoker) =
+        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
+            .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
         Some(workspace_tool_logger(&app_handle)),
-        orch.tool_permissions.clone(),
+        tool_permissions.clone(),
     );
-    orch.tool_invoker = tool_invoker;
-    // 写入记录跟着 `Clone` 共享同一份，所以这里先克一份出来，事后登记时
-    // 不用同时可变借用 orchestrator
-    let tool_permissions = orch.tool_permissions.clone();
-    // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
-    // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
-    let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
-    orch.start_usage_accounting(usage_meter.clone());
+
+    let usage_meter = {
+        let mut orch = agent_state.orchestrator.lock().await;
+        orch.tool_invoker = tool_invoker;
+        // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
+        // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
+        let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
+        orch.start_usage_accounting(usage_meter.clone());
+        usage_meter
+    };
     let llm = llm.with_usage_meter(usage_meter.clone());
-    let run_id = orch.last_run_id.clone();
-    orch.begin_run(run_id);
-    orch.emit_review_action_log(
-        &app_handle,
-        "info",
-        "pipeline_continue",
-        "Continuing paused Agent pipeline",
-        &format!("Continuing from stage {}", paused.stage_index + 1),
-    );
+
     let stage_index = paused.stage_index;
-    match orch
-        .continue_pipeline_from(
-            crate::agent::orchestrator::PipelineRun {
-                prompt: paused.prompt,
-                ctx_str: paused.context,
-                context_summary: paused.context_summary,
-                pipeline: paused.pipeline,
-                transcript: paused.transcript,
-                ide_mode: paused.ide_mode,
-            },
-            stage_index,
-            true,
-            cancel_flag,
-            &llm,
-            std::sync::Arc::new(app_handle.clone()),
-        )
-        .await
-    {
+    let outcome = crate::agent::orchestrator::drive_pipeline(
+        &agent_state.orchestrator,
+        crate::agent::orchestrator::PipelineRun {
+            prompt: paused.prompt,
+            ctx_str: paused.context,
+            context_summary: paused.context_summary,
+            pipeline: paused.pipeline,
+            transcript: paused.transcript,
+            ide_mode: paused.ide_mode,
+        },
+        stage_index,
+        true,
+        cancel_flag,
+        &llm,
+        std::sync::Arc::new(app_handle.clone()),
+    )
+    .await;
+
+    let mut orch = agent_state.orchestrator.lock().await;
+    match outcome {
         Ok(()) => {
             finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
             Ok("Agent pipeline continued".to_string())
@@ -1257,7 +1278,7 @@ pub async fn agent_repair_prompt(
 }
 
 fn is_cancelled_error(err: &str) -> bool {
-    err == "Agent task cancelled"
+    err == crate::agent::orchestrator::CANCELLED_ERROR
 }
 
 /// Reject all pending diffs.

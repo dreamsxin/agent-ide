@@ -2,7 +2,7 @@
 
 ## Overview
 
-Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-08: **74 frontend tests across 15 files** (`npm test`) and **260 Rust lib tests, 1 ignored** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
+Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-08: **77 frontend tests across 16 files** (`npm test`) and **265 Rust lib tests, 1 ignored** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
 
 ## Test Layers
 
@@ -383,11 +383,21 @@ frontend, `AppHandle` implements it, and tests use `RecordingEvents` to assert w
 Emission is worth asserting rather than ignoring — the frontend's entire state comes from these
 events, so a run that is logically correct but silent looks like nothing happened.
 `agent/orchestrator.rs` now contains **no Tauri types at all**: the leaf emitters take
-`&dyn RunEvents`, and `run` / `continue_pipeline_from` take `Arc<dyn RunEvents>` (owned, because they
-spawn token-forwarding tasks). A whole `run` against a `mock://` provider is now a plain `#[test]`,
+`&dyn RunEvents`, and the pipeline drivers take `Arc<dyn RunEvents>` (owned, because they
+spawn token-forwarding tasks). A whole run against a `mock://` provider is now a plain `#[test]`,
 asserting that the plan, state and pipeline events actually reach the frontend — three independent
 channels, and a missing one leaves a section of the UI frozen while the run looks fine from the
 backend's side.
+
+A run is driven by free functions (`drive_run` / `drive_pipeline`) that take
+`&Mutex<AgentOrchestrator>` rather than methods taking `&mut self`, so that the driver — not the
+command layer — decides when the lock is held. Tests therefore wrap the orchestrator in a
+`tokio::sync::Mutex` and call the drivers, which means they exercise the same locking path
+production does instead of a `&mut self` shortcut that no caller uses. The per-stage state changes
+live in synchronous methods (`prepare_stage`, `record_stage_outcome`, `finish_pipeline`) that a test
+can call directly with no runtime at all — that is how "the user pressed Stop mid-stage" is tested
+without racing anything.
+
 
 
 
