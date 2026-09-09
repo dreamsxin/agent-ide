@@ -26,10 +26,10 @@ import type {
   DestructiveOpConfirm,
 } from "../types/agent";
 import {
-  DEFAULT_PERMISSIONS,
   mcpApprovalForPermissions,
   normalizeAgentMode,
   permissionsForPreset,
+  READ_ONLY_PERMISSIONS,
 } from "../types/agent";
 
 interface AgentStore {
@@ -273,8 +273,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   chatContextCompression: null,
 
   // ====== 权限初始值 ======
-  permissionPreset: "suggest",
-  permissions: DEFAULT_PERMISSIONS,
+  // 预设和权限必须同源。以前这里是 `"suggest"` 配 `DEFAULT_PERMISSIONS`，
+  // 也就是界面高亮着"可以新建文件"那一档，而开关实际是关的。
+  permissionPreset: "read-only",
+  permissions: READ_ONLY_PERMISSIONS,
   pendingConfirm: null,
 
   // ========== 同步 Actions ==========

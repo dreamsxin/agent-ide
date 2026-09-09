@@ -100,21 +100,19 @@ response.
 
 ## 4. How much freedom to give it
 
-Two separate settings, in two different places. They share value names, which is
-worth knowing before you rely on either.
+Two separate settings, in two different places.
 
 - **Agent mode** — the switch in the top bar: `suggest`, `auto`. Controls whether
   changes reach disk without a click. `auto` applies pending diffs when the run
   finishes and lets the Agent write files during the run.
-- **Permission preset** — Settings → Agent Permissions: `ask`, `suggest`, `auto`.
-  Sets two toggles (create files, run commands),
-  which you can also flip individually.
+- **Permission preset** — Settings → Agent Permissions: `read-only`,
+  `create-files`, `run-commands`. A ladder: each step adds one grant. It sets two
+  toggles (create files, run commands), which you can also flip individually.
 
-Choosing the `suggest` preset does not put the run in `suggest` mode — the two
-settings are independent despite sharing value names.
-[SECURITY.md](../SECURITY.md#agent-approval-model) documents which toggles the
-backend actually enforces — several are deliberately inert because no
-Agent-reachable code path performs those operations yet.
+The two are independent: the preset decides what the Agent may do *during* a run,
+the mode decides what happens to its changes *after*.
+[SECURITY.md](../SECURITY.md#agent-approval-model) documents exactly what the
+backend checks.
 
 Permissions are captured when a run starts. Narrowing one mid-run does not revoke
 a tool already granted for that run; stop the run instead.

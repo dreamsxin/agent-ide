@@ -115,7 +115,7 @@ What the backend does **not** enforce:
 - The MCP server command, arguments, and environment come from `mcp.json` and are executed without validation. Configuring an MCP server is equivalent to granting arbitrary code execution.
 - A `cwd` is not a sandbox.
 
-Consequences for the operator: treat adding an MCP server as equivalent to installing a plugin with full user privileges. Prefer `AutoApprovedOnly` and list tools explicitly. In `auto` mode the permission preset resolves to `AllowAll`, so every discovered tool is callable without a human in the loop.
+Consequences for the operator: treat adding an MCP server as equivalent to installing a plugin with full user privileges. Prefer `AutoApprovedOnly` and list tools explicitly. Under the `run-commands` permission preset the policy resolves to `AllowAll`, so every discovered tool is callable without a human in the loop.
 
 `call_mcp_tool` intentionally uses `AllowAll`: it is a user-initiated escape hatch, not an Agent-initiated call. Note that no UI currently invokes it — `McpPanel.tsx` only calls `get_mcp_config`, `get_mcp_tools`, `save_mcp_config` and `discover_mcp_tools` — so today the permissive policy is reachable only over IPC.
 
@@ -162,15 +162,16 @@ different places.
 - **Agent mode** (`AgentMode`: `suggest` | `auto`) — decides whether the
   Agent's diffs reach disk without a click, and whether the direct write tool is
   advertised. Set from the mode switch in the top bar.
-- **Permission preset** (`AgentPermissionPreset`: `ask` | `suggest` | `auto`) — a
+- **Permission preset** (`AgentPermissionPreset`: `read-only` | `create-files` | `run-commands`) — a
   shortcut that sets the two fine-grained toggles (`allowFileCreate`,
   `allowCommandRun`). Set in
   Settings → Agent Permissions, where the toggles can also be changed one by one.
 
-Both mode values also exist as preset names and mean different things there:
-choosing the `suggest` **preset** does not put the run in `suggest` **mode**, and
-`ask` is a preset only. Renaming one of the two axes would remove the trap; until
-then it is recorded here rather than left for a user to discover.
+The preset values are deliberately named after what they grant. They used to be
+`ask` / `suggest` / `auto`, which collided with the mode's values while meaning
+something different — choosing the `suggest` preset did not put the run in
+`suggest` mode. Two axes have to coexist, so the names now carry the distinction
+instead of a paragraph explaining a trap.
 
 The Agent mode is not persisted by the backend — it resets to `suggest` on every
 launch. The frontend session snapshot in `localStorage` remembers the last
@@ -196,7 +197,7 @@ expressed more precisely by the permission toggles below.
 Which permission toggles are actually enforced in the backend:
 
 - `allowFileCreate` — enforced twice. In `auto` mode, new-file diffs are held for review instead of being written when it is false, and `workspace_write_file` refuses to create a file that does not exist.
-- `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. This one follows the **preset**, not the mode: the `ask` and `suggest` presets resolve to `AutoApprovedOnly`; the `auto` preset resolves to `AllowAll`.
+- `toolApproval` (derived from `allowCommandRun`) — enforced, as MCP tool-name gating only. This one follows the **preset**, not the mode: the `read-only` and `create-files` presets resolve to `AutoApprovedOnly`; the `run-commands` preset resolves to `AllowAll`.
 - `allowCommandRun` — enforced. When false, the `workspace_run_command` tool is **not advertised to the model and not claimed by the invoker**, so there is no Agent path to process execution other than MCP tools. When true, the exposed allow-list is derived by the backend from the project's own declared tasks (`package.json` scripts, Cargo), never from model input, and long-running commands (dev servers, watch tasks) are refused regardless of the list. Every call is written to the action log.
 - **Agent mode gates direct writes.** `workspace_write_file` is advertised only when the run is in `auto` mode. This is not a new privilege level: `auto` already applies pending diffs without a click, so writing during the run grants nothing it did not already have. In `suggest` the tool is absent and the model must emit reviewable diffs, which is what that mode promises. Writes still go through `workspace::resolve_for_agent_write`, so `.git/`, `.agent-ide/`, `node_modules/` and credential files are refused on this path too.
 - **The bounded repair loop (`repair_workspace`) is gated the same way, for the same reason.** Every iteration has to reach the workspace or the re-run checks the old code, so the command is refused outside `auto` mode instead of being downgraded to a single round. Its fixes go through the normal diff application path (`apply_all_diffs`), so each round keeps its base-hash staleness check and its undo point; the iteration budget is clamped to 3, and every iteration plus the stop reason is written to the action log.
