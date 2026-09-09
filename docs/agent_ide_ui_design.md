@@ -182,9 +182,9 @@ to Suggest — every backend gate tests for Auto only — so it was removed rath
 than given a meaning it would have duplicated from the permission toggles.
 
 This is `AgentMode`, and it is separate from the permission preset in
-Settings → Agent Permissions (`ask` / `suggest` / `auto`), which sets the
-fine-grained toggles instead. The two share the value names `suggest` and `auto`
-while meaning different things; see SECURITY.md § Agent Approval Model.
+Settings → Agent Permissions (`read-only` / `create-files` / `run-commands`),
+which sets the fine-grained toggles instead. The preset decides what the Agent may
+do during a run; the mode decides what happens to its changes afterwards.
 
 ### 3.5 Ghost Mode (Background AI) `[Future - Phase 10]`
 

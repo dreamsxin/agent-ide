@@ -39,7 +39,7 @@ beforeEach(() => {
     state: "idle",
     isStreaming: false,
     chatProfileId: null,
-    permissions: permissionsForPreset("ask"),
+    permissions: permissionsForPreset("read-only"),
   });
 });
 
@@ -61,16 +61,16 @@ describe("sendPrompt", () => {
   it("derives the MCP tool policy and file-create permission from the preset", async () => {
     invokeMock.mockResolvedValue("ok");
 
-    useAgentStore.setState({ permissions: permissionsForPreset("ask") });
-    await useAgentStore.getState().sendPrompt({ prompt: "ask preset" });
+    useAgentStore.setState({ permissions: permissionsForPreset("read-only") });
+    await useAgentStore.getState().sendPrompt({ prompt: "read-only preset" });
     const askRequest = invokeMock.mock.calls[0][1] as { request: Record<string, unknown> };
 
     expect(askRequest.request.toolApproval).toBe("auto_approved_only");
     expect(askRequest.request.allowFileCreate).toBe(false);
 
     invokeMock.mockClear();
-    useAgentStore.setState({ permissions: permissionsForPreset("auto") });
-    await useAgentStore.getState().sendPrompt({ prompt: "auto preset" });
+    useAgentStore.setState({ permissions: permissionsForPreset("run-commands") });
+    await useAgentStore.getState().sendPrompt({ prompt: "run-commands preset" });
     const autoRequest = invokeMock.mock.calls[0][1] as { request: Record<string, unknown> };
 
     // 只有授予命令执行权限才放开全部 MCP 工具

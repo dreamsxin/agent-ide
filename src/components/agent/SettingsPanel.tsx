@@ -761,7 +761,7 @@ export default function SettingsPanel() {
         {/* Permission Preset */}
         <label className="block text-surface-muted mb-1 text-[11px]">Permission Preset</label>
         <div className="mb-2 grid grid-cols-3 gap-1">
-          {(["ask", "suggest", "auto"] as AgentPermissionPreset[]).map((preset) => (
+          {(["read-only", "create-files", "run-commands"] as AgentPermissionPreset[]).map((preset) => (
             <button
               key={preset}
               onClick={() => setPermissionPreset(preset)}
@@ -771,14 +771,18 @@ export default function SettingsPanel() {
                   : "border-surface-border text-surface-muted hover:text-surface-text"
               }`}
             >
-              {preset === "ask" ? "\u{2753} Ask" : preset === "suggest" ? "\u{1F4DD} Suggest" : "\u{26A1} Auto"}
+              {preset === "read-only"
+                ? "\u{1F441} Read only"
+                : preset === "create-files"
+                ? "\u{1F4DD} Create files"
+                : "\u{26A1} Run commands"}
             </button>
           ))}
         </div>
         <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
-          {permissionPreset === "ask"
-            ? "Read-only: the Agent can read the workspace and propose changes, nothing else."
-            : permissionPreset === "suggest"
+          {permissionPreset === "read-only"
+            ? "The Agent can read the workspace and propose changes, nothing else."
+            : permissionPreset === "create-files"
             ? "Also lets the Agent create new files. Changes still wait in the review area."
             : "Also lets the Agent run the project's own declared commands (tests, build)."}
         </p>

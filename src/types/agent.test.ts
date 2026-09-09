@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  AUTO_PERMISSIONS,
-  DEFAULT_PERMISSIONS,
-  SUGGEST_PERMISSIONS,
+  CREATE_FILES_PERMISSIONS,
+  READ_ONLY_PERMISSIONS,
+  RUN_COMMANDS_PERMISSIONS,
   mcpApprovalForPermissions,
   permissionsForPreset,
   type AgentPermissionPreset,
@@ -10,33 +10,34 @@ import {
 
 describe("permissionsForPreset", () => {
   it("maps each preset to its permission table", () => {
-    expect(permissionsForPreset("ask")).toEqual(DEFAULT_PERMISSIONS);
-    expect(permissionsForPreset("suggest")).toEqual(SUGGEST_PERMISSIONS);
-    expect(permissionsForPreset("auto")).toEqual(AUTO_PERMISSIONS);
+    expect(permissionsForPreset("read-only")).toEqual(READ_ONLY_PERMISSIONS);
+    expect(permissionsForPreset("create-files")).toEqual(CREATE_FILES_PERMISSIONS);
+    expect(permissionsForPreset("run-commands")).toEqual(RUN_COMMANDS_PERMISSIONS);
   });
 
-  it("keeps ask read-only and only widens create for suggest", () => {
-    expect(permissionsForPreset("ask")).toEqual({
+  it("is a ladder: each preset adds exactly one grant", () => {
+    expect(permissionsForPreset("read-only")).toEqual({
       allowFileCreate: false,
       allowCommandRun: false,
     });
-    // suggest 放开新建文件，但不放开命令执行 —— MCP 工具策略依赖这一点
-    expect(permissionsForPreset("suggest").allowFileCreate).toBe(true);
-    expect(permissionsForPreset("suggest").allowCommandRun).toBe(false);
+    // create-files 放开新建文件，但不放开命令执行 —— MCP 工具策略依赖这一点
+    expect(permissionsForPreset("create-files").allowFileCreate).toBe(true);
+    expect(permissionsForPreset("create-files").allowCommandRun).toBe(false);
+    expect(permissionsForPreset("run-commands").allowCommandRun).toBe(true);
   });
 
   it("returns a fresh object so callers cannot mutate the shared presets", () => {
-    const permissions = permissionsForPreset("ask");
+    const permissions = permissionsForPreset("read-only");
     permissions.allowFileCreate = true;
 
-    expect(DEFAULT_PERMISSIONS.allowFileCreate).toBe(false);
-    expect(permissionsForPreset("ask").allowFileCreate).toBe(false);
+    expect(READ_ONLY_PERMISSIONS.allowFileCreate).toBe(false);
+    expect(permissionsForPreset("read-only").allowFileCreate).toBe(false);
   });
 });
 
 describe("mcpApprovalForPermissions", () => {
   it("only grants allow_all when command execution is permitted", () => {
-    const presets: AgentPermissionPreset[] = ["ask", "suggest", "auto"];
+    const presets: AgentPermissionPreset[] = ["read-only", "create-files", "run-commands"];
     const approvals = presets.map((preset) =>
       mcpApprovalForPermissions(permissionsForPreset(preset))
     );

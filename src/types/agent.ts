@@ -34,8 +34,15 @@ export function normalizeAgentMode(value: unknown): AgentMode {
 /** IDE 工作模式，独立于 Agent 权限模式 */
 export type IdeMode = "code" | "plan";
 
-/** Agent 权限预设 */
-export type AgentPermissionPreset = "ask" | "suggest" | "auto";
+/**
+ * 权限预设：一个梯子，每一档在前一档之上多放开一件事。
+ *
+ * 值名刻意不叫 `ask` / `suggest` / `auto` —— 后两个和 `AgentMode` 的取值撞名却
+ * 含义不同，选 `suggest` 预设并不会让运行进入 `suggest` 模式。既然两个轴必须
+ * 并存，那就让名字自己说清它授予什么，而不是靠文档去解释一个陷阱。
+ */
+export type AgentPermissionPreset = "read-only" | "create-files" | "run-commands";
+
 
 /**
  * 一次运行授予 Agent 的细粒度权限。
@@ -51,31 +58,30 @@ export interface AgentPermission {
   allowCommandRun: boolean;
 }
 
-/** `ask` 预设：只读。既不新建文件，也不跑命令。 */
-export const DEFAULT_PERMISSIONS: AgentPermission = {
+/** `read-only` 预设：既不新建文件，也不跑命令。 */
+export const READ_ONLY_PERMISSIONS: AgentPermission = {
   allowFileCreate: false,
   allowCommandRun: false,
 };
 
-/** `suggest` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
-export const SUGGEST_PERMISSIONS: AgentPermission = {
+/** `create-files` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
+export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
   allowCommandRun: false,
 };
 
-/** `auto` 预设：可以新建文件，也可以跑项目自己声明的命令。 */
-export const AUTO_PERMISSIONS: AgentPermission = {
+/** `run-commands` 预设：可以新建文件，也可以跑项目自己声明的命令。 */
+export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
   allowCommandRun: true,
 };
 
-
 /** 根据预设获取权限 */
 export function permissionsForPreset(preset: AgentPermissionPreset): AgentPermission {
   switch (preset) {
-    case "ask": return { ...DEFAULT_PERMISSIONS };
-    case "suggest": return { ...SUGGEST_PERMISSIONS };
-    case "auto": return { ...AUTO_PERMISSIONS };
+    case "read-only": return { ...READ_ONLY_PERMISSIONS };
+    case "create-files": return { ...CREATE_FILES_PERMISSIONS };
+    case "run-commands": return { ...RUN_COMMANDS_PERMISSIONS };
   }
 }
 
