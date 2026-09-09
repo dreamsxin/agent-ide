@@ -740,6 +740,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Also from the same audit, fixed immediately after: `AgentMode`'s values collided by name with `AgentPermissionPreset`'s. Two axes, meanings that differ, four of five values shared. The preset axis moved, because the mode's two words already describe behaviour accurately: presets are now `read-only` / `create-files` / `run-commands`, named after what each one grants. That deletes the explanatory paragraph SECURITY.md needed to warn about the trap — the names carry it now.
    - One inconsistency surfaced while renaming: the store's initial state was `permissionPreset: "suggest"` with `permissions: DEFAULT_PERMISSIONS`, i.e. Settings highlighted the "may create files" rung while the File Creation toggle was off. Aligned to the conservative side (`read-only` plus its own table) rather than widening the default grant to match the highlight.
 
+18. **The repo did not use its own project-memory feature (resolved 2026-09-09)**
+   - 9.0.2 loads the workspace-root `AGENTS.md` into every Agent run's context, and this repository had no `AGENTS.md`. So an Agent run *inside this project* — the exact workflow the product is built for — got no project conventions at all.
+   - Added one, scoped to what an agent cannot cheaply derive by reading code: the four verification commands, the traps that have already cost time here (PowerShell has no heredoc; `cargo test --bin agent_cli` runs zero tests; `as SomeUnion` on stored or event data is not validation; `Number("0.29") * 1e6` is not an integer; Vitest has no setup file so RTL auto-cleanup is unwired; `test.include` is pinned because `artifacts/` holds repo copies; `env_test_guard()` is only a mutex), the architecture rules that constrain edits (no Tauri types in the orchestrator, no lock held across an await, no per-field lock split, every landed change visible and undoable), and the conventions — including "never ship a control that does nothing", which two commits the same day were spent undoing.
+   - Kept at ~6 KB against the 8 000-character bound in `services/project_memory.rs`, because the loader truncates the tail silently. Every claim in it was verified against the code or by running the command, which is the standard the file itself sets.
+   - `CONTRIBUTING.md` is still absent. Deliberately not written as a copy of this: a human-facing contributing guide should cover setup and PR expectations, which are different content, not the same content in a second place.
+
+
 
 
 
