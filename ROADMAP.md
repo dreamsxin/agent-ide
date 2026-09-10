@@ -879,6 +879,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Checked before deleting, in the order that matters: **one** construction site, no other Rust reader, no frontend reader, and the field is absent from the `agent-state-changed` payload (`state_payload()` is a separate shape, so the event is unaffected). The `context_files` fields on the *request* DTOs are real inbound data and stay.
    - No test added. There is nothing left to assert — the honest guarantee here is the type, and `tsc` plus the IPC contract test already cover "the two sides agree".
 
+34. **The "did this apply actually work" log level was decided four times (fixed 2026-09-10)**
+   - `apply_diffs`, `apply_diff`, `apply_diff_hunk` and `undo_last_apply` each carried their own `if failed.is_empty() { "success" } else { "warn" }`. **All four agreed** — this is drift prevention, not a bug fix, and worth saying plainly rather than dressing up as a find.
+   - It is still worth one place and one test, because the rule guards the product's premise: the user has to be able to see what the Agent actually did. An apply that failed on some files but is logged as `success` tells them everything landed when it did not. `apply_log_level(failed)` now owns it.
+   - The test asserts the *property*, not the string: zero failures is `success`, and any failure must be a level the user notices — `matches!(level, "warn" | "error")`. Choosing between warn and error later is a legitimate change; letting a partial failure read as success is not. An `assert_eq!(…, "warn")` would have failed the legitimate change and passed a hypothetical `"info"` regression, which is backwards.
+   - The `reject_*` commands keep their fixed `"info"`: rejecting is the user's own decision, so there is no success/failure to report. Not folded into the helper.
+   - 278 → 279 tests.
+
 
 
 

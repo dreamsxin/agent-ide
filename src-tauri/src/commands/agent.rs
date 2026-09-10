@@ -954,7 +954,7 @@ pub async fn apply_diffs(
     let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
-        if failed.is_empty() { "success" } else { "warn" },
+        apply_log_level(failed.len()),
         "diff_apply",
         &format!(
             "Apply all diffs: {} applied, {} failed",
@@ -985,7 +985,7 @@ pub async fn apply_diff(
     let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
-        if failed.is_empty() { "success" } else { "warn" },
+        apply_log_level(failed.len()),
         "diff_apply",
         &format!(
             "Apply diff {}: {} applied, {} failed",
@@ -1015,7 +1015,7 @@ pub async fn apply_diff_hunk(
     let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
-        if failed.is_empty() { "success" } else { "warn" },
+        apply_log_level(failed.len()),
         "diff_apply",
         &format!(
             "Apply hunk {} in diff {}: {} applied, {} failed",
@@ -1050,11 +1050,7 @@ pub async fn undo_last_apply(
     let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
-        if result.failed.is_empty() {
-            "success"
-        } else {
-            "warn"
-        },
+        apply_log_level(result.failed.len()),
         "diff_undo",
         &format!(
             "Undid {}: restored {} file(s)",
@@ -1443,6 +1439,17 @@ mod tests {
     use super::*;
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
+
+    /// 部分失败**绝不能**记成 success：这个产品的前提是用户看得清 Agent 做了什么，
+    /// 一次有文件没改到的应用被标成成功，用户就会以为改动全落盘了。至于失败该记
+    /// warn 还是 error 是可以改的选择，所以断言落在"必须是一个引人注意的级别"上，
+    /// 而不是某个具体字符串。
+    #[test]
+    fn a_partial_failure_is_never_logged_as_success() {
+        assert_eq!(apply_log_level(0), "success");
+        assert!(matches!(apply_log_level(1), "warn" | "error"));
+        assert!(matches!(apply_log_level(7), "warn" | "error"));
+    }
 
     /// 请求里给了原始任务描述就用它，不去翻对话记录。
     #[test]
@@ -1838,6 +1845,20 @@ fn resolve_original_prompt(requested: Option<String>, last_turn: Option<String>)
     match requested {
         Some(prompt) if !prompt.trim().is_empty() => prompt,
         _ => last_turn.unwrap_or_else(|| "(original task not recorded)".to_string()),
+    }
+}
+
+/// 应用 / 撤销类操作在 action log 里的级别。
+///
+/// 只有一条规则：**有任何一条失败就不能记成 success**。这个产品的前提是用户能看清
+/// Agent 到底做了什么，一次部分失败的应用被记成成功，用户就会以为改动全都落盘了 ——
+/// 而实际上有文件没改到。四个命令（`apply_diffs` / `apply_diff` / `apply_diff_hunk` /
+/// `undo_last_apply`）以前各写一份同样的三元表达式。
+fn apply_log_level(failed: usize) -> &'static str {
+    if failed == 0 {
+        "success"
+    } else {
+        "warn"
     }
 }
 
