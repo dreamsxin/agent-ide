@@ -167,6 +167,18 @@ export default function EditorContainer() {
     };
   }, []);
 
+  // 关掉最后一个 tab 时 `<MonacoEditor>` 整体卸载，编辑器实例被 Monaco 释放 ——
+  // 但灯泡 provider 和 apply-code-action 是注册在 monaco 模块上的全局对象，只在
+  // 本组件卸载时才清。所以这里必须主动把引用清空，否则它们会拿一个已释放的实例
+  // 去调 `getSelection()` / `getModel()`；`MonacoContext` 也一样，消费者会照着
+  // 一个死实例算坐标。
+  const hasActiveTab = Boolean(activeTab);
+  useEffect(() => {
+    if (hasActiveTab) return;
+    activeEditorRef.current = null;
+    setEditorRef(null);
+  }, [hasActiveTab]);
+
   const handleChange = useCallback(
     (value: string | undefined) => {
       if (activeFile && value !== undefined) {
@@ -376,44 +388,52 @@ export default function EditorContainer() {
             },
           });
           disposablesRef.current.add(codeActionDisposable);
-
-          const applyCodeActionDisposable = monacoInst.editor.registerCommand(
-            "agent-ide.apply-code-action",
-            async (_accessor, title: string, edit: LspWorkspaceEdit) => {
-              try {
-                const applied = applyWorkspaceEdit(editorInst, monacoInst, edit);
-                if (!applied) {
-                  addLog({
-                    time: new Date().toLocaleTimeString(),
-                    level: "error",
-                    source: "system",
-                    message: `Code action failed: ${title}`,
-                    details: "Monaco rejected the workspace edit.",
-                  });
-                  return;
-                }
-                syncWorkspaceEditToStore(monacoInst, edit, updateFileContent);
-                await syncWorkspaceEditToLsp(monacoInst, edit);
-                addLog({
-                  time: new Date().toLocaleTimeString(),
-                  level: "success",
-                  source: "system",
-                  message: `Code action applied: ${title}`,
-                  details: `${edit.edits.length} edit(s) applied.`,
-                });
-              } catch (error) {
-                addLog({
-                  time: new Date().toLocaleTimeString(),
-                  level: "error",
-                  source: "system",
-                  message: `Code action failed: ${title}`,
-                  details: String(error),
-                });
-              }
-            }
-          );
-          disposablesRef.current.add(applyCodeActionDisposable);
         }
+
+        // 这个命令的 id 是全局唯一的，注册在 `monacoInst.editor` 上，跟语言无关 ——
+        // 放在上面的语言循环里等于同一个 id 注册五遍。它也必须走
+        // `activeEditorRef` 拿**当前**编辑器：`key={activeFile}` 每切一次 tab
+        // 就换一个实例，而这段只在第一次挂载时注册，闭包捕获的那个早被释放了 ——
+        // `applyWorkspaceEdit` 会在 `getModel()` 处返回 false，于是每个 LSP
+        // quick fix 都静默失效，还打出一条"Monaco 拒绝了这次编辑"的假日志。
+        const applyCodeActionDisposable = monacoInst.editor.registerCommand(
+          "agent-ide.apply-code-action",
+          async (_accessor, title: string, edit: LspWorkspaceEdit) => {
+            const failed = (details: string) => {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                level: "error",
+                source: "system",
+                message: `Code action failed: ${title}`,
+                details,
+              });
+            };
+            const activeEditor = activeEditorRef.current;
+            if (!activeEditor) {
+              failed("No active editor to apply the workspace edit to.");
+              return;
+            }
+            try {
+              const applied = applyWorkspaceEdit(activeEditor, monacoInst, edit);
+              if (!applied) {
+                failed("Monaco rejected the workspace edit.");
+                return;
+              }
+              syncWorkspaceEditToStore(monacoInst, edit, updateFileContent);
+              await syncWorkspaceEditToLsp(monacoInst, edit);
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                level: "success",
+                source: "system",
+                message: `Code action applied: ${title}`,
+                details: `${edit.edits.length} edit(s) applied.`,
+              });
+            } catch (error) {
+              failed(String(error));
+            }
+          }
+        );
+        disposablesRef.current.add(applyCodeActionDisposable);
       }
 
       const definitionDisposable = editorInst.addAction({
@@ -456,10 +476,24 @@ export default function EditorContainer() {
         const selectedText = model.getValueInRange(selection);
         if (!selectedText) return;
 
-
         const layout = useLayoutStore.getState();
         layout.setAgentView("task");
         if (!layout.rightVisible) layout.toggleRightPanel();
+
+        // 运行中就不再发第二条。灯泡会在忙时直接不出现，右键菜单没法按 Agent
+        // 状态隐藏，所以判断落在这里 —— 否则这条 prompt 先被写进对话记录，再被
+        // 后端的运行独占守卫拒掉，用户看到的是一条自己发出去却没有回复的消息。
+        // 面板照样打开：正在跑的那次运行就在里面，那才是"为什么没反应"的答案。
+        if (isAgentBusy()) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            level: "warn",
+            source: "agent",
+            message: "Agent is busy; the selection action was not sent.",
+            details: "Wait for the current run to finish, or press Stop.",
+          });
+          return;
+        }
 
         const editorState = useEditorStore.getState();
         const currentFile = editorState.activeFile;
