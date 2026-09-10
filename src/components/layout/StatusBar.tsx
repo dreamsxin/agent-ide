@@ -9,11 +9,16 @@ import { describeRunUsage } from "../../types/agent";
 import { formatMicrosUsd } from "../../utils/money";
 import StatusDot from "../shared/StatusDot";
 
-/** 严重级别的显示样式，与 ProblemsPanel / LSP 弹层里的 E/W/I 约定保持一致 */
-const SEVERITY_COLOR: Record<ProblemSeverity, string> = {
-  error: "text-diff-remove",
-  warning: "text-diff-modify",
-  info: "text-accent-blue",
+/**
+ * 每个严重级别的字母和颜色。
+ *
+ * 字母不是装饰：只用颜色区分三个数字，色觉障碍的用户看到的就是三个裸整数，
+ * 分不清哪个是错误。`aria-label` 解决读屏，解决不了这个。
+ */
+const SEVERITY_STYLE: Record<ProblemSeverity, { letter: string; color: string }> = {
+  error: { letter: "E", color: "text-diff-remove" },
+  warning: { letter: "W", color: "text-diff-modify" },
+  info: { letter: "I", color: "text-accent-blue" },
 };
 
 /**
@@ -84,6 +89,7 @@ export default function StatusBar() {
             type="button"
             onClick={showSourceControl}
             data-testid="status-bar-branch"
+            aria-label={`On branch ${gitStatus.branch}. Open Source Control.`}
             title={`On branch ${gitStatus.branch}${
               gitStatus.upstream ? ` (tracking ${gitStatus.upstream})` : " (no upstream)"
             } — click to open Source Control`}
@@ -105,9 +111,12 @@ export default function StatusBar() {
           title={`${problemLabel} — click to open the Problems panel`}
           className="flex items-center gap-1.5 rounded px-1 hover:bg-surface-border/40 hover:text-surface-text"
         >
-          <span className={SEVERITY_COLOR.error}>{counts.error}</span>
-          <span className={SEVERITY_COLOR.warning}>{counts.warning}</span>
-          <span className={SEVERITY_COLOR.info}>{counts.info}</span>
+          {(["error", "warning", "info"] as ProblemSeverity[]).map((severity) => (
+            <span key={severity} className={SEVERITY_STYLE[severity].color}>
+              {SEVERITY_STYLE[severity].letter}
+              {counts[severity]}
+            </span>
+          ))}
         </button>
 
         {activeTab && (

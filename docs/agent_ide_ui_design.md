@@ -53,7 +53,8 @@ per prompt in the Agent panel; Git state lives in the Source Control panel.
 A 24px row at the bottom edge, outside the bottom panel — it is not a panel, and
 focus mode collapses panels.
 
-- Problem counts by severity, clickable to open the Problems panel. Previously
+- Problem counts by severity, each prefixed with `E`/`W`/`I` so the distinction
+  does not rest on colour alone, clickable to open the Problems panel. Previously
   these were only visible once that panel was already open.
 - Cursor line and column. Tracked separately from the selection, because the
   selection is cleared the moment you deselect and "which line am I on" is a

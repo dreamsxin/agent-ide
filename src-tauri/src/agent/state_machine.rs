@@ -243,7 +243,17 @@ impl AgentStateManager {
     /// 处理事件，执行状态转换。返回新的状态和可选的 transition 事件数据。
     pub fn transition(&mut self, event: &AgentEvent) -> AgentState {
         self.state = match (&self.state, event) {
-            (AgentState::Idle, AgentEvent::UserPrompt(_)) => AgentState::Thinking,
+            // 新 prompt 从**任何**状态都直接进 Thinking。
+            //
+            // 以前只有 `Idle` 和 `Done` 有出边，而且 `Done` 那条是转到 `Idle`
+            // ——"先 reset"——但没有任何代码会再补一次 `UserPrompt`。于是后续的
+            // `PlanReady`（要求 Thinking）和 `StepStart`（要求 Planning）双双落进
+            // 兜底分支，**整次运行都报旧状态**。`WaitingUser` 更常见也更糟：
+            // 上一轮产出 diff 还没处理就接着发问，是最普通的用法。
+            //
+            // 前端据状态决定 Run / Continue 按钮是否可点，所以一次报着 idle 的
+            // 活跃运行意味着单步执行的按钮在流水线跑着的时候亮着。
+            (_, AgentEvent::UserPrompt(_)) => AgentState::Thinking,
             (AgentState::Thinking, AgentEvent::PlanReady(_)) => AgentState::Planning,
             (AgentState::Planning, AgentEvent::StepStart(_)) => AgentState::Acting,
             (AgentState::Acting, AgentEvent::StepDone(_)) => AgentState::Acting, // 保持
@@ -252,7 +262,6 @@ impl AgentStateManager {
             (AgentState::Reviewing, _) => AgentState::WaitingUser,
             (AgentState::WaitingUser, AgentEvent::UserApply) => AgentState::Done,
             (AgentState::WaitingUser, AgentEvent::UserReject) => AgentState::Done,
-            (AgentState::Done, AgentEvent::UserPrompt(_)) => AgentState::Idle, // 先 reset
             (_, AgentEvent::Error(_)) => AgentState::Error(String::new()),
             _ => self.state.clone(),
         };
@@ -262,5 +271,58 @@ impl AgentStateManager {
     /// 直接设置状态（用于外部控制，如 stop）
     pub fn set(&mut self, state: AgentState) {
         self.state = state;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 一次完整的运行必须从任何静息态出发都能走完整条状态链。
+    ///
+    /// `WaitingUser`（上一轮的 diff 还挂着）和 `Done`（刚 apply 完）都是常见起点，
+    /// 而它们以前都走不通：`UserPrompt` 没有出边或者只把状态推回 `Idle`，
+    /// 后面的 `PlanReady` / `StepStart` 于是全部落进兜底分支。
+    #[test]
+    fn a_new_prompt_starts_thinking_from_every_resting_state() {
+        for start in [
+            AgentState::Idle,
+            AgentState::Done,
+            AgentState::WaitingUser,
+            AgentState::Reviewing,
+            AgentState::Error("earlier failure".to_string()),
+        ] {
+            let mut manager = AgentStateManager::new();
+            manager.set(start.clone());
+
+            assert_eq!(
+                manager.transition(&AgentEvent::UserPrompt("go".to_string())),
+                AgentState::Thinking,
+                "从 {:?} 发新 prompt 应当进 Thinking",
+                start
+            );
+            assert_eq!(
+                manager.transition(&AgentEvent::PlanReady(Vec::new())),
+                AgentState::Planning,
+                "从 {:?} 起的运行应当能走到 Planning",
+                start
+            );
+            assert_eq!(
+                manager.transition(&AgentEvent::StepStart("stage".to_string())),
+                AgentState::Acting,
+                "从 {:?} 起的运行应当能走到 Acting",
+                start
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_wins_over_the_current_state() {
+        let mut manager = AgentStateManager::new();
+        manager.transition(&AgentEvent::UserPrompt("go".to_string()));
+
+        let state = manager.transition(&AgentEvent::Error("boom".to_string()));
+
+        assert!(matches!(state, AgentState::Error(_)));
     }
 }

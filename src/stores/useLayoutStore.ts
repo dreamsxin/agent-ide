@@ -192,9 +192,18 @@ export const useLayoutStore = create<LayoutStore>((set) => ({
   setLeftWidth: (w) => set({ leftWidth: clampLeft(w) }),
   setRightWidth: (w) => set({ rightWidth: clampRight(w) }),
   setBottomHeight: (h) => set({ bottomHeight: clampBottom(h) }),
-  toggleLeftPanel: () => set((s) => ({ leftVisible: !s.leftVisible })),
-  toggleRightPanel: () => set((s) => ({ rightVisible: !s.rightVisible })),
-  toggleBottomPanel: () => set((s) => ({ bottomVisible: !s.bottomVisible })),
+  // 打开任何一个面板都必须退出 focus mode。
+  //
+  // 否则会留下"focusMode 为真、面板却开着"这种自相矛盾的组合，而它是持久化的：
+  // 顶栏那个高亮的 Focus 按钮此时再点，走的是"退出"分支，于是**三个面板全部打开** ——
+  // 用户按了一个写着"专注"的按钮，得到的是完整三栏布局。收起面板时不动 focusMode，
+  // 因为那个方向不矛盾。
+  toggleLeftPanel: () =>
+    set((s) => ({ leftVisible: !s.leftVisible, focusMode: s.focusMode && s.leftVisible })),
+  toggleRightPanel: () =>
+    set((s) => ({ rightVisible: !s.rightVisible, focusMode: s.focusMode && s.rightVisible })),
+  toggleBottomPanel: () =>
+    set((s) => ({ bottomVisible: !s.bottomVisible, focusMode: s.focusMode && s.bottomVisible })),
   toggleFocusMode: () =>
     set((s) => {
       if (s.focusMode) {

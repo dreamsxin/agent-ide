@@ -155,4 +155,35 @@ describe("layout persistence", () => {
 
     expect(saved().performanceOverlay).toBeUndefined();
   });
+
+  /**
+   * 打开面板必须退出 focus mode。
+   *
+   * 留下"focusMode 为真、面板却开着"的组合会让顶栏那个高亮的 Focus 按钮走
+   * "退出"分支 —— 用户按一个写着专注的按钮，得到三栏全开。而这个矛盾状态
+   * 是持久化的，重启还在。
+   */
+  it("leaves focus mode when a panel is opened", async () => {
+    const { useLayoutStore } = await loadStore();
+
+    useLayoutStore.getState().toggleFocusMode();
+    expect(useLayoutStore.getState().focusMode).toBe(true);
+    expect(useLayoutStore.getState().bottomVisible).toBe(false);
+
+    useLayoutStore.getState().toggleBottomPanel();
+
+    expect(useLayoutStore.getState().bottomVisible).toBe(true);
+    expect(useLayoutStore.getState().focusMode).toBe(false);
+  });
+
+  it("stays in focus mode when a panel is closed", async () => {
+    const { useLayoutStore } = await loadStore();
+
+    useLayoutStore.setState({ focusMode: true, leftVisible: true });
+    useLayoutStore.getState().toggleLeftPanel();
+
+    // 收起面板和"专注"不矛盾，不该顺手把状态改掉
+    expect(useLayoutStore.getState().leftVisible).toBe(false);
+    expect(useLayoutStore.getState().focusMode).toBe(true);
+  });
 });
