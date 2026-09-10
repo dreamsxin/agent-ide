@@ -867,6 +867,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The first version of the split introduced a regression I caught before committing**: hoisting the scan above the authorization check meant every run read `package.json` and `Cargo.toml` even when commands were forbidden. The scan is now behind its own `if`, which looks redundant next to the one inside `allowed_agent_commands` but is not — one avoids I/O nobody will use, the other is the rule under test. Worth recording because the same reflex ("lift the impure part out") is what a future refactor here will reach for.
    - 272 → 275 tests. `commands/agent.rs` still has 41 commands and now two covered helpers, which is progress and not yet a claim of coverage.
 
+32. **"What did the user originally ask for" was decided in three places (fixed 2026-09-10)**
+   - `verify_workspace`, `repair_workspace` and `agent_repair_prompt` each carried a byte-identical `match` deciding the task description that goes into the repair prompt. Three copies of one rule is three chances for one of them to drift, and the value matters: it is the only thing telling the model what the failing checks were *supposed* to achieve. Lose it and the model repairs blind — it sees errors and no goal.
+   - Now one `resolve_original_prompt(requested, last_turn)`, with the three rules under test. The one worth naming is the middle one: **a whitespace-only request counts as absent.** The frontend sends `Some("")` from an empty input, so a naive `Option` check would pass an empty description through as if the user had specified it. The third test asserts the no-conversation case yields the explicit `(original task not recorded)` marker rather than an empty string — a placeholder in the prompt is diagnosable, blank space is not.
+   - The cost is one extra uncontended `lock().await` in the two commands that did not already hold the orchestrator: the fallback used to be computed lazily inside the match arm. Accepted deliberately, and it is only cheap because of Known Issues 16/23 — the orchestrator lock is never held across an `await` any more, so acquiring it is a few instructions rather than a wait behind a model call. Both new acquisitions are scoped to a block that ends before the next `await`, and neither function holds the lock elsewhere, so there is no nesting of a non-reentrant `tokio::sync::Mutex`. I checked that specifically; it is the failure mode that would have turned this tidy-up into a hang.
+   - 275 → 278 tests.
+
 
 
 
