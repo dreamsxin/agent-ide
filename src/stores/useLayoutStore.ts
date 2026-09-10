@@ -54,10 +54,31 @@ const LEFT_TABS: LayoutStore["leftTab"][] = ["explorer", "git"];
 const BOTTOM_TABS: LayoutStore["bottomTab"][] = ["terminal", "commands", "problems", "logs"];
 const AGENT_VIEWS: AgentViewId[] = ["task", "plan", "changes", "pipeline", "settings"];
 
+/**
+ * 竖直方向上不属于任何面板的固定开销：TopBar 40 + 拖拽条 4 + StatusBar 24。
+ * 底部面板之外只剩编辑器一列，所以编辑器高度 = 窗口高 - 这些 - bottomHeight。
+ */
+const VERTICAL_CHROME = 68;
+/**
+ * 编辑器至少要留下的高度。窗口最小高度是 600（tauri.conf.json），底部面板的
+ * 上限 500 是个和窗口无关的字面量，两者一撞编辑器只剩 32px —— 一个标签栏就吃满了。
+ */
+const MIN_EDITOR_HEIGHT = 160;
+
 /** 尺寸的合法区间，读取存档和调整尺寸走同一套规则，避免两处漂移 */
 const clampLeft = (w: number) => Math.max(180, Math.min(500, w));
 const clampRight = (w: number) => Math.max(280, Math.min(600, w));
-const clampBottom = (h: number) => Math.max(120, Math.min(500, h));
+/**
+ * 底部面板的上限跟着窗口高度走。固定上限的问题不只是拖得太狠：存档里的高度是在
+ * 大屏上存下来的，换到小窗口第一帧就已经把编辑器压没了，用户还没碰任何东西。
+ * 没有 window（node 环境下的测试）时退回固定上限。
+ */
+function maxBottomHeight() {
+  if (typeof window === "undefined") return 500;
+  const room = window.innerHeight - VERTICAL_CHROME - MIN_EDITOR_HEIGHT;
+  return Math.max(120, Math.min(500, room));
+}
+const clampBottom = (h: number) => Math.max(120, Math.min(maxBottomHeight(), h));
 
 /** 会被记住的那部分布局状态 */
 type PersistedLayout = Pick<
