@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 
 import StatusBar from "./StatusBar";
+import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 
@@ -10,7 +11,13 @@ afterEach(cleanup);
 
 beforeEach(() => {
   useProblemStore.setState({ problems: [] });
-  useLayoutStore.setState({ bottomVisible: true, bottomTab: "terminal" });
+  useGitStore.setState({ status: null });
+  useLayoutStore.setState({
+    bottomVisible: true,
+    bottomTab: "terminal",
+    leftVisible: true,
+    leftTab: "explorer",
+  });
 });
 
 function problem(id: string, severity: "error" | "warning" | "info") {
@@ -60,3 +67,65 @@ describe("problems segment", () => {
     expect(useLayoutStore.getState().bottomVisible).toBe(true);
   });
 });
+
+describe("branch segment", () => {
+  function gitStatus(overrides: Record<string, unknown> = {}) {
+    return {
+      branch: "main",
+      entries: [],
+      ahead: 0,
+      behind: 0,
+      upstream: "origin/main",
+      branches: [],
+      conflicts: [],
+      ...overrides,
+    };
+  }
+
+  /**
+   * 没有 Git 状态时整段不渲染，而不是显示一个空壳或者 "no branch"。
+   * 打开的目录不是仓库是完全正常的情况，不该在状态栏里留一个疑问。
+   */
+  it("is absent when there is no git status", () => {
+    render(<StatusBar />);
+
+    expect(screen.queryByTestId("status-bar-branch")).toBeNull();
+  });
+
+  it("shows dirty and divergence markers only when they apply", () => {
+    useGitStore.setState({
+      status: gitStatus({ entries: [{ file: "a.ts", staged: false }], ahead: 2 }),
+    });
+
+    render(<StatusBar />);
+    const text = screen.getByTestId("status-bar-branch").textContent ?? "";
+
+    expect(text).toContain("main");
+    expect(text).toContain("*");
+    expect(text).toContain("\u21912");
+    // behind 是 0，就不该出现向下箭头
+    expect(text).not.toContain("\u2193");
+  });
+
+  it("opens Source Control without collapsing an already-open left panel", () => {
+    useGitStore.setState({ status: gitStatus() });
+
+    render(<StatusBar />);
+    screen.getByTestId("status-bar-branch").click();
+
+    expect(useLayoutStore.getState().leftTab).toBe("git");
+    expect(useLayoutStore.getState().leftVisible).toBe(true);
+  });
+
+  it("reveals a collapsed left panel", () => {
+    useGitStore.setState({ status: gitStatus() });
+    useLayoutStore.setState({ leftVisible: false });
+
+    render(<StatusBar />);
+    screen.getByTestId("status-bar-branch").click();
+
+    expect(useLayoutStore.getState().leftTab).toBe("git");
+    expect(useLayoutStore.getState().leftVisible).toBe(true);
+  });
+});
+

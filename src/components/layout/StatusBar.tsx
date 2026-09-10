@@ -1,6 +1,8 @@
 import { useMemo } from "react";
+import { GitBranch } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
 import StatusDot from "../shared/StatusDot";
@@ -20,8 +22,8 @@ const SEVERITY_COLOR: Record<ProblemSeverity, string> = {
  * 更糟：只有打开底部面板的 Problems 页才看得到，于是"代码有几个错误"这种应该
  * 一直在视野里的事实，需要主动去翻。
  *
- * 这里只放**已经存在的数据**。编码、行尾、Git 分支都还没有可用的数据源
- * （分支的 fetch 只在 GitPanel 里触发），先不占位 —— 空着的段位比没有更糟。
+ * 这里只放**已经存在的数据**。编码和行尾在代码库里根本没建模，每次运行的花费
+ * 也没有 store，所以不占位 —— 空着的段位比没有更糟。
  */
 export default function StatusBar() {
   const problems = useProblemStore((s) => s.problems);
@@ -30,9 +32,13 @@ export default function StatusBar() {
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const cursorPosition = useEditorStore((s) => s.cursorPosition);
+  const gitStatus = useGitStore((s) => s.status);
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
+  const leftVisible = useLayoutStore((s) => s.leftVisible);
+  const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
+  const setLeftTab = useLayoutStore((s) => s.setLeftTab);
 
   const counts = useMemo(
     () => ({
@@ -51,6 +57,11 @@ export default function StatusBar() {
     if (!bottomVisible) toggleBottomPanel();
   };
 
+  const showSourceControl = () => {
+    setLeftTab("git");
+    if (!leftVisible) toggleLeftPanel();
+  };
+
   const problemLabel =
     counts.error + counts.warning + counts.info === 0
       ? "No problems"
@@ -64,6 +75,24 @@ export default function StatusBar() {
       className="flex h-6 flex-shrink-0 items-center justify-between border-t border-surface-border bg-surface-base px-2 text-[10px] text-surface-muted"
     >
       <div className="flex items-center gap-3">
+        {gitStatus && (
+          <button
+            type="button"
+            onClick={showSourceControl}
+            data-testid="status-bar-branch"
+            title={`On branch ${gitStatus.branch}${
+              gitStatus.upstream ? ` (tracking ${gitStatus.upstream})` : " (no upstream)"
+            } — click to open Source Control`}
+            className="flex items-center gap-1 rounded px-1 font-mono hover:bg-surface-border/40 hover:text-surface-text"
+          >
+            <GitBranch aria-hidden="true" className="h-3 w-3" />
+            {gitStatus.branch}
+            {gitStatus.entries.length > 0 && <span title="Uncommitted changes">*</span>}
+            {gitStatus.ahead > 0 && <span>{`\u2191${gitStatus.ahead}`}</span>}
+            {gitStatus.behind > 0 && <span>{`\u2193${gitStatus.behind}`}</span>}
+          </button>
+        )}
+
         <button
           type="button"
           onClick={showProblems}
