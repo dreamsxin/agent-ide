@@ -219,6 +219,7 @@ agent-ide/
 │   └── <LogView />                            # Agent & system action logs
 │
 ├── <StatusBar>                                # last row, outside the bottom panel
+│   ├── Git branch + dirty/ahead/behind        # click -> Source Control
 │   ├── Problem counts by severity             # click -> Problems panel
 │   ├── Cursor Ln/Col
 │   ├── Active file language

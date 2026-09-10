@@ -4,6 +4,7 @@ import { useLayoutStore } from "../stores/useLayoutStore";
 import { useEditorStore } from "../stores/useEditorStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useAgentStore } from "../stores/useAgentStore";
+import { useGitStore } from "../stores/useGitStore";
 import { isTauriRuntime } from "../utils/tauri";
 
 /**
@@ -35,6 +36,10 @@ export function useAppBootstrap() {
           void useAgentStore.getState().restoreDiffs(saved);
           void useAgentStore.getState().reconcileBackendRun();
           void useEditorStore.getState().restoreEditorSession(saved);
+          // 分支要在状态栏里一直显示，所以启动就取一次。以前只有 GitPanel 挂载时
+          // 才 fetch，于是"当前在哪个分支"这件事得先点开 Source Control 才知道 ——
+          // 和上面 `fetchLlmConfig` 曾经的毛病是同一个。
+          void useGitStore.getState().fetchStatus(saved);
         } else {
           console.log("[App] No saved workspace found, starting empty");
         }

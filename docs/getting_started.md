@@ -145,7 +145,8 @@ the command palette.
 
 - **Top bar** — project name, LSP status, run/build/test buttons, the code/plan
   mode switch, the Agent mode switch, and the panel toggles. Actions live here.
-- **Status bar** (bottom edge) — passive status: problem counts by severity
+- **Status bar** (bottom edge) — passive status: the Git branch with dirty and
+  ahead/behind markers (click to open Source Control), problem counts by severity
   (click to open the Problems panel), the cursor's line and column, the active
   file's language, whether an LLM profile is configured, and the Agent's current
   state.

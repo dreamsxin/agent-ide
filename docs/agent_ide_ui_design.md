@@ -64,9 +64,14 @@ focus mode collapses panels.
   state in the app — whether the Agent can run at all — required hovering to read.
 - Agent state (Idle / Thinking / Planning / Acting / Reviewing / Waiting / Done /
   Error).
+- Git branch, with a `*` when the worktree is dirty and ↑/↓ counts when the
+  branch has diverged from its upstream. Clickable to open Source Control. The
+  whole segment is absent when the folder is not a repository — an opened
+  directory that is not under version control is normal, and should not leave a
+  question mark in the status bar.
 
-Deliberately absent until the data exists: encoding and line-ending, Git branch,
-and per-run token spend. An empty segment is worse than no segment.
+Deliberately absent until the data exists: encoding and line-ending, and per-run
+token spend. An empty segment is worse than no segment.
 
 
 **Design points:**
