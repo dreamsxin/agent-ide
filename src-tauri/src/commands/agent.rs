@@ -402,28 +402,46 @@ fn workspace_tool_logger(app_handle: &AppHandle) -> crate::agent::workspace_tool
     })
 }
 
+/// 从项目**自己声明的**任务里挑出允许 Agent 执行的命令。
+///
+/// 纯函数，任务清单从参数进来 —— 扫盘那步（`discover_project_tasks`）留在调用方，
+/// 这样这条授权规则本身可以直接测。两条规则：
+///   * 没授权就一条都不给，哪怕项目声明了一堆任务；
+///   * 滤掉长驻命令。验证是"跑完看结果"，`npm run dev` 永远不退出，
+///     放进清单等于给 Agent 一个能把运行挂死的工具。
+fn allowed_agent_commands(
+    tasks: Vec<crate::services::project_tasks::ProjectTask>,
+    allow_command_run: bool,
+) -> Vec<String> {
+    if !allow_command_run {
+        return Vec::new();
+    }
+    tasks
+        .into_iter()
+        .map(|task| task.command)
+        .filter(|command| !crate::services::verification::is_long_running_command(command))
+        .collect()
+}
+
 /// 本次运行允许 Agent 执行哪些命令。
 ///
 /// 清单由后端从**项目自己声明的**任务推导（package.json scripts、Cargo），不是
-/// 模型自选、也不需要用户手写通配符。再滤掉长驻命令：验证是跑完再看结果，
-/// `npm run dev` 永远不退出。未授权时返回空清单，命令工具连通告都不会出现。
+/// 模型自选、也不需要用户手写通配符。未授权时返回空清单，命令工具连通告都不会出现。
 fn agent_tool_permissions(
     allow_command_run: bool,
     allow_write: bool,
     allow_create: bool,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
-    let allowed_commands = if allow_command_run {
-        crate::services::project_tasks::discover_project_tasks(None)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|task| task.command)
-            .filter(|command| !crate::services::verification::is_long_running_command(command))
-            .collect()
+    // 未授权时连扫都不扫：`discover_project_tasks` 要读 package.json / Cargo.toml。
+    // 下面 `allowed_agent_commands` 里那次判断不是重复 —— 那条是授权规则本身，
+    // 是被测试钉住的东西；这条只是省掉一次没人会用到的磁盘读。
+    let tasks = if allow_command_run {
+        crate::services::project_tasks::discover_project_tasks(None).unwrap_or_default()
     } else {
         Vec::new()
     };
     crate::agent::workspace_tools::WorkspaceToolPermissions::new(
-        allowed_commands,
+        allowed_agent_commands(tasks, allow_command_run),
         allow_write,
         allow_create,
     )
@@ -1440,6 +1458,54 @@ mod tests {
     use super::*;
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
+
+    fn task(command: &str) -> crate::services::project_tasks::ProjectTask {
+        crate::services::project_tasks::ProjectTask {
+            id: command.to_string(),
+            label: command.to_string(),
+            command: command.to_string(),
+            source: "package.json".to_string(),
+            description: String::new(),
+        }
+    }
+
+    /// 授权是一票否决：没勾"允许执行命令"就一条都不给，哪怕项目声明了一堆任务。
+    /// 这条以前埋在一个 `if/else` 表达式里，只能靠跑桌面应用验证。
+    #[test]
+    fn no_command_is_allowed_without_authorization() {
+        let tasks = vec![task("npm test"), task("cargo test")];
+        assert!(allowed_agent_commands(tasks, false).is_empty());
+    }
+
+    /// 长驻命令必须落在清单外：验证是"跑完看结果"，而 `npm run dev` 不会退出，
+    /// 给了它等于给 Agent 一个能把整次运行挂死的工具。
+    #[test]
+    fn long_running_commands_are_dropped_from_the_allow_list() {
+        let allowed = allowed_agent_commands(
+            vec![
+                task("npm test"),
+                task("npm run dev"),
+                task("cargo build"),
+                task("npm run watch"),
+            ],
+            true,
+        );
+        assert_eq!(allowed, vec!["npm test".to_string(), "cargo build".to_string()]);
+    }
+
+    /// 三个 bool 全靠位置传，换一下顺序照样编译得过。这条把它们各自落到哪个字段
+    /// 钉住：只允许写盘时，命令清单必须是空的，新建文件必须仍然不允许。
+    #[test]
+    fn each_flag_lands_on_its_own_permission() {
+        let write_only = agent_tool_permissions(false, true, false);
+        assert!(write_only.allowed_commands.is_empty());
+        assert!(write_only.allow_write);
+        assert!(!write_only.allow_create);
+
+        let create_only = agent_tool_permissions(false, false, true);
+        assert!(!create_only.allow_write);
+        assert!(create_only.allow_create);
+    }
 
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。
     /// 这两条以前只能靠跑桌面应用才验证得到，因为函数签名收的是 `State`。
