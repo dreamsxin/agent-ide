@@ -1122,18 +1122,14 @@ pub async fn verify_workspace(
     let (commands, skipped) = crate::services::verification::prepare_commands(request.commands)?;
 
     let root = workspace::workspace_root()?;
-    // 没给原始任务描述时退回最近一轮对话，这样修复提示里带着用户真正的诉求，
-    // 而不是只有一堆报错
-    let original_prompt = match request.original_prompt {
-        Some(prompt) if !prompt.trim().is_empty() => prompt,
-        _ => {
-            let orch = agent_state.orchestrator.lock().await;
-            orch.conversation
-                .last()
-                .map(|turn| turn.prompt.clone())
-                .unwrap_or_else(|| "(original task not recorded)".to_string())
-        }
+    // 兜底规则见 `resolve_original_prompt`。这里无条件取一次锁（哪怕请求里已经给了
+    // 描述）：orchestrator 锁只在短同步片段里持有，代价是一次无竞争的加锁，换来的是
+    // 这条规则在三个命令里只有一处实现。
+    let last_turn = {
+        let orch = agent_state.orchestrator.lock().await;
+        orch.conversation.last().map(|turn| turn.prompt.clone())
     };
+    let original_prompt = resolve_original_prompt(request.original_prompt, last_turn);
 
     let results = crate::services::verification::run_checks(commands, root).await;
     let report = crate::services::verification::summarize(&original_prompt, results, skipped);
@@ -1198,14 +1194,10 @@ pub async fn repair_workspace(
         // 自动修复会自己往磁盘上落改动，和一次普通运行同等重量，所以必须走同一个守卫。
         let last_run_id = orch.last_run_id.clone();
         let lease = orch.try_begin_run(last_run_id)?;
-        let original_prompt = match request.original_prompt {
-            Some(prompt) if !prompt.trim().is_empty() => prompt,
-            _ => orch
-                .conversation
-                .last()
-                .map(|turn| turn.prompt.clone())
-                .unwrap_or_else(|| "(original task not recorded)".to_string()),
-        };
+        let original_prompt = resolve_original_prompt(
+            request.original_prompt,
+            orch.conversation.last().map(|turn| turn.prompt.clone()),
+        );
         orch.start_usage_accounting(usage_meter.clone());
         (lease, original_prompt)
     };
@@ -1263,16 +1255,11 @@ pub async fn agent_repair_prompt(
         return Err("Repair prompt needs the failed command.".to_string());
     }
 
-    let original_prompt = match request.original_prompt {
-        Some(prompt) if !prompt.trim().is_empty() => prompt,
-        _ => {
-            let orch = agent_state.orchestrator.lock().await;
-            orch.conversation
-                .last()
-                .map(|turn| turn.prompt.clone())
-                .unwrap_or_else(|| "(original task not recorded)".to_string())
-        }
+    let last_turn = {
+        let orch = agent_state.orchestrator.lock().await;
+        orch.conversation.last().map(|turn| turn.prompt.clone())
     };
+    let original_prompt = resolve_original_prompt(request.original_prompt, last_turn);
 
     let result = crate::services::project_tasks::RunProjectTaskResult {
         command: request.command,
@@ -1458,6 +1445,41 @@ mod tests {
     use super::*;
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
+
+    /// 请求里给了原始任务描述就用它，不去翻对话记录。
+    #[test]
+    fn an_explicit_original_prompt_wins_over_the_conversation() {
+        assert_eq!(
+            resolve_original_prompt(
+                Some("add pagination".to_string()),
+                Some("something older".to_string())
+            ),
+            "add pagination"
+        );
+    }
+
+    /// 前端输入框留空送来的是 `Some("")`，不是 `None`。一个空的原始任务描述会让
+    /// 模型只看到一堆报错、不知道要修成什么样，所以空白必须按"没给"处理。
+    #[test]
+    fn a_blank_request_falls_back_to_the_last_turn() {
+        assert_eq!(
+            resolve_original_prompt(Some("   ".to_string()), Some("fix the parser".to_string())),
+            "fix the parser"
+        );
+        assert_eq!(
+            resolve_original_prompt(None, Some("fix the parser".to_string())),
+            "fix the parser"
+        );
+    }
+
+    /// 什么都没有时给一句可诊断的占位符，而不是空串：提示里出现
+    /// "(original task not recorded)" 能看出发生了什么，一段空白看不出。
+    #[test]
+    fn a_missing_prompt_is_marked_rather_than_left_empty() {
+        let resolved = resolve_original_prompt(None, None);
+        assert!(!resolved.trim().is_empty());
+        assert_eq!(resolved, "(original task not recorded)");
+    }
 
     fn task(command: &str) -> crate::services::project_tasks::ProjectTask {
         crate::services::project_tasks::ProjectTask {
@@ -1803,6 +1825,22 @@ pub fn save_workspace_path(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn get_workspace_path() -> Result<Option<String>, String> {
     workspace::load_workspace_path()
+}
+
+/// 修复/验证提示里那句"用户原本要什么"。
+///
+/// `verify_workspace`、`repair_workspace`、`agent_repair_prompt` 三个命令都要这个值，
+/// 以前各写一份同样的 `match`。三条规则，都有测试钉住：
+///   * 请求里给了就用请求的；
+///   * **空白串按"没给"处理** —— 前端输入框留空送来的是 `Some("")`，而一个空的原始
+///     任务描述会让模型只看到一堆报错，不知道要修成什么样；
+///   * 连对话记录都没有时返回显式占位符，不是空串。提示里出现
+///     "(original task not recorded)" 是可诊断的，一段空白不是。
+fn resolve_original_prompt(requested: Option<String>, last_turn: Option<String>) -> String {
+    match requested {
+        Some(prompt) if !prompt.trim().is_empty() => prompt,
+        _ => last_turn.unwrap_or_else(|| "(original task not recorded)".to_string()),
+    }
 }
 
 /// Test LLM connectivity with a small request.
