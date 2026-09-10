@@ -16,10 +16,7 @@ use crate::services::llm_profiles::{
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 use tauri::Emitter;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
@@ -31,7 +28,6 @@ pub struct AgentGlobalState {
     pub active_role: Arc<std::sync::Mutex<AgentRole>>,
     pub pipeline_stages: Arc<std::sync::Mutex<Vec<PipelineStage>>>,
     pub context_compression: Arc<std::sync::Mutex<ContextCompressionMode>>,
-    pub cancel_flag: Arc<AtomicBool>,
     pub local_engines:
         Arc<std::sync::Mutex<HashMap<String, Arc<dyn crate::services::llm_client::ModelEngine>>>>,
 }
@@ -47,7 +43,6 @@ impl AgentGlobalState {
             active_role: Arc::new(std::sync::Mutex::new(AgentRole::Coder)),
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
-            cancel_flag: Arc::new(AtomicBool::new(false)),
             local_engines: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -340,15 +335,13 @@ pub async fn send_agent_prompt(
         .map(IdeMode::from_str)
         .transpose()?
         .unwrap_or(IdeMode::Code);
-    agent_state.cancel_flag.store(false, Ordering::SeqCst);
-    let cancel_flag = agent_state.cancel_flag.clone();
     // 只在准备阶段持锁。运行本身由 `drive_run` 自己按阶段短持锁 —— 整段持锁会让
     // stop / apply / 状态查询全部排在模型调用后面。
-    let claim = {
+    let lease = {
         let mut orch = agent_state.orchestrator.lock().await;
         // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
         // 覆写它的工具面或记账器会把那次运行改坏
-        let claim = orch.try_begin_run(request.run_id.clone())?;
+        let lease = orch.try_begin_run(request.run_id.clone())?;
         orch.tool_invoker = tool_invoker;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
@@ -356,8 +349,9 @@ pub async fn send_agent_prompt(
         orch.start_usage_accounting(usage_meter.clone());
         // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
         context.conversation = orch.conversation_digest();
-        claim
+        lease
     };
+    let claim = lease.claim;
     let prompt_for_history = request.prompt.clone();
     let outcome = crate::agent::orchestrator::drive_run(
         &agent_state.orchestrator,
@@ -368,7 +362,7 @@ pub async fn send_agent_prompt(
         context_sources,
         pipeline,
         ide_mode,
-        cancel_flag,
+        lease.cancel,
         &llm,
         std::sync::Arc::new(app_handle.clone()),
     )
@@ -550,7 +544,8 @@ fn emit_usage_action_log(
 /// Stop the current Agent task.
 #[tauri::command]
 pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<String, String> {
-    agent_state.cancel_flag.store(true, Ordering::SeqCst);
+    // 取消开关现在挂在 orchestrator 上、每次运行一个，所以要在锁内拉。
+    // `abandon_run` 会先置 true 再释放执行权。
     let mut orch = agent_state.orchestrator.lock().await;
     orch.abandon_run();
     orch.state_mgr.set(AgentState::Idle);
@@ -697,8 +692,6 @@ pub async fn run_agent_step(
     let step_prompt =
         agent_runtime::format_single_step_prompt(&step, request.extra_prompt.as_deref());
 
-    agent_state.cancel_flag.store(false, Ordering::SeqCst);
-    let cancel_flag = agent_state.cancel_flag.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(32);
     let app_clone = app_handle.clone();
     tokio::spawn(async move {
@@ -707,12 +700,12 @@ pub async fn run_agent_step(
         }
     });
 
-    let claim = {
+    let lease = {
         let mut orch = agent_state.orchestrator.lock().await;
         // 单步执行也要抢执行权：它同样改 steps / diffs / 状态机，还会换掉工具面
         // 和记账器。以前这里直接 begin_run，等于绕过守卫从一次流水线运行手里抢走
         // 这些字段。
-        let claim = orch.try_begin_run(request.run_id.clone())?;
+        let lease = orch.try_begin_run(request.run_id.clone())?;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
         orch.start_usage_accounting(usage_meter.clone());
@@ -733,8 +726,10 @@ pub async fn run_agent_step(
                 compression
             ),
         );
-        claim
+        lease
     };
+    let claim = lease.claim;
+    let cancel_flag = lease.cancel;
 
     let response = crate::agent::executor::execute_step(
         &llm,
@@ -831,18 +826,16 @@ pub async fn continue_agent_pipeline(
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
-    agent_state.cancel_flag.store(false, Ordering::SeqCst);
-    let cancel_flag = agent_state.cancel_flag.clone();
 
     // 一个临界区里完成"有暂停的运行吗 -> 抢执行权 -> 取走快照"。顺序不能反：
     // 先取走快照再发现抢不到执行权，那份快照就没了，续跑的唯一凭据被销毁。
-    let (paused, tool_policy, tool_permissions, claim) = {
+    let (paused, tool_policy, tool_permissions, lease) = {
         let mut orch = agent_state.orchestrator.lock().await;
         if orch.paused_run.is_none() {
             return Err("No paused Agent pipeline to continue.".to_string());
         }
         let run_id = orch.last_run_id.clone();
-        let claim = orch.try_begin_run(run_id)?;
+        let lease = orch.try_begin_run(run_id)?;
         let paused = orch
             .paused_run
             .take()
@@ -856,8 +849,9 @@ pub async fn continue_agent_pipeline(
             "Continuing paused Agent pipeline",
             &format!("Continuing from stage {}", paused.stage_index + 1),
         );
-        (paused, policy, permissions, claim)
+        (paused, policy, permissions, lease)
     };
+    let claim = lease.claim;
 
     // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
     // 必须一起装：只装定义会让恢复后的 stage 看到工具，却由上次运行残留的执行器
@@ -896,7 +890,7 @@ pub async fn continue_agent_pipeline(
         },
         stage_index,
         true,
-        cancel_flag,
+        lease.cancel,
         &llm,
         std::sync::Arc::new(app_handle.clone()),
     )
@@ -1181,8 +1175,6 @@ pub async fn repair_workspace(
     let (commands, _skipped) = crate::services::verification::prepare_commands(request.commands)?;
     let max_iterations = request.max_iterations.unwrap_or(1).clamp(1, 3);
     let (llm, usage_meter) = agent_state.get_llm_client(None)?;
-    agent_state.cancel_flag.store(false, Ordering::SeqCst);
-    let cancel_flag = agent_state.cancel_flag.clone();
 
     let mut orch = agent_state.orchestrator.lock().await;
     if !matches!(orch.mode, AgentMode::Auto) {
@@ -1190,6 +1182,10 @@ pub async fn repair_workspace(
             "Automatic repair applies its own fixes, so it requires Auto mode.".to_string(),
         );
     }
+    // 抢执行权放在模式检查之后：检查不通过就直接返回，先抢会把执行权漏掉。
+    // 自动修复会自己往磁盘上落改动，和一次普通运行同等重量，所以必须走同一个守卫。
+    let last_run_id = orch.last_run_id.clone();
+    let lease = orch.try_begin_run(last_run_id)?;
     let original_prompt = match request.original_prompt {
         Some(prompt) if !prompt.trim().is_empty() => prompt,
         _ => orch
@@ -1205,13 +1201,15 @@ pub async fn repair_workspace(
             &original_prompt,
             commands,
             crate::services::verification::RepairPolicy::new(max_iterations, true),
-            cancel_flag,
+            lease.cancel,
             &llm,
             std::sync::Arc::new(app_handle.clone()),
         )
         .await;
     // 记账写在两条路径上：修复轮次花掉的 token 和别的运行一样要能查到
     emit_usage_action_log(&orch, &app_handle, &usage_meter);
+    // 释放要在 `?` 之前：修复失败也得把执行权交回去，否则后面所有运行都被拒
+    orch.finish_run(lease.claim);
     let outcome = outcome?;
 
     Ok(RepairWorkspaceReport {
@@ -1853,8 +1851,10 @@ pub async fn test_llm_connection(
     agent_state: State<'_, AgentGlobalState>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let (llm, _usage_meter) = agent_state.get_llm_client(profile_id.as_deref())?;
+    // 连通性探测有自己的取消开关。以前它清的是全局那个，于是"测试连接"这个
+    // 无害动作会把一次正在跑的运行**取消解除**。
+    let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
 
     let messages = vec![crate::services::llm_client::ChatMessage::user("Hi")];
 
@@ -1868,7 +1868,7 @@ pub async fn test_llm_connection(
     });
 
     match llm
-        .stream_chat(messages, agent_state.cancel_flag.clone(), tx)
+        .stream_chat(messages, cancel_flag, tx)
         .await
     {
         Ok(response) => {

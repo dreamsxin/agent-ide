@@ -101,6 +101,8 @@ pub struct AgentOrchestrator {
     undo_stack: Vec<ApplyCheckpoint>,
     /// 当前持有执行权的运行；`None` 表示空闲。见 `try_begin_run`。
     active_claim: Option<u64>,
+    /// 当前运行的取消开关。每次运行一个新的 Arc —— 见 `RunLease`。
+    active_cancel: Option<Arc<AtomicBool>>,
     /// 下一个要发的凭据编号。单调递增，只在进程内有意义。
     next_claim: u64,
 }
@@ -114,6 +116,20 @@ pub struct AgentOrchestrator {
 /// 就等于给第三个 prompt 开了门，那正是这个机制要挡住的事。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunClaim(u64);
+
+/// 一次运行的执行权 + 它自己的取消开关。
+///
+/// 取消开关**每次运行一个新的**，而不是全局共享一个。共享的那版有五处
+/// `store(false)`：每个入口在启动前都要"先清掉上次的取消状态"，于是一个新 prompt
+/// 会把还在排空的旧运行**取消解除** —— 用户点了 Stop，界面立刻变空闲，然后他接着
+/// 发下一个问题，那个已经被停掉的运行就继续调模型、继续花钱。
+///
+/// 一次运行一个 Arc 之后这件事在结构上就不可能了：旧运行手里那个开关被置 true
+/// 之后没有任何代码会再碰它，因为谁也拿不到它了。
+pub struct RunLease {
+    pub claim: RunClaim,
+    pub cancel: Arc<AtomicBool>,
+}
 
 /// 一次应用操作的回滚点
 #[derive(Clone, Debug)]
@@ -368,6 +384,7 @@ impl AgentOrchestrator {
             conversation: Vec::new(),
             undo_stack: Vec::new(),
             active_claim: None,
+            active_cancel: None,
             next_claim: 0,
         }
     }
@@ -617,8 +634,8 @@ impl AgentOrchestrator {
     /// 不看 `current_run_id`：run id 是调用方可选传的，缺省时它一直是 `None`，
     /// 拿它当"在跑"的判据会让守卫在最需要的时候失效。
     ///
-    /// 返回的凭据必须原样传给 `finish_run`。
-    pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<RunClaim, String> {
+    /// 返回的凭据必须原样传给 `finish_run`，取消开关则要一路传给流水线。
+    pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<RunLease, String> {
         if self.active_claim.is_some() {
             return Err(
                 "An Agent run is already in progress. Stop it before starting another.".to_string(),
@@ -627,8 +644,14 @@ impl AgentOrchestrator {
         let claim = self.next_claim;
         self.next_claim = self.next_claim.wrapping_add(1);
         self.active_claim = Some(claim);
+        // 全新的开关，不是把上一个清零：上一个可能还被一个正在排空的运行握着
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.active_cancel = Some(cancel.clone());
         self.begin_run(run_id);
-        Ok(RunClaim(claim))
+        Ok(RunLease {
+            claim: RunClaim(claim),
+            cancel,
+        })
     }
 
     /// 开启一个新的用量记账周期（一次全新运行）
@@ -655,14 +678,22 @@ impl AgentOrchestrator {
         }
         self.current_run_id = None;
         self.active_claim = None;
+        self.active_cancel = None;
     }
 
-    /// 用户主动放弃当前运行（Stop）：无条件释放执行权。
+    /// 用户主动放弃当前运行（Stop）：**先拉下取消开关**，再无条件释放执行权。
     ///
     /// 和 `finish_run` 分开是因为这里的语义相反 —— Stop 就是要抢回控制权，
     /// 包括从一个卡住的运行手里。代价是那个运行醒来时已经不是持有者，
     /// 而 `finish_run` 的持有者检查正好接住这一点。
+    ///
+    /// 开关是那次运行**自己的** Arc，所以置 true 之后不会有任何人再把它清零：
+    /// 新运行拿到的是另一个全新的开关。这就是"取消被下一个 prompt 解除"这个
+    /// bug 在结构上消失的地方。
     pub fn abandon_run(&mut self) {
+        if let Some(cancel) = self.active_cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
         self.current_run_id = None;
         self.active_claim = None;
     }
@@ -3451,14 +3482,14 @@ mod tests {
     fn run_id_tracks_current_and_last_run() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let claim = orchestrator
+        let lease = orchestrator
             .try_begin_run(Some("run-1".to_string()))
             .expect("空闲时应当抢到执行权");
 
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
 
-        orchestrator.finish_run(claim);
+        orchestrator.finish_run(lease.claim);
 
         assert_eq!(orchestrator.current_run_id, None);
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
@@ -3534,18 +3565,21 @@ mod tests {
         // 被拒绝不能顺手改掉在跑那个运行的身份
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
 
-        orchestrator.finish_run(first);
+        orchestrator.finish_run(first.claim);
         orchestrator
             .try_begin_run(Some("run-2".to_string()))
             .expect("上一个运行结束后应当能再开一个");
     }
 
-    /// 只有持有者能交还执行权。
+    /// 只有持有者能交还执行权，且 Stop 之后的新运行不会把旧运行"取消解除"。
     ///
     /// 被 Stop 放弃的旧运行会在几分钟后从一个不可中断的工具调用里醒来收尾。那时
     /// 执行权可能已经属于一个新运行 —— 第一版的 `finish_run` 无条件清标志，于是
     /// 旧运行的收尾会把新运行的执行权一起放掉，第三个 prompt 就能在新运行还在跑
     /// 的时候进来，正好是这个机制要挡的事。
+    ///
+    /// 取消开关同理：共享一个 `Arc` 时，新运行启动前的那句"清掉上次的取消状态"
+    /// 会把还在排空的旧运行**复活**。一次运行一个开关之后这件事不可能发生。
     #[test]
     fn a_stale_run_cannot_release_someone_elses_claim() {
         let mut orchestrator = AgentOrchestrator::new();
@@ -3555,13 +3589,22 @@ mod tests {
             .expect("第一个运行应当抢到执行权");
         // 用户点了 Stop：执行权被强行收回，但 run-1 还在某个工具调用里跑着
         orchestrator.abandon_run();
+        assert!(
+            stopped.cancel.load(Ordering::SeqCst),
+            "Stop 必须把那次运行自己的取消开关拉下来"
+        );
 
         let fresh = orchestrator
             .try_begin_run(Some("run-2".to_string()))
             .expect("Stop 之后应当能开新运行");
+        assert!(
+            stopped.cancel.load(Ordering::SeqCst),
+            "新运行不该把被停掉那次的取消状态解除"
+        );
+        assert!(!fresh.cancel.load(Ordering::SeqCst), "新运行自己不该是取消态");
 
         // run-1 终于醒来收尾
-        orchestrator.finish_run(stopped);
+        orchestrator.finish_run(stopped.claim);
 
         let third = orchestrator.try_begin_run(Some("run-3".to_string()));
         assert!(
@@ -3570,7 +3613,7 @@ mod tests {
         );
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-2"));
 
-        orchestrator.finish_run(fresh);
+        orchestrator.finish_run(fresh.claim);
         assert_eq!(orchestrator.current_run_id, None);
     }
 
