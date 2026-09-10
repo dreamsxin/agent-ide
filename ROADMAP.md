@@ -780,10 +780,17 @@ Current limitation: diff application still uses textual `find` replacement. It n
      - The lower-bound qualifier moved from the tooltip into the visible label (`≥1500 tok · ≥$0.0020`). A caveat only visible on hover is invisible to keyboard and screen-reader users, and "this number is lower than reality" is the most important part of that display.
      - `normalizeRunUsage` now rejects `NaN`/`Infinity` and clamps negatives. `typeof NaN === "number"`, so the original check let it through to render `$NaN.0NaN`.
    - **Found in the same audit, still open:**
-     - The `cancel_flag` is shared and every entry point resets it to `false` before starting, so a new run **un-cancels a still-draining old one**. A stopped run can resume calling the model.
-     - `repair_workspace` holds the orchestrator guard across an `await` — the one remaining instance of the pattern Known Issues 16 removed everywhere else.
+     - `repair_workspace` holds the orchestrator guard across an `await` — the one remaining instance of the pattern Known Issues 16 removed everywhere else. It now claims a lease, so it is at least mutually exclusive with real runs, but while it runs `stop_agent` cannot take the lock to cancel it.
      - At the 600px minimum window height with the bottom panel at its 500px maximum, the editor column gets ~32px. Pre-existing; the 24px status bar consumed 43% of the remaining margin.
      - `EditorContainer`'s global Monaco provider registrations are re-added on every tab switch and only drained on unmount, and `handleEditorMount`'s dependency array freezes `activeFile`/`fileContents` at first render.
+
+22. **The cancel switch was a global singleton (fixed 2026-09-09)**
+   - `AgentGlobalState.cancel_flag` was one shared `Arc<AtomicBool>`. `stop_agent` set it; **five** places reset it to `false` before starting — because each entry point had to "clear last time's cancellation" first. So a new prompt **un-cancelled a still-draining old run**: the user clicks Stop, the UI goes idle immediately, they type the next question, and the run they stopped resumes calling the model and spending money. `test_llm_connection` cleared it too, which made "test connection" a way to revive a stopped run.
+   - Same root cause as the run claim in Known Issues 21: something that belongs to *one run* was stored as a process-wide singleton. Fixed the same way — `try_begin_run` now returns a `RunLease { claim, cancel }` carrying a **fresh** `Arc` per run, and `abandon_run` pulls that run's switch down before releasing the slot. Nothing can reset it afterwards because nothing else holds it, so the un-cancel is gone *structurally* rather than by remembering not to write `store(false)`.
+   - The five resets are deleted; the global field is deleted. `test_llm_connection` gets its own switch — a connectivity ping does not need to be cancellable by Stop, and it certainly should not be able to cancel anything else. `repair_workspace` now takes a lease too: it writes to disk on its own, so it is a run by any reasonable definition and belongs behind the same guard.
+   - `stop_agent` no longer pre-sets a flag before taking the lock. That ordering existed because the lock used to be held for the whole run; after Known Issues 16 the lock is only ever held for a few synchronous steps.
+   - The stale-run test now also asserts the cancellation half: after Stop, the stopped run's switch stays down even once a new run has started.
+
 
 
 
