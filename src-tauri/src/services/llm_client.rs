@@ -1860,45 +1860,17 @@ impl ModelEngine for CodeLlamaEngine {
     }
 }
 
-/// 本地模型不再进程内推理。
+/// 进程内推理已经移除；这是配置了本地模型的 profile 该看到的说明。
 ///
-/// 这里刻意返回错误而不是静默降级：一个配置了本地模型的 profile 如果被悄悄
-/// 当成远端调用，用户会看到一堆莫名其妙的 401/404。让它明确说清该怎么配。
-pub fn create_local_model_engine(config: LocalModelConfig) -> Result<Arc<dyn ModelEngine>, String> {
-    Err(format!(
+/// 刻意在取客户端时就报错，而不是静默当成远端调用：后者会让用户收到一串莫名其妙的
+/// 401/404。文案只有这一份，`get_llm_client` 是唯一的调用点。
+pub fn local_inference_removed(config: &LocalModelConfig) -> String {
+    format!(
         "In-process local inference was removed. Serve {} through an OpenAI-compatible endpoint \
          instead (Ollama http://localhost:11434/v1, LM Studio http://localhost:1234/v1, or vLLM) \
          and configure it as a normal profile endpoint plus model name.",
         config.name
-    ))
-}
-
-/// 增强的 LLM 客户端工厂
-pub struct EnhancedLlmClientFactory;
-
-impl EnhancedLlmClientFactory {
-    /// 创建云端 LLM 客户端
-    pub fn create_cloud_client(config: LlmConfig) -> LlmClient {
-        LlmClient::new(config)
-    }
-
-    /// 创建本地 LLM 客户端
-    pub fn create_local_client(local_config: LocalModelConfig) -> Result<LlmClient, String> {
-        let engine = create_local_model_engine(local_config.clone())?;
-        let config = LlmConfig::local_model(local_config);
-
-        Ok(LlmClient::new(config).with_local_engine(engine))
-    }
-
-    /// 获取所有可用的本地模型配置
-    pub fn get_available_local_models() -> Vec<LocalModelConfig> {
-        vec![
-            LocalModelConfig::default_starcoder(),
-            LocalModelConfig::default_codellama(),
-            LocalModelConfig::default_deepseek_coder(),
-            LocalModelConfig::default_codegemma(),
-        ]
-    }
+    )
 }
 
 #[cfg(test)]

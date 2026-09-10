@@ -15,7 +15,6 @@ use crate::services::llm_profiles::{
 };
 use crate::services::workspace;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
 use tauri::Emitter;
 use tauri::{AppHandle, State};
@@ -31,25 +30,6 @@ pub struct AgentGlobalState {
     /// 当前运行取消开关的句柄。见 `CancelRegistry` —— Stop 必须能在不持有
     /// orchestrator 锁的情况下拉开关。
     pub cancel_registry: crate::agent::orchestrator::CancelRegistry,
-    pub local_engines:
-        Arc<std::sync::Mutex<HashMap<String, Arc<dyn crate::services::llm_client::ModelEngine>>>>,
-}
-
-/// 本地推理引擎缓存的键。
-///
-/// `profile_id: None` 表示"当前 profile"——`llm_profiles::resolve_llm_config` 就是
-/// 这么解释它的——所以键必须是**解析后的真实 id**，不能是别的哨兵值。
-///
-/// 这里以前有三个互不相同的答案：`get_llm_client` 和 `unload_local_model` 用字面量
-/// `"active"`，`local_model_status` 用真实的 active id。后果有两个，都是用户能看见的：
-/// 一次不带 profileId 的运行把引擎存进 `"active"`，设置页却去真实 id 下查，于是本地
-/// 模型明明加载着却显示未加载，点 Load 还会报 "Local engine is not configured"；而带上
-/// profileId 的运行会为同一个模型再建一个引擎，同一份几 GB 的权重进两次内存。
-fn engine_cache_key(profile_id: Option<&str>, active_profile_id: &str) -> String {
-    match profile_id.map(str::trim) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => active_profile_id.to_string(),
-    }
 }
 
 impl AgentGlobalState {
@@ -67,7 +47,6 @@ impl AgentGlobalState {
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
             cancel_registry,
-            local_engines: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -82,54 +61,20 @@ impl AgentGlobalState {
         profile_id: Option<&str>,
     ) -> Result<(LlmClient, Arc<crate::services::llm_client::RunUsageMeter>), String> {
         let config = self.get_llm_config(profile_id)?;
+        // 配置了本地模型的 profile 在这里就被挡住：进程内推理已经移除，静默降级成
+        // 远端调用只会让用户收到一串莫名其妙的 401/404。这是这条路径上唯一的检查点。
+        if let Some(local) = &config.local_model_config {
+            return Err(crate::services::llm_client::local_inference_removed(local));
+        }
         let (pricing, max_spend_micros) = self.get_run_spend_cap(profile_id);
         let meter = Arc::new(
             crate::services::llm_client::RunUsageMeter::new(self.get_run_token_cap(profile_id))
                 .with_spend_cap(pricing, max_spend_micros),
         );
-        if let Some(local) = config.local_model_config.clone() {
-            let engine = self.local_engine_for(profile_id, local)?;
-            return Ok((
-                LlmClient::new(config)
-                    .with_local_engine(engine)
-                    .with_usage_meter(meter.clone()),
-                meter,
-            ));
-        }
         Ok((
             LlmClient::new(config).with_usage_meter(meter.clone()),
             meter,
         ))
-    }
-
-    /// 当前生效的 profile id。`None` 一律表示"当前 profile"，和
-    /// `llm_profiles::resolve_llm_config` 的语义保持一致。
-    pub fn active_profile_id(&self) -> Result<String, String> {
-        Ok(self
-            .llm_profiles
-            .lock()
-            .map_err(|e| e.to_string())?
-            .active_profile_id
-            .clone())
-    }
-
-    /// 取（必要时创建）某个 profile 的本地推理引擎。
-    ///
-    /// 缓存里一个 profile 只能有一个引擎：权重是几 GB 级的，同一个模型进两次内存
-    /// 就是几 GB 的浪费。所以键一律走 `engine_cache_key`。
-    pub fn local_engine_for(
-        &self,
-        profile_id: Option<&str>,
-        local: crate::services::llm_client::LocalModelConfig,
-    ) -> Result<Arc<dyn crate::services::llm_client::ModelEngine>, String> {
-        let key = engine_cache_key(profile_id, &self.active_profile_id()?);
-        let mut engines = self.local_engines.lock().map_err(|e| e.to_string())?;
-        if let Some(engine) = engines.get(&key) {
-            return Ok(engine.clone());
-        }
-        let engine = crate::services::llm_client::create_local_model_engine(local)?;
-        engines.insert(key, engine.clone());
-        Ok(engine)
     }
 
     pub fn get_run_token_cap(&self, profile_id: Option<&str>) -> Option<u64> {
@@ -1496,32 +1441,6 @@ mod tests {
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
 
-    /// 缓存键的全部意义就是"这三处必须落在同一个格子里"：一次运行取客户端、
-    /// 设置页查状态、点 Unload。以前它们各写一份，于是模型加载着却显示未加载。
-    #[test]
-    fn engine_cache_key_agrees_for_an_omitted_and_an_explicit_active_profile() {
-        assert_eq!(
-            engine_cache_key(None, "default"),
-            engine_cache_key(Some("default"), "default")
-        );
-    }
-
-    #[test]
-    fn engine_cache_key_keeps_other_profiles_in_their_own_slot() {
-        assert_ne!(
-            engine_cache_key(Some("other"), "default"),
-            engine_cache_key(None, "default")
-        );
-        assert_eq!(engine_cache_key(Some(" other "), "default"), "other");
-    }
-
-    /// 前端传的是 `profileId || null`，空串照样会到这里；它不是一个 profile。
-    #[test]
-    fn engine_cache_key_treats_an_empty_id_as_the_active_profile() {
-        assert_eq!(engine_cache_key(Some(""), "default"), "default");
-        assert_eq!(engine_cache_key(Some("   "), "default"), "default");
-    }
-
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。
     /// 这两条以前只能靠跑桌面应用才验证得到，因为函数签名收的是 `State`。
     #[test]
@@ -1818,110 +1737,6 @@ pub fn save_workspace_path(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn get_workspace_path() -> Result<Option<String>, String> {
     workspace::load_workspace_path()
-}
-
-/// Runtime status of a configured local model.
-#[derive(Debug, Serialize)]
-pub struct LocalModelStatus {
-    pub profile_id: String,
-    pub model_path: String,
-    pub exists: bool,
-    pub loaded: bool,
-    pub model_type: String,
-}
-
-/// 把配置里的 `~/...` 展开成绝对路径。
-///
-/// 以前这个函数长在 local_inference 里，随进程内推理一起删掉了；但 profile 仍然
-/// 可以指向一个本地模型目录，状态查询还需要报告它的真实位置。
-fn expand_home(path: &std::path::Path) -> std::path::PathBuf {
-    let text = path.to_string_lossy();
-    let Some(rest) = text.strip_prefix('~') else {
-        return path.to_path_buf();
-    };
-    let home = dirs_next::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(rest.trim_start_matches(['/', '\\']))
-}
-
-/// 解析本地模型 profile 的加载状态。
-///
-/// 不是 Tauri 命令：`get_local_model_status` 才是暴露给前端的那个。这里以前挂着
-/// 一个 `#[tauri::command]` 属性和一段抄错的文档注释（写的是 LLM 连通性测试），
-/// 而它既是私有的、也不在 `invoke_handler` 名单里 —— 属性是死的，注释是误导。
-fn local_model_status(
-    profile_id: Option<String>,
-    agent_state: &AgentGlobalState,
-) -> Result<LocalModelStatus, String> {
-    let active_id = agent_state
-        .llm_profiles
-        .lock()
-        .map_err(|e| e.to_string())?
-        .active_profile_id
-        .clone();
-    let id = engine_cache_key(profile_id.as_deref(), &active_id);
-    let config = agent_state.get_llm_config(Some(&id))?;
-    let local = config
-        .local_model_config
-        .ok_or_else(|| "Selected profile is not local".to_string())?;
-    let path = expand_home(std::path::Path::new(&local.model_path)).join(&local.model_file);
-    let loaded = agent_state
-        .local_engines
-        .lock()
-        .map_err(|e| e.to_string())?
-        .get(&id)
-        .map(|e| e.is_model_loaded())
-        .unwrap_or(false);
-    Ok(LocalModelStatus {
-        profile_id: id,
-        model_path: path.to_string_lossy().to_string(),
-        exists: path.is_file(),
-        loaded,
-        model_type: local.model_type.to_string(),
-    })
-}
-
-#[tauri::command]
-pub async fn get_local_model_status(
-    profile_id: Option<String>,
-    agent_state: State<'_, AgentGlobalState>,
-) -> Result<LocalModelStatus, String> {
-    local_model_status(profile_id, &agent_state)
-}
-
-#[tauri::command]
-pub async fn load_local_model(
-    profile_id: Option<String>,
-    agent_state: State<'_, AgentGlobalState>,
-) -> Result<LocalModelStatus, String> {
-    let status = local_model_status(profile_id.clone(), &agent_state)?;
-    // 引擎以前只在一次真正的运行里被懒创建，而这里只 `get`，所以刚启动就点 Load
-    // 必然报 "Local engine is not configured" —— 一个永远失败的按钮。自己建。
-    let local = agent_state
-        .get_llm_config(Some(&status.profile_id))?
-        .local_model_config
-        .ok_or_else(|| "Selected profile is not local".to_string())?;
-    let engine = agent_state.local_engine_for(Some(&status.profile_id), local)?;
-    engine.load_model().await?;
-    local_model_status(Some(status.profile_id), &agent_state)
-}
-
-#[tauri::command]
-pub async fn unload_local_model(
-    profile_id: Option<String>,
-    agent_state: State<'_, AgentGlobalState>,
-) -> Result<(), String> {
-    let id = engine_cache_key(profile_id.as_deref(), &agent_state.active_profile_id()?);
-    let engine = {
-        let engines = agent_state
-            .local_engines
-            .lock()
-            .map_err(|e| e.to_string())?;
-        engines.get(&id).cloned()
-    };
-    if let Some(engine) = engine {
-        engine.unload_model().await;
-    }
-    Ok(())
 }
 
 /// Test LLM connectivity with a small request.

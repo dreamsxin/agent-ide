@@ -1,11 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/useAgentStore";
-import { isTauriRuntime } from "../../utils/tauri";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
 import McpPanel from "./McpPanel";
-import type { LocalModelType, ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
+import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
 
@@ -121,13 +119,6 @@ export default function SettingsPanel() {
   const [completionPrice, setCompletionPrice] = useState("");
   const [maxRunSpend, setMaxRunSpend] = useState("");
   const spendCapState = spendCapStatus(promptPrice, completionPrice, maxRunSpend);
-  const [modelType, setModelType] = useState<LocalModelType>("starcoder");
-  const [modelPath, setModelPath] = useState("");
-  const [modelFile, setModelFile] = useState("");
-  const [nThreads, setNThreads] = useState("4");
-  const [nCtx, setNCtx] = useState("4096");
-  const [nGpuLayers, setNGpuLayers] = useState("0");
-  const [temperature, setTemperature] = useState("0.2");
   const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
   const [saving, setSaving] = useState(false);
   // 后端探测不到可读条目时会返回 "not configured"，那不算已保存
@@ -139,8 +130,7 @@ export default function SettingsPanel() {
   useEffect(() => {
     if (message) messageRef.current?.scrollIntoView({ block: "nearest" });
   }, [message]);
-  const [localStatus, setLocalStatus] = useState<{ exists: boolean; loaded: boolean; modelPath: string } | null>(null);
-  const [loadingLocal, setLoadingLocal] = useState(false);
+
 
   // 初始化：从后端加载配置
   useEffect(() => {
@@ -164,13 +154,6 @@ export default function SettingsPanel() {
         setPromptPrice(microsToUsdInput(active.promptMicrosPerMillion));
         setCompletionPrice(microsToUsdInput(active.completionMicrosPerMillion));
         setMaxRunSpend(microsToUsdInput(active.maxRunSpendMicros));
-        setModelType(active.modelType ?? "starcoder");
-        setModelPath(active.modelPath ?? "");
-        setModelFile(active.modelFile ?? "");
-        setNThreads(numberToInput(active.nThreads) || "4");
-        setNCtx(numberToInput(active.nCtx) || "4096");
-        setNGpuLayers(numberToInput(active.nGpuLayers) || "0");
-        setTemperature(active.temperature !== undefined ? String(active.temperature) : "0.2");
         setToolCallMode(active.toolCallMode ?? "text_protocol");
       } else {
         setEndpoint(llmEndpoint);
@@ -200,40 +183,6 @@ export default function SettingsPanel() {
     },
     []
   );
-
-  const refreshLocalStatus = useCallback(async () => {
-    if (provider !== "local" || !isTauriRuntime()) return;
-    try {
-      const status = await invoke<{ exists: boolean; loaded: boolean; modelPath: string }>("get_local_model_status", { profileId: profileId || null });
-      setLocalStatus(status);
-    } catch {
-      setLocalStatus(null);
-    }
-  }, [profileId, provider]);
-
-  useEffect(() => {
-    void refreshLocalStatus();
-  }, [refreshLocalStatus, modelFile, modelPath]);
-
-  const handleLocalLoad = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    setLoadingLocal(true);
-    try {
-      const status = await invoke<{ exists: boolean; loaded: boolean; modelPath: string }>("load_local_model", { profileId: profileId || null });
-      setLocalStatus(status);
-      setMessage({ type: "ok", text: "Local model loaded" });
-    } catch (error) {
-      setMessage({ type: "err", text: `Local model failed: ${error}` });
-    } finally {
-      setLoadingLocal(false);
-    }
-  }, [profileId]);
-
-  const handleLocalUnload = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    await invoke("unload_local_model", { profileId: profileId || null });
-    await refreshLocalStatus();
-  }, [profileId, refreshLocalStatus]);
 
   // 保存
   /** 眼睛图标：显示时向后端取一次明文，隐藏时只清本地状态 */
@@ -279,13 +228,6 @@ export default function SettingsPanel() {
         completionMicrosPerMillion: usdToMicros(completionPrice),
         maxRunSpendMicros: usdToMicros(maxRunSpend),
         toolCallMode,
-        modelType: provider === "local" ? modelType : undefined,
-        modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
-        modelFile: provider === "local" ? modelFile.trim() || undefined : undefined,
-        nThreads: provider === "local" ? inputToNumber(nThreads) : undefined,
-        nCtx: provider === "local" ? inputToNumber(nCtx) : undefined,
-        nGpuLayers: provider === "local" ? Number(nGpuLayers) || 0 : undefined,
-        temperature: provider === "local" ? Number(temperature) || 0.2 : undefined,
         setActive: true,
       });
       setMessage({ type: "ok", text: "Saved successfully" });
@@ -296,7 +238,7 @@ export default function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, completionPrice, endpoint, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -321,13 +263,6 @@ export default function SettingsPanel() {
           completionMicrosPerMillion: usdToMicros(completionPrice),
           maxRunSpendMicros: usdToMicros(maxRunSpend),
           toolCallMode,
-          modelType: provider === "local" ? modelType : undefined,
-          modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
-          modelFile: provider === "local" ? modelFile.trim() || undefined : undefined,
-          nThreads: provider === "local" ? inputToNumber(nThreads) : undefined,
-          nCtx: provider === "local" ? inputToNumber(nCtx) : undefined,
-          nGpuLayers: provider === "local" ? Number(nGpuLayers) || 0 : undefined,
-          temperature: provider === "local" ? Number(temperature) || 0.2 : undefined,
           setActive: true,
         });
         setApiKey(""); // 保存后清空输入框
@@ -505,42 +440,15 @@ export default function SettingsPanel() {
       />
 
       {provider === "local" && (
-        <div className="mb-3 rounded border border-accent-blue/30 bg-accent-blue/5 p-2 space-y-2">
-          <div className="text-[11px] font-semibold text-surface-muted">Local model runtime</div>
-          <label className="block text-surface-muted text-[10px]">Model type
-            <select value={modelType} onChange={(e) => setModelType(e.target.value as LocalModelType)} className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text">
-              <option value="starcoder">StarCoder</option>
-              <option value="codellama">CodeLlama</option>
-              <option value="deepseek-coder">DeepSeek Coder</option>
-              <option value="codegemma">CodeGemma</option>
-            </select>
-          </label>
-          <label className="block text-surface-muted text-[10px]">Model directory
-            <input type="text" value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="~/.agent-ide/models" className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text font-mono" />
-          </label>
-          <label className="block text-surface-muted text-[10px]">GGUF file
-            <input type="text" value={modelFile} onChange={(e) => setModelFile(e.target.value)} placeholder="model.gguf" className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text font-mono" />
-          </label>
-          <div className="grid grid-cols-3 gap-1">
-            <BudgetInput label="Threads" value={nThreads} onChange={setNThreads} placeholder="4" />
-            <BudgetInput label="Context" value={nCtx} onChange={setNCtx} placeholder="4096" />
-            <BudgetInput label="GPU layers" value={nGpuLayers} onChange={setNGpuLayers} placeholder="0" />
-          </div>
-          <BudgetInput label="Temperature" value={temperature} onChange={setTemperature} placeholder="0.2" />
-          <div className="text-[10px] leading-relaxed text-surface-muted">The model must be downloaded locally. Agent output is streamed through the same reviewable diff pipeline.</div>
-          <div className="flex items-center justify-between gap-2 border-t border-surface-border pt-2 text-[10px]">
-            <span className={localStatus?.loaded ? "text-accent-green" : "text-surface-muted"}>
-              {localStatus?.loaded ? "Loaded" : localStatus?.exists ? "Ready to load" : "Model file not found"}
-            </span>
-            <div className="flex gap-1">
-              <button type="button" onClick={refreshLocalStatus} className="rounded border border-surface-border px-2 py-1 text-surface-muted hover:text-surface-text">Refresh</button>
-              <button type="button" onClick={handleLocalLoad} disabled={loadingLocal || !localStatus?.exists} className="rounded border border-accent-green/40 px-2 py-1 text-accent-green disabled:opacity-40">{loadingLocal ? "Loading..." : "Load"}</button>
-              <button type="button" onClick={handleLocalUnload} disabled={!localStatus?.loaded} className="rounded border border-surface-border px-2 py-1 text-surface-muted disabled:opacity-40">Unload</button>
-            </div>
-          </div>
-          {localStatus?.modelPath && <div className="truncate font-mono text-[10px] text-surface-muted" title={localStatus.modelPath}>{localStatus.modelPath}</div>}
+        <div className="mb-3 rounded border border-accent-blue/30 bg-accent-blue/5 p-2 text-[10px] leading-relaxed text-surface-muted">
+          In-process inference was removed. Serve the model through an OpenAI-compatible
+          endpoint — Ollama <span className="font-mono">http://localhost:11434/v1</span>,
+          LM Studio <span className="font-mono">http://localhost:1234/v1</span>, or vLLM — and
+          configure it above as a normal endpoint plus model name. A profile left on this
+          provider is refused when a run starts, with the same instructions.
         </div>
       )}
+
 
       {/* API Key */}
       <label className="block text-surface-muted mb-1 text-[11px]">
