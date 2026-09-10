@@ -220,6 +220,7 @@ agent-ide/
 │
 ├── <StatusBar>                                # last row, outside the bottom panel
 │   ├── Problem counts by severity             # click -> Problems panel
+│   ├── Cursor Ln/Col
 │   ├── Active file language
 │   ├── LLM configured / not configured
 │   └── <StatusDot />                          # Agent state

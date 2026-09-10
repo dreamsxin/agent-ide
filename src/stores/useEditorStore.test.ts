@@ -35,6 +35,7 @@ beforeEach(() => {
     activeFile: null,
     fileContents: {},
     saveError: null,
+    cursorPosition: null,
   });
 });
 
@@ -108,3 +109,46 @@ describe("saving", () => {
     expect(useEditorStore.getState().saveError).toBeNull();
   });
 });
+
+describe("cursor position", () => {
+  /**
+   * 状态栏一直显示 Ln/Col。切到另一个 tab 时旧位置必须立刻作废 ——
+   * Monaco 换完模型才会重新报一次位置，中间那段时间留着旧值就是在
+   * 用另一个文件的行号骗人。宁可空一帧。
+   */
+  it("goes stale-free when the active tab changes", async () => {
+    invokeMock.mockResolvedValueOnce("const value = 1;\n");
+    await useEditorStore.getState().openFile(tab);
+    useEditorStore.getState().setCursorPosition({ line: 42, column: 7 });
+
+    useEditorStore.getState().setActiveFile("src/other.ts");
+
+    expect(useEditorStore.getState().cursorPosition).toBeNull();
+  });
+
+  it("survives closing an unrelated tab", async () => {
+    invokeMock.mockResolvedValueOnce("const value = 1;\n");
+    await useEditorStore.getState().openFile(tab);
+    invokeMock.mockResolvedValueOnce("const other = 2;\n");
+    await useEditorStore
+      .getState()
+      .openFile({ path: "src/other.ts", name: "other.ts", isDirty: false, language: "typescript" });
+    useEditorStore.getState().setCursorPosition({ line: 3, column: 5 });
+
+    useEditorStore.getState().closeFile(tab.path);
+
+    // 关掉的不是当前文件，光标没动过
+    expect(useEditorStore.getState().cursorPosition).toEqual({ line: 3, column: 5 });
+  });
+
+  it("drops the position when the file it belonged to is closed", async () => {
+    invokeMock.mockResolvedValueOnce("const value = 1;\n");
+    await useEditorStore.getState().openFile(tab);
+    useEditorStore.getState().setCursorPosition({ line: 3, column: 5 });
+
+    useEditorStore.getState().closeFile(tab.path);
+
+    expect(useEditorStore.getState().cursorPosition).toBeNull();
+  });
+});
+

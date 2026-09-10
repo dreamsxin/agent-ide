@@ -97,6 +97,7 @@ export default function EditorContainer() {
   const clearSaveError = useEditorStore((s) => s.clearSaveError);
   const setSelectedText = useEditorStore((s) => s.setSelectedText);
   const setSelectedRange = useEditorStore((s) => s.setSelectedRange);
+  const setCursorPosition = useEditorStore((s) => s.setCursorPosition);
   const pendingRevealLocation = useEditorStore((s) => s.pendingRevealLocation);
   const clearPendingRevealLocation = useEditorStore((s) => s.clearPendingRevealLocation);
 
@@ -198,6 +199,20 @@ export default function EditorContainer() {
         }
       });
       disposablesRef.current.add(selectionDisposable);
+
+      // 光标位置单独监听：选区监听在取消选择时会把状态清空，而"我在第几行"
+      // 是一直成立的事实，状态栏要一直显示得出来
+      const cursorDisposable = editorInst.onDidChangeCursorPosition((event) => {
+        setCursorPosition({ line: event.position.lineNumber, column: event.position.column });
+      });
+      disposablesRef.current.add(cursorDisposable);
+      const initialPosition = editorInst.getPosition();
+      if (initialPosition) {
+        setCursorPosition({
+          line: initialPosition.lineNumber,
+          column: initialPosition.column,
+        });
+      }
 
       if (!completionRegisteredRef.current) {
         completionRegisteredRef.current = true;
@@ -499,7 +514,7 @@ export default function EditorContainer() {
         disposablesRef.current.add(cmdDisposable);
       }
     },
-    [addLog, setSelectedRange, setSelectedText, updateFileContent]
+    [addLog, setCursorPosition, setSelectedRange, setSelectedText, updateFileContent]
   );
 
   const contextValue = { editor: editorRef, monaco: monacoRef };
