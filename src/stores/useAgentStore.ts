@@ -24,6 +24,7 @@ import type {
   AgentPermission,
   AgentPermissionPreset,
   DestructiveOpConfirm,
+  RunUsage,
 } from "../types/agent";
 import {
   mcpApprovalForPermissions,
@@ -53,6 +54,8 @@ interface AgentStore {
    * 就没了，推断会在重启后显示一个点下去必然失败的 Undo 按钮。
    */
   pendingUndo: { label: string; files: string[] } | null;
+  /** 本次运行至今的 token/花费，随 `agent-state-changed` 更新；null 表示还没有记账器 */
+  runUsage: RunUsage | null;
   streamContent: string;
   isStreaming: boolean;
   agentRunId: string | null;
@@ -137,6 +140,7 @@ interface AgentStore {
   refreshPendingUndo: () => Promise<void>;
   /** 由 agent-state-changed 的 payload 驱动 */
   setPendingUndo: (undo: { label: string; files: string[] } | null) => void;
+  setRunUsage: (usage: RunUsage | null) => void;
   applyDiff: (diffId: string) => Promise<DiffEntry[]>;
   applyDiffHunk: (diffId: string, hunkIndex: number) => Promise<DiffEntry[]>;
   clearApplyResult: () => void;
@@ -248,6 +252,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   error: null,
   lastApplyResult: null,
   pendingUndo: null,
+  runUsage: null,
   streamContent: "",
   isStreaming: false,
   agentRunId: null,
@@ -678,6 +683,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   setPendingUndo: (pendingUndo) => set({ pendingUndo }),
+  setRunUsage: (runUsage) => set({ runUsage }),
 
   refreshPendingUndo: async () => {
     if (!isTauriRuntime()) return;

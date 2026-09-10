@@ -35,6 +35,84 @@ export function normalizeAgentMode(value: unknown): AgentMode {
 export type IdeMode = "code" | "plan";
 
 /**
+ * 一次运行至今的用量，随 `agent-state-changed` 一起送来。
+ *
+ * `spendMicros` 为 null 是"没配价格，算不出来"，**不是**"没花钱"。
+ * `calls` / `reportedCalls` 分开是因为供应商可能不回报用量：那时 token 数是 0，
+ * 但那代表"不知道"。
+ */
+export interface RunUsage {
+  totalTokens: number;
+  maxTotalTokens: number | null;
+  spendMicros: number | null;
+  maxSpendMicros: number | null;
+  calls: number;
+  reportedCalls: number;
+}
+
+/** 事件里的 usage 字段收敛成 `RunUsage`，非法或缺失时返回 null */
+export function normalizeRunUsage(value: unknown): RunUsage | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const count = (key: string) => (typeof raw[key] === "number" ? (raw[key] as number) : 0);
+  const optional = (key: string) => (typeof raw[key] === "number" ? (raw[key] as number) : null);
+  return {
+    totalTokens: count("totalTokens"),
+    maxTotalTokens: optional("maxTotalTokens"),
+    spendMicros: optional("spendMicros"),
+    maxSpendMicros: optional("maxSpendMicros"),
+    calls: count("calls"),
+    reportedCalls: count("reportedCalls"),
+  };
+}
+
+/**
+ * 把用量说成状态栏那一格能放下的一句话，以及悬停时的完整明细。
+ *
+ * 返回 null 表示这次会话还没发出过任何请求 —— 那时整格不渲染，而不是显示 0。
+ *
+ * 三档必须分开，理由和后端 `action_log_summary` 一样：完全没回报时说 "unknown"
+ * 而不是打印 0（后者让人以为免费）；部分回报比完全不回报更危险，总数看起来正常
+ * 但漏掉的调用不进账、per-run 上限因此偏松，所以明说。
+ */
+export function describeRunUsage(
+  usage: RunUsage,
+  formatSpend: (micros: number) => string
+): { label: string; detail: string } | null {
+  if (usage.calls === 0) return null;
+
+  const parts = [`${usage.calls} call${usage.calls === 1 ? "" : "s"}`];
+  if (usage.maxTotalTokens !== null) {
+    parts.push(`token cap ${usage.maxTotalTokens}`);
+  }
+  if (usage.maxSpendMicros !== null) {
+    parts.push(`spend cap ${formatSpend(usage.maxSpendMicros)}`);
+  }
+
+  if (usage.reportedCalls === 0) {
+    return {
+      label: "usage unknown",
+      detail: `The provider reported no token usage, so this run's cost cannot be estimated (${parts.join(", ")}).`,
+    };
+  }
+
+  const spend = usage.spendMicros === null ? null : formatSpend(usage.spendMicros);
+  const label = spend
+    ? `${usage.totalTokens} tok · ${spend}`
+    : `${usage.totalTokens} tok`;
+  const partial =
+    usage.reportedCalls < usage.calls
+      ? ` Only ${usage.reportedCalls} of ${usage.calls} calls reported usage, so this is a lower bound and the per-run cap undercounts.`
+      : "";
+  const cost = spend ? `, estimated ${spend}` : ", cost not computable (no pricing configured)";
+  return {
+    label,
+    detail: `${usage.totalTokens} tokens${cost} (${parts.join(", ")}).${partial}`,
+  };
+}
+
+
+/**
  * 权限预设：一个梯子，每一档在前一档之上多放开一件事。
  *
  * 值名刻意不叫 `ask` / `suggest` / `auto` —— 后两个和 `AgentMode` 的取值撞名却

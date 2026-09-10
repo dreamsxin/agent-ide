@@ -1496,6 +1496,13 @@ impl AgentOrchestrator {
     /// 放进 payload 就没有这个问题：它由刚刚改完撤销栈的同一段代码在同一个临界区里
     /// 计算，物理上不可能和真实栈漂移，也不需要第二份事实来源。
     /// 而如果把这个字段散在 12 处手写，一定会漏，漏掉的那处会让撤销按钮静默停在旧值。
+    ///
+    /// `usage` 同理搭这趟车。它本来只在运行**结束**时写进一条 action log，也就是
+    /// "这次花了多少钱"要等跑完、还得去翻日志。放进这个 payload 之后状态栏能一直
+    /// 显示。刻意**不**为它新开事件、也不让 `RunUsageMeter` 去持有 `RunEvents`：
+    /// 代价是刷新粒度只到状态变化（planner、每个 stage 的起止），一个 stage 内部
+    /// 的多轮工具调用要等这个 stage 结束才反映出来。这个精度对状态栏够用，而把
+    /// 发事件的职责塞进 llm_client 会把 Tauri 那一侧的关注点漏进最底层。
     pub fn state_payload(&self) -> serde_json::Value {
         serde_json::json!({
             "state": self.state_mgr.state.to_string(),
@@ -1507,6 +1514,21 @@ impl AgentOrchestrator {
                 "label": label,
                 "files": files,
             })),
+            // 只送数字，不送措辞：`calls`/`reportedCalls` 让前端自己判断
+            // "完全没回报"和"部分回报"，因为 24px 的状态栏和 action log
+            // 需要的说法不一样。`spendMicros` 为 null 是"没配价格算不出来"，
+            // 不是"没花钱" —— 前端必须保住这个区别。
+            "usage": self.run_usage.as_ref().map(|meter| {
+                let snapshot = meter.snapshot();
+                serde_json::json!({
+                    "totalTokens": snapshot.total_tokens,
+                    "maxTotalTokens": snapshot.max_total_tokens,
+                    "spendMicros": snapshot.spend_micros,
+                    "maxSpendMicros": snapshot.max_spend_micros,
+                    "calls": snapshot.calls,
+                    "reportedCalls": snapshot.reported_calls,
+                })
+            }),
         })
     }
 
@@ -3401,6 +3423,59 @@ mod tests {
 
         assert_eq!(orchestrator.current_run_id, None);
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
+    }
+
+    /// 状态栏要一直显示这次运行花了多少，所以用量搭 `agent-state-changed` 的车。
+    ///
+    /// 关键是"算不出来"和"没花钱"必须分得开：没配价格时 `spendMicros` 是 null，
+    /// 打印成 0 会让一次真花了钱的运行显示成免费。
+    #[test]
+    fn state_payload_carries_run_usage_without_faking_a_price() {
+        use crate::services::llm_client::{LlmUsage, RunUsageMeter, TokenPricing};
+
+        let mut orchestrator = AgentOrchestrator::new();
+        assert!(
+            orchestrator.state_payload()["usage"].is_null(),
+            "没有记账器时不该编一份用量出来"
+        );
+
+        let priced = Arc::new(RunUsageMeter::new(Some(10_000)).with_spend_cap(
+            Some(TokenPricing {
+                prompt_micros_per_million: 1_000_000,
+                completion_micros_per_million: 2_000_000,
+            }),
+            Some(500_000),
+        ));
+        priced.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(1_000),
+            completion_tokens: Some(500),
+            total_tokens: None,
+        }));
+        orchestrator.start_usage_accounting(priced);
+
+        let usage = orchestrator.state_payload()["usage"].clone();
+        assert_eq!(usage["totalTokens"], 1_500);
+        assert_eq!(usage["maxTotalTokens"], 10_000);
+        // 1000 * $1/M + 500 * $2/M = $0.002
+        assert_eq!(usage["spendMicros"], 2_000);
+        assert_eq!(usage["maxSpendMicros"], 500_000);
+        assert_eq!(usage["reportedCalls"], 1);
+
+        let unpriced = Arc::new(RunUsageMeter::new(None));
+        unpriced.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(1_000),
+            completion_tokens: Some(500),
+            total_tokens: None,
+        }));
+        orchestrator.start_usage_accounting(unpriced);
+
+        let usage = orchestrator.state_payload()["usage"].clone();
+        assert_eq!(usage["totalTokens"], 1_500);
+        assert!(
+            usage["spendMicros"].is_null(),
+            "没配价格就是算不出来，不是花了 0"
+        );
+        assert!(usage["maxTotalTokens"].is_null());
     }
 
     /// 同一时刻只能有一个运行。

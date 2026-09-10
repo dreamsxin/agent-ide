@@ -38,6 +38,20 @@ export function microsToUsdInput(micros?: number): string {
 }
 
 /**
+ * 展示用的金额格式化，`$0.0234`。
+ *
+ * 刻意逐位复制后端 `format_micros_usd` 的整数算法（截断，不四舍五入）：同一笔花费
+ * 在状态栏和 action log 里必须是同一个字符串，差一位会让人以为看到了两笔账。
+ * 固定 4 位小数的理由和后端一样 —— 单次运行常常远小于 1 分钱，2 位会全变成
+ * `$0.00`，看着像没花钱。
+ */
+export function formatMicrosUsd(micros: number): string {
+  const whole = Math.floor(micros / MICROS_PER_USD);
+  const fraction = Math.floor((micros % MICROS_PER_USD) / 100);
+  return `$${whole}.${String(fraction).padStart(4, "0")}`;
+}
+
+/**
  * 金额上限当前是否真的生效。
  *
  * `no_price` 这一档必须单独存在：填了上限但价格不全时后端不会执行它（只有一半

@@ -4,7 +4,7 @@ import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
-import { normalizeAgentMode } from "../types/agent";
+import { normalizeAgentMode, normalizeRunUsage } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
@@ -15,6 +15,8 @@ interface StateChangedPayload {
   lastRunId?: string | null;
   /** 当前可撤销的那次应用，`null` 表示没有退路。由后端在锁内计算，见 state_payload */
   pendingUndo?: { label: string; files: string[] } | null;
+  /** 本次运行至今的 token/花费，同样由 state_payload 在锁内算出 */
+  usage?: unknown;
 }
 
 /**
@@ -55,6 +57,9 @@ export function useAgentBridge() {
             // orchestrator 锁，而运行期间那把锁被整条流水线占着。payload 由刚改完
             // 撤销栈的同一段代码在同一个临界区里算出，既新鲜也不可能漂移。
             useAgentStore.getState().setPendingUndo(e.payload.pendingUndo ?? null);
+            // 用量搭同一趟车。走 normalize 而不是 `as RunUsage`：这是事件数据，
+            // 硬转只是让类型检查闭嘴，旧版本后端少一个字段就会以 NaN 渲染出来。
+            useAgentStore.getState().setRunUsage(normalizeRunUsage(e.payload.usage));
           }),
 
           listen<Step[]>("agent-plan-ready", (e) => {
