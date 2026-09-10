@@ -103,6 +103,8 @@ pub struct AgentOrchestrator {
     active_claim: Option<u64>,
     /// 当前运行的取消开关。每次运行一个新的 Arc —— 见 `RunLease`。
     active_cancel: Option<Arc<AtomicBool>>,
+    /// 同一个开关的对外句柄，让 Stop 不必先拿这把大锁。见 `CancelRegistry`。
+    cancel_registry: CancelRegistry,
     /// 下一个要发的凭据编号。单调递增，只在进程内有意义。
     next_claim: u64,
 }
@@ -129,6 +131,45 @@ pub struct RunClaim(u64);
 pub struct RunLease {
     pub claim: RunClaim,
     pub cancel: Arc<AtomicBool>,
+}
+
+/// 当前运行取消开关的**发布处**，用一把独立的小锁保护。
+///
+/// 存在的理由只有一个：**取消这条路不能依赖被取消的工作正持有的那把锁。**
+/// 第一版把开关只放在 orchestrator 里，于是 `stop_agent` 得先拿 orchestrator 锁
+/// 才能拉开关 —— 而 `repair_workspace` 会跨 await 一直持着那把锁，Stop 就只能
+/// 干等到修复自己结束。等它终于拿到锁时，那次运行已经把开关交回去了，
+/// `abandon_run` 拉了个空。Stop 变成一个只重置界面的空动作，而 Auto 模式下
+/// 修复循环还在往磁盘上写。
+///
+/// 写入方只有 `try_begin_run` / `finish_run` / `abandon_run`，所以它不是第二份
+/// 事实来源，而是同一个 per-run 对象的一个句柄出口。
+#[derive(Clone, Default)]
+pub struct CancelRegistry(Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>);
+
+impl CancelRegistry {
+    fn publish(&self, cancel: Arc<AtomicBool>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(cancel);
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+
+    /// 拉下当前运行的开关。没有运行在跑就什么都不做。
+    ///
+    /// 不需要 orchestrator 锁 —— 这正是这个类型存在的全部意义。
+    pub fn cancel_active_run(&self) {
+        if let Ok(slot) = self.0.lock() {
+            if let Some(cancel) = slot.as_ref() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 /// 一次应用操作的回滚点
@@ -385,6 +426,7 @@ impl AgentOrchestrator {
             undo_stack: Vec::new(),
             active_claim: None,
             active_cancel: None,
+            cancel_registry: CancelRegistry::default(),
             next_claim: 0,
         }
     }
@@ -647,11 +689,17 @@ impl AgentOrchestrator {
         // 全新的开关，不是把上一个清零：上一个可能还被一个正在排空的运行握着
         let cancel = Arc::new(AtomicBool::new(false));
         self.active_cancel = Some(cancel.clone());
+        self.cancel_registry.publish(cancel.clone());
         self.begin_run(run_id);
         Ok(RunLease {
             claim: RunClaim(claim),
             cancel,
         })
+    }
+
+    /// 取消开关的对外句柄，交给命令层，让 Stop 不用先抢这把锁。
+    pub fn cancel_registry(&self) -> CancelRegistry {
+        self.cancel_registry.clone()
     }
 
     /// 开启一个新的用量记账周期（一次全新运行）
@@ -679,6 +727,7 @@ impl AgentOrchestrator {
         self.current_run_id = None;
         self.active_claim = None;
         self.active_cancel = None;
+        self.cancel_registry.clear();
     }
 
     /// 用户主动放弃当前运行（Stop）：**先拉下取消开关**，再无条件释放执行权。
@@ -694,6 +743,7 @@ impl AgentOrchestrator {
         if let Some(cancel) = self.active_cancel.take() {
             cancel.store(true, Ordering::SeqCst);
         }
+        self.cancel_registry.clear();
         self.current_run_id = None;
         self.active_claim = None;
     }
@@ -3615,6 +3665,46 @@ mod tests {
 
         orchestrator.finish_run(fresh.claim);
         assert_eq!(orchestrator.current_run_id, None);
+    }
+
+    /// Stop 必须能在**不持有 orchestrator 锁**的情况下拉下开关。
+    ///
+    /// `repair_workspace` 会跨 await 一直持着那把锁。第一版把开关只放在
+    /// orchestrator 里，于是 Stop 得先抢锁 —— 只能干等到修复自己结束，而那时开关
+    /// 已经交回去了，拉了个空：Stop 退化成一个只重置界面的空动作，Auto 模式下
+    /// 修复循环还在往磁盘上写。所以句柄要单独发布出来。
+    #[test]
+    fn the_registry_cancels_without_the_orchestrator_lock() {
+        let mut orchestrator = AgentOrchestrator::new();
+        let registry = orchestrator.cancel_registry();
+
+        // 空闲时拉开关是无操作，不该 panic
+        registry.cancel_active_run();
+
+        let lease = orchestrator
+            .try_begin_run(Some("run-1".to_string()))
+            .expect("空闲时应当抢到执行权");
+        assert!(!lease.cancel.load(Ordering::SeqCst));
+
+        // 关键：这里没有碰 orchestrator
+        registry.cancel_active_run();
+        assert!(
+            lease.cancel.load(Ordering::SeqCst),
+            "句柄必须能直接拉到当前运行的开关"
+        );
+
+        orchestrator.finish_run(lease.claim);
+        let next = orchestrator
+            .try_begin_run(Some("run-2".to_string()))
+            .expect("上一个运行结束后应当能再开一个");
+        assert!(
+            !next.cancel.load(Ordering::SeqCst),
+            "上一次的取消不该沾到新运行头上"
+        );
+        // 交回之后句柄里已经没有开关了，再拉一次不该影响任何人
+        orchestrator.finish_run(next.claim);
+        registry.cancel_active_run();
+        assert!(!next.cancel.load(Ordering::SeqCst));
     }
 
     /// 阶段执行期间用户点了 Stop：结果不能再往一份已经不存在的计划里落地。

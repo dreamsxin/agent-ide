@@ -28,6 +28,9 @@ pub struct AgentGlobalState {
     pub active_role: Arc<std::sync::Mutex<AgentRole>>,
     pub pipeline_stages: Arc<std::sync::Mutex<Vec<PipelineStage>>>,
     pub context_compression: Arc<std::sync::Mutex<ContextCompressionMode>>,
+    /// 当前运行取消开关的句柄。见 `CancelRegistry` —— Stop 必须能在不持有
+    /// orchestrator 锁的情况下拉开关。
+    pub cancel_registry: crate::agent::orchestrator::CancelRegistry,
     pub local_engines:
         Arc<std::sync::Mutex<HashMap<String, Arc<dyn crate::services::llm_client::ModelEngine>>>>,
 }
@@ -37,12 +40,16 @@ impl AgentGlobalState {
         let profiles_config = llm_profiles::load_or_default_config();
         let context_compression = profiles_config.context_compression.clone();
 
+        let orchestrator = AgentOrchestrator::new();
+        let cancel_registry = orchestrator.cancel_registry();
+
         Self {
-            orchestrator: Arc::new(Mutex::new(AgentOrchestrator::new())),
+            orchestrator: Arc::new(Mutex::new(orchestrator)),
             llm_profiles: Arc::new(std::sync::Mutex::new(profiles_config)),
             active_role: Arc::new(std::sync::Mutex::new(AgentRole::Coder)),
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
+            cancel_registry,
             local_engines: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -544,8 +551,10 @@ fn emit_usage_action_log(
 /// Stop the current Agent task.
 #[tauri::command]
 pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<String, String> {
-    // 取消开关现在挂在 orchestrator 上、每次运行一个，所以要在锁内拉。
-    // `abandon_run` 会先置 true 再释放执行权。
+    // 先拉开关，再抢锁 —— 顺序不能反。`repair_workspace` 会跨 await 持着
+    // orchestrator 锁，先抢锁就得干等到修复自己结束，而那时它已经把开关交回去了，
+    // Stop 会拉空，退化成一个只重置界面的空动作。
+    agent_state.cancel_registry.cancel_active_run();
     let mut orch = agent_state.orchestrator.lock().await;
     orch.abandon_run();
     orch.state_mgr.set(AgentState::Idle);
