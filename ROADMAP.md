@@ -782,7 +782,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Found in the same audit, still open:**
      - At the 600px minimum window height with the bottom panel at its 500px maximum, the editor column gets ~32px. Pre-existing; the 24px status bar consumed 43% of the remaining margin.
      - `EditorContainer`'s global Monaco provider registrations are re-added on every tab switch and only drained on unmount, and `handleEditorMount`'s dependency array freezes `activeFile`/`fileContents` at first render.
-     - `RunLease` is neither `#[must_use]` nor `Drop`-guarded, so a future edit that adds an early `return` between the claim and the release would hold the run slot until the next Stop, with no compiler complaint.
+     - `RunLease` is neither `#[must_use]` nor `Drop`-guarded, so a future edit that adds an early `return` between the claim and the release would hold the run slot until the next Stop, with no compiler complaint. **Fixed 2026-09-10, see 24.**
+
+24. **The run slot's release depended on my memory (fixed 2026-09-10)**
+   - Three commits in a row in this area, and two of them shipped a lifetime-management bug of the same shape: something belonging to one run was managed by hand and I forgot a case. The claim's release was the remaining instance — correct only as long as every exit path in four command functions remembered to call `finish_run`, with the compiler silent and the failure mode being *every subsequent run refused* until the user pressed Stop.
+   - `RunLease` now carries a private `Arc<()>` and the orchestrator keeps only a `Weak`. A dropped lease — early return, `?`, panic — makes the claim unupgradeable, so the next `try_begin_run` reclaims it instead of refusing forever. `finish_run` still exists for the prompt, explicit path; forgetting it now costs a late reclaim rather than a wedged app.
+   - `#[must_use]` on both the type and `try_begin_run`. It earned its place immediately: it caught a test that called `try_begin_run(...).expect(...)` and dropped the lease on the spot, which under the new semantics silently released the slot mid-test.
+   - This is the second time in this block that the fix was to make the compiler enforce a rule instead of documenting it (the first: `StagePlan` carrying a step **id** rather than an index, so a cleared plan cannot be indexed out of bounds). Worth stating as a preference: when a guard depends on a human remembering, prefer moving the guarantee into a type.
+
 
 
 22. **The cancel switch was a global singleton (fixed 2026-09-09)**
