@@ -36,10 +36,10 @@ npm test
 - **Money is integer micro-USD, and parsing is string-based.**
   `Number("0.29") * 1e6` is `289999.99999999994`. Use `usdToMicros` in
   `src/utils/money.ts`. Rounding is *up*, so a sub-cent cost is never free.
-- **Vitest has no setup file.** The global environment is node; the four files
-  that need a DOM opt in with a `// @vitest-environment jsdom` docblock. Because
-  there is no setup file, React Testing Library's auto-cleanup is not wired — a
-  file with more than one rendering test needs its own `afterEach(cleanup)`, as
+- **Vitest has no setup file.** The global environment is node; files that need a
+  DOM opt in with a `// @vitest-environment jsdom` docblock. Because there is no
+  setup file, React Testing Library's auto-cleanup is not wired — a file with more
+  than one rendering test needs its own `afterEach(cleanup)`, as
   `src/components/shared/CommandPalette.test.tsx` does.
 - **`test.include` in `vite.config.ts` is pinned on purpose.** `artifacts/e2e/`
   holds whole repo copies including `*.test.tsx`; the default `include` runs those
@@ -86,6 +86,13 @@ npm test
 - **Permission gates are all `matches!(mode, AgentMode::Auto)`.** The mode has two
   values because there is one gate. Finer authority belongs in
   `WorkspaceToolPermissions`.
+- **Monaco's module-level registrations live in `components/editor/monacoGlobals.ts`,
+  never in a component.** `languages.register*` and `editor.registerCommand` belong
+  to the monaco module, so they register once per module (`WeakSet` guard) and are
+  never disposed. A per-component ref guarding a module-global resource disagrees
+  with it in both directions. Only per-editor things (listeners, `addAction`) belong
+  in `onMount` / `disposablesRef`. Code there reads `getState()`; the one fact it
+  cannot derive — which editor is current — arrives via `setCurrentEditor`.
 
 ## Conventions
 
