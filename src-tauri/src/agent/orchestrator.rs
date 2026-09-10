@@ -99,8 +99,11 @@ pub struct AgentOrchestrator {
     /// 还没应用的改动，却对已经应用的无能为力 —— 而"应用了才发现不对"恰恰是
     /// 最需要退路的时刻。
     undo_stack: Vec<ApplyCheckpoint>,
-    /// 当前持有执行权的运行；`None` 表示空闲。见 `try_begin_run`。
-    active_claim: Option<u64>,
+    /// 当前持有执行权的运行：凭据编号 + 它的存活凭证。`None` 表示空闲。
+    ///
+    /// 存 `Weak` 而不是 `bool`：`RunLease` 一旦被丢弃（正常收尾、提前返回、panic），
+    /// 这个 `Weak` 就升不上来，执行权自动可回收。见 `try_begin_run`。
+    active_claim: Option<(u64, std::sync::Weak<()>)>,
     /// 当前运行的取消开关。每次运行一个新的 Arc —— 见 `RunLease`。
     active_cancel: Option<Arc<AtomicBool>>,
     /// 同一个开关的对外句柄，让 Stop 不必先拿这把大锁。见 `CancelRegistry`。
@@ -128,9 +131,18 @@ pub struct RunClaim(u64);
 ///
 /// 一次运行一个 Arc 之后这件事在结构上就不可能了：旧运行手里那个开关被置 true
 /// 之后没有任何代码会再碰它，因为谁也拿不到它了。
+#[must_use = "持有它才代表持有执行权；丢掉它等于放弃这次运行"]
 pub struct RunLease {
     pub claim: RunClaim,
     pub cancel: Arc<AtomicBool>,
+    /// 存活凭证。orchestrator 那边只留一个 `Weak`，所以**它一被丢弃，执行权就自动
+    /// 可回收**。
+    ///
+    /// 这一层是拿来防我自己的：执行权的正确释放原本全靠调用方记得在每条退出路径上
+    /// 调 `finish_run`，而这个会话里我已经在相邻的两个改动里各漏过一次同类的生命周期
+    /// 管理。漏了的后果是所有后续运行被永久拒绝 —— 一个只能靠重启或 Stop 解开的死结。
+    /// 现在漏掉最多让回收晚一点，而不是让应用卡死。
+    _alive: Arc<()>,
 }
 
 /// 当前运行取消开关的**发布处**，用一把独立的小锁保护。
@@ -795,15 +807,25 @@ impl AgentOrchestrator {
     /// 拿它当"在跑"的判据会让守卫在最需要的时候失效。
     ///
     /// 返回的凭据必须原样传给 `finish_run`，取消开关则要一路传给流水线。
+    ///
+    /// 漏掉 `finish_run` 不会把应用锁死：`RunLease` 一被丢弃，这里存的 `Weak` 就
+    /// 升不上来，下一次抢占会把这个已经没人持有的执行权直接回收。
+    #[must_use = "拿到 lease 才算持有执行权"]
     pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<RunLease, String> {
-        if self.active_claim.is_some() {
-            return Err(
-                "An Agent run is already in progress. Stop it before starting another.".to_string(),
-            );
+        // 只有凭证还活着才算真的有人在跑。凭证已经没了说明上一个运行没走正常收尾
+        // （提前返回或 panic），那把执行权回收掉，而不是让它永久占着。
+        if let Some((_, alive)) = &self.active_claim {
+            if alive.strong_count() > 0 {
+                return Err(
+                    "An Agent run is already in progress. Stop it before starting another."
+                        .to_string(),
+                );
+            }
         }
         let claim = self.next_claim;
         self.next_claim = self.next_claim.wrapping_add(1);
-        self.active_claim = Some(claim);
+        let alive = Arc::new(());
+        self.active_claim = Some((claim, Arc::downgrade(&alive)));
         // 全新的开关，不是把上一个清零：上一个可能还被一个正在排空的运行握着
         let cancel = Arc::new(AtomicBool::new(false));
         self.active_cancel = Some(cancel.clone());
@@ -812,6 +834,7 @@ impl AgentOrchestrator {
         Ok(RunLease {
             claim: RunClaim(claim),
             cancel,
+            _alive: alive,
         })
     }
 
@@ -839,7 +862,7 @@ impl AgentOrchestrator {
     /// 走到这里。那时执行权可能已经属于一个新运行 —— 让它无条件清掉，就等于给
     /// 第三个 prompt 开门。
     pub fn finish_run(&mut self, claim: RunClaim) {
-        if self.active_claim != Some(claim.0) {
+        if self.active_claim.as_ref().map(|(id, _)| *id) != Some(claim.0) {
             return;
         }
         self.current_run_id = None;
@@ -3741,9 +3764,10 @@ mod tests {
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
 
         orchestrator.finish_run(first.claim);
-        orchestrator
+        let reused = orchestrator
             .try_begin_run(Some("run-2".to_string()))
             .expect("上一个运行结束后应当能再开一个");
+        orchestrator.finish_run(reused.claim);
     }
 
     /// 只有持有者能交还执行权，且 Stop 之后的新运行不会把旧运行"取消解除"。
@@ -3792,7 +3816,38 @@ mod tests {
         assert_eq!(orchestrator.current_run_id, None);
     }
 
-    /// Stop 必须能在**不持有 orchestrator 锁**的情况下拉下开关。
+    /// 漏掉 `finish_run` 不该把应用锁死。
+    ///
+    /// 执行权的释放本来全靠调用方在每条退出路径上记得调 `finish_run` —— 而这个
+    /// 会话里我在相邻两个改动里各漏过一次同类的生命周期管理。所以 lease 带一个
+    /// 存活凭证，orchestrator 只留 `Weak`：lease 一被丢弃（提前返回、panic），
+    /// 下一次抢占就把这份没人持有的执行权回收掉，而不是永久拒绝所有后续运行。
+    #[test]
+    fn a_dropped_lease_releases_the_slot_even_without_finish_run() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        {
+            let leaked = orchestrator
+                .try_begin_run(Some("run-1".to_string()))
+                .expect("空闲时应当抢到执行权");
+            assert!(
+                orchestrator.try_begin_run(Some("run-2".to_string())).is_err(),
+                "凭证还活着时必须拒绝第二个运行"
+            );
+            drop(leaked);
+        }
+
+        let recovered = orchestrator
+            .try_begin_run(Some("run-2".to_string()))
+            .expect("lease 已经没人持有，执行权应当被回收");
+        assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-2"));
+
+        // 迟到的旧收尾仍然不能动新运行的执行权
+        orchestrator.finish_run(RunClaim(0));
+        assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-2"));
+        orchestrator.finish_run(recovered.claim);
+        assert_eq!(orchestrator.current_run_id, None);
+    }
     ///
     /// `repair_workspace` 会跨 await 一直持着那把锁。第一版把开关只放在
     /// orchestrator 里，于是 Stop 得先抢锁 —— 只能干等到修复自己结束，而那时开关
