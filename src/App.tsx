@@ -140,6 +140,18 @@ export default function App() {
     [setBottomHeight]
   );
 
+  // 底部面板的高度上限跟着窗口高度走，所以窗口一变就要重新走一遍 clamp。写回
+  // 同一个 setter 而不是另开一条路径：上限的定义只能有一处，否则拖拽合法、
+  // 缩窗口不合法这种不一致马上就会出现。挂载时也跑一次 —— 存档里的高度是在大屏
+  // 上存下来的，换到小窗口时第一帧编辑器就已经被压没了。
+  useEffect(() => {
+    const reclamp = () => setBottomHeight(useLayoutStore.getState().bottomHeight);
+    reclamp();
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+  }, [setBottomHeight]);
+
+
   return (
     <div data-testid="app-root" className="h-screen flex flex-col bg-surface-base text-surface-text overflow-hidden">
       <ShortcutsHelp

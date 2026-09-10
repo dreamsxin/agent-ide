@@ -120,6 +120,37 @@ describe("layout persistence", () => {
     expect(state.bottomHeight).toBe(120);
   });
 
+  /**
+   * 存档里的高度是在大屏上存下来的。600px 高的窗口（tauri.conf.json 的最小高度）
+   * 减去 40+4+24 的固定开销，底部面板拉到 500 就只给编辑器剩 32px —— 用户还没碰
+   * 任何东西，第一帧就是坏的。上限必须跟着窗口高度走。
+   */
+  it("re-clamps a height saved on a bigger screen against the current window", async () => {
+    const original = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { value: 600, configurable: true });
+    try {
+      const { useLayoutStore } = await loadStore({ bottomHeight: 500 });
+      // 600 - (40 + 4 + 24) - 160 = 372
+      expect(useLayoutStore.getState().bottomHeight).toBe(372);
+      // 拖拽走同一个 clamp，所以拖也拖不出去
+      useLayoutStore.getState().setBottomHeight(500);
+      expect(useLayoutStore.getState().bottomHeight).toBe(372);
+    } finally {
+      Object.defineProperty(window, "innerHeight", { value: original, configurable: true });
+    }
+  });
+
+  it("still allows the full 500 when the window has room for it", async () => {
+    const original = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { value: 900, configurable: true });
+    try {
+      const { useLayoutStore } = await loadStore({ bottomHeight: 500 });
+      expect(useLayoutStore.getState().bottomHeight).toBe(500);
+    } finally {
+      Object.defineProperty(window, "innerHeight", { value: original, configurable: true });
+    }
+  });
+
   it("falls back to defaults for unknown tab and view names", async () => {
     const { useLayoutStore } = await loadStore({
       leftTab: "explorer-v2",
