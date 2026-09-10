@@ -2,7 +2,7 @@
 
 ## Overview
 
-Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-09: **96 frontend tests across 17 files** (`npm test`) and **266 Rust lib tests, 1 ignored** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
+Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-09: **100 frontend tests across 17 files** (`npm test`) and **266 Rust lib tests, 1 ignored** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
 
 ## Test Layers
 
@@ -230,7 +230,12 @@ cargo test --lib
 - **`npm run tauri -- dev`**: Real IDE runtime with Rust backend and Tauri APIs. Required for all smoke and E2E validation.
 - **Rust tests** use temporary directories with UUID-based names and a mutex guard (`env_test_guard`) to prevent concurrent workspace config mutation across test threads.
 - **Frontend tests** run in Vitest's default node environment and do not require a Tauri runtime. Four files opt into jsdom with a `// @vitest-environment jsdom` docblock because they render components or need `localStorage`: `src/hooks/useAppBootstrap.test.tsx`, `src/components/panels/TasksPanel.test.tsx`, `src/components/shared/CommandPalette.test.tsx`, `src/stores/useLayoutStore.persistence.test.ts`. The global environment is deliberately left as node — only files that need a DOM pay for one.
-- `test.include` in `vite.config.ts` lists `src/**` **and** `tests/**` rather than relying on the default. The narrow pin exists because E2E artifacts under `artifacts/` contain whole repo copies including `*.test.tsx`; the default would run those historical snapshots, inflating the count and reporting failures against old code. `tests/` has to be named explicitly — while it was omitted, `tests/ipc-contract.test.ts` existed but never executed, and it is exactly the kind of test that is worthless unrun: it checks that every command the frontend `invoke`s is registered in `lib.rs`, a seam neither `tsc` nor `cargo` can see.
+- `test.include` in `vite.config.ts` lists `src/**` **and** `tests/**` rather than relying on the default. The narrow pin exists because E2E artifacts under `artifacts/` contain whole repo copies including `*.test.tsx`; the default would run those historical snapshots, inflating the count and reporting failures against old code. `tests/` has to be named explicitly — while it was omitted, `tests/ipc-contract.test.ts` existed but never executed, and it is exactly the kind of test that is worthless unrun.
+- **`tests/ipc-contract.test.ts` guards the two string-keyed seams between the two languages.** Command names: every `invoke("…")` in `src/` must appear in `lib.rs`'s `generate_handler!`. Event names: every `listen("…")` must have an `emit`/`emit_json` somewhere in `src-tauri/`, **and** the reverse — an emitted event with no listener is wasted work. Neither seam is visible to `tsc` or `cargo`, and the event side fails worse than the command side: a mistyped command throws at runtime, while a mistyped event name does *nothing at all*. The UI simply stops updating and the backend log looks healthy.
+  - Both sets are currently identical, so there is no exemption list. A future CLI-only event will have to justify itself against this test, which is the intended friction.
+  - The parsers read whole files rather than lines, because most `emit` calls put the name on the next line — a line-based scan missed 7 of 12. Two tests pin the parsers themselves (a multi-line `emit`, and a `listen` whose type argument contains braces), because a parser that silently under-collects makes the contract tests pass vacuously or point at the wrong side.
+  - **Not attempted: argument shapes.** Many call sites pass a variable (`invoke("send_agent_prompt", { request })`), so the object's keys are not statically visible; a checker would skip exactly the calls most worth checking while breaking on unrelated refactors. That is a worse trade than no check.
+
 
 ## Desktop workflow E2E (`npm run e2e:workflow`)
 
