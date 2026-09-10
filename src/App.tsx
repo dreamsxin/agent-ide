@@ -10,7 +10,7 @@ import CommandPalette, { usePaletteCommands } from "./components/shared/CommandP
 import ConfirmDialog from "./components/agent/ConfirmDialog";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import PanelLoading from "./components/shared/PanelLoading";
-import { useLayoutStore } from "./stores/useLayoutStore";
+import { useLayoutStore, maxBottomHeight } from "./stores/useLayoutStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import { useAppBootstrap } from "./hooks/useAppBootstrap";
 import useShortcuts from "./hooks/useShortcuts";
@@ -67,6 +67,22 @@ export default function App() {
   const setRightWidth = useLayoutStore((s) => s.setRightWidth);
   const setBottomHeight = useLayoutStore((s) => s.setBottomHeight);
   const resizeStartRef = useRef({ left: leftWidth, right: rightWidth, bottom: bottomHeight });
+
+  // 视口高度只放在**组件**里，不写进 store：底部面板高度的上限跟着窗口走，但那是
+  // 一个渲染约束，不是用户的意图。把 clamp 的结果写回 store 会把用户在大屏上拖出来
+  // 的 500 永久改写成小窗口的上限，缩回去也回不来 —— 一次看不见、也无法撤销的偏好
+  // 丢失。存档里存意图，渲染时取 min。
+  const [viewportHeight, setViewportHeight] = useState(() =>
+    typeof window === "undefined" ? 900 : window.innerHeight
+  );
+  useEffect(() => {
+    const onResize = () => setViewportHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const bottomMax = maxBottomHeight(viewportHeight);
+  const effectiveBottomHeight = Math.min(bottomHeight, bottomMax);
+
 
   useAgentBridge();
 
@@ -132,24 +148,19 @@ export default function App() {
   const onBottomResize = useCallback(
     (delta: number, phase?: "start" | "move" | "end") => {
       if (phase === "start") {
-        resizeStartRef.current.bottom = useLayoutStore.getState().bottomHeight;
+        // 从屏幕上看到的高度起算，而不是存档里的意图值：窗口小的时候两者不同，
+        // 用意图值起算会让指针一按下去面板就跳一下。
+        resizeStartRef.current.bottom = effectiveBottomHeight;
         return;
       }
-      if (phase === "move") setBottomHeight(resizeStartRef.current.bottom - delta);
+      // 拖拽是显式操作，把上限写进意图是对的 —— 用户明确要求了这个尺寸。
+      if (phase === "move") {
+        setBottomHeight(Math.min(resizeStartRef.current.bottom - delta, bottomMax));
+      }
     },
-    [setBottomHeight]
+    [bottomMax, effectiveBottomHeight, setBottomHeight]
   );
 
-  // 底部面板的高度上限跟着窗口高度走，所以窗口一变就要重新走一遍 clamp。写回
-  // 同一个 setter 而不是另开一条路径：上限的定义只能有一处，否则拖拽合法、
-  // 缩窗口不合法这种不一致马上就会出现。挂载时也跑一次 —— 存档里的高度是在大屏
-  // 上存下来的，换到小窗口时第一帧编辑器就已经被压没了。
-  useEffect(() => {
-    const reclamp = () => setBottomHeight(useLayoutStore.getState().bottomHeight);
-    reclamp();
-    window.addEventListener("resize", reclamp);
-    return () => window.removeEventListener("resize", reclamp);
-  }, [setBottomHeight]);
 
 
   return (
@@ -200,7 +211,7 @@ export default function App() {
       <AnimatedPanel visible={bottomVisible} keepMounted className="flex-shrink-0">
         <div>
           <ResizeHandle direction="vertical" onResize={onBottomResize} />
-          <div style={{ height: `${bottomHeight}px` }} className="flex-shrink-0">
+              <div style={{ height: `${effectiveBottomHeight}px` }} className="flex-shrink-0">
             <BottomPanel />
           </div>
         </div>

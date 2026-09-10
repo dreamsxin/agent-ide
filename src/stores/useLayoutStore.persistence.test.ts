@@ -121,28 +121,14 @@ describe("layout persistence", () => {
   });
 
   /**
-   * 存档里的高度是在大屏上存下来的。600px 高的窗口（tauri.conf.json 的最小高度）
-   * 减去 40+4+24 的固定开销，底部面板拉到 500 就只给编辑器剩 32px —— 用户还没碰
-   * 任何东西，第一帧就是坏的。上限必须跟着窗口高度走。
+   * 存档里存的是用户的意图，不是当前窗口下显示得出来的高度。窗口太小时的收窄由
+   * 渲染侧负责（App.tsx 取 `min(意图, maxBottomHeight(视口))`）。如果在这里就把它
+   * 改小，用户在大屏上拖出来的 500 会被永久改写，回到大屏也拿不回来 —— 一次用户
+   * 看不见、也无法撤销的偏好丢失。
    */
-  it("re-clamps a height saved on a bigger screen against the current window", async () => {
+  it("keeps a large saved height as the user's intent, whatever the window is", async () => {
     const original = window.innerHeight;
     Object.defineProperty(window, "innerHeight", { value: 600, configurable: true });
-    try {
-      const { useLayoutStore } = await loadStore({ bottomHeight: 500 });
-      // 600 - (40 + 4 + 24) - 160 = 372
-      expect(useLayoutStore.getState().bottomHeight).toBe(372);
-      // 拖拽走同一个 clamp，所以拖也拖不出去
-      useLayoutStore.getState().setBottomHeight(500);
-      expect(useLayoutStore.getState().bottomHeight).toBe(372);
-    } finally {
-      Object.defineProperty(window, "innerHeight", { value: original, configurable: true });
-    }
-  });
-
-  it("still allows the full 500 when the window has room for it", async () => {
-    const original = window.innerHeight;
-    Object.defineProperty(window, "innerHeight", { value: 900, configurable: true });
     try {
       const { useLayoutStore } = await loadStore({ bottomHeight: 500 });
       expect(useLayoutStore.getState().bottomHeight).toBe(500);
@@ -150,6 +136,7 @@ describe("layout persistence", () => {
       Object.defineProperty(window, "innerHeight", { value: original, configurable: true });
     }
   });
+
 
   it("falls back to defaults for unknown tab and view names", async () => {
     const { useLayoutStore } = await loadStore({
