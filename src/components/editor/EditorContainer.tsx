@@ -102,11 +102,9 @@ export default function EditorContainer() {
   const clearPendingRevealLocation = useEditorStore((s) => s.clearPendingRevealLocation);
 
   // Agent store for context menu and lightbulb actions
-  const sendPrompt = useAgentStore((s) => s.sendPrompt);
-  const addMessage = useAgentStore((s) => s.addMessage);
-  const agentState = useAgentStore((s) => s.state);
-  const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
-  const rightVisible = useLayoutStore((s) => s.rightVisible);
+  // Agent / 右侧面板的状态刻意不订阅：只有右键菜单那几个回调用得到，而它们
+  // 一律 `getState()` 现取。订阅了反而让整个编辑器容器跟着 Agent 每次状态变化
+  // 和每次面板开合重渲染一遍。
   const performanceOverlay = useLayoutStore((s) => s.performanceOverlay);
   const togglePerformanceOverlay = useLayoutStore((s) => s.togglePerformanceOverlay);
   const theme = useThemeStore((s) => s.theme);
@@ -118,6 +116,11 @@ export default function EditorContainer() {
   const disposablesRef = useRef<Set<{ dispose(): void }>>(new Set());
   const completionRegisteredRef = useRef(false);
   const lspRegisteredRef = useRef(false);
+  // 全局的 Monaco 注册只做一次；`activeEditorRef` / `runAgentActionRef` 让那份
+  // 一次性注册始终指向**当前**这次挂载的编辑器和处理函数。
+  const agentGlobalsRegisteredRef = useRef(false);
+  const activeEditorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const runAgentActionRef = useRef<((action: AgentQuickActionKey) => Promise<void>) | null>(null);
   const lspOpenedFilesRef = useRef<Set<string>>(new Set());
   const lspFileVersionsRef = useRef<Map<string, number>>(new Map());
   const lspChangeTimerRef = useRef<number | null>(null);
@@ -178,6 +181,8 @@ export default function EditorContainer() {
     (editorInst: editor.IStandaloneCodeEditor, monacoInst: typeof import("monaco-editor")) => {
       setEditorRef(editorInst);
       setMonacoRef(monacoInst);
+      // 一次性的全局注册要通过这个 ref 找到当前编辑器，见下面 Agent lightbulb 那段
+      activeEditorRef.current = editorInst;
       configureTypeScriptSemantic(monacoInst);
 
       // 选区变化 → 更新 store
@@ -424,46 +429,69 @@ export default function EditorContainer() {
       disposablesRef.current.add(definitionDisposable);
 
       // ▸▸▸ Agent context menu actions
+      //
+      // 这两个闭包都在**注册时**建立，而右键菜单是在很久之后才被点的。所以它们
+      // 一律走 `getState()` 现取，不去闭包捕获渲染值 —— 捕获的话 `activeFile`
+      // 会永远停在编辑器挂载那一刻的值：编辑器通常是在还没打开任何文件时挂载的，
+      // 于是"选中一段 → 用 Agent 解释"发出去的上下文文件是空的，Agent 拿不到
+      // 这段代码属于哪个文件。
+      //
+      // 也不能把这些值塞进 `handleEditorMount` 的依赖数组：`fileContents` 每敲
+      // 一个字都在变，那会让整套 action / provider 每次按键重新注册一遍。
       const isAgentBusy = () => {
-        const s = agentState;
+        const s = useAgentStore.getState().state;
         return s !== "idle" && s !== "done" && s !== "error" && s !== "waiting_user";
       };
 
       const runAgentAction = async (action: AgentQuickActionKey) => {
-        const selection = editorInst.getSelection();
+        // 用 ref 里的**当前**编辑器，不用注册时那个：`key={activeFile}` 会让
+        // `<Editor>` 每次切 tab 整体重挂载，而下面的全局注册只做一次，捕获的
+        // 那个实例早已被 Monaco 释放。
+        const activeEditor = activeEditorRef.current;
+        if (!activeEditor) return;
+        const selection = activeEditor.getSelection();
         if (!selection || selection.isEmpty()) return;
-        const model = editorInst.getModel();
+        const model = activeEditor.getModel();
         if (!model) return;
         const selectedText = model.getValueInRange(selection);
         if (!selectedText) return;
 
-        useLayoutStore.getState().setAgentView("task");
-        if (!rightVisible) toggleRightPanel();
+
+        const layout = useLayoutStore.getState();
+        layout.setAgentView("task");
+        if (!layout.rightVisible) layout.toggleRightPanel();
+
+        const editorState = useEditorStore.getState();
+        const currentFile = editorState.activeFile;
 
         const prompt = buildActionPrompt(
           action,
           selectedText,
-          activeFile,
+          currentFile,
           selection.startLineNumber,
           selection.endLineNumber
         );
 
-        addMessage({
+        const agent = useAgentStore.getState();
+        agent.addMessage({
           id: `ctx-${Date.now()}`,
           role: "user",
           content: prompt,
           timestamp: Date.now(),
         });
 
-        await sendPrompt({
+        await agent.sendPrompt({
           prompt,
-          contextFiles: activeFile ? [activeFile] : [],
-          activeFile: activeFile ?? undefined,
-          activeFileContent: activeFile ? fileContents[activeFile] : undefined,
+          contextFiles: currentFile ? [currentFile] : [],
+          activeFile: currentFile ?? undefined,
+          activeFileContent: currentFile
+            ? editorState.fileContents[currentFile]
+            : undefined,
           selection: selectedText,
           ideMode: "code",
         });
       };
+
 
       for (const act of AGENT_QUICK_ACTIONS) {
         const disposable = editorInst.addAction({
@@ -477,42 +505,57 @@ export default function EditorContainer() {
         disposablesRef.current.add(disposable);
       }
 
-      // ▸▸▸ Agent lightbulb (CodeActionProvider)
-      const agentLightbulbDisposable = monacoInst.languages.registerCodeActionProvider("*", {
-        provideCodeActions: (_model, _range, _context) => {
-          if (isAgentBusy()) return { actions: [], dispose: () => {} };
-          const selection = editorInst.getSelection();
-          if (!selection || selection.isEmpty()) return { actions: [], dispose: () => {} };
-          // only show lightbulb when there's a selection (not just cursor)
-          const model = editorInst.getModel();
-          if (!model) return { actions: [], dispose: () => {} };
-          const selectedText = model.getValueInRange(selection);
-          if (!selectedText || selectedText.length < 1) return { actions: [], dispose: () => {} };
+      // ▸▸▸ Agent lightbulb 与它的命令：**全局**注册，只做一次
+      //
+      // `registerCodeActionProvider` 和 `registerCommand` 挂在 `monacoInst` 上，
+      // 不属于某个编辑器实例。而 `key={activeFile}` 让编辑器每次切 tab 重挂载，
+      // 所以不加守卫的话每切一次 tab 就多一份 provider，只在组件卸载时才清 ——
+      // 每一份都还捏着一个已经被释放的编辑器实例去调 `getSelection()`。
+      if (!agentGlobalsRegisteredRef.current) {
+        agentGlobalsRegisteredRef.current = true;
 
-          return {
-            actions: AGENT_QUICK_ACTIONS.map((act) => ({
-              title: `${act.icon} ${act.label} with Agent`,
-              kind: "refactor.rewrite",
-              diagnostics: [],
-              command: {
-                id: `agent-ide.lightbulb-${act.key}`,
-                title: `${act.label} with Agent`,
-              },
-            })),
-            dispose: () => {},
-          };
-        },
-      });
-      disposablesRef.current.add(agentLightbulbDisposable);
+        const agentLightbulbDisposable = monacoInst.languages.registerCodeActionProvider("*", {
+          provideCodeActions: (_model, _range, _context) => {
+            const empty = { actions: [], dispose: () => {} };
+            if (isAgentBusy()) return empty;
+            const activeEditor = activeEditorRef.current;
+            if (!activeEditor) return empty;
+            const selection = activeEditor.getSelection();
+            if (!selection || selection.isEmpty()) return empty;
+            // 只在真的选中了内容时给灯泡，光标停着不算
+            const model = activeEditor.getModel();
+            if (!model) return empty;
+            const selectedText = model.getValueInRange(selection);
+            if (!selectedText) return empty;
 
-      // Register commands for lightbulb actions
-      for (const act of AGENT_QUICK_ACTIONS) {
-        const cmdDisposable = monacoInst.editor.registerCommand(
-          `agent-ide.lightbulb-${act.key}`,
-          () => { void runAgentAction(act.key as AgentQuickActionKey); }
-        );
-        disposablesRef.current.add(cmdDisposable);
+            return {
+              actions: AGENT_QUICK_ACTIONS.map((act) => ({
+                title: `${act.icon} ${act.label} with Agent`,
+                kind: "refactor.rewrite",
+                diagnostics: [],
+                command: {
+                  id: `agent-ide.lightbulb-${act.key}`,
+                  title: `${act.label} with Agent`,
+                },
+              })),
+              dispose: () => {},
+            };
+          },
+        });
+        disposablesRef.current.add(agentLightbulbDisposable);
+
+        for (const act of AGENT_QUICK_ACTIONS) {
+          const cmdDisposable = monacoInst.editor.registerCommand(
+            `agent-ide.lightbulb-${act.key}`,
+            () => {
+              void runAgentActionRef.current?.(act.key as AgentQuickActionKey);
+            }
+          );
+          disposablesRef.current.add(cmdDisposable);
+        }
       }
+      // 命令只注册一次，所以它得通过 ref 找到**当前**这次挂载建立的处理函数
+      runAgentActionRef.current = runAgentAction;
     },
     [addLog, setCursorPosition, setSelectedRange, setSelectedText, updateFileContent]
   );
