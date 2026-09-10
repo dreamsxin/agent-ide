@@ -109,9 +109,14 @@ describe("run usage", () => {
   it("calls out a partial report, because the cap undercounts there", () => {
     const described = describeRunUsage(usage({ reportedCalls: 1 }), formatMicrosUsd);
 
-    expect(described?.label).toBe("1500 tok · $0.0020");
+    // `≥` 必须出现在可见标签上，不能只写在 tooltip 里
+    expect(described?.label).toBe("\u22651500 tok · \u2265$0.0020");
     expect(described?.detail).toContain("lower bound");
     expect(described?.detail).toContain("undercounts");
+  });
+
+  it("does not mark a complete report as a lower bound", () => {
+    expect(describeRunUsage(usage(), formatMicrosUsd)?.label).toBe("1500 tok · $0.0020");
   });
 
   it("distinguishes an uncomputable cost from a free run", () => {
@@ -144,6 +149,24 @@ describe("normalizeRunUsage", () => {
       calls: 0,
       reportedCalls: 0,
     });
+  });
+
+  /**
+   * `typeof NaN === "number"`，所以只看 typeof 挡不住它。放过去的话状态栏会
+   * 渲染出 `$NaN.0NaN`；负数则会显示成负花费。
+   */
+  it("rejects NaN and Infinity, and clamps negatives", () => {
+    const normalized = normalizeRunUsage({
+      totalTokens: Number.NaN,
+      spendMicros: Number.POSITIVE_INFINITY,
+      maxSpendMicros: -5,
+      calls: 2,
+      reportedCalls: 2,
+    });
+
+    expect(normalized?.totalTokens).toBe(0);
+    expect(normalized?.spendMicros).toBeNull();
+    expect(normalized?.maxSpendMicros).toBe(0);
   });
 });
 

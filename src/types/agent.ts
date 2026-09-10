@@ -54,8 +54,17 @@ export interface RunUsage {
 export function normalizeRunUsage(value: unknown): RunUsage | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
-  const count = (key: string) => (typeof raw[key] === "number" ? (raw[key] as number) : 0);
-  const optional = (key: string) => (typeof raw[key] === "number" ? (raw[key] as number) : null);
+  // `typeof NaN === "number"`，所以光看 typeof 不够：NaN 或负数漏进去，
+  // 状态栏就会渲染出 `$NaN.0NaN` 这种东西。计数不可能为负，钳到 0。
+  const finite = (key: string): number | null => {
+    const candidate = raw[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+  };
+  const count = (key: string) => Math.max(0, finite(key) ?? 0);
+  const optional = (key: string) => {
+    const candidate = finite(key);
+    return candidate === null ? null : Math.max(0, candidate);
+  };
   return {
     totalTokens: count("totalTokens"),
     maxTotalTokens: optional("maxTotalTokens"),
@@ -97,9 +106,13 @@ export function describeRunUsage(
   }
 
   const spend = usage.spendMicros === null ? null : formatSpend(usage.spendMicros);
+  // 部分回报时用 `≥` 把"这是下界"摆在**可见**的标签上，而不是只写进 tooltip：
+  // 只有 hover 才看得到的限定词，键盘和读屏用户永远看不到，而那正是这条信息
+  // 最要紧的部分 —— 数字看起来正常，实际偏低，per-run 上限也因此偏松。
+  const bound = usage.reportedCalls < usage.calls ? "\u2265" : "";
   const label = spend
-    ? `${usage.totalTokens} tok · ${spend}`
-    : `${usage.totalTokens} tok`;
+    ? `${bound}${usage.totalTokens} tok · ${bound}${spend}`
+    : `${bound}${usage.totalTokens} tok`;
   const partial =
     usage.reportedCalls < usage.calls
       ? ` Only ${usage.reportedCalls} of ${usage.calls} calls reported usage, so this is a lower bound and the per-run cap undercounts.`
