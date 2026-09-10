@@ -553,7 +553,7 @@ Highest-impact gaps:
 
 1. **Autonomous repair loop** (largest remaining gap)
    - The model can read the workspace, run the project's check commands, and — in `auto` mode — write files, so a full observe/change/verify cycle is now possible within one stage's tool loop.
-   - The orchestrator does drive that cycle now: `repair_until_checks_pass` (`orchestrator.rs`) runs verify → repair → re-verify under a shared `RepairPolicy`, exposed as the `repair_workspace` command and reachable from `Auto Repair` in the Commands panel. What remains is that a *stage* failure still aborts the pipeline (`orchestrator.rs` returns `Err`) rather than being fed back as a repair round.
+   - The orchestrator does drive that cycle now: `drive_repair` (`orchestrator.rs`) runs verify → repair → re-verify under a shared `RepairPolicy`, exposed as the `repair_workspace` command and reachable from `Auto Repair` in the Commands panel. What remains is that a *stage* failure still aborts the pipeline (`orchestrator.rs` returns `Err`) rather than being fed back as a repair round.
    - `agent_cli` has a bounded repair loop (`--max-iterations`, default 0 = off); the desktop app has `verify_workspace` + `agent_repair_prompt` and a `Verify All` / `Fix with Agent` path, but each is a single user-triggered round.
    - Target: an orchestrator-level bounded repair loop reusing `services/verification.rs`.
 
@@ -650,7 +650,7 @@ These are targets, not verified measurements. Baseline tests are a Phase 10 item
 Ordered by dependency, not by appeal:
 
 1. **Write tool.** Done: `workspace_write_file`, advertised only in `auto` mode, recorded as an applied+undoable diff.
-2. **Autonomous bounded repair loop.** Landed. The prompt builder and check runner are shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `repair_until_checks_pass` runs verify → repair → re-verify bounded by `RepairPolicy`, reachable as `Auto Repair` in the Commands panel and as the CLI's `--repair-iterations`. Still open: a failed *stage* aborts the pipeline instead of becoming a repair round.
+2. **Autonomous bounded repair loop.** Landed. The prompt builder and check runner are shared (`services/verification.rs`, `verify_workspace`, `agent_repair_prompt`), and `drive_repair` runs verify → repair → re-verify bounded by `RepairPolicy`, reachable as `Auto Repair` in the Commands panel and as the CLI's `--repair-iterations`. Still open: a failed *stage* aborts the pipeline instead of becoming a repair round.
 3. **Persistent message thread per run.** Done: stages exchange real `assistant` / `tool` messages (`executor::StageOutcome`), so tool results survive across stages and a pause/resume. Prompt caching is still not implemented — no cache-control markers are sent — and the thread is not persisted across a process restart.
 4. **Symbol index and retrieval.** tree-sitter symbol index plus local retrieval feeding `budgeted` packing. Prerequisite for large workspaces, where the 160-entry project tree is not a usable map.
 5. **Parallel subagents with worktree isolation.** Depends on (1): parallel agents that cannot write have nothing to isolate.
