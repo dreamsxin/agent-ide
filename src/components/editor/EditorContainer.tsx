@@ -140,17 +140,21 @@ export default function EditorContainer() {
     return () => window.removeEventListener("keydown", handler);
   }, [saveCurrentFile]);
 
-  // 组件卸载时清理所有 Monaco disposable
+  // 卸载时清掉 per-editor 的 disposable，并把"当前编辑器"交还给模块 ——
+  // 模块级注册活到页面结束，而这个实例马上就被 Monaco 释放了，不清就等于把一个
+  // 死实例留在全局变量里。`App.tsx` 把本组件包在 ErrorBoundary 里，任何一个兄弟
+  // 组件抛异常都会走到这条路径，而那时 tab 还开着，所以下面那个按 tab 判断的
+  // effect 覆盖不到。
   useEffect(() => {
     return () => {
       disposablesRef.current.forEach((d) => d.dispose());
       disposablesRef.current.clear();
+      setCurrentEditor(null);
     };
   }, []);
 
-  // 关掉最后一个 tab 时 `<MonacoEditor>` 整体卸载，编辑器实例被 Monaco 释放 ——
-  // 但灯泡 provider 和 apply-code-action 注册在 monaco 模块上，活到页面结束。所以
-  // 这里必须主动把"当前编辑器"清空，否则它们会拿一个已释放的实例去调
+  // 关掉最后一个 tab 时 `<MonacoEditor>` 单独卸载（本组件还在），编辑器实例同样
+  // 被释放。不清空的话灯泡 provider 和 apply-code-action 会拿它去调
   // `getSelection()` / `getModel()`；`MonacoContext` 也一样，消费者会照着一个死
   // 实例算坐标。
   const hasActiveTab = Boolean(activeTab);

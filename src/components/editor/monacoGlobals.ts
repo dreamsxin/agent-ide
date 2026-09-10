@@ -78,16 +78,12 @@ const APPLY_CODE_ACTION_COMMAND = "agent-ide.apply-code-action";
  */
 let currentEditor: editor.IStandaloneCodeEditor | null = null;
 
-/** 挂载时传入实例；最后一个 tab 关掉、编辑器被卸载时必须传 `null`。 */
+/** 挂载时传入实例；编辑器（或整个容器）卸载时必须传 `null`。 */
 export function setCurrentEditor(instance: editor.IStandaloneCodeEditor | null) {
   currentEditor = instance;
 }
 
-export function getCurrentEditor() {
-  return currentEditor;
-}
-
-export function isAgentBusy() {
+function isAgentBusy() {
   const state = useAgentStore.getState().state;
   return (
     state !== "idle" && state !== "done" && state !== "error" && state !== "waiting_user"
@@ -328,7 +324,7 @@ function registerLspProviders(monaco: Monaco) {
   );
 }
 
-export async function applyLspCodeAction(
+async function applyLspCodeAction(
   monaco: Monaco,
   title: string,
   edit: LspWorkspaceEdit
