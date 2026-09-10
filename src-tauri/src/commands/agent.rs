@@ -35,6 +35,23 @@ pub struct AgentGlobalState {
         Arc<std::sync::Mutex<HashMap<String, Arc<dyn crate::services::llm_client::ModelEngine>>>>,
 }
 
+/// 本地推理引擎缓存的键。
+///
+/// `profile_id: None` 表示"当前 profile"——`llm_profiles::resolve_llm_config` 就是
+/// 这么解释它的——所以键必须是**解析后的真实 id**，不能是别的哨兵值。
+///
+/// 这里以前有三个互不相同的答案：`get_llm_client` 和 `unload_local_model` 用字面量
+/// `"active"`，`local_model_status` 用真实的 active id。后果有两个，都是用户能看见的：
+/// 一次不带 profileId 的运行把引擎存进 `"active"`，设置页却去真实 id 下查，于是本地
+/// 模型明明加载着却显示未加载，点 Load 还会报 "Local engine is not configured"；而带上
+/// profileId 的运行会为同一个模型再建一个引擎，同一份几 GB 的权重进两次内存。
+fn engine_cache_key(profile_id: Option<&str>, active_profile_id: &str) -> String {
+    match profile_id.map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => active_profile_id.to_string(),
+    }
+}
+
 impl AgentGlobalState {
     pub fn new() -> Self {
         let profiles_config = llm_profiles::load_or_default_config();
@@ -71,17 +88,7 @@ impl AgentGlobalState {
                 .with_spend_cap(pricing, max_spend_micros),
         );
         if let Some(local) = config.local_model_config.clone() {
-            let key = profile_id.unwrap_or("active").to_string();
-            let engine = {
-                let mut engines = self.local_engines.lock().map_err(|e| e.to_string())?;
-                if let Some(engine) = engines.get(&key) {
-                    engine.clone()
-                } else {
-                    let engine = crate::services::llm_client::create_local_model_engine(local)?;
-                    engines.insert(key, engine.clone());
-                    engine
-                }
-            };
+            let engine = self.local_engine_for(profile_id, local)?;
             return Ok((
                 LlmClient::new(config)
                     .with_local_engine(engine)
@@ -93,6 +100,36 @@ impl AgentGlobalState {
             LlmClient::new(config).with_usage_meter(meter.clone()),
             meter,
         ))
+    }
+
+    /// 当前生效的 profile id。`None` 一律表示"当前 profile"，和
+    /// `llm_profiles::resolve_llm_config` 的语义保持一致。
+    pub fn active_profile_id(&self) -> Result<String, String> {
+        Ok(self
+            .llm_profiles
+            .lock()
+            .map_err(|e| e.to_string())?
+            .active_profile_id
+            .clone())
+    }
+
+    /// 取（必要时创建）某个 profile 的本地推理引擎。
+    ///
+    /// 缓存里一个 profile 只能有一个引擎：权重是几 GB 级的，同一个模型进两次内存
+    /// 就是几 GB 的浪费。所以键一律走 `engine_cache_key`。
+    pub fn local_engine_for(
+        &self,
+        profile_id: Option<&str>,
+        local: crate::services::llm_client::LocalModelConfig,
+    ) -> Result<Arc<dyn crate::services::llm_client::ModelEngine>, String> {
+        let key = engine_cache_key(profile_id, &self.active_profile_id()?);
+        let mut engines = self.local_engines.lock().map_err(|e| e.to_string())?;
+        if let Some(engine) = engines.get(&key) {
+            return Ok(engine.clone());
+        }
+        let engine = crate::services::llm_client::create_local_model_engine(local)?;
+        engines.insert(key, engine.clone());
+        Ok(engine)
     }
 
     pub fn get_run_token_cap(&self, profile_id: Option<&str>) -> Option<u64> {
@@ -1459,6 +1496,32 @@ mod tests {
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
 
+    /// 缓存键的全部意义就是"这三处必须落在同一个格子里"：一次运行取客户端、
+    /// 设置页查状态、点 Unload。以前它们各写一份，于是模型加载着却显示未加载。
+    #[test]
+    fn engine_cache_key_agrees_for_an_omitted_and_an_explicit_active_profile() {
+        assert_eq!(
+            engine_cache_key(None, "default"),
+            engine_cache_key(Some("default"), "default")
+        );
+    }
+
+    #[test]
+    fn engine_cache_key_keeps_other_profiles_in_their_own_slot() {
+        assert_ne!(
+            engine_cache_key(Some("other"), "default"),
+            engine_cache_key(None, "default")
+        );
+        assert_eq!(engine_cache_key(Some(" other "), "default"), "other");
+    }
+
+    /// 前端传的是 `profileId || null`，空串照样会到这里；它不是一个 profile。
+    #[test]
+    fn engine_cache_key_treats_an_empty_id_as_the_active_profile() {
+        assert_eq!(engine_cache_key(Some(""), "default"), "default");
+        assert_eq!(engine_cache_key(Some("   "), "default"), "default");
+    }
+
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。
     /// 这两条以前只能靠跑桌面应用才验证得到，因为函数签名收的是 `State`。
     #[test]
@@ -1795,7 +1858,7 @@ fn local_model_status(
         .map_err(|e| e.to_string())?
         .active_profile_id
         .clone();
-    let id = profile_id.unwrap_or(active_id);
+    let id = engine_cache_key(profile_id.as_deref(), &active_id);
     let config = agent_state.get_llm_config(Some(&id))?;
     let local = config
         .local_model_config
@@ -1831,13 +1894,13 @@ pub async fn load_local_model(
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<LocalModelStatus, String> {
     let status = local_model_status(profile_id.clone(), &agent_state)?;
-    let engine = agent_state
-        .local_engines
-        .lock()
-        .map_err(|e| e.to_string())?
-        .get(&status.profile_id)
-        .cloned()
-        .ok_or_else(|| "Local engine is not configured".to_string())?;
+    // 引擎以前只在一次真正的运行里被懒创建，而这里只 `get`，所以刚启动就点 Load
+    // 必然报 "Local engine is not configured" —— 一个永远失败的按钮。自己建。
+    let local = agent_state
+        .get_llm_config(Some(&status.profile_id))?
+        .local_model_config
+        .ok_or_else(|| "Selected profile is not local".to_string())?;
+    let engine = agent_state.local_engine_for(Some(&status.profile_id), local)?;
     engine.load_model().await?;
     local_model_status(Some(status.profile_id), &agent_state)
 }
@@ -1847,7 +1910,7 @@ pub async fn unload_local_model(
     profile_id: Option<String>,
     agent_state: State<'_, AgentGlobalState>,
 ) -> Result<(), String> {
-    let id = profile_id.unwrap_or_else(|| "active".to_string());
+    let id = engine_cache_key(profile_id.as_deref(), &agent_state.active_profile_id()?);
     let engine = {
         let engines = agent_state
             .local_engines
