@@ -20,7 +20,7 @@ const SEVERITY_COLOR: Record<ProblemSeverity, string> = {
  * 更糟：只有打开底部面板的 Problems 页才看得到，于是"代码有几个错误"这种应该
  * 一直在视野里的事实，需要主动去翻。
  *
- * 这里只放**已经存在的数据**。光标位置、编码、Git 分支都还没有可用的数据源
+ * 这里只放**已经存在的数据**。编码、行尾、Git 分支都还没有可用的数据源
  * （分支的 fetch 只在 GitPanel 里触发），先不占位 —— 空着的段位比没有更糟。
  */
 export default function StatusBar() {
@@ -29,6 +29,7 @@ export default function StatusBar() {
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
+  const cursorPosition = useEditorStore((s) => s.cursorPosition);
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
@@ -77,9 +78,16 @@ export default function StatusBar() {
         </button>
 
         {activeTab && (
-          <span title={activeTab.path} className="font-mono">
-            {activeTab.language}
-          </span>
+          <>
+            {cursorPosition && (
+              <span data-testid="status-bar-cursor" className="font-mono">
+                Ln {cursorPosition.line}, Col {cursorPosition.column}
+              </span>
+            )}
+            <span title={activeTab.path} className="font-mono">
+              {activeTab.language}
+            </span>
+          </>
         )}
       </div>
 

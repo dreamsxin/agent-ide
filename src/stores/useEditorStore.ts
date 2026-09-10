@@ -33,6 +33,13 @@ interface EditorStore {
   // 选区
   selectedText: string | null;
   selectedRange: { startLine: number; endLine: number } | null;
+  /**
+   * 当前光标位置（1-based，跟 Monaco 一致）。
+   *
+   * 和 `selectedRange` 分开存：后者只在选区**非空**时有值，一取消选择就被清成
+   * null，所以它回答不了"我现在在第几行"这个一直成立的问题。
+   */
+  cursorPosition: { line: number; column: number } | null;
   pendingRevealLocation: { file: string; line: number; column: number } | null;
 
   // ====== 文件打开/关闭 ======
@@ -74,6 +81,7 @@ interface EditorStore {
 
   setSelectedText: (text: string | null) => void;
   setSelectedRange: (range: { startLine: number; endLine: number } | null) => void;
+  setCursorPosition: (position: { line: number; column: number } | null) => void;
   revealLocation: (file: string, line: number, column: number) => void;
   clearPendingRevealLocation: () => void;
 }
@@ -90,6 +98,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   intentHints: [],
   selectedText: null,
   selectedRange: null,
+  cursorPosition: null,
   pendingRevealLocation: null,
 
   openFile: async (tab) => {
@@ -145,6 +154,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         openFiles: remaining,
         activeFile: newActive,
         fileContents: restContents,
+        // 关掉的正是当前文件时，光标位置跟着作废
+        cursorPosition: newActive === s.activeFile ? s.cursorPosition : null,
       };
     });
     persistEditorSession();
@@ -152,7 +163,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setActiveFile: (path) => {
     const existing = get().openFiles.find((file) => pathsEqual(file.path, path));
-    set({ activeFile: existing?.path ?? normalizeFilePath(path) });
+    // 换 tab 时旧位置立刻失效：Monaco 会在切模型后重新报一次，宁可空一帧
+    // 也不要显示上一个文件的行号
+    set({ activeFile: existing?.path ?? normalizeFilePath(path), cursorPosition: null });
     persistEditorSession();
   },
 
@@ -400,6 +413,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setSelectedText: (selectedText) => set({ selectedText }),
   setSelectedRange: (selectedRange) => set({ selectedRange }),
+  setCursorPosition: (cursorPosition) => set({ cursorPosition }),
   revealLocation: (file, line, column) =>
     set({ pendingRevealLocation: { file, line, column } }),
   clearPendingRevealLocation: () => set({ pendingRevealLocation: null }),
