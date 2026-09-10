@@ -56,29 +56,39 @@ const AGENT_VIEWS: AgentViewId[] = ["task", "plan", "changes", "pipeline", "sett
 
 /**
  * 竖直方向上不属于任何面板的固定开销：TopBar 40 + 拖拽条 4 + StatusBar 24。
- * 底部面板之外只剩编辑器一列，所以编辑器高度 = 窗口高 - 这些 - bottomHeight。
+ * 底部面板之外只剩编辑器一列，所以编辑器列高 = 窗口高 - 这些 - bottomHeight。
  */
-const VERTICAL_CHROME = 68;
+export const VERTICAL_CHROME = 68;
 /**
- * 编辑器至少要留下的高度。窗口最小高度是 600（tauri.conf.json），底部面板的
- * 上限 500 是个和窗口无关的字面量，两者一撞编辑器只剩 32px —— 一个标签栏就吃满了。
+ * 编辑器**这一列**至少要留下的高度 —— 不等于 Monaco 拿到的高度：`EditorTabs`
+ * 约 29px，保存失败横幅出现时再吃掉约 28px，所以 200 落到代码区约 145px。
+ * 窗口最小高度是 600（tauri.conf.json），底部面板上限 500 是个和窗口无关的字面量，
+ * 两者一撞编辑器列只剩 32px，连标签栏都放不下。
  */
-const MIN_EDITOR_HEIGHT = 160;
+export const MIN_EDITOR_COLUMN_HEIGHT = 200;
 
-/** 尺寸的合法区间，读取存档和调整尺寸走同一套规则，避免两处漂移 */
+/**
+ * 当前窗口高度下，底部面板最多能有多高。纯函数、视口从参数进来：既能在 node
+ * 环境的测试里直接算，也让"上限"只有这一处定义。
+ */
+export function maxBottomHeight(viewportHeight: number) {
+  const room = viewportHeight - VERTICAL_CHROME - MIN_EDITOR_COLUMN_HEIGHT;
+  // 下限 120 优先于上面那个承诺：窗口小到 388 以下时编辑器列会低于 200，
+  // 但面板本身再压就没有内容区了。Tauri 的最小高度 600 保证不会走到这里，
+  // 浏览器预览（npm run dev）和 devtools 停靠时可以。
+  return Math.max(120, Math.min(500, Math.floor(room)));
+}
+
+/**
+ * 尺寸的合法区间，读取存档和调整尺寸走同一套规则，避免两处漂移。
+ *
+ * `clampBottom` **刻意和窗口无关**：它是用户的意图，要原样存下来。窗口太小的时候
+ * 由渲染侧取 `min(意图, maxBottomHeight(视口))`，这样缩小窗口不会把用户在大屏上
+ * 拖出来的 500 永久改写成 372 —— 那是一次用户看不见、也无法撤销的偏好丢失。
+ */
 const clampLeft = (w: number) => Math.max(180, Math.min(500, w));
 const clampRight = (w: number) => Math.max(280, Math.min(600, w));
-/**
- * 底部面板的上限跟着窗口高度走。固定上限的问题不只是拖得太狠：存档里的高度是在
- * 大屏上存下来的，换到小窗口第一帧就已经把编辑器压没了，用户还没碰任何东西。
- * 没有 window（node 环境下的测试）时退回固定上限。
- */
-function maxBottomHeight() {
-  if (typeof window === "undefined") return 500;
-  const room = window.innerHeight - VERTICAL_CHROME - MIN_EDITOR_HEIGHT;
-  return Math.max(120, Math.min(500, room));
-}
-const clampBottom = (h: number) => Math.max(120, Math.min(maxBottomHeight(), h));
+const clampBottom = (h: number) => Math.max(120, Math.min(500, h));
 
 /** 会被记住的那部分布局状态 */
 type PersistedLayout = Pick<

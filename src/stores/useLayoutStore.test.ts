@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { useLayoutStore } from "./useLayoutStore";
+import {
+  MIN_EDITOR_COLUMN_HEIGHT,
+  VERTICAL_CHROME,
+  maxBottomHeight,
+  useLayoutStore,
+} from "./useLayoutStore";
 
 describe("layout navigation state", () => {
   afterEach(() => {
@@ -33,3 +38,31 @@ describe("performance overlay", () => {
     expect(useLayoutStore.getState().performanceOverlay).toBe(false);
   });
 });
+
+describe("maxBottomHeight", () => {
+  /**
+   * 断言落在真正重要的性质上 —— "编辑器列至少还剩这么高" —— 而不是某个具体像素值。
+   * 写死 372 的话，以后调 MIN_EDITOR_COLUMN_HEIGHT 会得到一条指着纯算术恒等式的
+   * 失败信息，看不出哪个不变量被破坏了。
+   */
+  it("always leaves the editor column its minimum at the smallest allowed window", () => {
+    // 600 = tauri.conf.json 里的 minHeight
+    const max = maxBottomHeight(600);
+    expect(600 - VERTICAL_CHROME - max).toBeGreaterThanOrEqual(MIN_EDITOR_COLUMN_HEIGHT);
+    // 而且确实比固定上限收紧了，否则这条断言可以恒真通过
+    expect(max).toBeLessThan(500);
+  });
+
+  it("keeps the fixed 500 ceiling when the window has room to spare", () => {
+    expect(maxBottomHeight(1200)).toBe(500);
+    expect(maxBottomHeight(900)).toBe(500);
+  });
+
+  it("never goes below the panel's own minimum, and stays an integer", () => {
+    // 分数 DPI 缩放下 innerHeight 可以是小数；高度会被写进存档，不能带小数
+    expect(Number.isInteger(maxBottomHeight(720.5))).toBe(true);
+    // 浏览器预览里窗口可以小到 Tauri 不允许的尺寸：这时面板下限赢，编辑器被压
+    expect(maxBottomHeight(300)).toBe(120);
+  });
+});
+
