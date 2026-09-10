@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { Tree, type NodeRendererProps } from "react-arborist";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -182,6 +182,13 @@ export default function Explorer() {
   const [nameDialogError, setNameDialogError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  // react-arborist 要一个像素高度做虚拟滚动，它自己不量容器。以前这里传的是
+  // `window.innerHeight - 120`，和这个容器的真实高度没有关系：底部面板一开，左侧
+  // 面板比那个数矮几百像素，于是虚拟视口比可见区域高，树的最后几十行永远滚不到
+  // （外层 overflow-hidden 把它们裁掉了）。窗口 resize 也不会重算，因为那是渲染期
+  // 读的一个全局量，没有任何东西订阅它。改成量容器本身。
+  const treeViewportRef = useRef<HTMLDivElement>(null);
+  const [treeHeight, setTreeHeight] = useState(0);
 
   const explorerKey = useEditorStore((s) => s.explorerKey);
   const workspacePath = useEditorStore((s) => s.workspacePath);
@@ -260,6 +267,21 @@ export default function Explorer() {
     return () => {
       unlisten?.();
     };
+  }, []);
+
+  // 量容器高度：ResizeObserver 覆盖窗口缩放、底部面板开合、左栏拖宽后的换行等
+  // 一切原因，不用去枚举"高度可能因为什么变了"。useLayoutEffect 是为了首帧就有值，
+  // 否则树会先渲染一帧高度 0 的空列表。
+  useLayoutEffect(() => {
+    const element = treeViewportRef.current;
+    if (!element) return;
+    setTreeHeight(element.clientHeight);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      setTreeHeight(element.clientHeight);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
   function showToast(msg: string) {
@@ -592,6 +614,7 @@ export default function Explorer() {
 
       {/* 树 */}
       <div
+        ref={treeViewportRef}
         className="flex-1 overflow-hidden"
         onContextMenu={(event) => {
           event.preventDefault();
@@ -617,7 +640,7 @@ export default function Explorer() {
             data={rootData}
             idAccessor="id"
             childrenAccessor={(d) => d.children ?? null}
-            height={(window.innerHeight || 600) - 120}
+            height={treeHeight}
             width="100%"
             indent={14}
             rowHeight={26}
