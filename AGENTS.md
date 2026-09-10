@@ -106,7 +106,10 @@ npm test
 - **Documentation claims must be verified against the code.** Repeated doc drift
   here has included a fabricated CLI help block, an inert flag described as
   working, and stale test counts. If you change behaviour, grep the docs for the
-  old claim.
+  old claim. When a bug report asserts a *consequence*, that consequence needs its
+  own evidence: a whole cache-key fix was once written up with two user-visible
+  symptoms that the code could not produce, because the map's only writer always
+  returned an error.
 - **Assertions sit on the property that matters**, not on incidental shape. A
   command that cannot launch reports a missing executable differently on Windows
   than elsewhere; assert "counted as a failure, earlier results survive".
