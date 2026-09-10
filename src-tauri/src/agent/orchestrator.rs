@@ -3848,6 +3848,34 @@ mod tests {
         orchestrator.finish_run(recovered.claim);
         assert_eq!(orchestrator.current_run_id, None);
     }
+
+    /// 把 `cancel` 移走之后，执行权仍然属于这次运行。
+    ///
+    /// 四个入口都是这么用的：`let claim = lease.claim;` 然后把 `lease.cancel` 交给
+    /// 驱动器。部分移动不会顺带丢掉 `_alive`，所以执行权活到函数结束 —— 但这条
+    /// 性质是四处调用点默默依赖的，而它靠的是"部分移动只移动那一个字段"这个语言
+    /// 细节。哪天有人把 lease 解构掉，执行权会在运行还在跑的时候就被回收。
+    #[test]
+    fn moving_the_cancel_switch_out_does_not_release_the_slot() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let lease = orchestrator
+            .try_begin_run(Some("run-1".to_string()))
+            .expect("空闲时应当抢到执行权");
+        let claim = lease.claim;
+        let _cancel = lease.cancel;
+
+        assert!(
+            orchestrator.try_begin_run(Some("run-2".to_string())).is_err(),
+            "开关被移走不代表这次运行结束了"
+        );
+
+        orchestrator.finish_run(claim);
+        let next = orchestrator
+            .try_begin_run(Some("run-2".to_string()))
+            .expect("正常收尾之后应当能再开一个");
+        orchestrator.finish_run(next.claim);
+    }
     ///
     /// `repair_workspace` 会跨 await 一直持着那把锁。第一版把开关只放在
     /// orchestrator 里，于是 Stop 得先抢锁 —— 只能干等到修复自己结束，而那时开关
