@@ -269,20 +269,28 @@ export default function Explorer() {
     };
   }, []);
 
-  // 量容器高度：ResizeObserver 覆盖窗口缩放、底部面板开合、左栏拖宽后的换行等
-  // 一切原因，不用去枚举"高度可能因为什么变了"。useLayoutEffect 是为了首帧就有值，
-  // 否则树会先渲染一帧高度 0 的空列表。
+  // 量容器高度：ResizeObserver 覆盖窗口缩放、底部面板开合、剪贴板条出现等一切
+  // 原因，不用去枚举"高度可能因为什么变了"。这个 div 无条件渲染，effect 的 `[]`
+  // 依赖才成立；它还必须保持 `overflow-hidden`，否则子内容会反过来撑高容器，
+  // ResizeObserver 就成了自激回路。
   useLayoutEffect(() => {
     const element = treeViewportRef.current;
     if (!element) return;
-    setTreeHeight(element.clientHeight);
+    // 只接受正数。面板收起动画期间容器是 display:none，量出来是 0，而 0 不是
+    // "不知道"：react-arborist 的默认高度 500 只在 `undefined` 时生效，传 0 它就
+    // 老老实实渲染一个 0 行的列表 —— 整棵树空掉，还看不出为什么。Terminal 里的
+    // ResizeObserver 也是这么挡的。
+    const measure = () => {
+      const next = element.clientHeight;
+      if (next > 0) setTreeHeight(next);
+    };
+    measure();
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      setTreeHeight(element.clientHeight);
-    });
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
 
   function showToast(msg: string) {
     setToast(msg);
@@ -640,7 +648,8 @@ export default function Explorer() {
             data={rootData}
             idAccessor="id"
             childrenAccessor={(d) => d.children ?? null}
-            height={treeHeight}
+            // 还没量到的时候传 undefined，让库用它自己的默认高度；传 0 会渲染空树
+            height={treeHeight || undefined}
             width="100%"
             indent={14}
             rowHeight={26}
