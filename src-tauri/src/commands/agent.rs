@@ -1185,36 +1185,43 @@ pub async fn repair_workspace(
     let max_iterations = request.max_iterations.unwrap_or(1).clamp(1, 3);
     let (llm, usage_meter) = agent_state.get_llm_client(None)?;
 
-    let mut orch = agent_state.orchestrator.lock().await;
-    if !matches!(orch.mode, AgentMode::Auto) {
-        return Err(
-            "Automatic repair applies its own fixes, so it requires Auto mode.".to_string(),
-        );
-    }
-    // 抢执行权放在模式检查之后：检查不通过就直接返回，先抢会把执行权漏掉。
-    // 自动修复会自己往磁盘上落改动，和一次普通运行同等重量，所以必须走同一个守卫。
-    let last_run_id = orch.last_run_id.clone();
-    let lease = orch.try_begin_run(last_run_id)?;
-    let original_prompt = match request.original_prompt {
-        Some(prompt) if !prompt.trim().is_empty() => prompt,
-        _ => orch
-            .conversation
-            .last()
-            .map(|turn| turn.prompt.clone())
-            .unwrap_or_else(|| "(original task not recorded)".to_string()),
+    // 只在准备阶段持锁。循环本身由 `drive_repair` 按轮次短持锁 —— 整段持锁会连
+    // `get_agent_state` 一起堵住，界面因此永远不知道后端在忙。
+    let (lease, original_prompt) = {
+        let mut orch = agent_state.orchestrator.lock().await;
+        if !matches!(orch.mode, AgentMode::Auto) {
+            return Err(
+                "Automatic repair applies its own fixes, so it requires Auto mode.".to_string(),
+            );
+        }
+        // 抢执行权放在模式检查之后：检查不通过就直接返回，先抢会把执行权漏掉。
+        // 自动修复会自己往磁盘上落改动，和一次普通运行同等重量，所以必须走同一个守卫。
+        let last_run_id = orch.last_run_id.clone();
+        let lease = orch.try_begin_run(last_run_id)?;
+        let original_prompt = match request.original_prompt {
+            Some(prompt) if !prompt.trim().is_empty() => prompt,
+            _ => orch
+                .conversation
+                .last()
+                .map(|turn| turn.prompt.clone())
+                .unwrap_or_else(|| "(original task not recorded)".to_string()),
+        };
+        orch.start_usage_accounting(usage_meter.clone());
+        (lease, original_prompt)
     };
-    orch.start_usage_accounting(usage_meter.clone());
 
-    let outcome = orch
-        .repair_until_checks_pass(
-            &original_prompt,
-            commands,
-            crate::services::verification::RepairPolicy::new(max_iterations, true),
-            lease.cancel,
-            &llm,
-            std::sync::Arc::new(app_handle.clone()),
-        )
-        .await;
+    let outcome = crate::agent::orchestrator::drive_repair(
+        &agent_state.orchestrator,
+        original_prompt,
+        commands,
+        crate::services::verification::RepairPolicy::new(max_iterations, true),
+        lease.cancel,
+        &llm,
+        std::sync::Arc::new(app_handle.clone()),
+    )
+    .await;
+
+    let mut orch = agent_state.orchestrator.lock().await;
     // 记账写在两条路径上：修复轮次花掉的 token 和别的运行一样要能查到
     emit_usage_action_log(&orch, &app_handle, &usage_meter);
     // 释放要在 `?` 之前：修复失败也得把执行权交回去，否则后面所有运行都被拒
