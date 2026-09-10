@@ -59,16 +59,23 @@ npm test
   `RunEvents` trait (`agent/events.rs`); `AppHandle` implements it and tests pass
   `RecordingEvents`. Reintroducing `AppHandle` there makes the pipeline
   untestable, which is how it used to be.
-- **A pipeline run is driven by `drive_run` / `drive_pipeline`**, free functions
-  taking `&Mutex<AgentOrchestrator>`. Every state mutation lives in a
+- **A pipeline run is driven by `drive_run` / `drive_pipeline` / `drive_repair`**,
+  free functions taking `&Mutex<AgentOrchestrator>`. Every state mutation lives in a
   *synchronous* method (`begin_planning`, `record_plan`, `prepare_stage`,
-  `record_stage_outcome`, `finish_pipeline`), each one critical section, each with
-  a doc comment naming the invariant it lands. Two rules follow:
-  - Do not hold the orchestrator lock across an `await`. That is the bug this
-    shape exists to prevent — it made every other command queue behind a
-    multi-minute model call.
+  `record_stage_outcome`, `finish_pipeline`, `prepare_repair_iteration`,
+  `record_repair_apply`, `record_repair_iteration`), each one critical section, each
+  with a doc comment naming the invariant it lands. Two rules follow:
+  - Do not hold the orchestrator lock across an `await`. **There are no remaining
+    exceptions** — the last one, the repair loop, was converted for this reason.
+    Holding it makes every other command queue behind a multi-minute model call,
+    including `get_agent_state`, so the UI cannot even tell it is busy.
   - Do not split the orchestrator into per-field locks. Four invariants span
     fields; see Known Issues 16 in ROADMAP.md before proposing it again.
+- **Cancelling must not need the lock held by the work being cancelled.** `Stop`
+  pulls the current run's switch through `CancelRegistry` *before* it takes the
+  orchestrator lock. A run's cancel flag and its exclusivity claim both come from
+  `try_begin_run` as a `RunLease`, one fresh pair per run — a shared flag let a new
+  prompt un-cancel a still-draining old run.
 - **Every change the Agent lands must be visible and undoable.** Diffs go through
   the review area; direct tool writes are published back as `applied` diffs with
   their pre-write content plus an undo checkpoint (`record_tool_writes`), on every

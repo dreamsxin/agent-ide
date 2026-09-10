@@ -259,6 +259,33 @@ pub enum StagePlan {
     Paused,
 }
 
+/// 修复循环的本地状态，由驱动器持有 —— 和 `PipelineRun` 同一个道理。
+///
+/// 它不放进 orchestrator，因为这些值属于**这一次**修复：一次修复的检查结果和
+/// 轮次计数对下一次毫无意义，存进共享状态只会多一份要记得清空的东西。
+pub struct RepairRun {
+    pub original_prompt: String,
+    pub commands: Vec<String>,
+    pub root: std::path::PathBuf,
+    pub policy: crate::services::verification::RepairPolicy,
+    /// 最近一次检查的完整结果
+    pub results: Vec<crate::services::project_tasks::RunProjectTaskResult>,
+    pub checks_failed: bool,
+    pub completed: u8,
+    pub apply_failed: bool,
+}
+
+/// `prepare_repair_iteration` 的结论：再修一轮，还是到此为止。
+pub enum RepairPlan {
+    Iterate {
+        iteration: u8,
+        step: TaskStep,
+        prompt: String,
+        tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
+    },
+    Done(RepairLoopOutcome),
+}
+
 #[derive(Debug, Clone)]
 pub struct PausedPipelineRun {
     pub prompt: String,
@@ -403,6 +430,97 @@ pub async fn drive_pipeline(
     }
 
     orch.lock().await.finish_pipeline(&run, events.as_ref())
+}
+
+/// 有界修复循环：跑检查 → 失败就让模型改 → 落盘 → 再跑检查。
+///
+/// CLI 早就有这套（`--max-iterations`），桌面端一直只有单轮：`Verify All` /
+/// `Fix with Agent` 各自跑一次，失败之后要人再点一遍。停止规则和 CLI 共用
+/// `verification::RepairPolicy`，所以两个入口对"什么时候该放弃"的判断不会各自漂移。
+///
+/// 和 `drive_pipeline` 同一形状，而且是**同一个理由**：这个循环原来是 orchestrator
+/// 上的一个 `&mut self` 方法，于是命令层要跨整段 await 持着锁。后果不止是 Stop 拉不到
+/// 开关（那条已经靠 `CancelRegistry` 绕开），还有 `get_agent_state` 一起被堵 ——
+/// 界面因此永远不知道后端在忙，`isAgentBusy` 保持 false，Send / Apply 仍可点，
+/// 而执行权守卫那句拒绝信息恰好在它最该出现的碰撞里到不了用户眼前。
+#[allow(clippy::too_many_arguments)]
+pub async fn drive_repair(
+    orch: &tokio::sync::Mutex<AgentOrchestrator>,
+    original_prompt: String,
+    commands: Vec<String>,
+    policy: crate::services::verification::RepairPolicy,
+    cancel: Arc<AtomicBool>,
+    llm: &LlmClient,
+    events: Arc<dyn RunEvents>,
+) -> Result<RepairLoopOutcome, String> {
+    use crate::services::verification::{failed_command_results, run_checks};
+
+    let root = crate::services::workspace::workspace_root()?;
+    let results = run_checks(commands.clone(), root.clone()).await;
+    let mut run = RepairRun {
+        original_prompt,
+        commands,
+        root,
+        policy,
+        checks_failed: !failed_command_results(&results).is_empty(),
+        results,
+        completed: 0,
+        apply_failed: false,
+    };
+
+    loop {
+        let plan = orch
+            .lock()
+            .await
+            .prepare_repair_iteration(&mut run, &cancel, events.as_ref())?;
+        let (iteration, step, prompt, tool_invoker) = match plan {
+            RepairPlan::Done(outcome) => return Ok(outcome),
+            RepairPlan::Iterate {
+                iteration,
+                step,
+                prompt,
+                tool_invoker,
+            } => (iteration, step, prompt, tool_invoker),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        let events_clone = events.clone();
+        tokio::spawn(async move {
+            while let Some(token) = rx.recv().await {
+                events_clone.emit_json("agent-stream-token", serde_json::json!(token));
+            }
+        });
+        let response = executor::execute_step(
+            llm,
+            &prompt,
+            "",
+            tool_invoker.as_deref(),
+            cancel.clone(),
+            tx,
+        )
+        .await?;
+
+        let (applied_count, failed_count) = orch
+            .lock()
+            .await
+            .record_repair_apply(&mut run, &step, &response);
+
+        // 先克隆再赋值：`run.results = run_checks(run.commands.clone(), ..)` 会在
+        // 同一个表达式里既读又写 `run`
+        let commands = run.commands.clone();
+        let root = run.root.clone();
+        run.results = run_checks(commands, root).await;
+        run.checks_failed = !failed_command_results(&run.results).is_empty();
+        run.completed = iteration;
+
+        orch.lock().await.record_repair_iteration(
+            &run,
+            iteration,
+            applied_count,
+            failed_count,
+            events.as_ref(),
+        );
+    }
 }
 
 impl AgentOrchestrator {
@@ -1855,132 +1973,137 @@ impl AgentOrchestrator {
         rejected
     }
 
-    /// 有界修复循环：跑检查 → 失败就让模型改 → 落盘 → 再跑检查。
+    /// 进入下一轮修复前的全部状态变更，同步完成。
     ///
-    /// CLI 早就有这套（`--max-iterations`），桌面端一直只有单轮：`Verify All` /
-    /// `Fix with Agent` 各自跑一次，失败之后要人再点一遍。停止规则和 CLI 共用
-    /// `verification::RepairPolicy`，所以两个入口对"什么时候该放弃"的判断不会
-    /// 各自漂移。
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。它要么写完"停止"那条
+    /// action log 并交出结果，要么把这一轮的 step 登记成 doing 并发出去 ——
+    /// 中间被别的命令插入，界面上会出现一个没有归属的 doing 步骤。
     ///
-    /// 修复必须落盘，否则重跑检查看的还是原来的代码。这里走 `apply_all_diffs`
-    /// —— 逐文件、带 base hash 校验和回滚点 —— 而不是绕过审查区直接写文件：
-    /// 循环结束后每一轮的改动仍然可以 Undo Apply。
-    pub async fn repair_until_checks_pass(
+    /// 返回 `Done` 时调用方必须直接结束循环。
+    pub fn prepare_repair_iteration(
         &mut self,
-        original_prompt: &str,
-        commands: Vec<String>,
-        policy: crate::services::verification::RepairPolicy,
-        cancel_flag: Arc<AtomicBool>,
-        llm: &LlmClient,
-        events: Arc<dyn RunEvents>,
-    ) -> Result<RepairLoopOutcome, String> {
+        run: &mut RepairRun,
+        cancel: &Arc<AtomicBool>,
+        events: &dyn RunEvents,
+    ) -> Result<RepairPlan, String> {
         use crate::services::verification::{
-            build_repair_prompt, collect_command_problems, failed_command_results, run_checks,
-            RepairDecision,
+            build_repair_prompt, collect_command_problems, RepairDecision,
         };
 
-        let root = crate::services::workspace::workspace_root()?;
-        let mut results = run_checks(commands.clone(), root.clone()).await;
-        let mut checks_failed = !failed_command_results(&results).is_empty();
-        let mut completed = 0u8;
-        let mut apply_failed = false;
-
-        loop {
-            let iteration = match policy.next(completed, checks_failed, apply_failed) {
-                RepairDecision::Repair { iteration } => iteration,
-                RepairDecision::Stop(stop) => {
-                    // 一轮都没修过就不写这条记录：一次检查全过的运行里，
-                    // "repair not enabled" 只是噪音
-                    if completed > 0 {
-                        self.emit_action_log(
-                            events.as_ref(),
-                            if checks_failed { "warn" } else { "success" },
-                            "repair_loop",
-                            None,
-                            Some("Repair"),
-                            &format!(
-                                "Repair stopped after {} iteration(s): {}",
-                                completed,
-                                stop.reason()
-                            ),
-                            &format!("Checks still failing: {}", checks_failed),
-                            None,
-                            None,
-                        );
-                    }
-                    return Ok(RepairLoopOutcome {
-                        iterations: completed,
-                        stop,
-                        checks_failed,
-                        results,
-                    });
+        let iteration = match run
+            .policy
+            .next(run.completed, run.checks_failed, run.apply_failed)
+        {
+            RepairDecision::Repair { iteration } => iteration,
+            RepairDecision::Stop(stop) => {
+                // 一轮都没修过就不写这条记录：一次检查全过的运行里，
+                // "repair not enabled" 只是噪音
+                if run.completed > 0 {
+                    self.emit_action_log(
+                        events,
+                        if run.checks_failed { "warn" } else { "success" },
+                        "repair_loop",
+                        None,
+                        Some("Repair"),
+                        &format!(
+                            "Repair stopped after {} iteration(s): {}",
+                            run.completed,
+                            stop.reason()
+                        ),
+                        &format!("Checks still failing: {}", run.checks_failed),
+                        None,
+                        None,
+                    );
                 }
-            };
+                return Ok(RepairPlan::Done(RepairLoopOutcome {
+                    iterations: run.completed,
+                    stop,
+                    checks_failed: run.checks_failed,
+                    results: std::mem::take(&mut run.results),
+                }));
+            }
+        };
 
-            self.ensure_not_cancelled(&cancel_flag, events.as_ref())?;
-            let problems = collect_command_problems(&results);
-            let repair_prompt =
-                build_repair_prompt(original_prompt, iteration, &results, &problems);
-            let step = TaskStep {
-                id: format!("repair-{}-{}", iteration, uuid::Uuid::new_v4()),
-                title: format!("Repair failed checks ({})", iteration),
-                step_type: "edit".to_string(),
-                status: "todo".to_string(),
-                logs: Vec::new(),
-                scope: Some("workspace".to_string()),
-                execution_mode: Some("fix".to_string()),
-            };
-            self.begin_step(&step, "Repair iteration started");
-            self.emit_step(events.as_ref(), self.steps.len().saturating_sub(1));
+        self.ensure_not_cancelled(cancel, events)?;
+        let problems = collect_command_problems(&run.results);
+        let prompt = build_repair_prompt(
+            &run.original_prompt,
+            iteration,
+            &run.results,
+            &problems,
+        );
+        let step = TaskStep {
+            id: format!("repair-{}-{}", iteration, uuid::Uuid::new_v4()),
+            title: format!("Repair failed checks ({})", iteration),
+            step_type: "edit".to_string(),
+            status: "todo".to_string(),
+            logs: Vec::new(),
+            scope: Some("workspace".to_string()),
+            execution_mode: Some("fix".to_string()),
+        };
+        self.begin_step(&step, "Repair iteration started");
+        self.emit_step(events, self.steps.len().saturating_sub(1));
 
-            let (tx, mut rx) = mpsc::channel::<String>(32);
-            let events_clone = events.clone();
-            tokio::spawn(async move {
-                while let Some(token) = rx.recv().await {
-                    events_clone.emit_json("agent-stream-token", serde_json::json!(token));
+        Ok(RepairPlan::Iterate {
+            iteration,
+            step,
+            prompt,
+            // 克隆出 Arc 而不是借 `self`：调用方要在 await 期间放开锁
+            tool_invoker: self.tool_invoker.clone(),
+        })
+    }
+
+    /// 记下模型的回答并把这一轮的改动落盘，同步完成。返回 (成功, 失败) 文件数。
+    ///
+    /// **锁不变量**：整个函数必须在**一个**临界区里跑完。`record_step_success`
+    /// 和 `apply_all_diffs` 之间被插入的话，审查区里会出现"这一轮已完成、但改动
+    /// 还没落盘"的状态，而紧接着的重跑检查看的就是没落盘的代码。
+    ///
+    /// 落盘走 `apply_all_diffs` 而不是绕过审查区直接写文件：逐文件、带 base hash
+    /// 校验和回滚点，所以循环结束后每一轮的改动仍然可以 Undo Apply。
+    pub fn record_repair_apply(
+        &mut self,
+        run: &mut RepairRun,
+        step: &TaskStep,
+        response: &str,
+    ) -> (usize, usize) {
+        self.record_step_success(step, response, None, None);
+        let applied = self.apply_all_diffs();
+        run.apply_failed = !applied.failed.is_empty();
+        (applied.applied.len(), applied.failed.len())
+    }
+
+    /// 一轮修复的收尾日志，同步完成。
+    pub fn record_repair_iteration(
+        &mut self,
+        run: &RepairRun,
+        iteration: u8,
+        applied_count: usize,
+        failed_count: usize,
+        events: &dyn RunEvents,
+    ) {
+        self.emit_action_log(
+            events,
+            if run.checks_failed { "warn" } else { "success" },
+            "repair_iteration",
+            None,
+            Some("Repair"),
+            &format!(
+                "Repair iteration {}: checks {}",
+                iteration,
+                if run.checks_failed {
+                    "still failing"
+                } else {
+                    "pass"
                 }
-            });
-            let response = executor::execute_step(
-                llm,
-                &repair_prompt,
-                "",
-                self.tool_invoker.as_deref(),
-                cancel_flag.clone(),
-                tx,
-            )
-            .await?;
-
-            self.record_step_success(&step, &response, None, None);
-            let applied = self.apply_all_diffs();
-            apply_failed = !applied.failed.is_empty();
-            results = run_checks(commands.clone(), root.clone()).await;
-            checks_failed = !failed_command_results(&results).is_empty();
-            completed = iteration;
-
-            self.emit_action_log(
-                events.as_ref(),
-                if checks_failed { "warn" } else { "success" },
-                "repair_iteration",
-                None,
-                Some("Repair"),
-                &format!(
-                    "Repair iteration {}: checks {}",
-                    iteration,
-                    if checks_failed {
-                        "still failing"
-                    } else {
-                        "pass"
-                    }
-                ),
-                &format!(
-                    "Applied {} file(s), {} failed to apply",
-                    applied.applied.len(),
-                    applied.failed.len()
-                ),
-                None,
-                None,
-            );
-        }
+            ),
+            &format!(
+                "Applied {} file(s), {} failed to apply",
+                applied_count, failed_count
+            ),
+            None,
+            None,
+        );
     }
 
     /// 还有未决 hunk、因而值得批量处理的 diff：(id, file)
@@ -3158,12 +3281,13 @@ mod tests {
                 model_type: crate::services::llm_client::ModelType::from_string("openai"),
                 local_model_config: None,
             });
-        let mut orchestrator = AgentOrchestrator::new();
+        let orchestrator = tokio::sync::Mutex::new(AgentOrchestrator::new());
 
         let outcome = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(orchestrator.repair_until_checks_pass(
-                "keep the build green".to_string().as_str(),
+            .block_on(drive_repair(
+                &orchestrator,
+                "keep the build green".to_string(),
                 vec!["cargo --version".to_string()],
                 crate::services::verification::RepairPolicy::new(2, true),
                 Arc::new(AtomicBool::new(false)),
@@ -3207,12 +3331,13 @@ mod tests {
         } else {
             "grep never-appears src/app.ts"
         };
-        let mut orchestrator = AgentOrchestrator::new();
+        let orchestrator = tokio::sync::Mutex::new(AgentOrchestrator::new());
 
         let outcome = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(orchestrator.repair_until_checks_pass(
-                "make the check pass",
+            .block_on(drive_repair(
+                &orchestrator,
+                "make the check pass".to_string(),
                 vec![check.to_string()],
                 crate::services::verification::RepairPolicy::new(2, true),
                 Arc::new(AtomicBool::new(false)),
