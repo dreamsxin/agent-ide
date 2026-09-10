@@ -99,9 +99,21 @@ pub struct AgentOrchestrator {
     /// 还没应用的改动，却对已经应用的无能为力 —— 而"应用了才发现不对"恰恰是
     /// 最需要退路的时刻。
     undo_stack: Vec<ApplyCheckpoint>,
-    /// 是否已有运行占着执行权。见 `try_begin_run`。
-    run_active: bool,
+    /// 当前持有执行权的运行；`None` 表示空闲。见 `try_begin_run`。
+    active_claim: Option<u64>,
+    /// 下一个要发的凭据编号。单调递增，只在进程内有意义。
+    next_claim: u64,
 }
+
+/// 一次运行的执行权凭据。
+///
+/// 存在的理由是**只有持有者能释放**。第一版用一个 `bool`，于是先结束的那个运行会
+/// 把还在跑的那个的执行权一起放掉 —— 而"先结束的不是先开始的"在这里是常态：
+/// `stop_agent` 不等运行排空就返回，被停掉的那次可能还卡在一个不可中断的
+/// `workspace_run_command` 里几分钟。它醒来收尾时，如果能无条件清标志，
+/// 就等于给第三个 prompt 开了门，那正是这个机制要挡住的事。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunClaim(u64);
 
 /// 一次应用操作的回滚点
 #[derive(Clone, Debug)]
@@ -355,7 +367,8 @@ impl AgentOrchestrator {
             run_usage: None,
             conversation: Vec::new(),
             undo_stack: Vec::new(),
-            run_active: false,
+            active_claim: None,
+            next_claim: 0,
         }
     }
 
@@ -586,11 +599,12 @@ impl AgentOrchestrator {
         self.conversation.clear();
     }
 
-    /// 开始一次新运行：换 run id
+    /// 换 run id。**不**授予执行权 —— 那是 `try_begin_run` 的事。
+    ///
+    /// 曾经在这里顺手置过"在跑"标志，结果任何调用它的入口都能绕过守卫拿到执行权。
     pub fn begin_run(&mut self, run_id: Option<String>) {
         self.current_run_id = run_id.clone();
         self.last_run_id = run_id;
-        self.run_active = true;
     }
 
     /// 抢占本次运行的执行权，抢不到就拒绝。
@@ -602,14 +616,19 @@ impl AgentOrchestrator {
     ///
     /// 不看 `current_run_id`：run id 是调用方可选传的，缺省时它一直是 `None`，
     /// 拿它当"在跑"的判据会让守卫在最需要的时候失效。
-    pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<(), String> {
-        if self.run_active {
+    ///
+    /// 返回的凭据必须原样传给 `finish_run`。
+    pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<RunClaim, String> {
+        if self.active_claim.is_some() {
             return Err(
                 "An Agent run is already in progress. Stop it before starting another.".to_string(),
             );
         }
+        let claim = self.next_claim;
+        self.next_claim = self.next_claim.wrapping_add(1);
+        self.active_claim = Some(claim);
         self.begin_run(run_id);
-        Ok(())
+        Ok(RunClaim(claim))
     }
 
     /// 开启一个新的用量记账周期（一次全新运行）
@@ -625,9 +644,27 @@ impl AgentOrchestrator {
         self.run_usage.clone()
     }
 
-    pub fn finish_run(&mut self) {
+    /// 交还执行权。**不是持有者就什么都不做。**
+    ///
+    /// 一个被 `stop_agent` 放弃、但还卡在不可中断工具调用里的旧运行，醒来后一定会
+    /// 走到这里。那时执行权可能已经属于一个新运行 —— 让它无条件清掉，就等于给
+    /// 第三个 prompt 开门。
+    pub fn finish_run(&mut self, claim: RunClaim) {
+        if self.active_claim != Some(claim.0) {
+            return;
+        }
         self.current_run_id = None;
-        self.run_active = false;
+        self.active_claim = None;
+    }
+
+    /// 用户主动放弃当前运行（Stop）：无条件释放执行权。
+    ///
+    /// 和 `finish_run` 分开是因为这里的语义相反 —— Stop 就是要抢回控制权，
+    /// 包括从一个卡住的运行手里。代价是那个运行醒来时已经不是持有者，
+    /// 而 `finish_run` 的持有者检查正好接住这一点。
+    pub fn abandon_run(&mut self) {
+        self.current_run_id = None;
+        self.active_claim = None;
     }
 
     /// 规划阶段之前的全部状态变更，同步完成。
@@ -3414,12 +3451,14 @@ mod tests {
     fn run_id_tracks_current_and_last_run() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        orchestrator.begin_run(Some("run-1".to_string()));
+        let claim = orchestrator
+            .try_begin_run(Some("run-1".to_string()))
+            .expect("空闲时应当抢到执行权");
 
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
 
-        orchestrator.finish_run();
+        orchestrator.finish_run(claim);
 
         assert_eq!(orchestrator.current_run_id, None);
         assert_eq!(orchestrator.last_run_id.as_deref(), Some("run-1"));
@@ -3486,7 +3525,7 @@ mod tests {
     fn a_second_run_is_refused_while_one_is_in_flight() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        orchestrator
+        let first = orchestrator
             .try_begin_run(Some("run-1".to_string()))
             .expect("第一个运行应当抢到执行权");
 
@@ -3495,10 +3534,44 @@ mod tests {
         // 被拒绝不能顺手改掉在跑那个运行的身份
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
 
-        orchestrator.finish_run();
+        orchestrator.finish_run(first);
         orchestrator
             .try_begin_run(Some("run-2".to_string()))
             .expect("上一个运行结束后应当能再开一个");
+    }
+
+    /// 只有持有者能交还执行权。
+    ///
+    /// 被 Stop 放弃的旧运行会在几分钟后从一个不可中断的工具调用里醒来收尾。那时
+    /// 执行权可能已经属于一个新运行 —— 第一版的 `finish_run` 无条件清标志，于是
+    /// 旧运行的收尾会把新运行的执行权一起放掉，第三个 prompt 就能在新运行还在跑
+    /// 的时候进来，正好是这个机制要挡的事。
+    #[test]
+    fn a_stale_run_cannot_release_someone_elses_claim() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let stopped = orchestrator
+            .try_begin_run(Some("run-1".to_string()))
+            .expect("第一个运行应当抢到执行权");
+        // 用户点了 Stop：执行权被强行收回，但 run-1 还在某个工具调用里跑着
+        orchestrator.abandon_run();
+
+        let fresh = orchestrator
+            .try_begin_run(Some("run-2".to_string()))
+            .expect("Stop 之后应当能开新运行");
+
+        // run-1 终于醒来收尾
+        orchestrator.finish_run(stopped);
+
+        let third = orchestrator.try_begin_run(Some("run-3".to_string()));
+        assert!(
+            third.is_err(),
+            "run-2 还在跑，它的执行权不该被 run-1 的收尾放掉"
+        );
+        assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-2"));
+
+        orchestrator.finish_run(fresh);
+        assert_eq!(orchestrator.current_run_id, None);
     }
 
     /// 阶段执行期间用户点了 Stop：结果不能再往一份已经不存在的计划里落地。

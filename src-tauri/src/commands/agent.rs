@@ -344,11 +344,11 @@ pub async fn send_agent_prompt(
     let cancel_flag = agent_state.cancel_flag.clone();
     // 只在准备阶段持锁。运行本身由 `drive_run` 自己按阶段短持锁 —— 整段持锁会让
     // stop / apply / 状态查询全部排在模型调用后面。
-    {
+    let claim = {
         let mut orch = agent_state.orchestrator.lock().await;
         // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
         // 覆写它的工具面或记账器会把那次运行改坏
-        orch.try_begin_run(request.run_id.clone())?;
+        let claim = orch.try_begin_run(request.run_id.clone())?;
         orch.tool_invoker = tool_invoker;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
@@ -356,7 +356,8 @@ pub async fn send_agent_prompt(
         orch.start_usage_accounting(usage_meter.clone());
         // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
         context.conversation = orch.conversation_digest();
-    }
+        claim
+    };
     let prompt_for_history = request.prompt.clone();
     let outcome = crate::agent::orchestrator::drive_run(
         &agent_state.orchestrator,
@@ -376,18 +377,18 @@ pub async fn send_agent_prompt(
     let mut orch = agent_state.orchestrator.lock().await;
     match outcome {
         Ok(()) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             orch.record_conversation_turn(&prompt_for_history);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
         }
         Err(err) if is_cancelled_error(&err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             return Ok("Agent task cancelled".to_string());
         }
         Err(err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             return Err(err);
         }
     }
@@ -495,8 +496,9 @@ fn finish_agent_run(
     app_handle: &AppHandle,
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
     meter: &crate::services::llm_client::RunUsageMeter,
+    claim: crate::agent::orchestrator::RunClaim,
 ) {
-    orch.finish_run();
+    orch.finish_run(claim);
     publish_tool_writes(orch, app_handle, permissions);
     emit_usage_action_log(orch, app_handle, meter);
 }
@@ -550,7 +552,7 @@ fn emit_usage_action_log(
 pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<String, String> {
     agent_state.cancel_flag.store(true, Ordering::SeqCst);
     let mut orch = agent_state.orchestrator.lock().await;
-    orch.finish_run();
+    orch.abandon_run();
     orch.state_mgr.set(AgentState::Idle);
     orch.ide_mode = IdeMode::Code;
     orch.steps.clear();
@@ -705,9 +707,12 @@ pub async fn run_agent_step(
         }
     });
 
-    {
+    let claim = {
         let mut orch = agent_state.orchestrator.lock().await;
-        orch.begin_run(request.run_id.clone());
+        // 单步执行也要抢执行权：它同样改 steps / diffs / 状态机，还会换掉工具面
+        // 和记账器。以前这里直接 begin_run，等于绕过守卫从一次流水线运行手里抢走
+        // 这些字段。
+        let claim = orch.try_begin_run(request.run_id.clone())?;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
         orch.start_usage_accounting(usage_meter.clone());
@@ -728,7 +733,8 @@ pub async fn run_agent_step(
                 compression
             ),
         );
-    }
+        claim
+    };
 
     let response = crate::agent::executor::execute_step(
         &llm,
@@ -774,7 +780,7 @@ pub async fn run_agent_step(
                 "agent-diff-ready",
                 serde_json::to_value(&orch.diffs).unwrap_or_default(),
             );
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             emit_tool_degradation_log(&orch, &app_handle, &llm);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             orch.emit_review_action_log(
@@ -791,14 +797,14 @@ pub async fn run_agent_step(
             Ok("Agent step completed".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             orch.record_step_status(&step, "todo", "Single step execution cancelled");
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             let failed = orch.record_step_status(&step, "error", &format!("Error: {}", err));
             let _ = app_handle.emit(
                 "agent-step-update",
@@ -830,13 +836,13 @@ pub async fn continue_agent_pipeline(
 
     // 一个临界区里完成"有暂停的运行吗 -> 抢执行权 -> 取走快照"。顺序不能反：
     // 先取走快照再发现抢不到执行权，那份快照就没了，续跑的唯一凭据被销毁。
-    let (paused, tool_policy, tool_permissions) = {
+    let (paused, tool_policy, tool_permissions, claim) = {
         let mut orch = agent_state.orchestrator.lock().await;
         if orch.paused_run.is_none() {
             return Err("No paused Agent pipeline to continue.".to_string());
         }
         let run_id = orch.last_run_id.clone();
-        orch.try_begin_run(run_id)?;
+        let claim = orch.try_begin_run(run_id)?;
         let paused = orch
             .paused_run
             .take()
@@ -850,7 +856,7 @@ pub async fn continue_agent_pipeline(
             "Continuing paused Agent pipeline",
             &format!("Continuing from stage {}", paused.stage_index + 1),
         );
-        (paused, policy, permissions)
+        (paused, policy, permissions, claim)
     };
 
     // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
@@ -899,17 +905,17 @@ pub async fn continue_agent_pipeline(
     let mut orch = agent_state.orchestrator.lock().await;
     match outcome {
         Ok(()) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             Ok("Agent pipeline continued".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter);
+            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
             Err(err)
         }
     }
