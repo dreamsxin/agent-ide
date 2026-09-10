@@ -2,14 +2,16 @@ import { Suspense, lazy, useEffect, useCallback, useState, useRef } from "react"
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLspStore } from "../../stores/useLspStore";
-import { useLogStore } from "../../stores/useLogStore";
-import { useAgentStore } from "../../stores/useAgentStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { pathsEqual } from "../../utils/paths";
 import { MonacoContext } from "./MonacoContext";
 import {
+  registerGlobalMonacoFeatures,
+  runAgentSelectionAction,
+  setCurrentEditor,
+} from "./monacoGlobals";
+import {
   AGENT_QUICK_ACTIONS,
-  buildActionPrompt,
   type AgentQuickActionKey,
 } from "../../utils/agentActions";
 import EditorTabs from "./EditorTabs";
@@ -19,7 +21,6 @@ import IntentHint from "./IntentHint";
 import QuickActions from "./QuickActions";
 import DiagnosticsBridge from "./DiagnosticsBridge";
 import ProblemsMarkerBridge from "./ProblemsMarkerBridge";
-import { buildLocalCompletionCandidates, type CompletionCandidateKind } from "../../utils/codeCompletion";
 import {
   configureTypeScriptSemantic,
   ensureOpenFileModels,
@@ -29,22 +30,11 @@ import { useIncrementalRendering } from "../../hooks/useIncrementalRendering";
 import PerformanceMetricsPanel from "./PerformanceMetricsPanel";
 import {
   changeLspFile,
-  getLspCodeActions,
-  getLspCompletion,
-  getLspDefinition,
-  getLspDocumentSymbols,
-  getLspHover,
-  getLspRename,
   initializeLsp,
   isLspLanguage,
-  lspRangeToMonacoRange,
-  monacoRangeToLspRange,
   openLspFile,
-  toMonacoSymbolKind,
-  type LspDocumentSymbol,
-  type LspDiagnostic,
-  type LspWorkspaceEdit,
 } from "../../utils/lspClient";
+
 
 import type { editor } from "monaco-editor";
 
@@ -90,7 +80,6 @@ export default function EditorContainer() {
   const fileContents = useEditorStore((s) => s.fileContents);
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const setLspStatus = useLspStore((s) => s.setStatus);
-  const addLog = useLogStore((s) => s.addLog);
   const updateFileContent = useEditorStore((s) => s.updateFileContent);
   const saveCurrentFile = useEditorStore((s) => s.saveCurrentFile);
   const saveError = useEditorStore((s) => s.saveError);
@@ -101,10 +90,9 @@ export default function EditorContainer() {
   const pendingRevealLocation = useEditorStore((s) => s.pendingRevealLocation);
   const clearPendingRevealLocation = useEditorStore((s) => s.clearPendingRevealLocation);
 
-  // Agent store for context menu and lightbulb actions
-  // Agent / 右侧面板的状态刻意不订阅：只有右键菜单那几个回调用得到，而它们
-  // 一律 `getState()` 现取。订阅了反而让整个编辑器容器跟着 Agent 每次状态变化
-  // 和每次面板开合重渲染一遍。
+  // Agent / 右侧面板的状态刻意不订阅：只有右键菜单那几个回调用得到，而它们在
+  // `monacoGlobals` 里一律 `getState()` 现取。订阅了反而让整个编辑器容器跟着
+  // Agent 每次状态变化和每次面板开合重渲染一遍。
   const performanceOverlay = useLayoutStore((s) => s.performanceOverlay);
   const togglePerformanceOverlay = useLayoutStore((s) => s.togglePerformanceOverlay);
   const theme = useThemeStore((s) => s.theme);
@@ -114,13 +102,6 @@ export default function EditorContainer() {
   useLspDiagnostics(monacoRef);
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const disposablesRef = useRef<Set<{ dispose(): void }>>(new Set());
-  const completionRegisteredRef = useRef(false);
-  const lspRegisteredRef = useRef(false);
-  // 全局的 Monaco 注册只做一次；`activeEditorRef` / `runAgentActionRef` 让那份
-  // 一次性注册始终指向**当前**这次挂载的编辑器和处理函数。
-  const agentGlobalsRegisteredRef = useRef(false);
-  const activeEditorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
-  const runAgentActionRef = useRef<((action: AgentQuickActionKey) => Promise<void>) | null>(null);
   const lspOpenedFilesRef = useRef<Set<string>>(new Set());
   const lspFileVersionsRef = useRef<Map<string, number>>(new Map());
   const lspChangeTimerRef = useRef<number | null>(null);
@@ -168,14 +149,14 @@ export default function EditorContainer() {
   }, []);
 
   // 关掉最后一个 tab 时 `<MonacoEditor>` 整体卸载，编辑器实例被 Monaco 释放 ——
-  // 但灯泡 provider 和 apply-code-action 是注册在 monaco 模块上的全局对象，只在
-  // 本组件卸载时才清。所以这里必须主动把引用清空，否则它们会拿一个已释放的实例
-  // 去调 `getSelection()` / `getModel()`；`MonacoContext` 也一样，消费者会照着
-  // 一个死实例算坐标。
+  // 但灯泡 provider 和 apply-code-action 注册在 monaco 模块上，活到页面结束。所以
+  // 这里必须主动把"当前编辑器"清空，否则它们会拿一个已释放的实例去调
+  // `getSelection()` / `getModel()`；`MonacoContext` 也一样，消费者会照着一个死
+  // 实例算坐标。
   const hasActiveTab = Boolean(activeTab);
   useEffect(() => {
     if (hasActiveTab) return;
-    activeEditorRef.current = null;
+    setCurrentEditor(null);
     setEditorRef(null);
   }, [hasActiveTab]);
 
@@ -193,9 +174,11 @@ export default function EditorContainer() {
     (editorInst: editor.IStandaloneCodeEditor, monacoInst: typeof import("monaco-editor")) => {
       setEditorRef(editorInst);
       setMonacoRef(monacoInst);
-      // 一次性的全局注册要通过这个 ref 找到当前编辑器，见下面 Agent lightbulb 那段
-      activeEditorRef.current = editorInst;
+      // 模块级的 provider / command 只能通过这里知道"当前是哪个编辑器"
+      setCurrentEditor(editorInst);
       configureTypeScriptSemantic(monacoInst);
+      // 幂等：按 monaco 模块去重，`key={activeFile}` 造成的重复挂载不会重复注册
+      registerGlobalMonacoFeatures(monacoInst);
 
       // 选区变化 → 更新 store
       const selectionDisposable = editorInst.onDidChangeCursorSelection(() => {
@@ -231,211 +214,6 @@ export default function EditorContainer() {
         });
       }
 
-      if (!completionRegisteredRef.current) {
-        completionRegisteredRef.current = true;
-        const completionLanguages = [
-          "rust",
-          "python",
-          "css",
-          "html",
-          "json",
-          "markdown",
-          "yaml",
-          "toml",
-        ];
-        for (const language of completionLanguages) {
-          const completionDisposable = monacoInst.languages.registerCompletionItemProvider(language, {
-            triggerCharacters: [".", "/", "\\", "'", "\"", "@", "<"],
-            provideCompletionItems: (model, position) => {
-              const word = model.getWordUntilPosition(position);
-              const currentWord = word.word;
-              const range = {
-                startLineNumber: position.lineNumber,
-                endLineNumber: position.lineNumber,
-                startColumn: word.startColumn,
-                endColumn: word.endColumn,
-              };
-              const editorState = useEditorStore.getState();
-              const candidates = buildLocalCompletionCandidates({
-                content: model.getValue(),
-                language: model.getLanguageId(),
-                currentWord,
-                linePrefix: model.getLineContent(position.lineNumber).slice(0, position.column - 1),
-                openFilePaths: editorState.openFiles.map((file) => file.path),
-              });
-
-              return {
-                suggestions: candidates.map((candidate) => ({
-                  label: candidate.label,
-                  kind: toMonacoCompletionKind(monacoInst, candidate.kind),
-                  insertText: candidate.insertText,
-                  insertTextRules:
-                    candidate.kind === "snippet"
-                      ? monacoInst.languages.CompletionItemInsertTextRule.InsertAsSnippet
-                      : undefined,
-                  detail: candidate.detail,
-                  sortText: `${999 - candidate.score}-${candidate.label}`,
-                  range,
-                })),
-              };
-            },
-          });
-          disposablesRef.current.add(completionDisposable);
-        }
-      }
-
-      if (!lspRegisteredRef.current) {
-        lspRegisteredRef.current = true;
-        for (const language of ["typescript", "javascript", "go", "python", "rust"]) {
-          const completionDisposable = monacoInst.languages.registerCompletionItemProvider(language, {
-            triggerCharacters: [".", "\"", "'", "/", "@", "<"],
-            provideCompletionItems: async (model, position) => {
-              const word = model.getWordUntilPosition(position);
-              const file = model.uri.fsPath || model.uri.path;
-              const items = await getLspCompletion(file, position.lineNumber - 1, position.column - 1);
-              return {
-                suggestions: items.map((item) => ({
-                  label: item.label,
-                  kind: toMonacoCompletionItemKind(monacoInst, item.kind),
-                  insertText: item.insertText || item.label,
-                  detail: item.detail,
-                  documentation: item.documentation ? { value: item.documentation } : undefined,
-                  sortText: item.sortText,
-                  filterText: item.filterText,
-                  range: {
-                    startLineNumber: position.lineNumber,
-                    endLineNumber: position.lineNumber,
-                    startColumn: word.startColumn,
-                    endColumn: word.endColumn,
-                  },
-                })),
-              };
-            },
-          });
-          disposablesRef.current.add(completionDisposable);
-
-          const hoverDisposable = monacoInst.languages.registerHoverProvider(language, {
-            provideHover: async (model, position) => {
-              const file = model.uri.fsPath || model.uri.path;
-              const hover = await getLspHover(file, position.lineNumber - 1, position.column - 1);
-              if (!hover?.contents) return null;
-              return {
-                contents: [{ value: hover.contents }],
-                range: hover.range ? lspRangeToMonacoRange(hover.range) : undefined,
-              };
-            },
-          });
-          disposablesRef.current.add(hoverDisposable);
-
-          const definitionProviderDisposable = monacoInst.languages.registerDefinitionProvider(language, {
-            provideDefinition: async (model, position) => {
-              const file = model.uri.fsPath || model.uri.path;
-              const locations = await getLspDefinition(file, position.lineNumber - 1, position.column - 1);
-              return locations.map((location) => ({
-                uri: monacoInst.Uri.file(location.file),
-                range: lspRangeToMonacoRange(location.range),
-              }));
-            },
-          });
-          disposablesRef.current.add(definitionProviderDisposable);
-
-          const documentSymbolDisposable = monacoInst.languages.registerDocumentSymbolProvider(language, {
-            provideDocumentSymbols: async (model) => {
-              const file = model.uri.fsPath || model.uri.path;
-              const symbols = await getLspDocumentSymbols(file);
-              return flattenDocumentSymbols(monacoInst, symbols);
-            },
-          });
-          disposablesRef.current.add(documentSymbolDisposable);
-
-          const renameDisposable = monacoInst.languages.registerRenameProvider(language, {
-            provideRenameEdits: async (model, position, newName) => {
-              const file = model.uri.fsPath || model.uri.path;
-              const edit = await getLspRename(file, position.lineNumber - 1, position.column - 1, newName);
-              if (!edit) {
-                return { edits: [] };
-              }
-              return workspaceEditToMonaco(monacoInst, edit);
-            },
-          });
-          disposablesRef.current.add(renameDisposable);
-
-          const codeActionDisposable = monacoInst.languages.registerCodeActionProvider(language, {
-            provideCodeActions: async (model, range) => {
-              const file = model.uri.fsPath || model.uri.path;
-              const diagnostics = markersToLspDiagnostics(
-                monacoInst,
-                file,
-                monacoInst.editor.getModelMarkers({ resource: model.uri }).filter((marker) =>
-                  markerIntersectsRange(marker, range)
-                )
-              );
-              const actions = await getLspCodeActions(file, monacoRangeToLspRange(range), diagnostics);
-              return {
-                actions: actions
-                  .filter((action) => action.edit?.edits.length)
-                  .map((action) => ({
-                    title: action.title,
-                    kind: action.kind ? action.kind.replace(/\./g, ".") : "quickfix",
-                    command: {
-                      id: "agent-ide.apply-code-action",
-                      title: action.title,
-                      arguments: [action.title, action.edit!],
-                    },
-                  })),
-                dispose: () => {},
-              };
-            },
-          });
-          disposablesRef.current.add(codeActionDisposable);
-        }
-
-        // 这个命令的 id 是全局唯一的，注册在 `monacoInst.editor` 上，跟语言无关 ——
-        // 放在上面的语言循环里等于同一个 id 注册五遍。它也必须走
-        // `activeEditorRef` 拿**当前**编辑器：`key={activeFile}` 每切一次 tab
-        // 就换一个实例，而这段只在第一次挂载时注册，闭包捕获的那个早被释放了 ——
-        // `applyWorkspaceEdit` 会在 `getModel()` 处返回 false，于是每个 LSP
-        // quick fix 都静默失效，还打出一条"Monaco 拒绝了这次编辑"的假日志。
-        const applyCodeActionDisposable = monacoInst.editor.registerCommand(
-          "agent-ide.apply-code-action",
-          async (_accessor, title: string, edit: LspWorkspaceEdit) => {
-            const failed = (details: string) => {
-              addLog({
-                time: new Date().toLocaleTimeString(),
-                level: "error",
-                source: "system",
-                message: `Code action failed: ${title}`,
-                details,
-              });
-            };
-            const activeEditor = activeEditorRef.current;
-            if (!activeEditor) {
-              failed("No active editor to apply the workspace edit to.");
-              return;
-            }
-            try {
-              const applied = applyWorkspaceEdit(activeEditor, monacoInst, edit);
-              if (!applied) {
-                failed("Monaco rejected the workspace edit.");
-                return;
-              }
-              syncWorkspaceEditToStore(monacoInst, edit, updateFileContent);
-              await syncWorkspaceEditToLsp(monacoInst, edit);
-              addLog({
-                time: new Date().toLocaleTimeString(),
-                level: "success",
-                source: "system",
-                message: `Code action applied: ${title}`,
-                details: `${edit.edits.length} edit(s) applied.`,
-              });
-            } catch (error) {
-              failed(String(error));
-            }
-          }
-        );
-        disposablesRef.current.add(applyCodeActionDisposable);
-      }
-
       const definitionDisposable = editorInst.addAction({
         id: "agent-ide.go-to-definition",
         label: "Go to Definition",
@@ -448,85 +226,9 @@ export default function EditorContainer() {
       });
       disposablesRef.current.add(definitionDisposable);
 
-      // ▸▸▸ Agent context menu actions
-      //
-      // 这两个闭包都在**注册时**建立，而右键菜单是在很久之后才被点的。所以它们
-      // 一律走 `getState()` 现取，不去闭包捕获渲染值 —— 捕获的话 `activeFile`
-      // 会永远停在编辑器挂载那一刻的值：编辑器通常是在还没打开任何文件时挂载的，
-      // 于是"选中一段 → 用 Agent 解释"发出去的上下文文件是空的，Agent 拿不到
-      // 这段代码属于哪个文件。
-      //
-      // 也不能把这些值塞进 `handleEditorMount` 的依赖数组：`fileContents` 每敲
-      // 一个字都在变，那会让整套 action / provider 每次按键重新注册一遍。
-      const isAgentBusy = () => {
-        const s = useAgentStore.getState().state;
-        return s !== "idle" && s !== "done" && s !== "error" && s !== "waiting_user";
-      };
-
-      const runAgentAction = async (action: AgentQuickActionKey) => {
-        // 用 ref 里的**当前**编辑器，不用注册时那个：`key={activeFile}` 会让
-        // `<Editor>` 每次切 tab 整体重挂载，而下面的全局注册只做一次，捕获的
-        // 那个实例早已被 Monaco 释放。
-        const activeEditor = activeEditorRef.current;
-        if (!activeEditor) return;
-        const selection = activeEditor.getSelection();
-        if (!selection || selection.isEmpty()) return;
-        const model = activeEditor.getModel();
-        if (!model) return;
-        const selectedText = model.getValueInRange(selection);
-        if (!selectedText) return;
-
-        const layout = useLayoutStore.getState();
-        layout.setAgentView("task");
-        if (!layout.rightVisible) layout.toggleRightPanel();
-
-        // 运行中就不再发第二条。灯泡会在忙时直接不出现，右键菜单没法按 Agent
-        // 状态隐藏，所以判断落在这里 —— 否则这条 prompt 先被写进对话记录，再被
-        // 后端的运行独占守卫拒掉，用户看到的是一条自己发出去却没有回复的消息。
-        // 面板照样打开：正在跑的那次运行就在里面，那才是"为什么没反应"的答案。
-        if (isAgentBusy()) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            level: "warn",
-            source: "agent",
-            message: "Agent is busy; the selection action was not sent.",
-            details: "Wait for the current run to finish, or press Stop.",
-          });
-          return;
-        }
-
-        const editorState = useEditorStore.getState();
-        const currentFile = editorState.activeFile;
-
-        const prompt = buildActionPrompt(
-          action,
-          selectedText,
-          currentFile,
-          selection.startLineNumber,
-          selection.endLineNumber
-        );
-
-        const agent = useAgentStore.getState();
-        agent.addMessage({
-          id: `ctx-${Date.now()}`,
-          role: "user",
-          content: prompt,
-          timestamp: Date.now(),
-        });
-
-        await agent.sendPrompt({
-          prompt,
-          contextFiles: currentFile ? [currentFile] : [],
-          activeFile: currentFile ?? undefined,
-          activeFileContent: currentFile
-            ? editorState.fileContents[currentFile]
-            : undefined,
-          selection: selectedText,
-          ideMode: "code",
-        });
-      };
-
-
+      // 右键菜单项是 `editorInst.addAction`，属于这个编辑器实例，所以每次挂载都要
+      // 重新加一遍（也就随实例一起被释放）。动作本体在 monacoGlobals 里，和灯泡
+      // 命令共用同一个函数，两条入口的忙判断和上下文取值不会走岔。
       for (const act of AGENT_QUICK_ACTIONS) {
         const disposable = editorInst.addAction({
           id: `agent-ide.${act.key}-selection`,
@@ -534,65 +236,16 @@ export default function EditorContainer() {
           contextMenuGroupId: "agent",
           contextMenuOrder: AGENT_QUICK_ACTIONS.indexOf(act) + 1,
           precondition: "editorHasSelection",
-          run: () => { void runAgentAction(act.key as AgentQuickActionKey); },
+          run: () => {
+            void runAgentSelectionAction(act.key as AgentQuickActionKey);
+          },
         });
         disposablesRef.current.add(disposable);
       }
-
-      // ▸▸▸ Agent lightbulb 与它的命令：**全局**注册，只做一次
-      //
-      // `registerCodeActionProvider` 和 `registerCommand` 挂在 `monacoInst` 上，
-      // 不属于某个编辑器实例。而 `key={activeFile}` 让编辑器每次切 tab 重挂载，
-      // 所以不加守卫的话每切一次 tab 就多一份 provider，只在组件卸载时才清 ——
-      // 每一份都还捏着一个已经被释放的编辑器实例去调 `getSelection()`。
-      if (!agentGlobalsRegisteredRef.current) {
-        agentGlobalsRegisteredRef.current = true;
-
-        const agentLightbulbDisposable = monacoInst.languages.registerCodeActionProvider("*", {
-          provideCodeActions: (_model, _range, _context) => {
-            const empty = { actions: [], dispose: () => {} };
-            if (isAgentBusy()) return empty;
-            const activeEditor = activeEditorRef.current;
-            if (!activeEditor) return empty;
-            const selection = activeEditor.getSelection();
-            if (!selection || selection.isEmpty()) return empty;
-            // 只在真的选中了内容时给灯泡，光标停着不算
-            const model = activeEditor.getModel();
-            if (!model) return empty;
-            const selectedText = model.getValueInRange(selection);
-            if (!selectedText) return empty;
-
-            return {
-              actions: AGENT_QUICK_ACTIONS.map((act) => ({
-                title: `${act.icon} ${act.label} with Agent`,
-                kind: "refactor.rewrite",
-                diagnostics: [],
-                command: {
-                  id: `agent-ide.lightbulb-${act.key}`,
-                  title: `${act.label} with Agent`,
-                },
-              })),
-              dispose: () => {},
-            };
-          },
-        });
-        disposablesRef.current.add(agentLightbulbDisposable);
-
-        for (const act of AGENT_QUICK_ACTIONS) {
-          const cmdDisposable = monacoInst.editor.registerCommand(
-            `agent-ide.lightbulb-${act.key}`,
-            () => {
-              void runAgentActionRef.current?.(act.key as AgentQuickActionKey);
-            }
-          );
-          disposablesRef.current.add(cmdDisposable);
-        }
-      }
-      // 命令只注册一次，所以它得通过 ref 找到**当前**这次挂载建立的处理函数
-      runAgentActionRef.current = runAgentAction;
     },
-    [addLog, setCursorPosition, setSelectedRange, setSelectedText, updateFileContent]
+    [setCursorPosition, setSelectedRange, setSelectedText]
   );
+
 
   const contextValue = { editor: editorRef, monaco: monacoRef };
 
@@ -775,190 +428,4 @@ export default function EditorContainer() {
   );
 }
 
-function toMonacoCompletionKind(
-  monaco: typeof import("monaco-editor"),
-  kind: CompletionCandidateKind
-) {
-  switch (kind) {
-    case "keyword":
-      return monaco.languages.CompletionItemKind.Keyword;
-    case "file":
-      return monaco.languages.CompletionItemKind.File;
-    case "snippet":
-      return monaco.languages.CompletionItemKind.Snippet;
-    case "symbol":
-    default:
-      return monaco.languages.CompletionItemKind.Variable;
-  }
-}
 
-function toMonacoCompletionItemKind(monaco: typeof import("monaco-editor"), kind?: number) {
-  const itemKind = monaco.languages.CompletionItemKind;
-  const mapping: Record<number, number> = {
-    1: itemKind.Text,
-    2: itemKind.Method,
-    3: itemKind.Function,
-    4: itemKind.Constructor,
-    5: itemKind.Field,
-    6: itemKind.Variable,
-    7: itemKind.Class,
-    8: itemKind.Interface,
-    9: itemKind.Module,
-    10: itemKind.Property,
-    11: itemKind.Unit,
-    12: itemKind.Value,
-    13: itemKind.Enum,
-    14: itemKind.Keyword,
-    15: itemKind.Snippet,
-    16: itemKind.Color,
-    17: itemKind.File,
-    18: itemKind.Reference,
-    21: itemKind.Constant,
-    22: itemKind.Struct,
-    23: itemKind.Event,
-    24: itemKind.Operator,
-    25: itemKind.TypeParameter,
-  };
-  return kind ? mapping[kind] ?? itemKind.Variable : itemKind.Variable;
-}
-
-function flattenDocumentSymbols(
-  monaco: typeof import("monaco-editor"),
-  symbols: LspDocumentSymbol[],
-  containerName?: string
-): import("monaco-editor").languages.DocumentSymbol[] {
-  return symbols.flatMap((symbol) => [
-    {
-      name: symbol.name,
-      detail: "",
-      kind: toMonacoSymbolKind(monaco, symbol.kind),
-      tags: [],
-      containerName,
-      range: lspRangeToMonacoRange(symbol.range),
-      selectionRange: lspRangeToMonacoRange(symbol.selectionRange),
-    },
-    ...flattenDocumentSymbols(monaco, symbol.children, symbol.name),
-  ]);
-}
-
-function workspaceEditToMonaco(
-  monaco: typeof import("monaco-editor"),
-  edit: LspWorkspaceEdit
-): import("monaco-editor").languages.WorkspaceEdit {
-  return {
-    edits: edit.edits.map((textEdit) => ({
-      resource: monaco.Uri.file(textEdit.file),
-      versionId: undefined,
-      textEdit: {
-        range: lspRangeToMonacoRange(textEdit.range),
-        text: textEdit.newText,
-      },
-    })),
-  };
-}
-
-function applyWorkspaceEdit(
-  editor: import("monaco-editor").editor.IStandaloneCodeEditor,
-  monaco: typeof import("monaco-editor"),
-  edit: LspWorkspaceEdit
-) {
-  const activeModel = editor.getModel();
-  if (!activeModel) return false;
-  const activeFile = activeModel.uri.fsPath || activeModel.uri.path;
-  const activeFileEdits = edit.edits.filter((textEdit) => pathsEqual(textEdit.file, activeFile));
-  const otherFileEdits = edit.edits.filter((textEdit) => !pathsEqual(textEdit.file, activeFile));
-
-  const activeApplied = activeFileEdits.length
-    ? editor.executeEdits(
-        "agent-ide-code-action",
-        activeFileEdits.map((textEdit) => ({
-          range: lspRangeToMonacoRange(textEdit.range),
-          text: textEdit.newText,
-        }))
-      )
-    : true;
-
-  if (!activeApplied) return false;
-
-  for (const textEdit of otherFileEdits) {
-    const model = findModelForFile(monaco, textEdit.file);
-    if (!model) return false;
-    model.applyEdits([
-      {
-        range: lspRangeToMonacoRange(textEdit.range),
-        text: textEdit.newText,
-      },
-    ]);
-  }
-  return true;
-}
-
-function syncWorkspaceEditToStore(
-  monaco: typeof import("monaco-editor"),
-  edit: LspWorkspaceEdit,
-  updateFileContent: (path: string, content: string) => void
-) {
-  const touchedFiles = new Set(edit.edits.map((textEdit) => textEdit.file));
-  for (const file of touchedFiles) {
-    const model = findModelForFile(monaco, file);
-    if (model) updateFileContent(file, model.getValue());
-  }
-}
-
-async function syncWorkspaceEditToLsp(
-  monaco: typeof import("monaco-editor"),
-  edit: LspWorkspaceEdit
-) {
-  const touchedFiles = new Set(edit.edits.map((textEdit) => textEdit.file));
-  await Promise.all(
-    [...touchedFiles].map(async (file) => {
-      const model = findModelForFile(monaco, file);
-      if (!model || !isLspLanguage(model.getLanguageId())) return;
-      await changeLspFile(file, model.getValue(), model.getLanguageId(), model.getVersionId());
-    })
-  );
-}
-
-function findModelForFile(monaco: typeof import("monaco-editor"), file: string) {
-  return (
-    monaco.editor.getModel(monaco.Uri.file(file)) ??
-    monaco.editor
-      .getModels()
-      .find((model) => pathsEqual(model.uri.fsPath || model.uri.path, file))
-  );
-}
-
-function markersToLspDiagnostics(
-  monaco: typeof import("monaco-editor"),
-  file: string,
-  markers: import("monaco-editor").editor.IMarker[]
-): LspDiagnostic[] {
-  return markers.map((marker) => ({
-    file,
-    range: monacoRangeToLspRange(marker),
-    severity: markerSeverityToLsp(monaco, marker.severity),
-    message: marker.message,
-    source: marker.source,
-  }));
-}
-
-function markerSeverityToLsp(
-  monaco: typeof import("monaco-editor"),
-  severity: import("monaco-editor").MarkerSeverity
-): LspDiagnostic["severity"] {
-  if (severity === monaco.MarkerSeverity.Error) return "error";
-  if (severity === monaco.MarkerSeverity.Warning) return "warning";
-  return "info";
-}
-
-function markerIntersectsRange(
-  marker: import("monaco-editor").editor.IMarker,
-  range: import("monaco-editor").IRange
-) {
-  return !(
-    marker.endLineNumber < range.startLineNumber ||
-    marker.startLineNumber > range.endLineNumber ||
-    (marker.endLineNumber === range.startLineNumber && marker.endColumn < range.startColumn) ||
-    (marker.startLineNumber === range.endLineNumber && marker.startColumn > range.endColumn)
-  );
-}
