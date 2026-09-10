@@ -115,7 +115,6 @@ pub struct AgentStatus {
     pub mode: String,
     #[serde(rename = "ideMode")]
     pub ide_mode: String,
-    pub context_files: Vec<String>,
     #[serde(rename = "currentRunId")]
     pub current_run_id: Option<String>,
     #[serde(rename = "lastRunId")]
@@ -232,7 +231,6 @@ pub async fn get_agent_state(
         state: orch.state_mgr.state.to_string(),
         mode: orch.mode.to_string(),
         ide_mode: orch.ide_mode.to_string(),
-        context_files: Vec::new(),
         current_run_id: orch.current_run_id.clone(),
         last_run_id: orch.last_run_id.clone(),
     })

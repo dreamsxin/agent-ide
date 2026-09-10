@@ -873,6 +873,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The cost is one extra uncontended `lock().await` in the two commands that did not already hold the orchestrator: the fallback used to be computed lazily inside the match arm. Accepted deliberately, and it is only cheap because of Known Issues 16/23 — the orchestrator lock is never held across an `await` any more, so acquiring it is a few instructions rather than a wait behind a model call. Both new acquisitions are scoped to a block that ends before the next `await`, and neither function holds the lock elsewhere, so there is no nesting of a non-reentrant `tokio::sync::Mutex`. I checked that specifically; it is the failure mode that would have turned this tidy-up into a hang.
    - 275 → 278 tests.
 
+33. **`AgentStatus.contextFiles` was always empty on the wire (fixed 2026-09-10)**
+   - `get_agent_state` — the state snapshot the frontend reconciles a restored session against — declared a `context_files: Vec<String>` field and constructed it as `Vec::new()`, unconditionally, at its only construction site. The TypeScript `AgentStatusResponse` declared it too (as `context_files`, snake_case, unlike every camelCase sibling), and nothing read it: the sole consumer, `reconcileBackendRun`, uses `currentRunId` / `lastRunId` / `ideMode`.
+   - Deleted from both sides. The same class as the deleted permission toggles and the `Edit` mode: a field that looks like information and carries none. Worse here than a dead local, because it is on an IPC boundary — the next reader would take an empty list as "no context files", not "this was never populated".
+   - Checked before deleting, in the order that matters: **one** construction site, no other Rust reader, no frontend reader, and the field is absent from the `agent-state-changed` payload (`state_payload()` is a separate shape, so the event is unaffected). The `context_files` fields on the *request* DTOs are real inbound data and stay.
+   - No test added. There is nothing left to assert — the honest guarantee here is the type, and `tsc` plus the IPC contract test already cover "the two sides agree".
+
 
 
 

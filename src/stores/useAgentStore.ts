@@ -225,7 +225,6 @@ interface AgentStatusResponse {
   state: AgentState;
   mode: AgentMode;
   ideMode?: IdeMode;
-  context_files: string[];
   currentRunId?: string | null;
   lastRunId?: string | null;
 }
