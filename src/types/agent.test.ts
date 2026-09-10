@@ -3,10 +3,14 @@ import {
   CREATE_FILES_PERMISSIONS,
   READ_ONLY_PERMISSIONS,
   RUN_COMMANDS_PERMISSIONS,
+  describeRunUsage,
   mcpApprovalForPermissions,
+  normalizeRunUsage,
   permissionsForPreset,
   type AgentPermissionPreset,
+  type RunUsage,
 } from "./agent";
+import { formatMicrosUsd } from "../utils/money";
 
 describe("permissionsForPreset", () => {
   it("maps each preset to its permission table", () => {
@@ -63,3 +67,83 @@ describe("mcpApprovalForPermissions", () => {
     ).toBe("allow_all");
   });
 });
+
+describe("run usage", () => {
+  function usage(overrides: Partial<RunUsage> = {}): RunUsage {
+    return {
+      totalTokens: 1_500,
+      maxTotalTokens: null,
+      spendMicros: 2_000,
+      maxSpendMicros: null,
+      calls: 3,
+      reportedCalls: 3,
+      ...overrides,
+    };
+  }
+
+  /**
+   * 状态栏和 action log 里的同一笔花费必须是同一个字符串，所以这里的格式化
+   * 逐位复制后端 `format_micros_usd`（截断到 4 位小数，不四舍五入）。
+   */
+  it("formats spend the same way the backend does", () => {
+    expect(formatMicrosUsd(2_000)).toBe("$0.0020");
+    expect(formatMicrosUsd(1_234_567)).toBe("$1.2345");
+    expect(formatMicrosUsd(0)).toBe("$0.0000");
+  });
+
+  it("says nothing before the first provider call", () => {
+    expect(describeRunUsage(usage({ calls: 0, reportedCalls: 0 }), formatMicrosUsd)).toBeNull();
+  });
+
+  it("reports unknown rather than zero when the provider never says", () => {
+    const described = describeRunUsage(
+      usage({ totalTokens: 0, reportedCalls: 0, spendMicros: 0 }),
+      formatMicrosUsd
+    );
+
+    // 打印 0 会让人以为这次运行免费
+    expect(described?.label).toBe("usage unknown");
+    expect(described?.detail).toContain("cannot be estimated");
+  });
+
+  it("calls out a partial report, because the cap undercounts there", () => {
+    const described = describeRunUsage(usage({ reportedCalls: 1 }), formatMicrosUsd);
+
+    expect(described?.label).toBe("1500 tok · $0.0020");
+    expect(described?.detail).toContain("lower bound");
+    expect(described?.detail).toContain("undercounts");
+  });
+
+  it("distinguishes an uncomputable cost from a free run", () => {
+    const described = describeRunUsage(usage({ spendMicros: null }), formatMicrosUsd);
+
+    expect(described?.label).toBe("1500 tok");
+    expect(described?.detail).toContain("not computable");
+  });
+});
+
+describe("normalizeRunUsage", () => {
+  it("returns null for anything that is not a usage object", () => {
+    expect(normalizeRunUsage(null)).toBeNull();
+    expect(normalizeRunUsage(undefined)).toBeNull();
+    expect(normalizeRunUsage("1500")).toBeNull();
+  });
+
+  /**
+   * 事件里少字段就当 0 / null，而不是让 undefined 一路漏到 `toFixed` 变成 NaN。
+   * 旧版本后端不带 `usage` 字段时也走这条路。
+   */
+  it("fills missing counters instead of letting undefined through", () => {
+    const normalized = normalizeRunUsage({ totalTokens: 10 });
+
+    expect(normalized).toEqual({
+      totalTokens: 10,
+      maxTotalTokens: null,
+      spendMicros: null,
+      maxSpendMicros: null,
+      calls: 0,
+      reportedCalls: 0,
+    });
+  });
+});
+

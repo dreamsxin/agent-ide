@@ -70,8 +70,15 @@ focus mode collapses panels.
   directory that is not under version control is normal, and should not leave a
   question mark in the status bar.
 
-Deliberately absent until the data exists: encoding and line-ending, and per-run
-token spend. An empty segment is worse than no segment.
+- The current run's token count and estimated spend, hover for the full
+  breakdown. Three states, kept distinct on purpose: a number, `usage unknown`
+  when the provider reported nothing (printing 0 would read as "free"), and a
+  lower-bound warning when only some calls reported usage — that case also means
+  the per-run cap undercounts. Refresh granularity is state changes, so a long
+  stage's tool rounds land when the stage ends.
+
+Deliberately absent until the data exists: encoding and line-ending. An empty
+segment is worse than no segment.
 
 
 **Design points:**

@@ -5,6 +5,8 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
+import { describeRunUsage } from "../../types/agent";
+import { formatMicrosUsd } from "../../utils/money";
 import StatusDot from "../shared/StatusDot";
 
 /** 严重级别的显示样式，与 ProblemsPanel / LSP 弹层里的 E/W/I 约定保持一致 */
@@ -29,6 +31,7 @@ export default function StatusBar() {
   const problems = useProblemStore((s) => s.problems);
   const agentState = useAgentStore((s) => s.state);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
+  const runUsage = useAgentStore((s) => s.runUsage);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const cursorPosition = useEditorStore((s) => s.cursorPosition);
@@ -50,6 +53,7 @@ export default function StatusBar() {
   );
 
   const activeTab = openFiles.find((file) => file.path === activeFile) ?? null;
+  const usageDisplay = runUsage ? describeRunUsage(runUsage, formatMicrosUsd) : null;
 
   // 点数字就该到得了列表，否则这个数字只是让人知道有问题却不知道去哪看
   const showProblems = () => {
@@ -121,6 +125,12 @@ export default function StatusBar() {
       </div>
 
       <div className="flex items-center gap-3">
+        {usageDisplay && (
+          <span data-testid="status-bar-usage" title={usageDisplay.detail} className="font-mono">
+            {usageDisplay.label}
+          </span>
+        )}
+
         <span
           className="flex items-center gap-1.5"
           title={
