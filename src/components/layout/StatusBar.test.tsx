@@ -44,6 +44,20 @@ describe("problems segment", () => {
     expect(label).toContain("2 errors, 1 warning, 0 info");
   });
 
+  /**
+   * 字母不是装饰。只靠颜色区分三个数字，色觉障碍的用户看到的是三个裸整数，
+   * 分不清哪个是错误 —— 而 `aria-label` 对这类用户毫无帮助。
+   */
+  it("labels each count with a letter, not only a colour", () => {
+    useProblemStore.setState({
+      problems: [problem("a", "error"), problem("b", "error"), problem("c", "warning")],
+    });
+
+    render(<StatusBar />);
+
+    expect(screen.getByTestId("status-bar-problems").textContent).toBe("E2W1I0");
+  });
+
   it("reveals the Problems panel when the bottom panel is collapsed", () => {
     useLayoutStore.setState({ bottomVisible: false, bottomTab: "terminal" });
 
