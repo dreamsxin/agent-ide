@@ -997,6 +997,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Not fixed, recorded instead: after an undo, a tool-write card returns to `pending` and its Apply can only fail — a move card has no content to apply (`build_updated_content` rejects an empty `original`), and a delete card would write an empty file rather than delete. It fails loudly rather than corrupting anything, but the right answer is that tool-write records should not become reviewable proposals at all. That is a change to the review model, not to this tool.
    - Rust 298 → 303.
 
+45. **An undone tool-write record was offered back as a proposal (2026-09-13)**
+   - Recorded as open at the end of 44, fixed here. `undo_last_apply` cleared every applied hunk status and recomputed the diff status, so a tool-write card came back as `pending` with Apply and Reject buttons. Applying one is not a no-op: a delete record's hunk is `content → ""`, so it takes the content-replacement path and writes a **0-byte file instead of deleting it**; a move record has no content at all and only fails. The user's mental model — "Apply puts the deletion back" — and the code disagree, and the code wins.
+   - The distinction the review area never had: **a tool-write card is a record of something that already happened, not a proposal.** `record_tool_writes` has always stamped `protocol: "workspace_tool"`, and until now **nothing read it** — the only thing separating "already on disk" from "waiting for you" was the `applied` status itself, which is exactly what undo destroyed.
+   - Undone records now land in a terminal status, `reverted`: still listed, because undoing a change does not mean it never happened, but with no buttons and no place in any pending count. Model-proposed diffs still return to `pending`, which is correct for them — they *are* proposals, and undo just makes them undecided again. The existing test that asserts that (`undo_restores_the_file_and_lets_the_diff_be_applied_again`) is the regression guard.
+   - Also fixed while adding the status: `refresh_review_state` had its own inline copy of the three reviewable statuses instead of calling `is_reviewable_diff_status`. Two lists that must agree, one of which is easy to miss when adding a status — the audit of 43 flagged exactly this shape of duplication, and it would have made "no open work" and "cannot be applied" disagree.
+   - The frontend needed the status in `DiffEntry["status"]` and `DiffHunk["status"]`, a banner, and nothing else: `REVIEWABLE_DIFF_STATUSES` in both `useAgentStore.ts` and `agentExperience.ts` are allow-lists, so an unknown value is already treated as not-reviewable. Rust 303 → 304, frontend 166 → 167.
+
+
 
 
 

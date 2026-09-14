@@ -737,8 +737,14 @@ impl AgentOrchestrator {
 
     /// 撤销最近一次应用：把文件恢复到那次应用之前。
     ///
-    /// 恢复完成后把受影响的 diff 退回 `pending`，这样它们重新回到审查区，
-    /// 而不是留在"已应用"却和磁盘不一致的状态。
+    /// 模型提出的 diff 恢复后退回 `pending`，重新回到审查区 —— 它本来就是一份提议，
+    /// 撤销只是让它回到未决状态。
+    ///
+    /// **工具写入的记录不能这样处理**，它们是"已经发生过的事"的记录，不是提议：
+    /// 一张删除记录被退回 `pending` 之后，Apply 会走内容替换那条路，把文件写成 0 字节
+    /// 而不是删掉它；一张移动记录根本没有内容可应用，只会失败。所以它们变成终态
+    /// `reverted`：仍然留在列表里可查（撤销掉一次改动不等于它没发生过），但不再是
+    /// 一个可以按的提议。
     pub fn undo_last_apply(&mut self) -> Result<UndoResult, String> {
         let Some(checkpoint) = self.undo_stack.pop() else {
             return Err("Nothing to undo: no applied change is recorded".to_string());
@@ -747,6 +753,13 @@ impl AgentOrchestrator {
 
         for diff in &mut self.diffs {
             if !restored.contains(&diff.file) {
+                continue;
+            }
+            if is_tool_write_record(diff) {
+                for hunk in &mut diff.hunks {
+                    hunk.status = Some("reverted".to_string());
+                }
+                diff.status = "reverted".to_string();
                 continue;
             }
             for hunk in &mut diff.hunks {
@@ -1721,9 +1734,12 @@ impl AgentOrchestrator {
 
     /// 还有待处理的 diff 时留在 WaitingUser，否则收尾为 Done
     pub fn refresh_review_state(&mut self) {
-        let has_open_work = self.diffs.iter().any(|diff| {
-            diff.status == "pending" || diff.status == "partial" || diff.status == "failed"
-        });
+        // 和 `is_reviewable_diff_status` 共用同一份判断：以前这里把三个状态又抄了一遍，
+        // 加一个新状态时很容易只改一处，于是"没有待办"和"不能应用"两个概念对不上。
+        let has_open_work = self
+            .diffs
+            .iter()
+            .any(|diff| is_reviewable_diff_status(&diff.status));
         if has_open_work {
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
@@ -2287,6 +2303,17 @@ fn is_reviewable_diff_status(status: &str) -> bool {
     matches!(status, "pending" | "partial" | "failed")
 }
 
+/// 这张卡片是"已经发生过的事"的记录，而不是一份等待审查的提议。
+///
+/// 判断依据是 `record_tool_writes` 打上的 protocol：内置写入 / 删除 / 移动工具直接改了
+/// 磁盘，卡片是事后补的凭据。把它和模型提出的 diff 混为一谈，就会出现"应用一条删除
+/// 记录"这种既没有意义、又会把文件写成 0 字节的操作。
+fn is_tool_write_record(diff: &crate::agent::state_machine::FileDiff) -> bool {
+    diff.provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.protocol == "workspace_tool")
+}
+
 fn summarize_text(text: &str, max_chars: usize) -> String {
     let normalized = text
         .lines()
@@ -2600,6 +2627,43 @@ mod tests {
         );
         assert_eq!(edited.hunks[0].original, "as it was when moved\n");
         assert_eq!(edited.hunks[0].updated, "edited after the move\n");
+    }
+
+    /// 撤销一条工具写入记录之后，它不能变回一份"待审查的提议"。
+    ///
+    /// 退回 `pending` 的后果很具体：删除记录的 hunk 是 `内容 → ""`，Apply 会走内容替换
+    /// 那条路，把文件写成 0 字节而不是删掉它；移动记录根本没有内容可应用。记录讲的是
+    /// "已经发生过、并且已经被撤销"，那是终态。
+    #[test]
+    fn undoing_a_tool_write_record_makes_it_terminal_not_reviewable() {
+        let base = std::env::temp_dir().join(format!("agent-ide-reverted-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("gone.ts");
+        let mut orchestrator = AgentOrchestrator::new();
+
+        // 工具已经把文件删了，卡片是事后补的凭据
+        orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "gone.ts".to_string(),
+            path: path.clone(),
+            previous: Some("content\n".to_string()),
+            updated: String::new(),
+            removed: true,
+            moved_from: None,
+        }]);
+
+        let undone = orchestrator.undo_last_apply().unwrap();
+        assert_eq!(undone.restored, vec!["gone.ts".to_string()]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content\n");
+
+        let diff_id = orchestrator.diffs[0].id.clone();
+        assert_eq!(orchestrator.diffs[0].status, "reverted");
+        assert_eq!(orchestrator.pending_diff_count(), 0);
+        let error = orchestrator.apply_diff(&diff_id).unwrap_err();
+        assert!(error.contains("reverted"), "{}", error);
+        // 文件保持恢复后的样子：被拒绝的 Apply 不能把它写成 0 字节
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "content\n");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 先删掉 B，再把 A 移到 B。两条记录的 `file` 都是 B，但要恢复的是两件不同的事：

@@ -238,7 +238,13 @@ export interface DiffEntry {
   baseHash?: string | null;
   provenance?: DiffProvenance | null;
   hunks: DiffHunk[];
-  status: "pending" | "partial" | "applied" | "rejected" | "failed";
+  /**
+   * `reverted` 是终态：工具写入的记录被撤销之后停在这里。
+   *
+   * 它不能退回 `pending` —— 那样 Apply 会把一条删除记录当成内容替换执行，把文件写成
+   * 0 字节而不是删掉它；移动记录更是没有内容可应用。见后端 `undo_last_apply`。
+   */
+  status: "pending" | "partial" | "applied" | "rejected" | "failed" | "reverted";
   applyError?: string;
 }
 
@@ -265,7 +271,7 @@ export interface DiffHunk {
   original: string;
   updated: string;
   provenance?: DiffHunkProvenance | null;
-  status?: "pending" | "applied" | "rejected" | "failed";
+  status?: "pending" | "applied" | "rejected" | "failed" | "reverted";
   applyError?: string;
 }
 
