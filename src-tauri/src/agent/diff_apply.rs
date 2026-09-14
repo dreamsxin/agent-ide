@@ -270,7 +270,12 @@ pub fn apply_pending_diffs_with_snapshots(
 pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> (Vec<String>, Vec<String>) {
     let mut restored = Vec::new();
     let mut failed = Vec::new();
-    for snapshot in snapshots {
+    // **倒序**。一批快照是按操作发生的顺序记的，而一串操作的逆操作必须反过来做。
+    // 顺序重放会真的丢数据：`move A→B` 之后又 `write A`，正序先把 B 移回 A（覆盖刚建的
+    // A，这步是对的），再按第二条记录把 A 删掉 —— A 的原始内容哪儿都不剩了，界面还报告
+    // "已恢复"。`move A→B; move B→C`、`move A→B; move C→A` 同理。
+    // 单文件的内容快照彼此独立，倒序对它们没有任何影响。
+    for snapshot in snapshots.iter().rev() {
         let outcome = match snapshot.move_back_to {
             // 撤销一次移动：先把文件移回去。目标已经不在了（移完之后又被删掉）也不算
             // 失败 —— 那种情况下 `previous` 里存着内容，下面一步把源文件重建出来。
@@ -299,6 +304,16 @@ pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> (Vec<String>, Vec<String
 /// 父目录要重建：移动很可能把文件从一个此后被清空的目录里搬走了，而 `fs::rename`
 /// 不会为你创建目标目录。
 fn restore_move(snapshot: &FileSnapshot, target: &PathBuf) -> Result<(), String> {
+    // `fs::rename` 会**静默覆盖**已存在的目标。倒序重放之后源路径本该是空的，所以
+    // 这里有东西就说明世界和快照不一致（比如运行结束后用户自己建了个同名文件）——
+    // 那时候宁可让撤销这一条失败并如实报告，也不能把它悄悄冲掉。
+    if target.exists() && snapshot.path != *target {
+        return Err(format!(
+            "{}: {} already exists, refusing to overwrite it while undoing a move",
+            snapshot.file,
+            target.display()
+        ));
+    }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("{}: {}", snapshot.file, error))?;
@@ -487,6 +502,138 @@ mod tests {
             std::fs::read_to_string(&source).unwrap(),
             "export const a = 1;\n"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 移动之后又在原路径新建了一个文件：撤销必须倒着来。
+    ///
+    /// 正序重放会先把 B 移回 A（覆盖新建的那个 A，这步是对的），再按第二条记录把 A
+    /// 删掉 —— A 的原始内容哪儿都不剩了，而界面报告的是"已恢复"。这正是本项目拒绝
+    /// 把移动拆成删+建时列出的那个失败，从另一扇门回来了。
+    #[test]
+    fn undoing_a_move_then_a_write_at_the_old_path_replays_in_reverse() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-order-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        // 运行结束时的磁盘状态：A 是运行中新建的，B 是从原来的 A 移过去的
+        std::fs::write(&b, "the original a\n").unwrap();
+        std::fs::write(&a, "written after the move\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[
+            FileSnapshot {
+                file: "b.ts".to_string(),
+                path: b.clone(),
+                previous: None,
+                move_back_to: Some(a.clone()),
+            },
+            FileSnapshot {
+                file: "a.ts".to_string(),
+                path: a.clone(),
+                previous: None,
+                move_back_to: None,
+            },
+        ]);
+
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "the original a\n");
+        assert!(!b.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 连续两次移动：A→B→C。倒序重放才能把文件送回 A。
+    #[test]
+    fn undoing_two_chained_moves_returns_the_file_to_the_first_path() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-chain-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        let c = base.join("c.ts");
+        std::fs::write(&c, "content\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[
+            FileSnapshot {
+                file: "b.ts".to_string(),
+                path: b.clone(),
+                previous: None,
+                move_back_to: Some(a.clone()),
+            },
+            FileSnapshot {
+                file: "c.ts".to_string(),
+                path: c.clone(),
+                previous: None,
+                move_back_to: Some(b.clone()),
+            },
+        ]);
+
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "content\n");
+        assert!(!b.exists());
+        assert!(!c.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新建之后再移动：撤销之后两个路径都不该有文件 —— 运行之前它们都不存在。
+    #[test]
+    fn undoing_a_create_then_move_leaves_neither_path_behind() {
+        let base = std::env::temp_dir().join(format!("agent-ide-create-move-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        std::fs::write(&b, "agent authored\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[
+            FileSnapshot {
+                file: "a.ts".to_string(),
+                path: a.clone(),
+                previous: None,
+                move_back_to: None,
+            },
+            FileSnapshot {
+                file: "b.ts".to_string(),
+                path: b.clone(),
+                previous: None,
+                move_back_to: Some(a.clone()),
+            },
+        ]);
+
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(restored.len(), 2);
+        assert!(!a.exists(), "运行前 a.ts 并不存在，撤销后也不该有");
+        assert!(!b.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 源路径上已经有别的东西时，移回去要如实失败，而不是 `fs::rename` 静默覆盖。
+    #[test]
+    fn undoing_a_move_refuses_to_overwrite_something_at_the_source() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-clash-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        std::fs::write(&b, "moved content\n").unwrap();
+        // 运行结束之后用户自己在原路径建了个同名文件
+        std::fs::write(&a, "user's own file\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[FileSnapshot {
+            file: "b.ts".to_string(),
+            path: b.clone(),
+            previous: None,
+            move_back_to: Some(a.clone()),
+        }]);
+
+        assert!(restored.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].contains("already exists"), "{:?}", failed);
+        // 两边都保持原样：撤销失败也不能毁掉任何一份内容
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "user's own file\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "moved content\n");
 
         let _ = std::fs::remove_dir_all(&base);
     }

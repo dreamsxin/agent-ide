@@ -618,37 +618,37 @@ impl AgentOrchestrator {
             return Vec::new();
         }
 
-        // 按文件聚合，保持首次出现的顺序
-        let mut order: Vec<String> = Vec::new();
+        // 按文件聚合，保持首次出现的顺序。
+        //
+        // 键里带上"是不是一次移动"：`delete B` 之后又 `move A→B`，两条记录的 `file` 都是
+        // B，但它们要恢复的是两件不同的事（B 原来的内容、以及 A 这个文件本身）。合成一条
+        // 就必然丢掉其中一个，而且标签会变成 `edit` 外加一句指向 `workspace_write_file`
+        // 的理由 —— 那正是本项目拒绝把移动拆成删+建的原因。
+        let mut order: Vec<(String, bool)> = Vec::new();
         let mut merged: std::collections::HashMap<
-            String,
+            (String, bool),
             crate::agent::workspace_tools::AgentFileWrite,
         > = std::collections::HashMap::new();
         for write in writes {
-            match merged.get_mut(&write.file) {
+            let key = (write.file.clone(), write.moved_from.is_some());
+            match merged.get_mut(&key) {
                 Some(existing) => {
-                    // 移动之后又被改了：`previous` 此前是 None（移动没有"之前的内容"），
-                    // 而这条编辑记录的 previous 恰好就是移动那一刻的内容 —— 不接住它，
-                    // 撤销只能把改坏的内容移回原处。
-                    if existing.moved_from.is_some() && existing.previous.is_none() {
-                        existing.previous = write.previous.clone();
-                    }
                     existing.updated = write.updated;
                     // 最后一次操作决定这个文件最终是"改了"还是"没了"：先写后删是删除，
                     // 先删后写（重建）是编辑。只看第一条会把删除显示成一次普通修改。
                     existing.removed = write.removed;
                 }
                 None => {
-                    order.push(write.file.clone());
-                    merged.insert(write.file.clone(), write);
+                    order.push(key.clone());
+                    merged.insert(key, write);
                 }
             }
         }
 
         let mut snapshots = Vec::new();
         let mut created = Vec::new();
-        for file in &order {
-            let Some(write) = merged.remove(file) else {
+        for key in &order {
+            let Some(write) = merged.remove(key) else {
                 continue;
             };
             snapshots.push(crate::agent::diff_apply::FileSnapshot {
@@ -2576,12 +2576,70 @@ mod tests {
             },
         ]);
 
-        assert_eq!(recorded.len(), 1, "same file must merge into one entry");
-        let provenance = recorded[0].provenance.as_ref().expect("provenance");
-        assert_eq!(provenance.operation, "move");
-        assert_eq!(provenance.moved_from.as_deref(), Some("src/before.ts"));
-        assert_eq!(recorded[0].hunks[0].original, "as it was when moved\n");
-        assert_eq!(recorded[0].hunks[0].updated, "edited after the move\n");
+        assert_eq!(recorded.len(), 2, "移动和随后的编辑是两件事，不能压成一条");
+        let moved = &recorded[0];
+        let edited = &recorded[1];
+        assert_eq!(
+            moved.provenance.as_ref().expect("provenance").operation,
+            "move"
+        );
+        assert_eq!(
+            moved
+                .provenance
+                .as_ref()
+                .expect("provenance")
+                .moved_from
+                .as_deref(),
+            Some("src/before.ts")
+        );
+        // 移动本身没有内容变化，内容变化属于后面那条编辑记录
+        assert!(moved.hunks[0].original.is_empty());
+        assert_eq!(
+            edited.provenance.as_ref().expect("provenance").operation,
+            "edit"
+        );
+        assert_eq!(edited.hunks[0].original, "as it was when moved\n");
+        assert_eq!(edited.hunks[0].updated, "edited after the move\n");
+    }
+
+    /// 先删掉 B，再把 A 移到 B。两条记录的 `file` 都是 B，但要恢复的是两件不同的事：
+    /// B 原来的内容，以及 A 这个文件本身。
+    ///
+    /// 合成一条就必然丢掉其中一个 —— 而且标签会变成 `edit`，理由写着
+    /// `workspace_write_file`，一次都没被调用过的工具。
+    #[test]
+    fn a_delete_and_a_move_onto_the_same_path_stay_two_entries() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_tool_writes(vec![
+            AgentFileWrite {
+                file: "src/target.ts".to_string(),
+                path: PathBuf::from("src/target.ts"),
+                previous: Some("the old target\n".to_string()),
+                updated: String::new(),
+                removed: true,
+                moved_from: None,
+            },
+            AgentFileWrite {
+                file: "src/target.ts".to_string(),
+                path: PathBuf::from("src/target.ts"),
+                previous: None,
+                updated: String::new(),
+                removed: false,
+                moved_from: Some(crate::agent::workspace_tools::MovedFrom {
+                    file: "src/source.ts".to_string(),
+                    path: PathBuf::from("src/source.ts"),
+                }),
+            },
+        ]);
+
+        assert_eq!(recorded.len(), 2);
+        let deleted = recorded[0].provenance.as_ref().expect("provenance");
+        assert_eq!(deleted.operation, "delete");
+        assert_eq!(recorded[0].hunks[0].original, "the old target\n");
+        let moved = recorded[1].provenance.as_ref().expect("provenance");
+        assert_eq!(moved.operation, "move");
+        assert_eq!(moved.moved_from.as_deref(), Some("src/source.ts"));
     }
 
     #[test]

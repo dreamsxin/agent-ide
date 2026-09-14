@@ -776,8 +776,13 @@ fn move_file_tool(
     let source = workspace::resolve_for_agent_write(from)?;
     let destination = workspace::resolve_for_agent_write(to)?;
     if source == destination {
+        // 只改大小写的重命名也落在这里：`resolve_for_write` 会 canonicalize 已存在的
+        // 路径，而 Windows / macOS 返回的是磁盘上真实的大小写，于是 `foo.ts` 和
+        // `Foo.ts` 解析成同一个 PathBuf。所以这条消息要直接给出可行的做法，而不是
+        // 让模型反复重试同一个调用。
         return Err(format!(
-            "{} and {} are the same path; nothing to move.",
+            "{} and {} are the same path; nothing to move. A case-only rename needs an \
+             intermediate name (move to a temporary path first, then to the final one).",
             from, to
         ));
     }
@@ -790,7 +795,11 @@ fn move_file_tool(
     if !source.exists() {
         return Err(format!("{} does not exist.", from));
     }
-    if destination.exists() && !same_file_different_case(&source, &destination) {
+    // 目标存在就拒绝，一个例外都不留。之前这里放过"只差大小写"的情况，而大小写敏感性
+    // 是**每个目录**的属性（Windows 10+ 的 setCaseSensitiveInfo、大小写敏感的 APFS
+    // 卷），不是编译目标的属性 —— 在那些地方 `Foo.ts` 和 `foo.ts` 是两个真实文件，
+    // 放行等于用 `fs::rename` 静默覆盖掉一个没有任何记录能恢复的文件。
+    if destination.exists() {
         return Err(format!(
             "{} already exists. Refusing to overwrite it — delete it first if that is really \
              intended.",
@@ -798,12 +807,30 @@ fn move_file_tool(
         ));
     }
 
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Create parent directory for {}: {}", to, error))?;
+    // 只在父目录确实不存在时创建，并记住是我们建的：`fs::rename` 仍然可能失败（跨卷、
+    // 权限、Windows 上的共享冲突），那时候留下一棵空目录树等于一次没有任何记录、也无法
+    // 撤销的工作区改动。
+    let created_parent = match destination.parent() {
+        Some(parent) if !parent.exists() => {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Create parent directory for {}: {}", to, error))?;
+            Some(parent.to_path_buf())
+        }
+        _ => None,
+    };
+    if let Err(error) = std::fs::rename(&source, &destination) {
+        if let Some(parent) = created_parent {
+            // 只删空目录，remove_dir 天然不会碰有内容的目录
+            let mut current = Some(parent);
+            while let Some(directory) = current {
+                if std::fs::remove_dir(&directory).is_err() {
+                    break;
+                }
+                current = directory.parent().map(|path| path.to_path_buf());
+            }
+        }
+        return Err(format!("Move {} to {}: {}", from, to, error));
     }
-    std::fs::rename(&source, &destination)
-        .map_err(|error| format!("Move {} to {}: {}", from, to, error))?;
 
     permissions.record_write(AgentFileWrite {
         file: to.to_string(),
@@ -822,18 +849,6 @@ fn move_file_tool(
         "Moved {} to {}. The move is recorded and undo puts it back at {}.",
         from, to, from
     ))
-}
-
-/// 只差大小写的同一个文件。
-///
-/// `foo.ts` → `Foo.ts` 是一次正当的重命名，但在大小写不敏感的文件系统上
-/// `destination.exists()` 会为真，于是"不覆盖已存在的目标"这条规则会把它一起挡掉。
-/// Linux 上 `foo.ts` 和 `Foo.ts` 是两个文件，那里就必须按存在处理。
-fn same_file_different_case(source: &std::path::Path, destination: &std::path::Path) -> bool {
-    if cfg!(target_os = "linux") {
-        return false;
-    }
-    source.to_string_lossy().to_lowercase() == destination.to_string_lossy().to_lowercase()
 }
 
 
