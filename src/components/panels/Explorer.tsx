@@ -6,7 +6,9 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import {
   attachLoadedChildren,
+  copyNameCandidates,
   loadedDirectoryPaths,
+  validateEntryName,
   type ExplorerNode,
 } from "./explorerTree";
 
@@ -821,7 +823,13 @@ export default function Explorer() {
             onSubmit={async (event) => {
               event.preventDefault();
               const value = nameDialogValue.trim();
-              if (!value) return;
+              // 形状不对就当场说清楚，别把它拼进路径：`a/b/c` 会静默建出一层嵌套，
+              // `../x` 会跑到父目录去 —— 用户以为自己在起名字，实际写了一段路径。
+              const problem = validateEntryName(value);
+              if (problem) {
+                setNameDialogError(problem);
+                return;
+              }
               try {
                 await nameDialog.onConfirm(value);
                 closeNameDialog();
@@ -906,7 +914,7 @@ async function copyWithUniqueName(
   sourceName: string,
   copyPath: (src: string, dest: string) => Promise<void>
 ) {
-  const candidates = copyNameCandidates(parent, sourceName);
+  const candidates = copyNameCandidates(sourceName).map((name) => joinPath(parent, name));
   let lastError: unknown = null;
   for (const destination of candidates) {
     try {
@@ -922,13 +930,3 @@ async function copyWithUniqueName(
   throw lastError ?? new Error("No available copy name");
 }
 
-function copyNameCandidates(parent: string, sourceName: string) {
-  const dotIndex = sourceName.lastIndexOf(".");
-  const hasExtension = dotIndex > 0;
-  const stem = hasExtension ? sourceName.slice(0, dotIndex) : sourceName;
-  const ext = hasExtension ? sourceName.slice(dotIndex) : "";
-  return Array.from({ length: 50 }, (_, index) => {
-    const suffix = index === 0 ? " Copy" : ` Copy ${index + 1}`;
-    return joinPath(parent, `${stem}${suffix}${ext}`);
-  });
-}
