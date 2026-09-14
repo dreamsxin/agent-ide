@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   attachLoadedChildren,
   copyNameCandidates,
+  findNodeById,
   loadedDirectoryPaths,
   resolveMoveDestination,
   validateEntryName,
@@ -195,6 +196,27 @@ describe("validateEntryName", () => {
     expect(validateEntryName("COM1")).not.toBeNull();
     // 只是以设备名开头不算
     expect(validateEntryName("console.ts")).toBeNull();
+  });
+});
+
+describe("findNodeById", () => {
+  const tree = [
+    dir("src", [dir("src/components", [file("src/components/App.tsx")]), file("src/main.ts")]),
+    file("README.md"),
+  ];
+
+  /**
+   * 拖放只交回 id。只扫顶层的话，把文件拖进一个二级目录会找不到落点，然后静默什么
+   * 都不做 —— 比报错更糟。
+   */
+  it("finds a node nested below an expanded directory", () => {
+    expect(findNodeById(tree, "src/components")?.isDir).toBe(true);
+    expect(findNodeById(tree, "src/components/App.tsx")?.name).toBe("App.tsx");
+  });
+
+  it("finds a top-level node and returns null for an unknown id", () => {
+    expect(findNodeById(tree, "README.md")?.path).toBe("README.md");
+    expect(findNodeById(tree, "nowhere.ts")).toBeNull();
   });
 });
 

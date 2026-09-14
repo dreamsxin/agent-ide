@@ -34,6 +34,24 @@ export function loadedDirectoryPaths(nodes: ExplorerNode[]): string[] {
 }
 
 /**
+ * 按 id 在整棵树里找节点，含未展开分支下已经列过的子节点。
+ *
+ * 拖放只把 id 交回来（react-arborist 的 `onMove` 给的是 `dragIds` 和 `parentId`），
+ * 而落点判断需要真实路径和"是不是目录"。递归找是必须的：只扫顶层的话，把文件拖进
+ * 一个二级目录时会找不到落点，然后静默什么都不做 —— 比报错更糟。
+ */
+export function findNodeById(nodes: ExplorerNode[], id: string): ExplorerNode | null {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    if (node.children?.length) {
+      const found = findNodeById(node.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
  * 把重新列出来的子节点按路径接回新树。
  *
  * 只认 `childrenByPath` 里有的目录：清单里没有的目录保持"未展开"，而不是被塞一个

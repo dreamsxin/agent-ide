@@ -7,6 +7,7 @@ import { isTauriRuntime } from "../../utils/tauri";
 import {
   attachLoadedChildren,
   copyNameCandidates,
+  findNodeById,
   loadedDirectoryPaths,
   resolveMoveDestination,
   validateEntryName,
@@ -605,6 +606,55 @@ export default function Explorer() {
   );
 
 
+  /**
+   * 拖放移动。
+   *
+   * react-arborist 的行默认就是可拖的，但没有 `onMove` 时松手什么都不会发生 ——
+   * 一个假的可拖动手感，比不能拖更糟。落点判断和粘贴共用 `resolveMoveDestination`：
+   * 移动到自己身上、移进自己的子目录、移到它已经在的目录，这三种都要给出人能看懂的
+   * 拒绝理由，而不是让后端返回一句 EINVAL。
+   *
+   * 多选拖动时逐个搬（不是并发）：并发会让文件监听器的刷新和后续的搬移抢同一棵树，
+   * 而且失败一个也要能说清是哪一个。
+   */
+  const handleMove = useCallback(
+    async (args: { dragIds: string[]; parentId: string | null }) => {
+      const parent = args.parentId ? findNodeById(rootDataRef.current, args.parentId) : null;
+      const targetDirectory = parent
+        ? parent.isDir
+          ? parent.path
+          : parentOf(parent.path)
+        : workspacePath;
+      if (!targetDirectory) return;
+
+      const moved: string[] = [];
+      const failures: string[] = [];
+      for (const id of args.dragIds) {
+        const source = findNodeById(rootDataRef.current, id);
+        if (!source) continue;
+        const outcome = resolveMoveDestination(source.path, source.name, targetDirectory);
+        if ("error" in outcome) {
+          failures.push(outcome.error);
+          continue;
+        }
+        try {
+          await renamePath(source.path, outcome.destination);
+          moved.push(source.name);
+        } catch (e) {
+          failures.push(`${source.name}: ${e}`);
+        }
+      }
+
+      if (failures.length > 0) {
+        // 失败优先显示：成功的那些用户已经在树上看见了，失败的才是他需要知道的
+        showToast(failures[0]);
+      } else if (moved.length > 0) {
+        showToast(moved.length === 1 ? `Moved: ${moved[0]}` : `Moved ${moved.length} items`);
+      }
+    },
+    [renamePath, workspacePath]
+  );
+
   // 复制绝对路径
   const handleCopyFilePath = useCallback(
     async (node: TreeNodeData) => {
@@ -738,6 +788,7 @@ export default function Explorer() {
             overscanCount={20}
             openByDefault={false}
             onToggle={handleToggle}
+            onMove={handleMove}
             onActivate={(node) => {
               // 方向键导航之后按 Enter 走到这里。目录切换，文件打开 ——
               // 以前这里只处理目录，键盘用户因此打不开文件。
