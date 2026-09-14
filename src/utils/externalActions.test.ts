@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeExternalAction,
+  isFromOtherRun,
   isRefusedAction,
   normalizeExternalActions,
   summarizeExternalActions,
@@ -70,5 +71,23 @@ describe("isRefusedAction / summarizeExternalActions", () => {
     expect(
       describeExternalAction({ ...actions[0], detail: "Opened it" })
     ).toBe("https://ok.example — Opened it");
+  });
+});
+
+describe("isFromOtherRun", () => {
+  const action = normalizeExternalActions([
+    { id: "1", kind: "browser_open", target: "https://a.example", runId: "run-1" },
+  ])[0];
+
+  it("marks a record whose run differs from the one on screen", () => {
+    // 后端跨运行保留记录，所以界面必须说清哪些不是这次干的
+    expect(isFromOtherRun(action, "run-2")).toBe(true);
+    expect(isFromOtherRun(action, "run-1")).toBe(false);
+  });
+
+  it("says nothing when either side has no run id", () => {
+    // 标错来源比不标更糟
+    expect(isFromOtherRun(action, null)).toBe(false);
+    expect(isFromOtherRun({ ...action, runId: null }, "run-2")).toBe(false);
   });
 });

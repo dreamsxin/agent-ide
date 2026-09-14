@@ -110,6 +110,13 @@ pub struct WorkspaceToolPermissions {
     /// 空清单等于不许访问任何站点，`allow_browser` 也救不了 —— 两者是"能不能用浏览器"
     /// 和"能去哪些站点"两个问题，任何一个没给都不该放行。
     pub browser_origins: Vec<String>,
+    /// 这批授权属于哪一次运行。
+    ///
+    /// 在拿到执行权之后由命令层写进来，而不是在登记记录时去读 orchestrator 的
+    /// `current_run_id`：一次被 Stop 掉的运行可能在下一个 prompt 已经开跑之后才排空
+    /// 它的记录，那时读到的是**后一次**运行的 id，于是前一次的导航被记在了后一次名下 ——
+    /// 正好是这个字段本来要防的事。
+    pub run_id: Option<String>,
     /// 已经发生的写入。跟着 `Clone` 共享同一份（`Arc`），所以命令层可以克隆一份
     /// 交给工具、另一份记在 orchestrator 上，事后从任一份都取得到记录。
     writes: AgentWriteLog,

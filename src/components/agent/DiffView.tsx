@@ -6,6 +6,7 @@ import type { DiffEntry, DiffHunk } from "../../types/agent";
 import { hunkBanner, hunkKind } from "./diffPresentation";
 import {
   describeExternalAction,
+  isFromOtherRun,
   isRefusedAction,
   summarizeExternalActions,
 } from "../../utils/externalActions";
@@ -228,6 +229,7 @@ function HunkBlock({
 export default function DiffView() {
   const diffs = useAgentStore((s) => s.diffs);
   const externalActions = useAgentStore((s) => s.externalActions);
+  const agentRunId = useAgentStore((s) => s.agentRunId);
   const externalSummary = summarizeExternalActions(externalActions);
   const lastApplyResult = useAgentStore((s) => s.lastApplyResult);
   const clearApplyResult = useAgentStore((s) => s.clearApplyResult);
@@ -334,17 +336,26 @@ export default function DiffView() {
             {externalSummary.performed} browser action(s) — cannot be undone
             {externalSummary.refused > 0 && `, ${externalSummary.refused} refused or failed`}
           </div>
-          <div className="space-y-1">
-            {externalActions.slice(-10).map((action) => (
+          {/* 全部列出来，只加滚动：截断成"最近 10 条"等于在用户唯一被告知要看的地方
+              把这份记录悄悄砍掉，和它替换掉的 emit-only 设计是同一类毛病。 */}
+          <div className="max-h-40 space-y-1 overflow-y-auto">
+            {[...externalActions].reverse().map((action) => (
               <div key={action.id} className="rounded bg-surface-base/60 px-2 py-1">
-                <div
-                  className={
-                    isRefusedAction(action)
-                      ? "font-medium text-diff-remove"
-                      : "font-medium text-surface-text"
-                  }
-                >
-                  {action.kind}
+                <div className="flex items-baseline gap-2">
+                  <span
+                    className={
+                      isRefusedAction(action)
+                        ? "font-medium text-diff-remove"
+                        : "font-medium text-surface-text"
+                    }
+                  >
+                    {action.kind}
+                  </span>
+                  {isFromOtherRun(action, agentRunId) && (
+                    <span className="rounded bg-surface-muted/20 px-1 text-[10px] text-surface-muted">
+                      earlier run
+                    </span>
+                  )}
                 </div>
                 <div className="mt-0.5 break-words text-[11px] text-surface-muted">
                   {describeExternalAction(action)}

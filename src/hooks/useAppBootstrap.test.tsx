@@ -52,11 +52,13 @@ describe("useAppBootstrap", () => {
     const restoreAgentSession = vi.fn();
     const restoreDiffs = vi.fn().mockResolvedValue(undefined);
     const reconcileBackendRun = vi.fn().mockResolvedValue(undefined);
+    const refreshExternalActions = vi.fn().mockResolvedValue(undefined);
     useAgentStore.setState({
       fetchLlmConfig,
       restoreAgentSession,
       restoreDiffs,
       reconcileBackendRun,
+      refreshExternalActions,
     });
     invokeMock.mockResolvedValue("D:/work/demo");
 
@@ -65,6 +67,9 @@ describe("useAppBootstrap", () => {
     await waitFor(() => expect(restoreAgentSession).toHaveBeenCalledWith("D:/work/demo"));
     expect(invokeMock).toHaveBeenCalledWith("get_workspace_path");
     expect(fetchLlmConfig).toHaveBeenCalledTimes(1);
+    // 撤不回的动作也要在刷新后回到界面上；这条断言就是防"函数是好的，只是没人调它"
+    // 的那类缺陷 —— 和上面 fetchLlmConfig 当初的毛病一样
+    expect(refreshExternalActions).toHaveBeenCalledTimes(1);
   });
 
   /// 后端拿不到工作区时不能把启动流程带崩：这条路径以前只有一个 `.catch` 里的

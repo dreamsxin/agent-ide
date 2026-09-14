@@ -306,7 +306,7 @@ pub async fn send_agent_prompt(
         let orch = agent_state.orchestrator.lock().await;
         matches!(orch.mode, AgentMode::Auto)
     };
-    let tool_permissions = agent_tool_permissions(
+    let mut tool_permissions = agent_tool_permissions(
         request.allow_command_run,
         allow_write,
         request.allow_file_create,
@@ -355,6 +355,9 @@ pub async fn send_agent_prompt(
         // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
         // 覆写它的工具面或记账器会把那次运行改坏
         let lease = orch.try_begin_run(request.run_id.clone())?;
+        // 撤不回的动作要认领**这一次**运行：id 只在这里是确定的，排空记录时再去读
+        // orchestrator 就可能读到下一次运行的 id
+        tool_permissions.run_id = orch.current_run_id.clone();
         orch.tool_invoker = tool_invoker;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
@@ -492,7 +495,7 @@ fn publish_external_actions(
     if actions.is_empty() {
         return;
     }
-    let recorded = orch.record_external_actions(actions);
+    let recorded = orch.record_external_actions(actions, permissions.run_id.clone());
     let refused = recorded
         .iter()
         .filter(|action| action.kind.ends_with("_refused") || action.kind.ends_with("_failed"))
@@ -740,7 +743,7 @@ pub async fn run_agent_step(
         let orch = agent_state.orchestrator.lock().await;
         matches!(orch.mode, AgentMode::Auto)
     };
-    let tool_permissions = agent_tool_permissions(
+    let mut tool_permissions = agent_tool_permissions(
         request.allow_command_run,
         allow_write,
         request.allow_file_create,
@@ -792,6 +795,7 @@ pub async fn run_agent_step(
         // 和记账器。以前这里直接 begin_run，等于绕过守卫从一次流水线运行手里抢走
         // 这些字段。
         let lease = orch.try_begin_run(request.run_id.clone())?;
+        tool_permissions.run_id = orch.current_run_id.clone();
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
         orch.start_usage_accounting(usage_meter.clone());
@@ -928,7 +932,9 @@ pub async fn continue_agent_pipeline(
             .take()
             .expect("paused run checked in this critical section");
         let policy = orch.tool_policy;
-        let permissions = orch.tool_permissions.clone();
+        let mut permissions = orch.tool_permissions.clone();
+        // 续跑是一次新的运行：记录要认领续跑这次的 id，而不是暂停前那次的
+        permissions.run_id = orch.current_run_id.clone();
         orch.emit_review_action_log(
             &app_handle,
             "info",
@@ -1290,6 +1296,14 @@ pub async fn repair_workspace(
     let mut orch = agent_state.orchestrator.lock().await;
     // 记账写在两条路径上：修复轮次花掉的 token 和别的运行一样要能查到
     emit_usage_action_log(&orch, &app_handle, &usage_meter);
+    // 修复循环用的是上一次运行留在 orchestrator 上的工具面（`drive_repair` 直接克隆
+    // `tool_invoker`），那份授权和这里的 `tool_permissions` 共享同一份日志 `Arc`。
+    // 不在这里排空的话，修复轮里发生的写入和导航就要等下一个 prompt —— 而下一个
+    // prompt 会换上一份全新的 `Arc`，于是那些记录永远没人取走。
+    let mut repair_permissions = orch.tool_permissions.clone();
+    repair_permissions.run_id = orch.current_run_id.clone();
+    publish_tool_writes(&mut orch, &app_handle, &repair_permissions);
+    publish_external_actions(&mut orch, &app_handle, &repair_permissions);
     // 释放要在 `?` 之前：修复失败也得把执行权交回去，否则后面所有运行都被拒
     orch.finish_run(lease.claim);
     let outcome = outcome?;

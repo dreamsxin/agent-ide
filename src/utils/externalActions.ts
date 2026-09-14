@@ -56,6 +56,21 @@ export function isRefusedAction(action: ExternalActionRecord): boolean {
 }
 
 /**
+ * 这条记录属于**别的**运行。
+ *
+ * 后端的列表跨运行保留（导航已经发生，不该因为换了个提问就消失），所以界面必须能
+ * 说出哪些不是当前这次干的 —— 否则用户会把上一次运行打开的站点当成刚发生的事。
+ * 任一边缺 id 时不下判断：标错来源比不标更糟。
+ */
+export function isFromOtherRun(
+  action: ExternalActionRecord,
+  currentRunId: string | null
+): boolean {
+  if (!action.runId || !currentRunId) return false;
+  return action.runId !== currentRunId;
+}
+
+/**
  * 一行摘要。
  *
  * 类别写在前面而不是翻译成句子：`browser_open_refused` 和 `browser_open` 差一个词，
