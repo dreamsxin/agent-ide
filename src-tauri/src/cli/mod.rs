@@ -2505,6 +2505,7 @@ mod tests {
                 source_stage: None,
                 regenerated_from_diff_id: None,
                 regenerated_from_hunk_index: None,
+                moved_from: None,
             }),
             hunks: Vec::new(),
             status: "pending".to_string(),
@@ -2542,6 +2543,7 @@ mod tests {
                 source_stage: None,
                 regenerated_from_diff_id: None,
                 regenerated_from_hunk_index: None,
+                moved_from: None,
             }),
             hunks: vec![crate::agent::state_machine::DiffHunk {
                 old_start: 0,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DiffHunk } from "../../types/agent";
-import { hunkKind } from "./diffPresentation";
+import { hunkBanner, hunkKind } from "./diffPresentation";
 
 function hunk(overrides: Partial<DiffHunk>): DiffHunk {
   return {
@@ -45,5 +45,36 @@ describe("hunkKind", () => {
   // 只有空白的内容不算内容：一个全是空格的 `updated` 不该被当成"新建了一个文件"
   it("只有空白不算有内容", () => {
     expect(hunkKind(hunk({ original: "a\n", updated: "   \n" }), "edit")).toBe("emptied");
+  });
+
+  /**
+   * 纯移动两边都没有内容（内容一个字节没变），落到兜底分支会渲染出一个空行，
+   * 于是"从哪搬来的"完全看不到 —— 而那正是这次改动的全部内容。
+   */
+  it("纯移动是自己一档，不是兜底", () => {
+    expect(hunkKind(hunk({}), "move")).toBe("moved");
+  });
+
+  it("移动之后又改了内容，就按修改画，横幅另说", () => {
+    expect(hunkKind(hunk({ original: "a\n", updated: "b\n" }), "move")).toBe("modified");
+  });
+});
+
+describe("hunkBanner", () => {
+  it("移动的横幅必须带上源路径：卡片标题只有落点", () => {
+    expect(hunkBanner("moved", "src/old.ts")).toContain("src/old.ts");
+  });
+
+  it("源路径缺失时也要说清这是一次移动，而不是显示 undefined", () => {
+    expect(hunkBanner("moved", null)).toBe("→ Moved");
+  });
+
+  it("删除和清空的说法不能混：后者文件还在", () => {
+    expect(hunkBanner("deleted")).not.toBe(hunkBanner("emptied"));
+  });
+
+  it("左右对照和统一 diff 文本没有横幅", () => {
+    expect(hunkBanner("modified")).toBeNull();
+    expect(hunkBanner("raw")).toBeNull();
   });
 });

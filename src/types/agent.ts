@@ -252,6 +252,8 @@ export interface DiffProvenance {
   sourceStage?: string | null;
   regeneratedFromDiffId?: string | null;
   regeneratedFromHunkIndex?: number | null;
+  /** 移动过来的话，这里是移动前的工作区相对路径（`DiffEntry.file` 只有落点） */
+  movedFrom?: string | null;
 }
 
 export interface DiffHunk {

@@ -190,6 +190,11 @@ pub struct FileSnapshot {
     pub file: String,
     pub path: PathBuf,
     pub previous: Option<String>,
+    /// 撤销这一笔要把 `path` 移回到这里。
+    ///
+    /// 移动的逆操作是移回去，不是"用内容重写源文件"：后者会丢掉文件本身的身份
+    /// （元数据、时间戳），二进制文件更是连内容都读不出来。
+    pub move_back_to: Option<PathBuf>,
 }
 
 pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
@@ -240,6 +245,7 @@ pub fn apply_pending_diffs_with_snapshots(
                         file: diff.file.clone(),
                         path: file_path.clone(),
                         previous,
+                        move_back_to: None,
                     });
                 }
                 written.insert(file_path);
@@ -265,14 +271,19 @@ pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> (Vec<String>, Vec<String
     let mut restored = Vec::new();
     let mut failed = Vec::new();
     for snapshot in snapshots {
-        let outcome = match snapshot.previous {
-            Some(ref content) => std::fs::write(&snapshot.path, content)
-                .map_err(|error| format!("{}: {}", snapshot.file, error)),
-            None => match std::fs::remove_file(&snapshot.path) {
-                Ok(()) => Ok(()),
-                // 已经不在了就算撤销成功，不必报错
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(format!("{}: {}", snapshot.file, error)),
+        let outcome = match snapshot.move_back_to {
+            // 撤销一次移动：先把文件移回去。目标已经不在了（移完之后又被删掉）也不算
+            // 失败 —— 那种情况下 `previous` 里存着内容，下面一步把源文件重建出来。
+            Some(ref target) => restore_move(snapshot, target),
+            None => match snapshot.previous {
+                Some(ref content) => std::fs::write(&snapshot.path, content)
+                    .map_err(|error| format!("{}: {}", snapshot.file, error)),
+                None => match std::fs::remove_file(&snapshot.path) {
+                    Ok(()) => Ok(()),
+                    // 已经不在了就算撤销成功，不必报错
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(format!("{}: {}", snapshot.file, error)),
+                },
             },
         };
         match outcome {
@@ -281,6 +292,29 @@ pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> (Vec<String>, Vec<String
         }
     }
     (restored, failed)
+}
+
+/// 把 `snapshot.path` 移回 `target`，必要时用 `previous` 补回内容。
+///
+/// 父目录要重建：移动很可能把文件从一个此后被清空的目录里搬走了，而 `fs::rename`
+/// 不会为你创建目标目录。
+fn restore_move(snapshot: &FileSnapshot, target: &PathBuf) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {}", snapshot.file, error))?;
+    }
+    match std::fs::rename(&snapshot.path, target) {
+        Ok(()) => {}
+        // 移动之后目标又被删了：内容还在快照里，直接重建源文件
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && snapshot.previous.is_some() => {}
+        Err(error) => return Err(format!("{}: {}", snapshot.file, error)),
+    }
+    // 移动之后又被改过：`previous` 是移动那一刻的内容，写回去才算真的撤销
+    if let Some(ref content) = snapshot.previous {
+        std::fs::write(target, content).map_err(|error| format!("{}: {}", snapshot.file, error))?;
+    }
+    Ok(())
 }
 
 fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, String> {
@@ -425,6 +459,63 @@ mod tests {
         let result = replace_unique(text, "class Greeter", "class Greeting");
 
         assert!(result.is_err(), "{:?}", result);
+    }
+
+    /// 撤销一次移动就是移回去，而不是"在源路径重写内容"。
+    ///
+    /// 用重写实现的话，文件的身份（时间戳、权限）会丢，而二进制文件根本读不出内容来
+    /// 重写；目标路径那个新文件也会留在磁盘上。
+    #[test]
+    fn undoing_a_move_puts_the_file_back_and_leaves_nothing_behind() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-undo-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("nested")).unwrap();
+        let source = base.join("old.ts");
+        let destination = base.join("nested/new.ts");
+        std::fs::write(&destination, "export const a = 1;\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[FileSnapshot {
+            file: "nested/new.ts".to_string(),
+            path: destination.clone(),
+            previous: None,
+            move_back_to: Some(source.clone()),
+        }]);
+
+        assert_eq!(restored, vec!["nested/new.ts".to_string()]);
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert!(!destination.exists(), "移动的落点不该留下文件");
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "export const a = 1;\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 移动之后又被改过：`previous` 是移动那一刻的内容，移回去还得把它写回来。
+    #[test]
+    fn undoing_a_move_that_was_edited_afterwards_restores_the_older_content() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("old.ts");
+        let destination = base.join("new.ts");
+        std::fs::write(&destination, "edited after the move\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[FileSnapshot {
+            file: "new.ts".to_string(),
+            path: destination.clone(),
+            previous: Some("as it was when moved\n".to_string()),
+            move_back_to: Some(source.clone()),
+        }]);
+
+        assert_eq!(restored.len(), 1);
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "as it was when moved\n"
+        );
+        assert!(!destination.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 一个应用不上的 hunk，其错误信息里要摘录 original 的开头。摘录必须按字符切，
@@ -758,6 +849,7 @@ mod tests {
             source_stage: None,
             regenerated_from_diff_id: None,
             regenerated_from_hunk_index: None,
+            moved_from: None,
         });
         assert!(!is_new_file_diff(&mislabeled));
 
