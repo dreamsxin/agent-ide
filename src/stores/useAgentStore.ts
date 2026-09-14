@@ -9,6 +9,7 @@ import type {
   ContextCompressionMode,
   PipelineStage,
   LlmConfigResponse,
+  LlmConnectionState,
   LlmProfile,
   LlmProfilesResponse,
   SaveLlmProfileRequest,
@@ -27,6 +28,11 @@ import type {
   DestructiveOpConfirm,
   RunUsage,
 } from "../types/agent";
+import {
+  connectionForTarget,
+  llmTargetFingerprint,
+  UNVERIFIED_LLM_CONNECTION,
+} from "./llmConnection";
 import {
   mcpApprovalForPermissions,
   normalizeAgentMode,
@@ -81,6 +87,14 @@ interface AgentStore {
 
   // ====== LLM 配置 ======
   llmConfigured: boolean;
+  /**
+   * 上一次连通性测试的结果。
+   *
+   * 单独一份状态，是因为它和 `llmConfigured` 回答的不是同一个问题：那个只说明存了
+   * profile，端点通不通它不知道。端点 / 模型 / 活动 profile 一变就回到 `unknown`，
+   * 否则一个绿点会替一个全新的、没验证过的端点作保。
+   */
+  llmConnection: LlmConnectionState;
   llmEndpoint: string;
   llmModel: string;
   apiKeyMasked: string;
@@ -283,6 +297,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   activeRole: "coder",
   pipeline: DEFAULT_PIPELINE,
   llmConfigured: false,
+  llmConnection: UNVERIFIED_LLM_CONNECTION,
   llmEndpoint: "",
   llmModel: "",
   apiKeyMasked: "",
@@ -1062,16 +1077,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         return;
       }
       const cfg = await invoke<LlmConfigResponse>("get_llm_config");
-      set({
-        llmConfigured: true,
-        llmEndpoint: cfg.endpoint,
-        llmModel: cfg.model,
-        apiKeyMasked: cfg.api_key_masked,
-        contextCompression: cfg.context_compression,
-        llmProfiles: cfg.profiles ?? [],
-        activeProfileId: cfg.active_profile_id ?? "",
-        chatProfileId: get().chatProfileId ?? cfg.active_profile_id ?? null,
-      });
+      commitLlmTarget(
+        {
+          llmConfigured: true,
+          llmEndpoint: cfg.endpoint,
+          llmModel: cfg.model,
+          apiKeyMasked: cfg.api_key_masked,
+          contextCompression: cfg.context_compression,
+          llmProfiles: cfg.profiles ?? [],
+          activeProfileId: cfg.active_profile_id ?? "",
+          chatProfileId: get().chatProfileId ?? cfg.active_profile_id ?? null,
+        },
+        set,
+        get
+      );
     } catch {
       set({ llmConfigured: false });
     }
@@ -1086,14 +1105,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       apiKey,
       model,
     });
-    set({
-      llmConfigured: true,
-      llmEndpoint: endpoint,
-      llmModel: model,
-      apiKeyMasked: apiKey.length > 8
-        ? apiKey.slice(0, 4) + "****" + apiKey.slice(-4)
-        : "****",
-    });
+    commitLlmTarget(
+      {
+        llmConfigured: true,
+        llmEndpoint: endpoint,
+        llmModel: model,
+        apiKeyMasked: apiKey.length > 8
+          ? apiKey.slice(0, 4) + "****" + apiKey.slice(-4)
+          : "****",
+      },
+      set,
+      get
+    );
   },
 
   saveLlmProfile: async (request) => {
@@ -1114,14 +1137,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setActiveLlmProfile: async (profileId) => {
     if (!isTauriRuntime()) {
-      set({ activeProfileId: profileId, chatProfileId: profileId });
+      commitLlmTarget({ activeProfileId: profileId, chatProfileId: profileId }, set, get);
       return;
     }
     const response = await invoke<LlmProfilesResponse>("set_active_llm_profile", { profileId });
     applyProfilesResponse(response, set, get);
   },
 
-  setChatProfileId: (profileId) => set({ chatProfileId: profileId }),
+  setChatProfileId: (profileId) => commitLlmTarget({ chatProfileId: profileId }, set, get),
   setChatContextCompression: (mode) => set({ chatContextCompression: mode }),
 
   /** 显式取一次明文密钥，只在用户点击"显示"时调用 */
@@ -1195,12 +1218,47 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (!isTauriRuntime()) {
       throw new Error("LLM connection test is available in the Tauri app runtime.");
     }
-    const result = await invoke<string>("test_llm_connection", {
-      profileId: get().chatProfileId,
-    });
-    return result;
+    const target = llmTargetFingerprint(get());
+    try {
+      const result = await invoke<string>("test_llm_connection", {
+        profileId: get().chatProfileId,
+      });
+      set({ llmConnection: { status: "ok", checkedAt: Date.now(), detail: result, target } });
+      return result;
+    } catch (error) {
+      // 失败也要记下来。只往上抛的话，调用方把它变成一句转瞬即逝的提示，状态栏
+      // 那个点继续说"ready" —— 而它其实只知道"配置过"。
+      set({
+        llmConnection: {
+          status: "failed",
+          checkedAt: Date.now(),
+          detail: String(error),
+          target,
+        },
+      });
+      throw error;
+    }
   },
 }));
+
+/**
+ * 改动 LLM 配置的统一入口：写进 store，然后按目标指纹决定上一次的连通性结果还算不算。
+ *
+ * 之所以集中在一处，是因为能改目标的地方有五个（`fetchLlmConfig`、
+ * `updateLlmConfig`、`setChatProfileId`、`setActiveLlmProfile`、
+ * `applyProfilesResponse`）。少接一处，那条路径上就会留下一个替新端点作保的绿点。
+ */
+function commitLlmTarget(
+  partial: Partial<AgentStore>,
+  set: (partial: Partial<AgentStore>) => void,
+  get: () => AgentStore
+) {
+  const next = { ...get(), ...partial };
+  set({
+    ...partial,
+    llmConnection: connectionForTarget(next.llmConnection, llmTargetFingerprint(next)),
+  });
+}
 
 function applyProfilesResponse(
   response: LlmProfilesResponse,
@@ -1210,16 +1268,20 @@ function applyProfilesResponse(
   const active =
     response.profiles.find((profile) => profile.id === response.active_profile_id) ??
     response.profiles[0];
-  set({
-    llmConfigured: response.profiles.length > 0,
-    llmProfiles: response.profiles,
-    activeProfileId: response.active_profile_id,
-    chatProfileId: get().chatProfileId ?? response.active_profile_id,
-    contextCompression: response.context_compression,
-    llmEndpoint: active?.endpoint ?? "",
-    llmModel: active?.model ?? "",
-    apiKeyMasked: active?.api_key_masked ?? "",
-  });
+  commitLlmTarget(
+    {
+      llmConfigured: response.profiles.length > 0,
+      llmProfiles: response.profiles,
+      activeProfileId: response.active_profile_id,
+      chatProfileId: get().chatProfileId ?? response.active_profile_id,
+      contextCompression: response.context_compression,
+      llmEndpoint: active?.endpoint ?? "",
+      llmModel: active?.model ?? "",
+      apiKeyMasked: active?.api_key_masked ?? "",
+    },
+    set,
+    get
+  );
 }
 
 function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {

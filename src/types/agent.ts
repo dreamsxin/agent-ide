@@ -348,6 +348,30 @@ export interface ConversationTurn {
   outcome: string;
 }
 
+/**
+ * 上一次连通性测试的结果。
+ *
+ * 和 `llmConfigured` 是两件事，不能混：后者只说明"存了一个 profile"，端点通不通、
+ * key 对不对、模型名存不存在，它一概不知道。之前状态栏只有一个绿点表示"已配置"，
+ * 而一个填错端点的 profile 也会让它变绿 —— 这正是这个项目明令禁止的那种虚假信心。
+ *
+ * `unknown` 是诚实的默认值：没测过就是不知道，不能算通。
+ */
+export interface LlmConnectionState {
+  status: "unknown" | "ok" | "failed";
+  /** 什么时候测的；`unknown` 时为 null */
+  checkedAt: number | null;
+  /** 成功时是模型回的一小段内容，失败时是错误原因 */
+  detail: string | null;
+  /**
+   * 被测的那个目标的指纹（见 `stores/llmConnection.ts`）。
+   *
+   * 结果必须带着目标一起存：否则改完端点之后，上一次的 ok 会替一个从没连过的
+   * 地址作保。
+   */
+  target: string | null;
+}
+
 /** Chat 消息 */
 export interface ChatMessage {
   id: string;

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 
 import StatusBar from "./StatusBar";
+import { useAgentStore } from "../../stores/useAgentStore";
+import { UNVERIFIED_LLM_CONNECTION } from "../../stores/llmConnection";
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore } from "../../stores/useProblemStore";
@@ -140,6 +142,59 @@ describe("branch segment", () => {
 
     expect(useLayoutStore.getState().leftTab).toBe("git");
     expect(useLayoutStore.getState().leftVisible).toBe(true);
+  });
+});
+
+/**
+ * 这一段以前只有两档："存过 profile" 就是绿点加 "LLM ready"。端点填错、key 过期、
+ * 模型名不存在，它一概照绿 —— 用户点了发送才知道不通。中间那档就是为此存在的。
+ */
+describe("LLM segment", () => {
+  it("没有凭据时说没配置", () => {
+    useAgentStore.setState({ llmConfigured: false, llmConnection: UNVERIFIED_LLM_CONNECTION });
+
+    render(<StatusBar />);
+
+    expect(screen.getByTestId("status-bar-llm").textContent).toContain("not configured");
+  });
+
+  it("配置了但没测过，不说 connected", () => {
+    useAgentStore.setState({ llmConfigured: true, llmConnection: UNVERIFIED_LLM_CONNECTION });
+
+    render(<StatusBar />);
+
+    const segment = screen.getByTestId("status-bar-llm");
+    expect(segment.textContent).not.toContain("connected");
+    expect(segment.getAttribute("title")).toMatch(/not been reached/);
+  });
+
+  it("测通了才说 connected", () => {
+    useAgentStore.setState({
+      llmConfigured: true,
+      llmConnection: { status: "ok", checkedAt: 1, detail: "pong", target: "t" },
+    });
+
+    render(<StatusBar />);
+
+    expect(screen.getByTestId("status-bar-llm").textContent).toContain("connected");
+  });
+
+  it("测失败时把失败原因带在 title 上，而不是只留一个红点", () => {
+    useAgentStore.setState({
+      llmConfigured: true,
+      llmConnection: {
+        status: "failed",
+        checkedAt: 1,
+        detail: "401 Unauthorized",
+        target: "t",
+      },
+    });
+
+    render(<StatusBar />);
+
+    const segment = screen.getByTestId("status-bar-llm");
+    expect(segment.textContent).toContain("unreachable");
+    expect(segment.getAttribute("title")).toContain("401 Unauthorized");
   });
 });
 

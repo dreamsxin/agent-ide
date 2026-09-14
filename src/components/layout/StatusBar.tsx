@@ -5,6 +5,7 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
+import { llmIndicator } from "../../stores/llmConnection";
 import { describeRunUsage } from "../../types/agent";
 import { formatMicrosUsd } from "../../utils/money";
 import StatusDot from "../shared/StatusDot";
@@ -21,6 +22,13 @@ const SEVERITY_STYLE: Record<ProblemSeverity, { letter: string; color: string }>
   info: { letter: "I", color: "text-accent-blue" },
 };
 
+/** 连通性三档对应的点色；判断在 `stores/llmConnection.ts`，这里只是配色 */
+const LLM_TONE_COLOR = {
+  ok: "bg-green-500",
+  warn: "bg-amber-500",
+  error: "bg-red-500",
+} as const;
+
 /**
  * 底部状态栏：被动状态的归处。
  *
@@ -36,6 +44,7 @@ export default function StatusBar() {
   const problems = useProblemStore((s) => s.problems);
   const agentState = useAgentStore((s) => s.state);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
+  const llmConnection = useAgentStore((s) => s.llmConnection);
   const runUsage = useAgentStore((s) => s.runUsage);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
@@ -59,6 +68,7 @@ export default function StatusBar() {
 
   const activeTab = openFiles.find((file) => file.path === activeFile) ?? null;
   const usageDisplay = runUsage ? describeRunUsage(runUsage, formatMicrosUsd) : null;
+  const llm = llmIndicator(llmConfigured, llmConnection);
 
   // 点数字就该到得了列表，否则这个数字只是让人知道有问题却不知道去哪看
   const showProblems = () => {
@@ -141,20 +151,15 @@ export default function StatusBar() {
         )}
 
         <span
+          data-testid="status-bar-llm"
           className="flex items-center gap-1.5"
-          title={
-            llmConfigured
-              ? "An LLM profile is configured"
-              : "No API credentials — open the Agent panel's Settings view to add a profile"
-          }
+          title={llm.title}
         >
           <span
             aria-hidden="true"
-            className={`inline-block h-2 w-2 flex-shrink-0 rounded-full ${
-              llmConfigured ? "bg-green-500" : "bg-red-500"
-            }`}
+            className={`inline-block h-2 w-2 flex-shrink-0 rounded-full ${LLM_TONE_COLOR[llm.tone]}`}
           />
-          {llmConfigured ? "LLM ready" : "LLM not configured"}
+          {llm.label}
         </span>
 
         <StatusDot state={agentState} />

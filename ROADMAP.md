@@ -950,6 +950,21 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Not addressed, and not claimed: destinations are still built with `/` separators on Windows (Known Issues 35). The backend resolves them, so this is cosmetic until something string-compares a destination against a `list_directory` path.
    - Rust 289 → 291, frontend 126 → 131. With Known Issues 38, a cut-paste refreshes the tree **and keeps the folders you had open**, which is the pair actually needed to make this feel like a file manager.
 
+41. **"LLM ready" meant "a profile exists", not "the endpoint answers" (2026-09-13)**
+   - Reported as *the configured / connected status indicators are gone*. Two thirds of that report do not hold, and the write-up says so rather than quietly fixing something adjacent:
+     - The **configured** indicator was never removed. `StatusBar.tsx` has rendered a dot plus "LLM ready" / "LLM not configured" the whole time, and `SettingsPanel.tsx` still shows the `LLM Service Configured` card.
+     - What commit `216db9d` deleted was the **local-model file status** row (`Loaded` / `Ready to load` / `Model file not found` plus Refresh/Load/Unload). That was GGUF file presence and in-process engine state, and it was dead — `create_local_model_engine` returned an unconditional `Err` (Known Issues 30), so those buttons could not succeed.
+     - A **connected** indicator never existed as state. `testLlmConnection` returned a `Promise<string>` and stored nothing; the result became a transient toast in the Settings panel and was gone on the next render.
+   - The real defect the report points at: `llmConfigured` answers "is a profile saved", and the UI presented that as readiness. A profile with a typo'd endpoint, an expired key or a model name the provider does not serve produced a **green dot saying "LLM ready"** — false confidence, which this project's conventions single out as worse than no indicator.
+   - Fix: `llmConnection: LlmConnectionState` in the store, three states — `unknown` / `ok` / `failed` — recorded by `testLlmConnection` on **both** paths. Failure is recorded *and* rethrown, so the Settings panel still shows its message while the status bar stops claiming readiness.
+   - **The result is stored with the target it was measured against**, a fingerprint of `id|endpoint|model` for the profile the test actually hits (`chatProfileId`, falling back to the active one). Without it, verifying a profile and then editing its endpoint leaves a green dot vouching for an address nothing ever reached. Five call sites can move the target (`fetchLlmConfig`, `updateLlmConfig`, `setChatProfileId`, `setActiveLlmProfile`, `applyProfilesResponse`), so they all go through one `commitLlmTarget` helper — miss one and that path keeps the stale green dot.
+   - The reset is deliberately **not** "any config write invalidates it": a periodic `fetchLlmConfig` that returns identical values keeps the verified state, because nothing about the target changed. That is the property the test asserts, rather than "reset was called".
+   - `unknown` renders amber and says `LLM configured` — configured is what is actually known. The status bar text distinguishes all three (`LLM connected` / `LLM configured` / `LLM unreachable`), because a colour alone is unreadable to a colour-blind user, the same reasoning as the E/W/I letters next to the problem counts.
+   - Judgement lives in `stores/llmConnection.ts` (pure, no store or React import) and the components only map a tone to a class. `llmIndicator` and `llmConnectionIndicator` share one wording table so the status bar and the Settings card cannot drift into telling different stories about the same state.
+   - Not done, and not implied: nothing tests connectivity on its own. The state says when it was last checked and by whose action; it never claims to be live. A background poll would need a rate limit and a cost story (the test is a real completion request), so it is a separate decision.
+   - Frontend 131 → 151: 11 for the pure module, 5 in the store (both outcomes recorded, target change invalidates, identical refresh does not), 4 rendering the three states in `StatusBar`.
+
+
 
 
 
