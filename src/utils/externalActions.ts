@@ -50,9 +50,19 @@ export function normalizeExternalActions(value: unknown): ExternalActionRecord[]
   return records;
 }
 
-/** 这条记录是被拒绝或失败的尝试，而不是真的发生了。 */
+/**
+ * 这条记录是没有真的发生的尝试：被拒、失败，或者被 Stop 拦下。
+ *
+ * `_cancelled` 必须算在里面。漏掉它的时候，一次被 Stop 拦住的导航会被计进
+ * "N browser action(s) — cannot be undone" —— 在这个产品唯一承诺可信的地方
+ * 说一件没发生的事。
+ */
 export function isRefusedAction(action: ExternalActionRecord): boolean {
-  return action.kind.endsWith("_refused") || action.kind.endsWith("_failed");
+  return (
+    action.kind.endsWith("_refused") ||
+    action.kind.endsWith("_failed") ||
+    action.kind.endsWith("_cancelled")
+  );
 }
 
 /**

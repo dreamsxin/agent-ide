@@ -58,12 +58,13 @@ describe("isRefusedAction / summarizeExternalActions", () => {
     { id: "1", kind: "browser_open", target: "https://ok.example" },
     { id: "2", kind: "browser_open_refused", target: "https://evil.example" },
     { id: "3", kind: "browser_tabs_failed", target: "127.0.0.1:9222" },
+    { id: "4", kind: "browser_open_cancelled", target: "https://late.example" },
   ]);
 
-  it("counts refusals and failures apart from what actually happened", () => {
-    // 这是标题里唯一要区分的事：真的出网了几次，被挡了几次
-    expect(summarizeExternalActions(actions)).toEqual({ performed: 1, refused: 2 });
-    expect(actions.filter(isRefusedAction).map((action) => action.id)).toEqual(["2", "3"]);
+  it("counts refusals, failures and Stop-cancelled attempts apart from what actually happened", () => {
+    // 这是标题里唯一要区分的事：真的出网了几次，没成的几次
+    expect(summarizeExternalActions(actions)).toEqual({ performed: 1, refused: 3 });
+    expect(actions.filter(isRefusedAction).map((action) => action.id)).toEqual(["2", "3", "4"]);
   });
 
   it("puts the target first and only appends a detail when there is one", () => {

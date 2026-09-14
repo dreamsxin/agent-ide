@@ -499,10 +499,18 @@ fn publish_external_actions(
         return;
     }
     let recorded = orch.record_external_actions(actions, permissions.run_id.clone());
+    // `_cancelled` 也算没发生：漏掉它的话，一次被 Stop 拦下的导航会被算进
+    // "Agent performed N browser action(s) … cannot be undone" —— 在这个产品唯一
+    // 承诺可信的地方说一件没发生的事，比记漏还糟。
     let refused = recorded
         .iter()
-        .filter(|action| action.kind.ends_with("_refused") || action.kind.ends_with("_failed"))
+        .filter(|action| {
+            action.kind.ends_with("_refused")
+                || action.kind.ends_with("_failed")
+                || action.kind.ends_with("_cancelled")
+        })
         .count();
+    let performed = recorded.len() - refused;
     let details = recorded
         .iter()
         .map(|action| format!("{}: {} — {}", action.kind, action.target, action.detail))
@@ -514,9 +522,9 @@ fn publish_external_actions(
         "external_action",
         &format!(
             "Agent performed {} browser action(s){}",
-            recorded.len(),
+            performed,
             if refused > 0 {
-                format!(", {} refused or failed", refused)
+                format!(", {} refused, failed or stopped", refused)
             } else {
                 String::new()
             }
@@ -1264,6 +1272,7 @@ pub struct RepairWorkspaceReport {
 pub async fn repair_workspace(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp_state: State<'_, crate::commands::mcp::McpState>,
     request: RepairWorkspaceRequest,
 ) -> Result<RepairWorkspaceReport, String> {
     let (commands, _skipped) = crate::services::verification::prepare_commands(request.commands)?;
@@ -1272,7 +1281,7 @@ pub async fn repair_workspace(
 
     // 只在准备阶段持锁。循环本身由 `drive_repair` 按轮次短持锁 —— 整段持锁会连
     // `get_agent_state` 一起堵住，界面因此永远不知道后端在忙。
-    let (lease, original_prompt, repair_permissions) = {
+    let (lease, original_prompt, repair_permissions, tool_policy) = {
         let mut orch = agent_state.orchestrator.lock().await;
         if !matches!(orch.mode, AgentMode::Auto) {
             return Err(
@@ -1282,21 +1291,41 @@ pub async fn repair_workspace(
         // 抢执行权放在模式检查之后：检查不通过就直接返回，先抢会把执行权漏掉。
         // 自动修复会自己往磁盘上落改动，和一次普通运行同等重量，所以必须走同一个守卫。
         let last_run_id = orch.last_run_id.clone();
-        // 修复循环不自己装工具面 —— `drive_repair` 直接克隆上一次运行留下的
-        // `tool_invoker`，那份授权里的副作用开关是上一次运行的。所以这里给 lease 一个
-        // 新开关（Stop 照旧能停住模型调用），但**工具那一侧的副作用闸门在这条路径上
-        // 没有接通**：要接通就得连工具面一起重建，记在 ROADMAP 59 里。
+        // 修复循环这一轮自己的授权：新开关，新 run id。它下面会连工具面一起重建，
+        // 否则这个开关就装不到工具那一侧 —— 更糟的是，沿用上一次运行的工具面意味着
+        // 沿用它的开关，而那个开关可能被上一次 Stop 永久置成了 true，于是这一次
+        // 全新的修复运行会把自己的每一次写盘都拒掉。
         let mut repair_permissions = orch.tool_permissions.clone();
         let side_effect_switch = repair_permissions.fresh_cancel();
         let lease = orch.try_begin_run(last_run_id, side_effect_switch)?;
         repair_permissions.run_id = orch.current_run_id.clone();
+        let tool_policy = orch.tool_policy;
         let original_prompt = resolve_original_prompt(
             request.original_prompt,
             orch.conversation.last().map(|turn| turn.prompt.clone()),
         );
         orch.start_usage_accounting(usage_meter.clone());
-        (lease, original_prompt, repair_permissions)
+        (lease, original_prompt, repair_permissions, tool_policy)
     };
+
+    // 修复循环也要有自己的工具面。以前它直接沿用上一次运行留在 orchestrator 上的
+    // `tool_invoker`：那份授权的副作用开关属于上一次运行，被 Stop 过就永久是 true，
+    // 于是这一次修复的每一次写盘都会被拒 —— 一个新运行被上一个运行的 Stop 掐死。
+    let (llm, tool_invoker) =
+        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
+            .await;
+    let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        tool_invoker,
+        Some(workspace_tool_logger(&app_handle)),
+        repair_permissions.clone(),
+    );
+    {
+        let mut orch = agent_state.orchestrator.lock().await;
+        orch.tool_invoker = tool_invoker;
+        orch.tool_permissions = repair_permissions.clone();
+    }
+    let llm = llm.with_usage_meter(usage_meter.clone());
 
     let outcome = crate::agent::orchestrator::drive_repair(
         &agent_state.orchestrator,

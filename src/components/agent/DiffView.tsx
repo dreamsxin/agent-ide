@@ -334,7 +334,8 @@ export default function DiffView() {
               看"Agent 做了什么"。 */}
           <div className="mb-1 font-medium text-amber-300">
             {externalSummary.performed} browser action(s) — cannot be undone
-            {externalSummary.refused > 0 && `, ${externalSummary.refused} refused or failed`}
+            {externalSummary.refused > 0 &&
+              `, ${externalSummary.refused} refused, failed or stopped`}
           </div>
           {/* 全部列出来，只加滚动：截断成"最近 10 条"等于在用户唯一被告知要看的地方
               把这份记录悄悄砍掉，和它替换掉的 emit-only 设计是同一类毛病。 */}
