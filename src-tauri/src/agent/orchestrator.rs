@@ -626,7 +626,12 @@ impl AgentOrchestrator {
         > = std::collections::HashMap::new();
         for write in writes {
             match merged.get_mut(&write.file) {
-                Some(existing) => existing.updated = write.updated,
+                Some(existing) => {
+                    existing.updated = write.updated;
+                    // 最后一次操作决定这个文件最终是"改了"还是"没了"：先写后删是删除，
+                    // 先删后写（重建）是编辑。只看第一条会把删除显示成一次普通修改。
+                    existing.removed = write.removed;
+                }
                 None => {
                     order.push(write.file.clone());
                     merged.insert(write.file.clone(), write);
@@ -652,9 +657,23 @@ impl AgentOrchestrator {
                 base_hash: None,
                 provenance: Some(DiffProvenance {
                     protocol: "workspace_tool".to_string(),
-                    operation: if is_new { "create" } else { "edit" }.to_string(),
+                    // 删除必须和"清空"长得不一样：两者的 hunk 都是 previous → ""，
+                    // 只有这个标签能告诉用户文件已经不在了。
+                    operation: if write.removed {
+                        "delete"
+                    } else if is_new {
+                        "create"
+                    } else {
+                        "edit"
+                    }
+                    .to_string(),
                     rationale: Some(
-                        "Written directly by the Agent through workspace_write_file".to_string(),
+                        if write.removed {
+                            "Deleted by the Agent through workspace_delete_file"
+                        } else {
+                            "Written directly by the Agent through workspace_write_file"
+                        }
+                        .to_string(),
                     ),
                     schema_version: None,
                     change_index: None,
@@ -2412,9 +2431,66 @@ mod tests {
         assert_eq!(entry["diffSummary"], "No reviewable diffs.");
     }
 
+    /// 删除必须在审查区里显示成"删除"，而不是"内容被清空"：两者的 hunk 都是
+    /// `previous → ""`，只有 `operation` 这个标签能区分。把删除显示成清空，用户会以为
+    /// 文件还在。撤销侧不需要新东西 —— 快照带着内容，`restore_snapshots` 写回去
+    /// 恰好就是把文件重建出来。
     #[test]
-    fn tool_writes_become_applied_diffs_with_an_undo_point() {
+    fn a_recorded_removal_is_labelled_delete_and_keeps_its_content() {
         let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "src/gone.ts".to_string(),
+            path: PathBuf::from("src/gone.ts"),
+            previous: Some("goodbye\n".to_string()),
+            updated: String::new(),
+            removed: true,
+        }]);
+
+        assert_eq!(recorded.len(), 1);
+        let provenance = recorded[0].provenance.as_ref().expect("provenance");
+        assert_eq!(provenance.operation, "delete");
+        // 删掉的内容必须留在 hunk 里，否则审查区看不到到底删了什么
+        assert_eq!(recorded[0].hunks[0].original, "goodbye\n");
+        assert!(recorded[0].hunks[0].updated.is_empty());
+        // 已经落盘，状态必须如实
+        assert_eq!(recorded[0].status, "applied");
+    }
+
+    /// 同一个文件先写后删，净效果是"没了"。合并时只保留第一条记录的判断会把它
+    /// 显示成一次普通修改。
+    #[test]
+    fn a_write_followed_by_a_delete_is_reported_as_a_delete() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_tool_writes(vec![
+            AgentFileWrite {
+                file: "src/tmp.ts".to_string(),
+                path: PathBuf::from("src/tmp.ts"),
+                previous: Some("original\n".to_string()),
+                updated: "rewritten\n".to_string(),
+                removed: false,
+            },
+            AgentFileWrite {
+                file: "src/tmp.ts".to_string(),
+                path: PathBuf::from("src/tmp.ts"),
+                previous: Some("rewritten\n".to_string()),
+                updated: String::new(),
+                removed: true,
+            },
+        ]);
+
+        assert_eq!(recorded.len(), 1, "same file must merge into one entry");
+        assert_eq!(
+            recorded[0].provenance.as_ref().expect("provenance").operation,
+            "delete"
+        );
+        // 撤销要回到这次运行之前的内容，不是中间那一版
+        assert_eq!(recorded[0].hunks[0].original, "original\n");
+    }
+
+    #[test]
+    fn tool_writes_become_applied_diffs_with_an_undo_point() {        let mut orchestrator = AgentOrchestrator::new();
 
         let recorded = orchestrator.record_tool_writes(vec![
             AgentFileWrite {
@@ -2422,18 +2498,21 @@ mod tests {
                 path: PathBuf::from("src/app.ts"),
                 previous: Some("before run\n".to_string()),
                 updated: "first write\n".to_string(),
+                removed: false,
             },
             AgentFileWrite {
                 file: "src/app.ts".to_string(),
                 path: PathBuf::from("src/app.ts"),
                 previous: Some("first write\n".to_string()),
                 updated: "second write\n".to_string(),
+                removed: false,
             },
             AgentFileWrite {
                 file: "src/new.ts".to_string(),
                 path: PathBuf::from("src/new.ts"),
                 previous: None,
                 updated: "created\n".to_string(),
+                removed: false,
             },
         ]);
 
