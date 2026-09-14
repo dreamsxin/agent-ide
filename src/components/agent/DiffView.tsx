@@ -511,6 +511,12 @@ export default function DiffView() {
                   Rejected
                 </div>
               )}
+              {/* 记录已经被撤销：留在列表里是历史，不是还能按的提议 */}
+              {diff.status === "reverted" && (
+                <div className="bg-surface-border/20 px-3 py-1 text-center text-xs text-surface-muted">
+                  Reverted — this is a record of a change the Agent made and you undid
+                </div>
+              )}
               {diff.status === "failed" && (
                 <div className="bg-diff-remove/10 px-3 py-1 text-xs text-diff-remove">
                   <div className="font-medium">Apply failed</div>

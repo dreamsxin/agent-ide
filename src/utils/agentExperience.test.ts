@@ -60,4 +60,15 @@ describe("agent experience helpers", () => {
     expect(isAgentBusy("acting")).toBe(true);
     expect(isAgentBusy("done")).toBe(false);
   });
+
+  /**
+   * `reverted` 是终态：工具写入的记录被撤销之后停在这里。它既不是待办也不该让状态栏
+   * 一直说"需要审查" —— 用户刚刚亲手撤销了它。
+   */
+  it("撤销掉的工具写入记录不算待处理的改动", () => {
+    const summary = summarizeAgentRun([], [diff("undone", "reverted")]);
+
+    expect(summary.pendingChanges).toBe(0);
+    expect(summary.reviewRequired).toBe(false);
+  });
 });
