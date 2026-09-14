@@ -968,6 +968,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Not done, and not implied: nothing tests connectivity on its own. The state says when it was last checked and by whose action; it never claims to be live. A background poll would need a rate limit and a cost story (the test is a real completion request), so it is a separate decision.
    - Frontend 131 → 154: 12 for the pure module (including "a stale target hides the detail, not just the colour"), 6 in the store (both outcomes recorded, stale target no longer reads as verified, identical refresh still does, a deleted chat profile is dropped), 5 rendering the states in `StatusBar`.
 
+42. **A deleted file's contents were stored, and shown as one blank line (2026-09-13)**
+   - Found while designing a `move_file` tool for the Agent, by reading how a delete renders today. `HunkBlock` in `DiffView.tsx` had three branches — new file, side-by-side, and a fallback that splits `hunk.content` — and the shape "old content, no new content" fell through into the fallback. For a direct tool write `content` is the empty string (`record_tool_writes` sets it), so a delete card rendered **one empty row**.
+   - Nothing was lost: the backend stores the content in `hunks[0].original` and the undo checkpoint restores from it, both covered by existing tests. What broke was the part this product exists for — seeing what the Agent did — and it broke for the least reversible operation, where the user most needs to look before deciding.
+   - Deleted lines now render red under `- Deleted file`. A hunk that merely **empties** a file gets `- All content removed`, because the file still exists and the other banner would be a different false claim. The two are told apart by the diff's own `provenance.operation`, which is why `HunkBlock` now receives it; hunk-level provenance does not carry the operation.
+   - `hunkKind` moved to `diffPresentation.ts`, pure and tested (6 tests), for the reason `explorerTree.ts` and `monacoGlobals.ts` exist: the decision was untestable inside a component that needs the agent store, the editor store and the problem store to render at all. Frontend 154 → 160.
+   - The `move_file` design work that surfaced this is recorded but not implemented: `FileDiff` has a single `file` field, so "moved A → B" is inexpressible, and a delete+create pair would produce two unrelated cards whose hardcoded rationales both name the wrong tool. The undo side needs nothing new — `restore_snapshots` already means "write `previous` back, or remove the path when it is `None`" — but two records for one rename are not atomic, and on a case-insensitive filesystem `Foo.ts` → `foo.ts` would produce two records pointing at one file, whose undo restores the source and then deletes it.
+
+
 
 
 

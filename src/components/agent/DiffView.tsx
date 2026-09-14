@@ -3,11 +3,13 @@ import { isReviewableDiff, useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
+import { HUNK_BANNER, hunkKind } from "./diffPresentation";
 
 function HunkBlock({
   hunk,
   index,
   diffStatus,
+  operation,
   onApply,
   onReject,
   onRegenerate,
@@ -16,13 +18,14 @@ function HunkBlock({
   hunk: DiffHunk;
   index: number;
   diffStatus: DiffEntry["status"];
+  /** 这份 diff 的操作（"create" / "edit" / "delete"）；决定删除和清空的区别 */
+  operation?: string | null;
   onApply: () => void;
   onReject: () => void;
   onRegenerate: () => void;
   findings: ProblemEntry[];
 }) {
-  const hasOriginal = hunk.original && hunk.original.trim().length > 0;
-  const hasUpdated = hunk.updated && hunk.updated.trim().length > 0;
+  const kind = hunkKind(hunk, operation);
   const hunkStatus = hunk.status ?? "pending";
   const canAct = isReviewableDiffStatus(diffStatus) && hunkStatus !== "applied" && hunkStatus !== "rejected";
   const provenanceLabel = [hunk.provenance?.sourceRole, hunk.provenance?.sourceStage]
@@ -101,7 +104,7 @@ function HunkBlock({
     </div>
   );
 
-  if (!hasOriginal && hasUpdated) {
+  if (kind === "created") {
     const lines = hunk.updated.split("\n");
     return (
       <div data-testid={`diff-hunk-${index}`} className="border-b border-surface-border text-xs font-mono leading-relaxed">
@@ -109,7 +112,7 @@ function HunkBlock({
         {provenancePanel}
         {findingPanel}
         <div className="border-b border-diff-add/20 bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
-          + New file
+          {HUNK_BANNER.created}
         </div>
         {lines.map((line, i) => (
           <div key={i} className="bg-diff-add/5 px-2">
@@ -120,7 +123,28 @@ function HunkBlock({
     );
   }
 
-  if (hasOriginal && hasUpdated) {
+  // 删除 / 清空：原来这两种都掉到最后的兜底分支去 split 空的 `content`，于是被删掉的
+  // 内容一行都看不到 —— 而这个产品的全部意义就是能看见 Agent 动了什么
+  if (kind === "deleted" || kind === "emptied") {
+    const lines = hunk.original.split("\n");
+    return (
+      <div data-testid={`diff-hunk-${index}`} className="border-b border-surface-border text-xs font-mono leading-relaxed">
+        {header}
+        {provenancePanel}
+        {findingPanel}
+        <div className="border-b border-diff-remove/20 bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
+          {kind === "deleted" ? HUNK_BANNER.deleted : HUNK_BANNER.emptied}
+        </div>
+        {lines.map((line, i) => (
+          <div key={i} className="bg-diff-remove/5 px-2">
+            <span className="whitespace-pre text-diff-remove">- {line}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (kind === "modified") {
     const origLines = hunk.original.split("\n");
     const updLines = hunk.updated.split("\n");
 
@@ -449,6 +473,7 @@ export default function DiffView() {
                     hunk={hunk}
                     index={i}
                     diffStatus={diff.status}
+                    operation={diff.provenance?.operation}
                     findings={fileFindings.filter((problem) => problemMatchesHunk(problem, hunk))}
                     onApply={() => void applyDiffHunk(diff.id, i)}
                     onReject={() => void rejectDiffHunk(diff.id, i)}
