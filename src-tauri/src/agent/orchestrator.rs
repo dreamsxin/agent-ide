@@ -969,7 +969,11 @@ impl AgentOrchestrator {
     /// 漏掉 `finish_run` 不会把应用锁死：`RunLease` 一被丢弃，这里存的 `Weak` 就
     /// 升不上来，下一次抢占会把这个已经没人持有的执行权直接回收。
     #[must_use = "拿到 lease 才算持有执行权"]
-    pub fn try_begin_run(&mut self, run_id: Option<String>) -> Result<RunLease, String> {
+    pub fn try_begin_run(
+        &mut self,
+        run_id: Option<String>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<RunLease, String> {
         // 只有凭证还活着才算真的有人在跑。凭证已经没了说明上一个运行没走正常收尾
         // （提前返回或 panic），那把执行权回收掉，而不是让它永久占着。
         if let Some((_, alive)) = &self.active_claim {
@@ -984,8 +988,9 @@ impl AgentOrchestrator {
         self.next_claim = self.next_claim.wrapping_add(1);
         let alive = Arc::new(());
         self.active_claim = Some((claim, Arc::downgrade(&alive)));
-        // 全新的开关，不是把上一个清零：上一个可能还被一个正在排空的运行握着
-        let cancel = Arc::new(AtomicBool::new(false));
+        // 开关由调用方给：它同时被交给这次运行的工具面，所以"停"能同时拦住模型调用
+        // 和还没动手的副作用。必须是**新**的一个 —— 复位旧开关会把还在排空的旧运行
+        // 解除取消，`WorkspaceToolPermissions::fresh_cancel` 负责这件事。
         self.active_cancel = Some(cancel.clone());
         self.cancel_registry.publish(cancel.clone());
         self.begin_run(run_id);
@@ -2961,6 +2966,12 @@ mod tests {
             .all(|action| action.target != "https://example.com/docs"));
     }
 
+    /// 测试里的副作用开关。真实路径上它来自
+    /// `WorkspaceToolPermissions::fresh_cancel()`，所以工具面和 `RunLease` 拿的是同一个。
+    fn test_switch() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     struct TestEnv {
         root: PathBuf,
         config_dir: PathBuf,
@@ -4281,7 +4292,7 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         let lease = orchestrator
-            .try_begin_run(Some("run-1".to_string()))
+            .try_begin_run(Some("run-1".to_string()), test_switch())
             .expect("空闲时应当抢到执行权");
 
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
@@ -4355,17 +4366,17 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         let first = orchestrator
-            .try_begin_run(Some("run-1".to_string()))
+            .try_begin_run(Some("run-1".to_string()), test_switch())
             .expect("第一个运行应当抢到执行权");
 
-        let second = orchestrator.try_begin_run(Some("run-2".to_string()));
+        let second = orchestrator.try_begin_run(Some("run-2".to_string()), test_switch());
         assert!(second.is_err(), "并发的第二个运行必须被拒绝");
         // 被拒绝不能顺手改掉在跑那个运行的身份
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-1"));
 
         orchestrator.finish_run(first.claim);
         let reused = orchestrator
-            .try_begin_run(Some("run-2".to_string()))
+            .try_begin_run(Some("run-2".to_string()), test_switch())
             .expect("上一个运行结束后应当能再开一个");
         orchestrator.finish_run(reused.claim);
     }
@@ -4384,7 +4395,7 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         let stopped = orchestrator
-            .try_begin_run(Some("run-1".to_string()))
+            .try_begin_run(Some("run-1".to_string()), test_switch())
             .expect("第一个运行应当抢到执行权");
         // 用户点了 Stop：执行权被强行收回，但 run-1 还在某个工具调用里跑着
         orchestrator.abandon_run();
@@ -4394,7 +4405,7 @@ mod tests {
         );
 
         let fresh = orchestrator
-            .try_begin_run(Some("run-2".to_string()))
+            .try_begin_run(Some("run-2".to_string()), test_switch())
             .expect("Stop 之后应当能开新运行");
         assert!(
             stopped.cancel.load(Ordering::SeqCst),
@@ -4405,7 +4416,7 @@ mod tests {
         // run-1 终于醒来收尾
         orchestrator.finish_run(stopped.claim);
 
-        let third = orchestrator.try_begin_run(Some("run-3".to_string()));
+        let third = orchestrator.try_begin_run(Some("run-3".to_string()), test_switch());
         assert!(
             third.is_err(),
             "run-2 还在跑，它的执行权不该被 run-1 的收尾放掉"
@@ -4428,17 +4439,17 @@ mod tests {
 
         {
             let leaked = orchestrator
-                .try_begin_run(Some("run-1".to_string()))
+                .try_begin_run(Some("run-1".to_string()), test_switch())
                 .expect("空闲时应当抢到执行权");
             assert!(
-                orchestrator.try_begin_run(Some("run-2".to_string())).is_err(),
+                orchestrator.try_begin_run(Some("run-2".to_string()), test_switch()).is_err(),
                 "凭证还活着时必须拒绝第二个运行"
             );
             drop(leaked);
         }
 
         let recovered = orchestrator
-            .try_begin_run(Some("run-2".to_string()))
+            .try_begin_run(Some("run-2".to_string()), test_switch())
             .expect("lease 已经没人持有，执行权应当被回收");
         assert_eq!(orchestrator.current_run_id.as_deref(), Some("run-2"));
 
@@ -4460,19 +4471,19 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         let lease = orchestrator
-            .try_begin_run(Some("run-1".to_string()))
+            .try_begin_run(Some("run-1".to_string()), test_switch())
             .expect("空闲时应当抢到执行权");
         let claim = lease.claim;
         let _cancel = lease.cancel;
 
         assert!(
-            orchestrator.try_begin_run(Some("run-2".to_string())).is_err(),
+            orchestrator.try_begin_run(Some("run-2".to_string()), test_switch()).is_err(),
             "开关被移走不代表这次运行结束了"
         );
 
         orchestrator.finish_run(claim);
         let next = orchestrator
-            .try_begin_run(Some("run-2".to_string()))
+            .try_begin_run(Some("run-2".to_string()), test_switch())
             .expect("正常收尾之后应当能再开一个");
         orchestrator.finish_run(next.claim);
     }
@@ -4490,7 +4501,7 @@ mod tests {
         registry.cancel_active_run();
 
         let lease = orchestrator
-            .try_begin_run(Some("run-1".to_string()))
+            .try_begin_run(Some("run-1".to_string()), test_switch())
             .expect("空闲时应当抢到执行权");
         assert!(!lease.cancel.load(Ordering::SeqCst));
 
@@ -4503,7 +4514,7 @@ mod tests {
 
         orchestrator.finish_run(lease.claim);
         let next = orchestrator
-            .try_begin_run(Some("run-2".to_string()))
+            .try_begin_run(Some("run-2".to_string()), test_switch())
             .expect("上一个运行结束后应当能再开一个");
         assert!(
             !next.cancel.load(Ordering::SeqCst),

@@ -75,7 +75,10 @@ npm test
   pulls the current run's switch through `CancelRegistry` *before* it takes the
   orchestrator lock. A run's cancel flag and its exclusivity claim both come from
   `try_begin_run` as a `RunLease`, one fresh pair per run — a shared flag let a new
-  prompt un-cancel a still-draining old run.
+  prompt un-cancel a still-draining old run. That flag is also the **side-effect gate**:
+  `WorkspaceToolPermissions::fresh_cancel()` mints it before the tool surface is built
+  and hands it to `try_begin_run`, so `invoke()` refuses command / write / browser tools
+  after Stop. One flag, not two copies.
 - **Every change the Agent lands must be visible and undoable.** Diffs go through
   the review area; direct tool writes are published back as `applied` diffs with
   their pre-write content plus an undo checkpoint (`record_tool_writes`), on every
