@@ -334,6 +334,20 @@ export interface Task {
   affectedFiles: string[];
 }
 
+/**
+ * 后端真正会喂给模型的一轮对话。
+ *
+ * 和 `ChatMessage` 不是一回事，也不该被混在一起显示：消息流不设上限、不持久化、
+ * 由各个调用点自己 push；这个列表只留末尾若干轮、每轮都截断过，而且只有一次
+ * `send_agent_prompt` **成功**才会产生一轮。要让用户管上下文，得让他看见这一份。
+ */
+export interface ConversationTurn {
+  /** 后端分配的稳定编号；切上下文时回传的就是它，不是下标 */
+  id: string;
+  prompt: string;
+  outcome: string;
+}
+
 /** Chat 消息 */
 export interface ChatMessage {
   id: string;

@@ -155,6 +155,87 @@ function ContextToggle({
   );
 }
 
+/**
+ * 后端真正会喂给模型的那几轮，以及"从这一轮起切掉"。
+ *
+ * 单独一块、默认收起，而**不是**把按钮挂在消息气泡上。气泡和这里的"轮"不是一一
+ * 对应的：气泡由各个调用点自己 push、不设上限、刷新即失；这个列表只在一次 prompt
+ * **成功**之后才多一轮、只留末尾若干轮，取消和报错都不记。把"切上下文"做成气泡上的
+ * 按钮，用户点的是第 3 条、切掉的会是另一条。
+ *
+ * 顺带解决一个更基本的问题：在此之前用户完全看不到模型实际收到的历史是什么。
+ */
+function ContextTurns() {
+  const turns = useAgentStore((s) => s.conversationTurns);
+  const loadConversationTurns = useAgentStore((s) => s.loadConversationTurns);
+  const truncateConversationFrom = useAgentStore((s) => s.truncateConversationFrom);
+  const isStreaming = useAgentStore((s) => s.isStreaming);
+  const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 一次运行成功结束才会多一轮，所以在 streaming 落下沿刷新；挂载时也会跑一次。
+  useEffect(() => {
+    if (!isStreaming) void loadConversationTurns();
+  }, [isStreaming, loadConversationTurns]);
+
+  const handleCut = async (turnId: string) => {
+    setError(null);
+    try {
+      await truncateConversationFrom(turnId);
+    } catch (err) {
+      // 那一轮可能已经被头部淘汰掉了。说出来，而不是让按钮看起来没反应。
+      setError(String(err));
+    }
+  };
+
+  if (turns.length === 0) return null;
+
+  return (
+    <div className="flex-shrink-0 border-b border-surface-border text-[10px]">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        className="flex w-full items-center justify-between px-3 py-1.5 text-surface-muted hover:text-surface-text"
+      >
+        <span>
+          Context sent to the model · {turns.length} turn{turns.length === 1 ? "" : "s"}
+        </span>
+        <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && (
+        <div className="space-y-1 px-3 pb-2">
+          {turns.map((turn, index) => (
+            <div
+              key={turn.id}
+              className="group flex items-start gap-2 rounded border border-surface-border/60 px-2 py-1"
+            >
+              <span className="mt-[1px] text-surface-muted">{index + 1}.</span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-surface-text" title={turn.prompt}>
+                  {turn.prompt}
+                </span>
+                <span className="block truncate text-surface-muted" title={turn.outcome}>
+                  {turn.outcome}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleCut(turn.id)}
+                title="Drop this turn and everything after it from the context"
+                className="opacity-0 transition-opacity group-hover:opacity-100 rounded border border-surface-border px-1.5 py-0.5 text-surface-muted hover:text-surface-text"
+              >
+                Cut from here
+              </button>
+            </div>
+          ))}
+          {error && <div className="text-accent-red">{error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ChatView() {
   const messages = useAgentStore((s) => s.messages);
   const addMessage = useAgentStore((s) => s.addMessage);
@@ -373,6 +454,7 @@ export default function ChatView() {
 
   return (
     <div data-testid="agent-chat" className="flex flex-col h-full">
+      <ContextTurns />
       {/* 消息列表 */}
       <div className="flex-1 overflow-auto p-3 space-y-3">
         {messages.map((msg) => (

@@ -93,6 +93,8 @@ pub struct AgentOrchestrator {
     /// 上一轮做了什么。只保留末尾若干轮并且每条都截断：这里要的是"上次干了啥"
     /// 的线索，不是完整逐字记录，后者会把上下文预算吃光。
     pub conversation: Vec<ConversationTurn>,
+    /// 下一轮对话的编号。单调递增、从不复用 —— 头部淘汰会让下标平移，编号不会。
+    next_turn_id: u64,
     /// 已应用批次的撤销栈，最新的在最后。
     ///
     /// diff 应用之前是单向的：一旦落盘就只能靠用户自己 git。审查界面能拒绝
@@ -215,6 +217,12 @@ const MAX_UNDO_CHECKPOINTS: usize = 20;
 /// 一轮已完成的对话：用户说了什么，以及那一轮的结果
 #[derive(Clone, Debug, Serialize)]
 pub struct ConversationTurn {
+    /// 这一轮的稳定标识。
+    ///
+    /// 没有它，"从某一轮之后切掉上下文"就无从表达 —— 下标会随头部淘汰整体平移，
+    /// prompt 文本既可能重复也已经被截断过。界面拿到的每一轮都必须能指回后端的
+    /// 同一轮，否则用户点的是第 3 条、切掉的是另一条。
+    pub id: String,
     pub prompt: String,
     pub outcome: String,
 }
@@ -553,6 +561,7 @@ impl AgentOrchestrator {
             allow_file_create: false,
             run_usage: None,
             conversation: Vec::new(),
+            next_turn_id: 1,
             undo_stack: Vec::new(),
             active_claim: None,
             active_cancel: None,
@@ -772,7 +781,10 @@ impl AgentOrchestrator {
             parts.join("; ")
         };
 
+        let id = format!("turn-{}", self.next_turn_id);
+        self.next_turn_id = self.next_turn_id.wrapping_add(1);
         self.conversation.push(ConversationTurn {
+            id,
             prompt: summarize_text(prompt.trim(), MAX_TURN_PROMPT_CHARS),
             outcome: summarize_text(&outcome, MAX_TURN_OUTCOME_CHARS),
         });
@@ -781,6 +793,27 @@ impl AgentOrchestrator {
             let excess = self.conversation.len() - MAX_CONVERSATION_TURNS;
             self.conversation.drain(..excess);
         }
+    }
+
+    /// 从指定的那一轮起（含它自己）把对话历史切掉，返回被丢掉的轮数。
+    ///
+    /// 这是"回到某个节点重新开始"在单会话模型里的样子：下一次 prompt 的
+    /// `conversation_digest()` 就再也看不到这一轮之后的东西了。按 **id** 定位而不是
+    /// 下标 —— 头部淘汰会让下标整体平移，界面上看到的第 3 条和后端此刻的第 3 条
+    /// 可以不是同一轮。
+    ///
+    /// 找不到 id 就报错，不做"当作没这回事"的静默处理：用户明确点了某一轮，
+    /// 什么都没发生比报错更难查。
+    pub fn truncate_conversation_from(&mut self, turn_id: &str) -> Result<usize, String> {
+        let Some(index) = self.conversation.iter().position(|turn| turn.id == turn_id) else {
+            return Err(format!(
+                "That turn is no longer part of the context ({}).",
+                turn_id
+            ));
+        };
+        let dropped = self.conversation.len() - index;
+        self.conversation.truncate(index);
+        Ok(dropped)
     }
 
     /// 开始新任务时清空对话历史
@@ -3474,10 +3507,83 @@ mod tests {
         assert_eq!(meter.snapshot().total_tokens, 110);
     }
 
+    /// 切上下文是"回到某个节点重新开始"的实现。真正要成立的性质是**下一次运行
+    /// 看不到被切掉的那几轮** —— 断言落在 digest 上，因为 digest 才是喂给模型的东西，
+    /// `conversation.len()` 只是它的内部表示。
+    #[test]
+    fn truncating_the_conversation_removes_the_chosen_turn_and_everything_after() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("first ask");
+        orchestrator.record_conversation_turn("second ask");
+        orchestrator.record_conversation_turn("third ask");
+
+        let second = orchestrator.conversation[1].id.clone();
+        assert_eq!(orchestrator.truncate_conversation_from(&second).unwrap(), 2);
+
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(digest.contains("first ask"), "{}", digest);
+        assert!(!digest.contains("second ask"), "{}", digest);
+        assert!(!digest.contains("third ask"), "{}", digest);
+    }
+
+    /// 切到第一轮就等于清空 —— 这时 digest 必须是 `None` 而不是一段空字符串，
+    /// 否则上下文里会多出一个空的 "Earlier turns" 段落。
+    #[test]
+    fn truncating_from_the_first_turn_leaves_no_history_section() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("only ask");
+        let first = orchestrator.conversation[0].id.clone();
+
+        assert_eq!(orchestrator.truncate_conversation_from(&first).unwrap(), 1);
+        assert!(orchestrator.conversation_digest().is_none());
+    }
+
+    /// 认不出的 id 要报错，而且**什么都不能动**：用户点的那一轮已经被头部淘汰掉时，
+    /// 静默地切掉别的东西比报错糟得多。
+    #[test]
+    fn truncating_an_unknown_turn_changes_nothing() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("first ask");
+        orchestrator.record_conversation_turn("second ask");
+
+        let error = orchestrator
+            .truncate_conversation_from("turn-does-not-exist")
+            .unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(orchestrator.conversation.len(), 2);
+    }
+
+    /// 为什么按 id 而不是下标：头部淘汰会让下标整体平移。第 6 轮在被淘汰前是下标 5，
+    /// 之后是下标 4、3……而它的 id 始终不变，界面拿着 id 回来切的永远是同一轮。
+    #[test]
+    fn turn_ids_survive_head_eviction_while_indexes_shift() {
+        let mut orchestrator = AgentOrchestrator::new();
+        for index in 0..MAX_CONVERSATION_TURNS {
+            orchestrator.record_conversation_turn(&format!("ask {}", index));
+        }
+        let sixth = orchestrator.conversation[MAX_CONVERSATION_TURNS - 1].id.clone();
+        let index_before = MAX_CONVERSATION_TURNS - 1;
+
+        // 再来两轮，头部被挤掉两条
+        orchestrator.record_conversation_turn("later ask");
+        orchestrator.record_conversation_turn("latest ask");
+        let index_now = orchestrator
+            .conversation
+            .iter()
+            .position(|turn| turn.id == sixth)
+            .expect("the turn is still in the window");
+        assert_ne!(index_now, index_before, "下标应当已经平移，否则这条测试没在测东西");
+
+        // 拿着当初那个 id 回来切，命中的仍然是同一轮
+        assert_eq!(orchestrator.truncate_conversation_from(&sixth).unwrap(), 3);
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(!digest.contains("later ask"), "{}", digest);
+        assert!(!digest.contains("latest ask"), "{}", digest);
+    }
+
     /// 每次运行原本都是冷启动，跟进一句"再处理下错误分支"读不到上一轮做了什么。
     #[test]
-    fn conversation_turns_carry_forward_and_stay_bounded() {
-        let mut orchestrator = AgentOrchestrator::new();
+    fn conversation_turns_carry_forward_and_stay_bounded() {        let mut orchestrator = AgentOrchestrator::new();
         assert!(orchestrator.conversation_digest().is_none());
 
         orchestrator

@@ -17,6 +17,7 @@ import type {
   DiffEntry,
   ApplyDiffsResult,
   ChatMessage,
+  ConversationTurn,
   ContextEstimateResponse,
   SddArtifact,
   SavedSddArtifactResponse,
@@ -63,6 +64,16 @@ interface AgentStore {
 
   // ====== Chat 消息 ======
   messages: ChatMessage[];
+  /**
+   * 后端此刻真正会喂给模型的几轮对话。
+   *
+   * 刻意和 `messages` 分开存：那是界面记录，这是上下文本体，两者会因为
+   * "只在成功时记一轮"、"只留末尾 6 轮"、"刷新后消息没了而后端还在"而不一致。
+   * 想让用户管上下文，就得让他看见后者。空数组既表示"真的没有"也表示"还没查过"，
+   * 因为这两种情况下界面要显示的东西一样。
+   */
+  conversationTurns: ConversationTurn[];
+
 
   // ====== 角色与流水线 ======
   activeRole: AgentRole;
@@ -113,6 +124,10 @@ interface AgentStore {
   addMessage: (msg: ChatMessage) => void;
   updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
   clearMessages: () => void;
+  /** 从后端拉一次真正的上下文；界面要显示它之前必须先调 */
+  loadConversationTurns: () => Promise<void>;
+  /** 从这一轮起（含它）把上下文切掉。失败会抛，调用方负责告诉用户 */
+  truncateConversationFrom: (turnId: string) => Promise<void>;
   reset: () => void;
 
   // ====== 异步 Actions (IPC) ======
@@ -256,6 +271,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   isStreaming: false,
   agentRunId: null,
   restoredSession: null,
+  conversationTurns: [],
   messages: [
     {
       id: "welcome",
@@ -495,6 +511,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         },
       ],
     }),
+  loadConversationTurns: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const turns = await invoke<ConversationTurn[]>("get_agent_conversation");
+      set({ conversationTurns: turns });
+    } catch (err) {
+      // 读不到上下文不该让面板炸掉：这是一个信息展示，不是运行的一部分
+      console.warn("[AgentStore] get_agent_conversation failed:", err);
+    }
+  },
+  truncateConversationFrom: async (turnId) => {
+    if (!isTauriRuntime()) return;
+    // 后端把切完剩下的几轮一起返回，这里不再查第二次：中间多一次往返就多一个
+    // "界面显示的和后端实际的不一致"的窗口。
+    const turns = await invoke<ConversationTurn[]>("truncate_agent_conversation", {
+      turnId,
+    });
+    set({ conversationTurns: turns });
+  },
   reset: () => {
     clearPersistedAgentSession();
     set({

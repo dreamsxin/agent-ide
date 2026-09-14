@@ -90,6 +90,8 @@ pub fn run() {
             commands::agent::update_pipeline,
             commands::agent::reset_pipeline,
             commands::agent::clear_agent_conversation,
+            commands::agent::get_agent_conversation,
+            commands::agent::truncate_agent_conversation,
             commands::agent::undo_last_apply,
             commands::agent::pending_undo,
             commands::agent::verify_workspace,

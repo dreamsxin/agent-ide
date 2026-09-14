@@ -1963,6 +1963,50 @@ pub async fn reset_pipeline(
     Ok(pipe.clone())
 }
 
+/// 后端此刻真正会喂给模型的那几轮对话。
+///
+/// 界面上的消息流和这个列表是两回事：消息流不设上限也不持久化，而这里只留末尾
+/// 若干轮、每轮都截断过，并且只在一次 `send_agent_prompt` **成功**时才记一轮。
+/// 想让用户管理上下文，就必须让他看见真正的那一份，而不是看起来像的那一份。
+#[tauri::command]
+pub async fn get_agent_conversation(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Vec<crate::agent::orchestrator::ConversationTurn>, String> {
+    let orch = agent_state.orchestrator.lock().await;
+    Ok(orch.conversation.clone())
+}
+
+/// 从指定的那一轮起把上下文切掉，返回剩下的几轮。
+///
+/// 顺带写一条 action log：这是一次用户主动的状态变更，而这个产品的前提是每一次
+/// 变更都看得见。返回剩余列表而不是让界面再查一次 —— 中间多一次往返就多一个
+/// "界面显示的和后端实际的不一致"的窗口。
+#[tauri::command]
+pub async fn truncate_agent_conversation(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+    turn_id: String,
+) -> Result<Vec<crate::agent::orchestrator::ConversationTurn>, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let dropped = orch.truncate_conversation_from(&turn_id)?;
+    orch.emit_review_action_log(
+        &app_handle,
+        "info",
+        "context_truncate",
+        &format!(
+            "Dropped {} turn{} from the Agent context",
+            dropped,
+            if dropped == 1 { "" } else { "s" }
+        ),
+        &format!(
+            "Cut from {}. Remaining turns: {}.",
+            turn_id,
+            orch.conversation.len()
+        ),
+    );
+    Ok(orch.conversation.clone())
+}
+
 /// 开始一个不相关的新任务时清空对话历史。
 ///
 /// 不清的话上一件事的摘要会继续被喂进新任务的上下文，既浪费预算也会误导模型。
