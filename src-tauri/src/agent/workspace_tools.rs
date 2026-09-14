@@ -25,6 +25,7 @@ pub const SEARCH_TEXT: &str = "workspace_search_text";
 pub const LIST_FILES: &str = "workspace_list_files";
 pub const RUN_COMMAND: &str = "workspace_run_command";
 pub const WRITE_FILE: &str = "workspace_write_file";
+pub const DELETE_FILE: &str = "workspace_delete_file";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -56,6 +57,12 @@ pub struct AgentFileWrite {
     /// 写之前的内容，None 表示这是新建文件
     pub previous: Option<String>,
     pub updated: String,
+    /// 这条记录是一次删除。
+    ///
+    /// 光看 `updated == ""` 分不出"删掉了"和"清空了"，而这两件事在审查卡片上必须
+    /// 长得不一样 —— 把删除显示成"文件被清空"会让用户以为文件还在。撤销侧不需要
+    /// 区分：`previous` 有内容就写回去，恰好就是重建那个文件。
+    pub removed: bool,
 }
 
 type AgentWriteLog = std::sync::Arc<std::sync::Mutex<Vec<AgentFileWrite>>>;
@@ -214,7 +221,33 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                 "required": ["path", "content"]
             }),
         });
+
+        // 删除和写入用同一个授权位。理由是它们的后果同级 —— 整文件覆盖已经能把内容
+        // 全部抹掉，再单独给删除加一道开关只是让人误以为写入更安全。
+        //
+        // 为什么值得内置：Agent 今天**根本删不掉文件**。`workspace_run_command` 只认
+        // 项目自己声明的任务命令，`del` / `rm` 都不在里面；就算在，`rm -rf` 和
+        // `del /q` 也不是同一个命令，跨平台得由我们来抹平，而不是让模型去猜操作系统。
+        definitions.push(ToolDefinition {
+            name: DELETE_FILE.to_string(),
+            description: "Delete one workspace file. Use this for files that should no longer \
+                          exist — do not empty a file to fake a deletion. Directories are not \
+                          accepted. The removal is recorded as a reviewable, undoable entry, and \
+                          undo puts the file back with its exact previous contents."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path of the file to delete"
+                    }
+                },
+                "required": ["path"]
+            }),
+        });
     }
+
 
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
@@ -291,7 +324,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             // 未授权时不认领：工具本来也没有被通告出去，认领它只会把一个
             // "不存在的工具"变成一个"总是失败的工具"
             RUN_COMMAND => self.permissions.allows_commands(),
-            WRITE_FILE => self.permissions.allow_write,
+            WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
             _ => false,
         }
     }
@@ -321,11 +354,13 @@ impl ToolInvoker for WorkspaceToolInvoker {
             }
             WRITE_FILE => write_file_tool(
                 string_arg(&args, "path").ok_or("Missing 'path'")?,
-                // 内容不能用 `string_arg`：它会把空串过滤成 None，而"把文件写空"
-                // 是合法请求（清掉一个文件的内容）
                 args.get("content")
                     .and_then(|value| value.as_str())
                     .ok_or("Missing 'content'")?,
+                &self.permissions,
+            ),
+            DELETE_FILE => delete_file_tool(
+                string_arg(&args, "path").ok_or("Missing 'path'")?,
                 &self.permissions,
             ),
             other => Err(format!("Unknown workspace tool: {}", other)),
@@ -582,6 +617,7 @@ fn write_file_tool(
         path: resolved,
         previous: previous.clone(),
         updated: content.to_string(),
+        removed: false,
     });
 
     Ok(format!(
@@ -595,6 +631,56 @@ fn write_file_tool(
         content.len()
     ))
 }
+
+/// 删除一个工作区文件，并留下可审查、可撤销的记录。
+///
+/// 走的是和写入完全相同的边界：`resolve_for_agent_write` 既拦工作区外的路径，也拦
+/// `.git/`、`.agent-ide/`、`node_modules/` 和凭据文件。删除比覆盖更不可逆，所以这里
+/// 一条边界都不能比写入宽松。
+///
+/// 只删文件，不删目录。递归删除的爆炸半径完全不同 —— 一次说错的目录名可以清掉整个
+/// 子树，而现在的撤销记录是"文件 → 内容"的列表，重建一棵目录树需要另一套东西。
+/// 与其给一个半个撤销得回来的能力，不如明确拒绝。
+fn delete_file_tool(path: &str, permissions: &WorkspaceToolPermissions) -> Result<String, String> {
+    let resolved = workspace::resolve_for_agent_write(path)?;
+    if resolved.is_dir() {
+        return Err(format!(
+            "{} is a directory; this tool deletes single files only.",
+            path
+        ));
+    }
+    // 先读内容再删：撤销就是把这份内容写回去，读不出来就没有可撤销的删除。
+    let previous = match std::fs::read_to_string(&resolved) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("{} does not exist.", path));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Read {} before deleting it: {}. Refusing to delete something that cannot be \
+                 restored.",
+                path, error
+            ));
+        }
+    };
+
+    std::fs::remove_file(&resolved).map_err(|error| format!("Delete {}: {}", path, error))?;
+
+    permissions.record_write(AgentFileWrite {
+        file: path.to_string(),
+        path: resolved,
+        previous: Some(previous.clone()),
+        updated: String::new(),
+        removed: true,
+    });
+
+    Ok(format!(
+        "Deleted {} ({} bytes). The removal is recorded and can be undone.",
+        path,
+        previous.len()
+    ))
+}
+
 
 /// 把多个执行器合成一个。
 ///
