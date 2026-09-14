@@ -180,6 +180,17 @@ pub fn origin_allowed(origin: &str, allowlist: &[String]) -> bool {
 
 /// 端点连不上时给出可执行的下一步，而不是一句网络错误。
 fn unreachable_message(port: u16, error: &reqwest::Error) -> String {
+    // 超时和"没人监听"要分开说：前者说明端口上有东西但不回话，让用户去查 Chrome
+    // 本身（卡在弹窗、正在退出），而不是再加一遍已经加过的启动参数。
+    if error.is_timeout() {
+        return format!(
+            "The Chrome DevTools endpoint on 127.0.0.1:{} accepted the connection but did not \
+             answer within {} seconds. Check whether that port belongs to Chrome and whether \
+             Chrome is blocked on a dialog.",
+            port,
+            REQUEST_TIMEOUT.as_secs()
+        );
+    }
     format!(
         "No Chrome DevTools endpoint on 127.0.0.1:{}. Start Chrome with \
          `--remote-debugging-port={}` (a normal Chrome launched without that flag cannot be \
@@ -188,8 +199,29 @@ fn unreachable_message(port: u16, error: &reqwest::Error) -> String {
     )
 }
 
+/// 每个 CDP 请求的上限。
+///
+/// reqwest 默认没有任何超时，而这些请求跑在 `ToolInvoker::invoke` 里 —— 那是同步的，
+/// 取消标志只在两次工具调用**之间**检查。所以一个接受了连接却不回话的端点（占了
+/// 9222 的别的服务、卡在 beforeunload 的 Chrome、睡眠后半开的 socket）会把整个 run
+/// 永久钉住：用户点 Stop 只会把 UI 标成 Idle，后台任务还挂在那条阻塞的线程上，
+/// 连外部动作记录都发不出去 —— 一个撤不回的能力，唯一的补偿就是那份记录。
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 带超时的客户端。构造失败时退回默认客户端而不是报错：没有超时也比连不上好，
+/// 而这个分支在 reqwest 里实际上不可达。
+fn cdp_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
 pub async fn list_tabs(port: u16) -> Result<Vec<BrowserTab>, String> {
-    let response = reqwest::get(list_endpoint(port))
+    let response = cdp_client()
+        .get(list_endpoint(port))
+        .send()
         .await
         .map_err(|error| unreachable_message(port, &error))?;
     let body = response
@@ -205,8 +237,7 @@ pub async fn list_tabs(port: u16) -> Result<Vec<BrowserTab>, String> {
 /// 接受 PUT，不需要为兼容再退回 GET。
 pub async fn open_url(port: u16, raw_url: &str) -> Result<BrowserTab, String> {
     let url = normalize_target_url(raw_url)?;
-    let client = reqwest::Client::new();
-    let response = client
+    let response = cdp_client()
         .put(new_tab_endpoint(port, &url))
         .send()
         .await
