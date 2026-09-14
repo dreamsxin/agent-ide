@@ -77,8 +77,9 @@ npm test
   `try_begin_run` as a `RunLease`, one fresh pair per run — a shared flag let a new
   prompt un-cancel a still-draining old run. That flag is also the **side-effect gate**:
   `WorkspaceToolPermissions::fresh_cancel()` mints it before the tool surface is built
-  and hands it to `try_begin_run`, so `invoke()` refuses command / write / browser tools
-  after Stop. One flag, not two copies.
+  and hands it to `try_begin_run`, so `WorkspaceToolInvoker::invoke()` refuses command /
+  write / browser calls that have not started yet. One flag, not two copies. It does not
+  interrupt a call already executing, and MCP tools have no such gate.
 - **Every change the Agent lands must be visible and undoable.** Diffs go through
   the review area; direct tool writes are published back as `applied` diffs with
   their pre-write content plus an undo checkpoint (`record_tool_writes`), on every
