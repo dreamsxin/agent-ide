@@ -140,6 +140,9 @@ pub fn run() {
             commands::terminal::write_to_terminal,
             commands::terminal::resize_terminal,
             commands::terminal::kill_terminal,
+            // 浏览器：CDP 的 HTTP 端点，只服务用户自己的操作（命令面板）
+            commands::browser::browser_list_tabs,
+            commands::browser::browser_open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent IDE");
