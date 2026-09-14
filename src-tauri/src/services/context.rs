@@ -141,6 +141,14 @@ pub struct AgentContext {
     /// 普通上下文段落参与预算裁剪，而不是绕过预算直接塞进提示词。
     #[serde(default)]
     pub conversation: Option<String>,
+    /// IDE 当下的运行状况：问题面板、终端输出、失败的检查命令、warn/error 日志。
+    ///
+    /// 这一段以前由前端直接拼在提示词后面。后果是它对预算完全不可见：估算面板报的
+    /// "selected context N tokens" 不含它，裁剪也保护不到它，而它最大能有一万字符
+    /// 上下 —— 一个用户看不见、也管不到的大块。作为段落进来之后，它和别的段落一样被
+    /// 估算、排优先级、按配额裁。
+    #[serde(default)]
+    pub ide_runtime: Option<String>,
 }
 
 impl AgentContext {
@@ -155,6 +163,7 @@ impl AgentContext {
             project_tree: None,
             project_memory: None,
             conversation: None,
+            ide_runtime: None,
         }
     }
 
@@ -262,6 +271,15 @@ impl AgentContext {
                     content: format!("Selected code:\n```\n{}\n```\n", selection),
                 });
             }
+        }
+        // 问题面板 / 终端 / 失败的检查 / 日志。以前前端把这段直接拼在提示词后面，于是
+        // 估算和裁剪都看不见它 —— 一个上万字符的块可以把预算悄悄挤爆。
+        if let Some(ref runtime) = self.ide_runtime {
+            sections.push(ContextSection {
+                id: "ide_runtime",
+                label: "IDE runtime",
+                content: format!("=== IDE Runtime Context ===\n{}\n", runtime.trim_end()),
+            });
         }
         if let Some(ref content) = self.active_file_content {
             let section_content = if active_file_is_credential {
@@ -376,12 +394,15 @@ fn section_budget_rule(id: &str) -> (u8, f32) {
         // 项目约定和用户选区是最强的意图信号，排在正文之前
         "project_memory" => (2, 0.15),
         "selection" => (3, 0.15),
-        "conversation" => (4, 0.10),
-        "active_file_content" => (5, 0.30),
-        "git_diff" => (6, 0.20),
-        "project_tree" => (7, 0.10),
-        "open_files" => (8, 0.05),
-        _ => (9, 0.05),
+        // 用户刚点了"让 Agent 修"，问题面板和失败输出就是这次请求的理由；排在正文
+        // 之前，配额比正文小 —— 它是线索，正文才是要改的东西
+        "ide_runtime" => (4, 0.15),
+        "conversation" => (5, 0.10),
+        "active_file_content" => (6, 0.30),
+        "git_diff" => (7, 0.20),
+        "project_tree" => (8, 0.10),
+        "open_files" => (9, 0.05),
+        _ => (10, 0.05),
     }
 }
 
@@ -792,7 +813,50 @@ mod tests {
             project_tree: None,
             project_memory: None,
             conversation: None,
+            ide_runtime: None,
         }
+    }
+
+    /// IDE 运行状况必须是一个**段落**，而不是前端拼在提示词后面的一块。
+    ///
+    /// 拼在提示词里的话，估算面板报的 token 数不含它、预算裁剪也保护不到它 —— 而这块
+    /// 最大能有上万字符，等于用户看不见也管不到的一大截。
+    #[test]
+    fn ide_runtime_is_an_estimated_and_budgeted_section() {
+        let mut context = sample_context("const a = 1;\n");
+        let runtime = format!("problem list\n{}", "x".repeat(4_000));
+        context.ide_runtime = Some(runtime);
+
+        let estimate = context.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            None,
+        ));
+        let section = estimate
+            .sections
+            .iter()
+            .find(|section| section.id == "ide_runtime")
+            .expect("ide_runtime section");
+        assert!(section.chars > 4_000, "{}", section.chars);
+        assert!(section.estimated_tokens > 0);
+
+        // 预算紧到只够高优先级段落时，它按规则被裁或被排除，而不是绕过预算照发
+        let squeezed = context.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            Some(ContextBudget {
+                max_context_tokens: Some(1_200),
+                reserved_output_tokens: Some(400),
+            }),
+        ));
+        let squeezed_section = squeezed
+            .sections
+            .iter()
+            .find(|section| section.id == "ide_runtime")
+            .expect("ide_runtime section");
+        assert!(
+            squeezed_section.trimmed || !squeezed_section.included,
+            "{:?}",
+            squeezed_section
+        );
     }
 
     /// 写入侧的拒绝清单只管落盘，没有出网方向的对应约束：打开 `.env` 时

@@ -1,11 +1,11 @@
-import { lazy, Suspense, useState, useRef, useEffect, useCallback } from "react";
+import { lazy, Suspense, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import PendingChangesCard from "./PendingChangesCard";
-import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
+import { buildIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
 import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
 import type { ProblemEntry } from "../../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../../stores/useTaskStore";
@@ -366,6 +366,17 @@ export default function ChatView() {
     };
   }, [activeFile, fileContents, selectedText, openFiles, contextOptions]);
 
+  // 估算和发送必须用同一份 IDE 运行状况开关，否则面板上的数字和真正发出去的提示词不符
+  const runtimeContextOptions = useMemo<IdeRuntimeContextOptions>(
+    () => ({
+      includeFailedTask: contextOptions.failedTask,
+      includeProblems: contextOptions.problems,
+      includeTerminalOutput: contextOptions.terminalOutput,
+      includeLogs: contextOptions.logs,
+    }),
+    [contextOptions.failedTask, contextOptions.problems, contextOptions.terminalOutput, contextOptions.logs]
+  );
+
   useEffect(() => {
     let cancelled = false;
     const ctx = buildContext();
@@ -379,6 +390,8 @@ export default function ChatView() {
           includeProjectTree: contextOptions.projectTree,
           includeProjectMemory: contextOptions.projectMemory,
         },
+        // 估算必须和发送用同一份内容，否则面板上的数字比真实提示词小上万字符
+        ideRuntime: buildIdeRuntimeContext(runtimeContextOptions),
       }).then((estimate) => {
         if (!cancelled) setContextEstimate(estimate);
       });
@@ -387,7 +400,7 @@ export default function ChatView() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory]);
+  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory, runtimeContextOptions]);
 
   // 运行失败时把 prompt 放回输入框，Retry 才有可发的东西
   useEffect(() => {
@@ -410,14 +423,11 @@ export default function ChatView() {
     setInput("");
 
     const ctx = buildContext();
-    const runtimeContextOptions: IdeRuntimeContextOptions = {
-      includeFailedTask: contextOptions.failedTask,
-      includeProblems: contextOptions.problems,
-      includeTerminalOutput: contextOptions.terminalOutput,
-      includeLogs: contextOptions.logs,
-    };
     await sendPrompt({
-      prompt: withIdeRuntimeContext(content, runtimeContextOptions),
+      prompt: content,
+      // 单独给后端，让它作为上下文段落参与估算和裁剪；拼进 prompt 的话这上万字符
+      // 对预算是隐形的
+      ideRuntime: buildIdeRuntimeContext(runtimeContextOptions),
       profileId: selectedProfileId || undefined,
       contextCompression: selectedContextMode,
       contextSources: {
@@ -427,7 +437,7 @@ export default function ChatView() {
       },
       ...ctx,
     });
-  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions]);
+  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions, runtimeContextOptions]);
 
   const handleSaveSdd = useCallback(async () => {
     setSddSaveMessage("");
