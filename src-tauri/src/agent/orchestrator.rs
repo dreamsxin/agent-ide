@@ -39,6 +39,28 @@ pub struct ActionLogEntry {
     pub diff_summary: Option<String>,
 }
 
+/// 一次已经发生、且撤不回的外部动作，登记在 orchestrator 上。
+///
+/// 为什么不只发一条 action log：那条日志是 fire-and-forget 的，窗口关了、前端在重载、
+/// 日志条数滚过上限，记录就没了 —— 而对一个撤不回的能力，记录是唯一的补偿。这份列表
+/// 和 `diffs` 站在同一层：后端留着，前端可以重新读回来。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExternalActionRecord {
+    pub id: String,
+    pub timestamp: String,
+    /// `browser_open` / `browser_open_refused` / `browser_tabs` …
+    pub kind: String,
+    pub target: String,
+    pub detail: String,
+    /// 哪一次运行做的；重启后前端拿它和恢复出来的会话对账
+    #[serde(rename = "runId")]
+    pub run_id: Option<String>,
+}
+
+/// 外部动作记录的上限。一次长跑里模型可能反复试探被拒的站点，无界列表会把内存
+/// 和前端渲染一起拖下去；留最近的，因为最近的才是用户在追的那件事。
+const MAX_EXTERNAL_ACTIONS: usize = 200;
+
 /// 有界修复循环的结果。
 ///
 /// `stop` 说明为什么停：检查通过、预算耗尽、diff 落不了盘、没开启。四种情况
@@ -61,6 +83,8 @@ pub struct AgentOrchestrator {
     pub ide_mode: IdeMode,
     pub steps: Vec<TaskStep>,
     pub diffs: Vec<crate::agent::state_machine::FileDiff>,
+    /// 撤不回的外部动作（浏览器导航等）。和 `diffs` 一样由后端保管、可重新读回。
+    pub external_actions: Vec<ExternalActionRecord>,
     pub sdd_artifacts: Vec<SddArtifact>,
     pub current_run_id: Option<String>,
     pub last_run_id: Option<String>,
@@ -558,6 +582,7 @@ impl AgentOrchestrator {
             ide_mode: IdeMode::Code,
             steps: Vec::new(),
             diffs: Vec::new(),
+            external_actions: Vec::new(),
             sdd_artifacts: Vec::new(),
             current_run_id: None,
             last_run_id: None,
@@ -607,6 +632,38 @@ impl AgentOrchestrator {
     ///
     /// 同一文件被写多次时合并成一条：original 取**第一次**写之前的内容，
     /// updated 取**最后一次**写入的内容。撤销要回到"这次运行之前"，而不是
+    /// 登记撤不回的外部动作，并返回登记结果供调用方发事件。
+    ///
+    /// **不变量**：上游 `permissions.take_external_actions()` 的排空和这里的追加要算在
+    /// 同一段临界区里（`commands/agent.rs::publish_external_actions`）。排空一次就没了
+    /// 第二次机会 —— 导航已经发生，而这份记录是它唯一的痕迹；掉了就没有任何地方能补。
+    ///
+    /// 不发事件、不带 `events` 参数：照 `record_tool_writes` 的分工，登记在这里，
+    /// 通知留给命令层，这样这个方法在没有桌面运行时的测试里也能直接调。
+    pub fn record_external_actions(
+        &mut self,
+        actions: Vec<crate::agent::workspace_tools::AgentExternalAction>,
+    ) -> Vec<ExternalActionRecord> {
+        let run_id = self.current_run_id.clone().or_else(|| self.last_run_id.clone());
+        let recorded: Vec<ExternalActionRecord> = actions
+            .into_iter()
+            .map(|action| ExternalActionRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                kind: action.kind,
+                target: action.target,
+                detail: action.detail,
+                run_id: run_id.clone(),
+            })
+            .collect();
+        self.external_actions.extend(recorded.clone());
+        if self.external_actions.len() > MAX_EXTERNAL_ACTIONS {
+            let excess = self.external_actions.len() - MAX_EXTERNAL_ACTIONS;
+            self.external_actions.drain(..excess);
+        }
+        recorded
+    }
+
     /// 回到中间某一步。
     ///
     /// **锁不变量**：压回滚点（293）、挂 diff（294）、重刷 baseHash（297）必须在
@@ -2841,6 +2898,56 @@ mod tests {
         let mut fresh = AgentOrchestrator::new();
         assert!(fresh.record_tool_writes(Vec::new()).is_empty());
         assert!(fresh.pending_undo().is_none());
+    }
+
+    /// 撤不回的动作要留在 orchestrator 上，而不是只发一条事件。
+    ///
+    /// 只发事件的版本在审计里被指出来过：`take_external_actions` 排空之后，如果没有
+    /// 窗口在听，那次导航就没有任何痕迹了 —— 而记录是这个能力唯一的补偿。
+    #[test]
+    fn external_actions_stay_on_the_orchestrator_and_are_bounded() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.current_run_id = Some("run-7".to_string());
+
+        let recorded = orchestrator.record_external_actions(vec![
+            crate::agent::workspace_tools::AgentExternalAction {
+                kind: "browser_open".to_string(),
+                target: "https://example.com/docs".to_string(),
+                detail: "Opened \"Docs\" (tab 1)".to_string(),
+            },
+            crate::agent::workspace_tools::AgentExternalAction {
+                kind: "browser_open_refused".to_string(),
+                target: "https://evil.example".to_string(),
+                detail: "not in the allowed origins".to_string(),
+            },
+        ]);
+
+        assert_eq!(recorded.len(), 2);
+        // 记录要能说出"哪一次运行做的"，否则重启后对不上会话
+        assert!(recorded.iter().all(|a| a.run_id.as_deref() == Some("run-7")));
+        assert!(recorded.iter().all(|a| !a.id.is_empty() && !a.timestamp.is_empty()));
+        assert_eq!(orchestrator.external_actions.len(), 2);
+
+        // 无界列表会被一次长跑里反复被拒的调用撑爆；留最近的
+        for index in 0..MAX_EXTERNAL_ACTIONS {
+            orchestrator.record_external_actions(vec![
+                crate::agent::workspace_tools::AgentExternalAction {
+                    kind: "browser_open_refused".to_string(),
+                    target: format!("https://probe-{}.example", index),
+                    detail: "refused".to_string(),
+                },
+            ]);
+        }
+        assert_eq!(orchestrator.external_actions.len(), MAX_EXTERNAL_ACTIONS);
+        assert_eq!(
+            orchestrator.external_actions.last().unwrap().target,
+            format!("https://probe-{}.example", MAX_EXTERNAL_ACTIONS - 1)
+        );
+        // 最早那两条被挤掉了，而不是新的被丢弃
+        assert!(orchestrator
+            .external_actions
+            .iter()
+            .all(|action| action.target != "https://example.com/docs"));
     }
 
     struct TestEnv {

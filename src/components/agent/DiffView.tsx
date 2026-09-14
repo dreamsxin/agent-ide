@@ -4,6 +4,11 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
 import { hunkBanner, hunkKind } from "./diffPresentation";
+import {
+  describeExternalAction,
+  isRefusedAction,
+  summarizeExternalActions,
+} from "../../utils/externalActions";
 
 function HunkBlock({
   hunk,
@@ -222,6 +227,8 @@ function HunkBlock({
 
 export default function DiffView() {
   const diffs = useAgentStore((s) => s.diffs);
+  const externalActions = useAgentStore((s) => s.externalActions);
+  const externalSummary = summarizeExternalActions(externalActions);
   const lastApplyResult = useAgentStore((s) => s.lastApplyResult);
   const clearApplyResult = useAgentStore((s) => s.clearApplyResult);
   const applyAllDiffs = useAgentStore((s) => s.applyAllDiffs);
@@ -312,6 +319,39 @@ export default function DiffView() {
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {externalActions.length > 0 && (
+        <div
+          data-testid="external-actions"
+          className="flex-shrink-0 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs"
+        >
+          {/* 这一块没有按钮，这是它的重点：导航没有 previous 可以还原，能提供的只有
+              记录本身。放在审查区顶部而不是只写进日志，是因为用户来这里就是为了
+              看"Agent 做了什么"。 */}
+          <div className="mb-1 font-medium text-amber-300">
+            {externalSummary.performed} browser action(s) — cannot be undone
+            {externalSummary.refused > 0 && `, ${externalSummary.refused} refused or failed`}
+          </div>
+          <div className="space-y-1">
+            {externalActions.slice(-10).map((action) => (
+              <div key={action.id} className="rounded bg-surface-base/60 px-2 py-1">
+                <div
+                  className={
+                    isRefusedAction(action)
+                      ? "font-medium text-diff-remove"
+                      : "font-medium text-surface-text"
+                  }
+                >
+                  {action.kind}
+                </div>
+                <div className="mt-0.5 break-words text-[11px] text-surface-muted">
+                  {describeExternalAction(action)}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
