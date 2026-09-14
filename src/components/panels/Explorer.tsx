@@ -4,6 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import {
+  attachLoadedChildren,
+  loadedDirectoryPaths,
+  type ExplorerNode,
+} from "./explorerTree";
 
 // ====== 类型 ======
 interface FileEntry {
@@ -13,15 +18,8 @@ interface FileEntry {
   size: number;
 }
 
-interface TreeNodeData {
-  id: string;
-  name: string;
-  path: string;
-  isDir: boolean;
-  size: number;
-  childrenLoaded?: boolean;
-  children?: TreeNodeData[];
-}
+type TreeNodeData = ExplorerNode;
+
 
 interface ContextMenuState {
   x: number;
@@ -173,6 +171,12 @@ function TreeNode({
 // ====== 主组件 ======
 export default function Explorer() {
   const [rootData, setRootData] = useState<TreeNodeData[]>([]);
+  // `loadRoot` 需要读上一棵树来决定重新展开哪些目录，但它不能把 rootData 放进依赖：
+  // 那会让它每次树变化都换一个新函数，而挂载 effect 依赖它 —— 无限重载。
+  const rootDataRef = useRef<TreeNodeData[]>([]);
+  useEffect(() => {
+    rootDataRef.current = rootData;
+  }, [rootData]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -202,7 +206,15 @@ export default function Explorer() {
 
   const toastTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  // 加载根目录
+  // 加载根目录。
+  //
+  // 重新列根之后必须把展开过的子树再列一遍：react-arborist 的展开状态存在它自己
+  // 内部（按 node id），我们这边一换 `rootData`，那些目录在它眼里还是开着的，
+  // 内容却空了 —— 用户每做一次新建 / 删除 / 重命名 / 粘贴都会看到"打开却是空的
+  // 文件夹"，要折叠再展开两次才能看回来。
+  //
+  // 是重新 list 而不是把旧子树缓存回去：这次操作本身就可能是在那个目录里新建了
+  // 文件，缓存旧内容会让新文件看不见 —— 那只是把一个可见的错换成一个隐蔽的错。
   const loadRoot = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -216,17 +228,42 @@ export default function Explorer() {
         setError("File explorer is available in the Tauri app runtime.");
         return;
       }
+      // 从 ref 读上一棵树：放进 useCallback 的依赖会让 loadRoot 每次树变化都换一个
+      // 新函数，而挂载 effect 依赖它 —— 那就是一个无限重载循环。
+      const expandedDirs = loadedDirectoryPaths(rootDataRef.current);
       const entries: FileEntry[] = await invoke("list_directory", { path: workspacePath });
       const nodes = entries
         .filter((e) => !EXCLUDE_DIRS.has(e.name))
         .map(fileEntryToNode);
-      setRootData(nodes);
+
+      if (expandedDirs.length === 0) {
+        setRootData(nodes);
+        return;
+      }
+      const reloaded = await Promise.all(
+        expandedDirs.map(async (dirPath) => {
+          try {
+            const children: FileEntry[] = await invoke("list_directory", { path: dirPath });
+            return [
+              dirPath,
+              children.filter((e) => !EXCLUDE_DIRS.has(e.name)).map(fileEntryToNode),
+            ] as const;
+          } catch {
+            // 这个目录可能刚刚被删掉或改名，那就让它保持未展开，别让整次刷新失败
+            return null;
+          }
+        })
+      );
+      setRootData(
+        attachLoadedChildren(nodes, new Map(reloaded.filter((entry) => entry !== null)))
+      );
     } catch (e) {
       setError(`Failed to load directory: ${e}`);
     } finally {
       setLoading(false);
     }
   }, [workspacePath]);
+
 
   useEffect(() => {
     loadRoot();
