@@ -2,7 +2,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
-import { llmConnectionIndicator } from "../../stores/llmConnection";
+import {
+  llmConnectionCheckedAt,
+  llmConnectionIndicator,
+  llmTargetFingerprint,
+} from "../../stores/llmConnection";
 import McpPanel from "./McpPanel";
 import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
@@ -13,6 +17,27 @@ const CONNECTION_TONE_TEXT = {
   ok: "text-accent-green",
   warn: "text-diff-modify",
   error: "text-diff-remove",
+} as const;
+
+/**
+ * 状态卡本身也跟着连通性走。
+ *
+ * 卡片整体是绿的、标题前面还有一个绿色实心圆点，而卡里那行 Connection 写着红色的
+ * Failed —— 那个绿点正是刚从状态栏拿掉的东西，不能换个面板又长回来。
+ */
+const CONNECTION_TONE_CARD = {
+  ok: {
+    shell: "border-accent-green/30 bg-accent-green/5",
+    header: "bg-accent-green/10 border-accent-green/20 text-accent-green",
+  },
+  warn: {
+    shell: "border-diff-modify/30 bg-diff-modify/5",
+    header: "bg-diff-modify/10 border-diff-modify/20 text-diff-modify",
+  },
+  error: {
+    shell: "border-diff-remove/30 bg-diff-remove/5",
+    header: "bg-diff-remove/10 border-diff-remove/20 text-diff-remove",
+  },
 } as const;
 
 // ====== 提供商预设 ======
@@ -98,6 +123,8 @@ export default function SettingsPanel() {
   const apiKeyMasked = useAgentStore((s) => s.apiKeyMasked);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const llmConnection = useAgentStore((s) => s.llmConnection);
+  // 指纹在渲染时算：上一次的结果只在目标没变时才算数，见 stores/llmConnection.ts
+  const llmTarget = useAgentStore(llmTargetFingerprint);
   const llmProfiles = useAgentStore((s) => s.llmProfiles);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
@@ -350,7 +377,8 @@ export default function SettingsPanel() {
   }, [deleteLlmProfile, profileId]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
-  const connectionState = llmConnectionIndicator(llmConnection);
+  const connectionState = llmConnectionIndicator(llmConnection, llmTarget);
+  const connectionCheckedAt = llmConnectionCheckedAt(llmConnection, llmTarget);
 
   return (
     <div className="p-3 text-xs overflow-auto h-full">
@@ -360,8 +388,8 @@ export default function SettingsPanel() {
 
       {/* 当前配置状态卡 */}
       {llmConfigured ? (
-        <div className="mb-4 rounded border border-accent-green/30 bg-accent-green/5 overflow-hidden">
-          <div className="px-3 py-1.5 bg-accent-green/10 border-b border-accent-green/20 text-accent-green text-[11px] font-medium flex items-center gap-1.5">
+        <div className={`mb-4 rounded border overflow-hidden ${CONNECTION_TONE_CARD[connectionState.tone].shell}`}>
+          <div className={`px-3 py-1.5 border-b text-[11px] font-medium flex items-center gap-1.5 ${CONNECTION_TONE_CARD[connectionState.tone].header}`}>
             <span>●</span> LLM Service Configured
           </div>
           <div className="px-3 py-2 space-y-1 text-[11px]">
@@ -392,8 +420,8 @@ export default function SettingsPanel() {
                 title={connectionState.title}
               >
                 {connectionState.label}
-                {llmConnection.checkedAt
-                  ? ` · ${new Date(llmConnection.checkedAt).toLocaleTimeString()}`
+                {connectionCheckedAt
+                  ? ` · ${new Date(connectionCheckedAt).toLocaleTimeString()}`
                   : ""}
               </span>
             </div>
