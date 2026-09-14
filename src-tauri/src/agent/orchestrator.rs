@@ -634,6 +634,11 @@ impl AgentOrchestrator {
     /// updated 取**最后一次**写入的内容。撤销要回到"这次运行之前"，而不是
     /// 登记撤不回的外部动作，并返回登记结果供调用方发事件。
     ///
+    /// `run_id` 由调用方给出（那批授权自己带着的那个），**不在这里读
+    /// `current_run_id`**：被 Stop 的运行可能在下一个 prompt 开跑之后才排空记录，
+    /// 那时读到的是后一次运行的 id。记错比记不到更糟 —— 复盘时它看起来是另一个提问
+    /// 干的。
+    ///
     /// **不变量**：上游 `permissions.take_external_actions()` 的排空和这里的追加要算在
     /// 同一段临界区里（`commands/agent.rs::publish_external_actions`）。排空一次就没了
     /// 第二次机会 —— 导航已经发生，而这份记录是它唯一的痕迹；掉了就没有任何地方能补。
@@ -643,8 +648,8 @@ impl AgentOrchestrator {
     pub fn record_external_actions(
         &mut self,
         actions: Vec<crate::agent::workspace_tools::AgentExternalAction>,
+        run_id: Option<String>,
     ) -> Vec<ExternalActionRecord> {
-        let run_id = self.current_run_id.clone().or_else(|| self.last_run_id.clone());
         let recorded: Vec<ExternalActionRecord> = actions
             .into_iter()
             .map(|action| ExternalActionRecord {
@@ -2907,36 +2912,42 @@ mod tests {
     #[test]
     fn external_actions_stay_on_the_orchestrator_and_are_bounded() {
         let mut orchestrator = AgentOrchestrator::new();
-        orchestrator.current_run_id = Some("run-7".to_string());
+        // 故意和传进去的 id 不同：记录必须认领授权自己带的那次运行
+        orchestrator.current_run_id = Some("run-8-the-next-prompt".to_string());
 
-        let recorded = orchestrator.record_external_actions(vec![
-            crate::agent::workspace_tools::AgentExternalAction {
-                kind: "browser_open".to_string(),
-                target: "https://example.com/docs".to_string(),
-                detail: "Opened \"Docs\" (tab 1)".to_string(),
-            },
-            crate::agent::workspace_tools::AgentExternalAction {
-                kind: "browser_open_refused".to_string(),
-                target: "https://evil.example".to_string(),
-                detail: "not in the allowed origins".to_string(),
-            },
-        ]);
+        let recorded = orchestrator.record_external_actions(
+            vec![
+                crate::agent::workspace_tools::AgentExternalAction {
+                    kind: "browser_open".to_string(),
+                    target: "https://example.com/docs".to_string(),
+                    detail: "Opened \"Docs\" (tab 1)".to_string(),
+                },
+                crate::agent::workspace_tools::AgentExternalAction {
+                    kind: "browser_open_refused".to_string(),
+                    target: "https://evil.example".to_string(),
+                    detail: "not in the allowed origins".to_string(),
+                },
+            ],
+            Some("run-7".to_string()),
+        );
 
         assert_eq!(recorded.len(), 2);
-        // 记录要能说出"哪一次运行做的"，否则重启后对不上会话
+        // 记录要能说出"哪一次运行做的"，而且用的是那批授权自己带的 id：
+        // 事后再去读 orchestrator 会把被 Stop 的那次运行记到下一次名下
         assert!(recorded.iter().all(|a| a.run_id.as_deref() == Some("run-7")));
         assert!(recorded.iter().all(|a| !a.id.is_empty() && !a.timestamp.is_empty()));
         assert_eq!(orchestrator.external_actions.len(), 2);
 
         // 无界列表会被一次长跑里反复被拒的调用撑爆；留最近的
         for index in 0..MAX_EXTERNAL_ACTIONS {
-            orchestrator.record_external_actions(vec![
-                crate::agent::workspace_tools::AgentExternalAction {
+            orchestrator.record_external_actions(
+                vec![crate::agent::workspace_tools::AgentExternalAction {
                     kind: "browser_open_refused".to_string(),
                     target: format!("https://probe-{}.example", index),
                     detail: "refused".to_string(),
-                },
-            ]);
+                }],
+                Some("run-7".to_string()),
+            );
         }
         assert_eq!(orchestrator.external_actions.len(), MAX_EXTERNAL_ACTIONS);
         assert_eq!(
