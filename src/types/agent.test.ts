@@ -23,11 +23,16 @@ describe("permissionsForPreset", () => {
     expect(permissionsForPreset("read-only")).toEqual({
       allowFileCreate: false,
       allowCommandRun: false,
+      allowBrowserUse: false,
+      browserOrigins: [],
     });
     // create-files 放开新建文件，但不放开命令执行 —— MCP 工具策略依赖这一点
     expect(permissionsForPreset("create-files").allowFileCreate).toBe(true);
     expect(permissionsForPreset("create-files").allowCommandRun).toBe(false);
     expect(permissionsForPreset("run-commands").allowCommandRun).toBe(true);
+    // 浏览器不在这条阶梯上：为了跑测试而选 run-commands，不该顺带批准出网
+    expect(permissionsForPreset("run-commands").allowBrowserUse).toBe(false);
+    expect(permissionsForPreset("run-commands").browserOrigins).toEqual([]);
   });
 
   it("returns a fresh object so callers cannot mutate the shared presets", () => {
@@ -56,6 +61,8 @@ describe("mcpApprovalForPermissions", () => {
       mcpApprovalForPermissions({
         allowFileCreate: true,
         allowCommandRun: false,
+        allowBrowserUse: false,
+        browserOrigins: [],
       })
     ).toBe("auto_approved_only");
 
@@ -63,6 +70,8 @@ describe("mcpApprovalForPermissions", () => {
       mcpApprovalForPermissions({
         allowFileCreate: false,
         allowCommandRun: true,
+        allowBrowserUse: false,
+        browserOrigins: [],
       })
     ).toBe("allow_all");
   });

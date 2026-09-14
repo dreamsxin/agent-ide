@@ -160,6 +160,12 @@ pub struct SendPromptRequest {
     /// 它，而它能有上万字符。作为上下文段落进来才会被计量。
     #[serde(default, rename = "ideRuntime")]
     pub ide_runtime: Option<String>,
+    /// 是否允许驱动浏览器。和写盘分开：打开页面不改工作区，但会把内容送到某个站点。
+    #[serde(default, rename = "allowBrowserUse")]
+    pub allow_browser_use: bool,
+    /// 允许访问的 origin 清单；空清单等于不许，`allowBrowserUse` 也救不了。
+    #[serde(default, rename = "browserOrigins")]
+    pub browser_origins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +227,12 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::allow_file_create`
     #[serde(default, rename = "allowFileCreate")]
     pub allow_file_create: bool,
+    /// 同 `SendPromptRequest::allow_browser_use`
+    #[serde(default, rename = "allowBrowserUse")]
+    pub allow_browser_use: bool,
+    /// 同 `SendPromptRequest::browser_origins`
+    #[serde(default, rename = "browserOrigins")]
+    pub browser_origins: Option<Vec<String>>,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -298,6 +310,8 @@ pub async fn send_agent_prompt(
         request.allow_command_run,
         allow_write,
         request.allow_file_create,
+        request.allow_browser_use,
+        request.browser_origins.clone().unwrap_or_default(),
     );
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
@@ -441,6 +455,8 @@ fn agent_tool_permissions(
     allow_command_run: bool,
     allow_write: bool,
     allow_create: bool,
+    allow_browser: bool,
+    browser_origins: Vec<String>,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
     // 未授权时连扫都不扫：`discover_project_tasks` 要读 package.json / Cargo.toml。
     // 下面 `allowed_agent_commands` 里那次判断不是重复 —— 那条是授权规则本身，
@@ -455,6 +471,47 @@ fn agent_tool_permissions(
         allow_write,
         allow_create,
     )
+    .with_browser(allow_browser, browser_origins)
+}
+
+/// 把撤不回的外部动作写进操作日志。
+///
+/// 浏览器动作没有 `previous` 可以还原，所以记录**就是**我们唯一能兑现的承诺：哪个
+/// 站点、什么时候、成功还是被拒。被拒的调用也记 —— "模型试图打开一个没授权的站点"
+/// 只在返回值里说一句，会随着这一轮对话一起消失。
+fn publish_external_actions(
+    orch: &crate::agent::orchestrator::AgentOrchestrator,
+    app_handle: &AppHandle,
+    permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
+) {
+    let actions = permissions.take_external_actions();
+    if actions.is_empty() {
+        return;
+    }
+    let refused = actions
+        .iter()
+        .filter(|action| action.kind.ends_with("_refused") || action.kind.ends_with("_failed"))
+        .count();
+    let details = actions
+        .iter()
+        .map(|action| format!("{}: {} — {}", action.kind, action.target, action.detail))
+        .collect::<Vec<_>>()
+        .join("\n");
+    orch.emit_review_action_log(
+        app_handle,
+        if refused > 0 { "warn" } else { "info" },
+        "external_action",
+        &format!(
+            "Agent performed {} browser action(s){}",
+            actions.len(),
+            if refused > 0 {
+                format!(", {} refused or failed", refused)
+            } else {
+                String::new()
+            }
+        ),
+        &format!("{}\nThese cannot be undone.", details),
+    );
 }
 
 /// 把 Agent 写入工具落下的改动登记进审查区并通知前端。
@@ -511,6 +568,7 @@ fn finish_agent_run(
 ) {
     orch.finish_run(claim);
     publish_tool_writes(orch, app_handle, permissions);
+    publish_external_actions(orch, app_handle, permissions);
     emit_usage_action_log(orch, app_handle, meter);
 }
 
@@ -681,6 +739,8 @@ pub async fn run_agent_step(
         request.allow_command_run,
         allow_write,
         request.allow_file_create,
+        request.allow_browser_use,
+        request.browser_origins.clone().unwrap_or_default(),
     );
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
@@ -769,6 +829,7 @@ pub async fn run_agent_step(
     // 之前，否则工具写入产生的 diff 会被算进"这一步新增了几个 diff"的计数里。
     // `finish_agent_run` 里那次登记因此是空操作，留着是为了别的入口不必记得这条顺序。
     publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
+    publish_external_actions(&orch, &app_handle, &tool_permissions);
     match response {
         Ok(response) => {
             // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
@@ -1540,14 +1601,27 @@ mod tests {
     /// 钉住：只允许写盘时，命令清单必须是空的，新建文件必须仍然不允许。
     #[test]
     fn each_flag_lands_on_its_own_permission() {
-        let write_only = agent_tool_permissions(false, true, false);
+        let write_only = agent_tool_permissions(false, true, false, false, Vec::new());
         assert!(write_only.allowed_commands.is_empty());
         assert!(write_only.allow_write);
         assert!(!write_only.allow_create);
+        assert!(!write_only.allow_browser);
 
-        let create_only = agent_tool_permissions(false, false, true);
+        let create_only = agent_tool_permissions(false, false, true, false, Vec::new());
         assert!(!create_only.allow_write);
         assert!(create_only.allow_create);
+
+        // 浏览器授权和写盘授权互不牵连：给了浏览器不等于能改文件
+        let browser_only = agent_tool_permissions(
+            false,
+            false,
+            false,
+            true,
+            vec!["http://127.0.0.1:1420".to_string()],
+        );
+        assert!(!browser_only.allow_write);
+        assert!(browser_only.allow_browser);
+        assert_eq!(browser_only.browser_origins.len(), 1);
     }
 
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。
