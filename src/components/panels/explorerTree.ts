@@ -82,7 +82,45 @@ export function copyNameCandidates(sourceName: string, limit = 50): string[] {
   ];
 }
 
-/** Windows 上被设备名占用的名字，带扩展名也一样不能用 */
+/** 比较路径前先统一分隔符：`joinPath` 产出的是 `/`，而 `list_directory` 在 Windows 上给 `\` */
+function normalizeForCompare(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * 剪切粘贴的目标路径，或者拒绝的原因。
+ *
+ * 三条拒绝都是"后端也会失败，但话说不清"的情况，提前拦住是为了给一句人看得懂的：
+ *   * 搬到自己身上；
+ *   * 把一个目录搬进它自己的子目录 —— `fs::rename` 会返回一句裸的 EINVAL；
+ *   * 搬到它已经在的那个目录 —— 后端只会说"目标已存在"，读起来像是撞了同名文件，
+ *     而实际上什么都不需要做。
+ *
+ * 大小写按敏感比较：Windows 上文件系统不区分大小写，但在 Linux 上 `A` 和 `a` 是两个
+ * 目录，前端按不敏感比会误拒一个合法的移动。真撞上了由后端的"目标已存在"兜住。
+ */
+export function resolveMoveDestination(
+  sourcePath: string,
+  sourceName: string,
+  targetDirectory: string
+): { destination: string } | { error: string } {
+  const source = normalizeForCompare(sourcePath);
+  const target = normalizeForCompare(targetDirectory);
+
+  if (target === source) {
+    return { error: `Cannot move "${sourceName}" into itself.` };
+  }
+  if (target.startsWith(`${source}/`)) {
+    return { error: `Cannot move "${sourceName}" into a folder inside it.` };
+  }
+  const separator = source.lastIndexOf("/");
+  const currentParent = separator === -1 ? "" : source.slice(0, separator);
+  if (currentParent === target) {
+    return { error: `"${sourceName}" is already in this folder.` };
+  }
+  return { destination: `${target}/${sourceName}` };
+}
+
 const WINDOWS_RESERVED = new Set([
   "CON",
   "PRN",
