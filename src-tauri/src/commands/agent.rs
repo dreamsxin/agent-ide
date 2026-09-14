@@ -154,6 +154,12 @@ pub struct SendPromptRequest {
     pub run_id: Option<String>,
     #[serde(rename = "ideMode")]
     pub ide_mode: Option<String>,
+    /// IDE 当下的运行状况（问题、终端、失败的检查、日志）。
+    ///
+    /// 单独一个字段而不是拼在 `prompt` 里：拼进提示词的话，估算面板和预算裁剪都看不见
+    /// 它，而它能有上万字符。作为上下文段落进来才会被计量。
+    #[serde(default, rename = "ideRuntime")]
+    pub ide_runtime: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +190,10 @@ pub struct EstimateContextRequest {
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
     pub context_sources: Option<ContextSourceOptions>,
+    /// 和 `SendPromptRequest.ide_runtime` 同一段内容：估算必须和真正发出去的一致，
+    /// 否则面板上的数字会系统性偏小。
+    #[serde(default, rename = "ideRuntime")]
+    pub ide_runtime: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,6 +257,7 @@ pub async fn estimate_agent_context(
         request.active_file_content,
         request.selection,
         request.context_files,
+        request.ide_runtime,
     );
     let context_sources = request
         .context_sources
@@ -301,16 +312,17 @@ pub async fn send_agent_prompt(
         request.active_file_content,
         request.selection,
         request.context_files,
+        request.ide_runtime,
     );
     let context_sources = request
         .context_sources
         .unwrap_or_else(default_context_sources);
     context.enrich_from_workspace_with_sources(&context_sources);
-
     let compression = resolve_context_compression(
         &agent_state.context_compression,
         request.context_compression.as_deref(),
     )?;
+
     let pipeline = agent_state
         .pipeline_stages
         .lock()
@@ -682,6 +694,8 @@ pub async fn run_agent_step(
         request.active_file_content,
         request.selection,
         request.context_files,
+        // 流水线的每一步是 Agent 自己在跑，IDE 那一刻的问题面板/终端不是这一步的输入
+        None,
     );
     let context_sources = request
         .context_sources
@@ -1395,6 +1409,7 @@ fn build_agent_context(
     active_file_content: Option<String>,
     selection: Option<String>,
     context_files: Vec<String>,
+    ide_runtime: Option<String>,
 ) -> AgentContext {
     AgentContext {
         active_file,
@@ -1406,6 +1421,7 @@ fn build_agent_context(
         project_tree: None,
         project_memory: None,
         conversation: None,
+        ide_runtime,
     }
 }
 

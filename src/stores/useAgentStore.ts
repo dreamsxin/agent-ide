@@ -158,6 +158,13 @@ interface AgentStore {
       includeProjectMemory?: boolean;
     };
     ideMode?: IdeMode;
+    /**
+     * IDE 当下的运行状况（问题、终端、失败的检查、日志）。
+     *
+     * 独立字段而不是拼进 `prompt`：拼进去的话它绕过后端的上下文估算和预算裁剪，
+     * 面板上那个"selected context N tokens"就会系统性少算上万字符。
+     */
+    ideRuntime?: string | null;
   }) => Promise<void>;
   stopAgent: () => Promise<void>;
   changeMode: (mode: AgentMode) => Promise<void>;
@@ -225,6 +232,8 @@ interface AgentContextParams {
     includeProjectMemory?: boolean;
   };
   ideMode?: IdeMode;
+  /** 估算要和真正发出去的一致，所以这一段也得给后端；见 `sendPrompt` 的同名字段 */
+  ideRuntime?: string | null;
 }
 
 interface AgentStepRunParams extends AgentContextParams {
@@ -601,6 +610,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           profileId: params.profileId ?? get().chatProfileId,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
+          ideRuntime: params.ideRuntime ?? null,
           toolApproval: mcpApprovalForPermissions(get().permissions),
           allowFileCreate: get().permissions.allowFileCreate,
           allowCommandRun: get().permissions.allowCommandRun,
@@ -897,6 +907,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           profileId: params.profileId ?? get().chatProfileId,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
+          ideRuntime: params.ideRuntime ?? null,
         },
       });
     } catch (err: unknown) {

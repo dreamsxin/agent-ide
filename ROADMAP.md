@@ -1032,6 +1032,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Also: the toast now reports both sides (`Moved 4; <first failure> (+1 more)`), because "any failure hides the successes" reads as a total failure when four of five files moved. And `handleMove`'s `parent.isDir ? … : parentOf(…)` branch was dead — arborist's `compute-drop` only ever names a folder or the root — so it is gone rather than left as decoration.
    - Frontend 172 → 175.
 
+50. **The context panel's token count did not include the IDE runtime block (2026-09-14)**
+   - Found while mapping what the user can actually see about their context, before deciding what to build next. `withIdeRuntimeContext` on the frontend appended the problems list, terminal output, failed-check output and warn/error log lines **to the prompt string**. Everything downstream therefore missed it: `estimate_agent_context` runs the real assembly and so reported a number that excluded up to ~10 000 characters (20 problems, 4 000 chars of terminal, 8 log lines, 4 000 chars of failed output), and the budget allocator could not trim it because it never saw it. The panel that exists to answer "what am I sending" was systematically wrong in the one place where the answer is largest.
+   - Fix: `ide_runtime` is now an `AgentContext` field and a context section, with `SendPromptRequest.ideRuntime` / `EstimateContextRequest.ideRuntime` carrying it. The frontend passes the same string to both, from one memoised options object, so the estimate and the real prompt cannot diverge — the previous arrangement made divergence the default.
+   - Priority 4, quota 0.15: ahead of the conversation digest and the file body because the user pressed "Fix with Agent" *because of* those problems, but a smaller share than the file body, which is the thing being changed. It participates in the same two-pass allocation as everything else, so a tiny budget trims or drops it instead of letting it push the real work out.
+   - The pipeline path (`run_agent_step`) passes `None` deliberately: those steps are the Agent working through its own plan, and the IDE's problem panel at that instant is not the step's input.
+   - `withIdeRuntimeContext` is deleted rather than kept as a wrapper — one composed call site each in `ChatView` and `useFixWithAgent` now pass the section explicitly. The "Fix with Agent" chat bubble also stops echoing the whole runtime blob: the request is what the user wrote, and the attached evidence is visible in the context panel with its size.
+   - Rust 305 → 306.
+
+
 
 
 

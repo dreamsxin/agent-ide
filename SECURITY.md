@@ -258,6 +258,7 @@ What is sent to the configured LLM provider, and only to it:
 - `git_diff` — working-tree patch text, capped at 24 000 characters
 - `project_tree` — up to 160 entries, depth 4
 - `open_files` — paths only
+- `ide_runtime` — the IDE's current state as the user chose to attach it: up to 20 problems, 4 000 characters of terminal output, 8 warn/error log lines, and 4 000 characters from a failed check command. It used to be concatenated onto the prompt by the frontend, which meant it was sent but never counted; it is now a context section like the others, so it appears in the estimate panel and is subject to budget trimming.
 
 **Every context source is on by default.** The per-run toggles let the user turn each off, but the shipped default sends all of them.
 

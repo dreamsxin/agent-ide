@@ -17,13 +17,6 @@ const DEFAULT_RUNTIME_CONTEXT_OPTIONS: Required<IdeRuntimeContextOptions> = {
   includeLogs: true,
 };
 
-export function withIdeRuntimeContext(prompt: string, options?: IdeRuntimeContextOptions) {
-  const ideRuntimeContext = buildIdeRuntimeContext(options);
-  return ideRuntimeContext
-    ? `${prompt}\n\n=== IDE Runtime Context ===\n${ideRuntimeContext}`
-    : prompt;
-}
-
 export function buildProblemExplainPrompt(problem?: ProblemEntry) {
   const target = problem
     ? [

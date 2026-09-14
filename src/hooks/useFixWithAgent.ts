@@ -7,10 +7,10 @@ import { useLayoutStore } from "../stores/useLayoutStore";
 import type { ProblemEntry } from "../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../stores/useTaskStore";
 import {
+  buildIdeRuntimeContext,
   buildProblemExplainPrompt,
   buildProblemFixPrompt,
   buildTaskFailureFixPrompt,
-  withIdeRuntimeContext,
 } from "../utils/agentRuntimeContext";
 
 export function useFixWithAgent() {
@@ -38,21 +38,24 @@ export function useFixWithAgent() {
         toggleRightPanel();
       }
 
-      const fullPrompt = withIdeRuntimeContext(prompt);
+      // 聊天气泡里只放用户看得懂的那句请求；IDE 运行状况作为上下文段落单独送，
+      // 这样它会出现在估算面板里、也会参与预算裁剪
+      const ideRuntime = buildIdeRuntimeContext();
       addMessage({
         id: `fix-${Date.now()}`,
         role: "user",
-        content: fullPrompt,
+        content: prompt,
         timestamp: Date.now(),
       });
 
       await sendPrompt({
-        prompt: fullPrompt,
+        prompt,
         contextFiles: activeFile ? [activeFile] : [],
         activeFile: activeFile ?? undefined,
         activeFileContent: activeFile ? fileContents[activeFile] : undefined,
         selection: selectedText ?? undefined,
         ideMode: "code",
+        ideRuntime,
       });
     },
     [
