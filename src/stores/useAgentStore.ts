@@ -232,11 +232,17 @@ interface AgentContextParams {
     includeProjectMemory?: boolean;
   };
   ideMode?: IdeMode;
-  /** 估算要和真正发出去的一致，所以这一段也得给后端；见 `sendPrompt` 的同名字段 */
+  /**
+   * 估算要和真正发出去的一致，所以这一段也得给后端；见 `sendPrompt` 的同名字段。
+   *
+   * 只属于"整轮 prompt"这两条路径。流水线单步不接它（后端那边固定传 None），所以
+   * `AgentStepRunParams` 把它 Omit 掉 —— 类型上收得下、实际被丢弃的字段，和一个按了
+   * 没反应的开关是同一种东西。
+   */
   ideRuntime?: string | null;
 }
 
-interface AgentStepRunParams extends AgentContextParams {
+interface AgentStepRunParams extends Omit<AgentContextParams, "ideRuntime"> {
   step: Step;
   extraPrompt?: string;
   regeneratedFromDiffId?: string;

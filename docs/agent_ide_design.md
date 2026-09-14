@@ -445,7 +445,7 @@ Context compression is implemented in `src-tauri/src/services/context.rs`.
 | `compact` | Include outline/metadata-style summary. Lowest token use. |
 | `budgeted` | Token-budget-aware packing using the active provider profile budget or a safe default budget. |
 
-Budget packing is priority-quota based, not sequential. Each section has a priority and a share of the input budget (`section_budget_rule`): project header and active-file path first, then project memory and selection, then conversation digest, then active-file content, Git diff, project tree, and open-file list. Allocation runs in two passes — quota first, then unused allowance is redistributed to sections that were truncated. A section granted less than 240 bytes is excluded rather than filled with a truncation marker.
+Budget packing is priority-quota based, not sequential. Each section has a priority and a share of the input budget (`section_budget_rule`): project header and active-file path first, then project memory and selection, then the IDE runtime block, then conversation digest, then active-file content, Git diff, project tree, and open-file list. Allocation runs in two passes — quota first, then unused allowance is redistributed to sections that were truncated. A section granted less than 240 bytes is excluded rather than filled with a truncation marker.
 
 This replaced sequential greedy trimming, where the first oversized section consumed the remaining budget and every later section was dropped as "budget exhausted" purely because of its position in the list.
 

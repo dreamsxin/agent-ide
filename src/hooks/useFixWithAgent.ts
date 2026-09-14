@@ -12,6 +12,7 @@ import {
   buildProblemFixPrompt,
   buildTaskFailureFixPrompt,
 } from "../utils/agentRuntimeContext";
+import { ideRuntimeOptionsFor, loadContextOptions } from "../utils/chatContextOptions";
 
 export function useFixWithAgent() {
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
@@ -38,9 +39,9 @@ export function useFixWithAgent() {
         toggleRightPanel();
       }
 
-      // 聊天气泡里只放用户看得懂的那句请求；IDE 运行状况作为上下文段落单独送，
-      // 这样它会出现在估算面板里、也会参与预算裁剪
-      const ideRuntime = buildIdeRuntimeContext();
+      // 用户在 Chat 里存下来的那份开关，而不是硬编码的默认值：他关掉了终端和日志，
+      // 从问题面板点进来就不该照样把两者发出去
+      const ideRuntime = buildIdeRuntimeContext(ideRuntimeOptionsFor(loadContextOptions()));
       addMessage({
         id: `fix-${Date.now()}`,
         role: "user",

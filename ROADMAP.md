@@ -1040,6 +1040,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `withIdeRuntimeContext` is deleted rather than kept as a wrapper — one composed call site each in `ChatView` and `useFixWithAgent` now pass the section explicitly. The "Fix with Agent" chat bubble also stops echoing the whole runtime blob: the request is what the user wrote, and the attached evidence is visible in the context panel with its size.
    - Rust 305 → 306.
 
+51. **Three follow-ups the audit of 50 found, all in the same commit's blast radius (2026-09-14)**
+   - **An empty runtime block still became a section.** `buildIdeRuntimeContext` returns `""` when there is nothing to report *or* when all four toggles are off, and `"" ?? null` is `""`, so Rust received `Some("")` and pushed a section: the panel showed a green `IDE runtime  8 tok` row and the model got a bare `=== IDE Runtime Context ===` header. "Turned off" and "on but nothing to report" became indistinguishable **in the panel whose only job is to say what is being sent**. Every other optional section already guarded on emptiness; this one now does too, on the Rust side so no caller can reintroduce it.
+   - **The estimate did not refresh when the problems or logs actually changed.** The effect's dependencies were the four toggles, but the builder reads the problem / log / task / terminal stores imperatively. So `npm test` failing and filling the panel with 20 problems moved nothing on screen until something unrelated re-ran the effect — understated at exactly the moment the user is about to press "Fix with Agent". Fixed by memoising the *string* with those store slices as dependencies; the existing 250 ms debounce absorbs the churn.
+   - **"Fix with Agent" ignored the user's toggles.** It called `buildIdeRuntimeContext()` with no options, i.e. hardcoded defaults: someone who turned Terminal and Logs off in Chat still shipped both, and that path does not show the context panel. The toggles, their persistence and the mapping to the four runtime flags moved out of `ChatView` into `utils/chatContextOptions.ts` so both paths read one source. This is the second time in two entries that a **second copy of the same state** was the defect — first the connection target, now the context toggles.
+   - Also: `ideRuntime` was accepted by `AgentStepRunParams` and silently dropped (the backend passes `None` for pipeline steps on purpose), which is the type-level version of an inert control — `Omit`ted now. And `docs/agent_ide_design.md` still listed the old section order; `SECURITY.md` and the test counts had been updated but that one was missed, which is exactly the doc-drift the conventions warn about.
+   - Recorded, not fixed: `ide_runtime` is **not** suppressed when the active file is a credential file, while `selection` and `active_file_content` are. Terminal output and problem messages can quote a `.env`-driven failure, so this is a new outbound channel the existing guard does not cover. It needs its own decision (suppress the section, or scrub the credential values), not a reflex.
+   - Rust 306 → 307, frontend 175 → 179.
+
+
 
 
 

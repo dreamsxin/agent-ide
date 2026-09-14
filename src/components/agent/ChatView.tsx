@@ -5,7 +5,13 @@ import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import PendingChangesCard from "./PendingChangesCard";
-import { buildIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
+import { buildIdeRuntimeContext } from "../../utils/agentRuntimeContext";
+import {
+  ideRuntimeOptionsFor,
+  loadContextOptions,
+  persistContextOptions,
+  type ChatContextOptions,
+} from "../../utils/chatContextOptions";
 import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
 import type { ProblemEntry } from "../../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../../stores/useTaskStore";
@@ -13,34 +19,6 @@ import type { LogEntry } from "../../types/project";
 import { ArrowUp, Check, Copy, CornerDownLeft, RotateCcw, Square } from "lucide-react";
 
 const MarkdownMessage = lazy(() => import("./MarkdownMessage"));
-
-type ChatContextOptions = {
-  activeFile: boolean;
-  selection: boolean;
-  openFiles: boolean;
-  problems: boolean;
-  failedTask: boolean;
-  terminalOutput: boolean;
-  logs: boolean;
-  gitDiff: boolean;
-  projectTree: boolean;
-  projectMemory: boolean;
-};
-
-const DEFAULT_CONTEXT_OPTIONS: ChatContextOptions = {
-  activeFile: true,
-  selection: true,
-  openFiles: true,
-  problems: true,
-  failedTask: true,
-  terminalOutput: true,
-  logs: true,
-  gitDiff: true,
-  projectTree: true,
-  projectMemory: true,
-};
-
-const CONTEXT_OPTIONS_KEY = "agent-ide-chat-context-options";
 
 /** 各状态对应的 UI 信息 */
 const STATE_INFO: Record<AgentState, { label: string; spinner: boolean }> = {
@@ -366,15 +344,12 @@ export default function ChatView() {
     };
   }, [activeFile, fileContents, selectedText, openFiles, contextOptions]);
 
-  // 估算和发送必须用同一份 IDE 运行状况开关，否则面板上的数字和真正发出去的提示词不符
-  const runtimeContextOptions = useMemo<IdeRuntimeContextOptions>(
-    () => ({
-      includeFailedTask: contextOptions.failedTask,
-      includeProblems: contextOptions.problems,
-      includeTerminalOutput: contextOptions.terminalOutput,
-      includeLogs: contextOptions.logs,
-    }),
-    [contextOptions.failedTask, contextOptions.problems, contextOptions.terminalOutput, contextOptions.logs]
+  // 估算和发送必须用同一份文本。依赖里带上 problems / logs / taskRuns / terminalOutput
+  // 本身，而不只是那四个开关：`npm test` 跑出 20 条问题时，开关没变但内容变了，只依赖
+  // 开关的话面板上的数字会停在旧值 —— 而那正是用户要点"让 Agent 修"的时刻。
+  const ideRuntimeText = useMemo(
+    () => buildIdeRuntimeContext(ideRuntimeOptionsFor(contextOptions)),
+    [contextOptions, problems, logs, taskRuns, terminalOutput]
   );
 
   useEffect(() => {
@@ -391,7 +366,7 @@ export default function ChatView() {
           includeProjectMemory: contextOptions.projectMemory,
         },
         // 估算必须和发送用同一份内容，否则面板上的数字比真实提示词小上万字符
-        ideRuntime: buildIdeRuntimeContext(runtimeContextOptions),
+        ideRuntime: ideRuntimeText,
       }).then((estimate) => {
         if (!cancelled) setContextEstimate(estimate);
       });
@@ -400,7 +375,7 @@ export default function ChatView() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory, runtimeContextOptions]);
+  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory, ideRuntimeText]);
 
   // 运行失败时把 prompt 放回输入框，Retry 才有可发的东西
   useEffect(() => {
@@ -427,7 +402,7 @@ export default function ChatView() {
       prompt: content,
       // 单独给后端，让它作为上下文段落参与估算和裁剪；拼进 prompt 的话这上万字符
       // 对预算是隐形的
-      ideRuntime: buildIdeRuntimeContext(runtimeContextOptions),
+      ideRuntime: ideRuntimeText,
       profileId: selectedProfileId || undefined,
       contextCompression: selectedContextMode,
       contextSources: {
@@ -437,7 +412,7 @@ export default function ChatView() {
       },
       ...ctx,
     });
-  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions, runtimeContextOptions]);
+  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions, ideRuntimeText]);
 
   const handleSaveSdd = useCallback(async () => {
     setSddSaveMessage("");
@@ -870,37 +845,6 @@ function buildGhostSuggestions(
     });
   }
   return suggestions.slice(0, 3);
-}
-
-function loadContextOptions(): ChatContextOptions {
-  if (typeof window === "undefined") return DEFAULT_CONTEXT_OPTIONS;
-  try {
-    const workspacePath = localStorage.getItem("agent-ide-workspace-path") ?? "";
-    const raw = localStorage.getItem(CONTEXT_OPTIONS_KEY);
-    if (!raw) return DEFAULT_CONTEXT_OPTIONS;
-    const parsed = JSON.parse(raw) as { workspacePath?: string; options?: Partial<ChatContextOptions> };
-    if (parsed.workspacePath && workspacePath && parsed.workspacePath !== workspacePath) {
-      return DEFAULT_CONTEXT_OPTIONS;
-    }
-    return { ...DEFAULT_CONTEXT_OPTIONS, ...(parsed.options ?? {}) };
-  } catch {
-    return DEFAULT_CONTEXT_OPTIONS;
-  }
-}
-
-function persistContextOptions(options: ChatContextOptions) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(
-      CONTEXT_OPTIONS_KEY,
-      JSON.stringify({
-        workspacePath: localStorage.getItem("agent-ide-workspace-path") ?? "",
-        options,
-      })
-    );
-  } catch {
-    // Ignore persistence failures.
-  }
 }
 
 function formatEstimateDetail(
