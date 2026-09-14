@@ -51,6 +51,21 @@ export function findNodeById(nodes: ExplorerNode[], id: string): ExplorerNode | 
   return null;
 }
 
+/**
+ * 多选拖动时，去掉那些已经被同批里某个目录包住的节点。
+ *
+ * 一起选中 `src/` 和 `src/main.ts` 再拖走：目录先搬，`src/main.ts` 跟着一起走了，
+ * 第二次 rename 于是打在一个已经不存在的路径上，报一句后端原话，而磁盘其实是对的。
+ * 反过来先搬子节点，则会把它从目录里拽出来 —— 用户根本没要求这件事。两种都不该发生。
+ */
+export function withoutDraggedDescendants(nodes: ExplorerNode[]): ExplorerNode[] {
+  const directories = nodes.filter((node) => node.isDir).map((node) => normalizeForCompare(node.path));
+  return nodes.filter((node) => {
+    const path = normalizeForCompare(node.path);
+    return !directories.some((directory) => directory !== path && path.startsWith(`${directory}/`));
+  });
+}
+
 /** 文件树上一次按键对应的操作，`null` 表示这个组合不归我们管 */
 export type ExplorerShortcut = "rename" | "delete" | "copy" | "cut" | "paste";
 
@@ -153,6 +168,9 @@ function normalizeForCompare(path: string): string {
  *   * 搬到它已经在的那个目录 —— 后端只会说"目标已存在"，读起来像是撞了同名文件，
  *     而实际上什么都不需要做。
  *
+ * `reason` 和文案分开给：拖放要区别对待 `sameFolder`（arborist 画的插入线让人以为能
+ * 排序，一次无害的手势不该弹错误），而靠匹配错误文案来判断，改一个字就会失效。
+ *
  * 大小写按敏感比较：Windows 上文件系统不区分大小写，但在 Linux 上 `A` 和 `a` 是两个
  * 目录，前端按不敏感比会误拒一个合法的移动。真撞上了由后端的"目标已存在"兜住。
  */
@@ -160,20 +178,20 @@ export function resolveMoveDestination(
   sourcePath: string,
   sourceName: string,
   targetDirectory: string
-): { destination: string } | { error: string } {
+): { destination: string } | { error: string; reason: "self" | "descendant" | "sameFolder" } {
   const source = normalizeForCompare(sourcePath);
   const target = normalizeForCompare(targetDirectory);
 
   if (target === source) {
-    return { error: `Cannot move "${sourceName}" into itself.` };
+    return { error: `Cannot move "${sourceName}" into itself.`, reason: "self" };
   }
   if (target.startsWith(`${source}/`)) {
-    return { error: `Cannot move "${sourceName}" into a folder inside it.` };
+    return { error: `Cannot move "${sourceName}" into a folder inside it.`, reason: "descendant" };
   }
   const separator = source.lastIndexOf("/");
   const currentParent = separator === -1 ? "" : source.slice(0, separator);
   if (currentParent === target) {
-    return { error: `"${sourceName}" is already in this folder.` };
+    return { error: `"${sourceName}" is already in this folder.`, reason: "sameFolder" };
   }
   return { destination: `${target}/${sourceName}` };
 }
