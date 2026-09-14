@@ -1017,6 +1017,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Multi-select drags are handled properly rather than by taking `dragIds[0]`: arborist allows multi-select by default, so dropping three files while handling one would silently lose two. They move **sequentially**, because concurrent renames race the file-watcher refresh, and a failure has to be able to name which item failed. Failures take precedence in the toast — a success the user can already see in the tree, a refusal they cannot.
    - `findNodeById` (recursive, in `explorerTree.ts`, tested) exists because the drop handler receives ids, not nodes, and the destination needs the real path plus its `isDir` flag. Scanning only the top level would fail to find a second-level folder and then do nothing — the same silent no-op, one layer down. Frontend 167 → 169.
 
+48. **The tree had no keyboard shortcuts (2026-09-13)**
+   - Every file operation existed only behind a right-click. Arrow keys and Enter worked (react-arborist's own bindings plus the `onActivate` fix from an earlier entry), but F2, Delete and Ctrl+C/X/V did nothing — the keys a user coming from any file manager tries first.
+   - Wired to the row that has focus, tracked in a **ref** rather than state: `onFocus` fires on every arrow-key move, and putting that in state re-renders the whole tree for a fact only a keystroke handler reads.
+   - The decision lives in `explorerShortcut` (pure, 3 tests) because the hard part is not the mapping but the **combinations to leave alone**: anything with Alt belongs to the OS and window manager, `Ctrl+Shift+C` is a different command in VS Code and quietly treating it as Copy is worse than not supporting it, and `Shift+Delete` is not "delete" here. Backspace counts as delete because Mac keyboards have no Delete key; that is safe to claim because react-arborist only consumes Backspace when an `onDelete` handler is passed, and this tree passes none.
+   - Paste is the one action that works with no row focused — it targets the workspace root, matching what right-clicking blank space already does. The name dialog short-circuits the whole handler: without that, typing a name would also delete the file behind the dialog. Frontend 169 → 172.
+
+
 
 
 

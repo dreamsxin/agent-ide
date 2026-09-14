@@ -51,6 +51,45 @@ export function findNodeById(nodes: ExplorerNode[], id: string): ExplorerNode | 
   return null;
 }
 
+/** 文件树上一次按键对应的操作，`null` 表示这个组合不归我们管 */
+export type ExplorerShortcut = "rename" | "delete" | "copy" | "cut" | "paste";
+
+/**
+ * 键盘按下时该做什么。
+ *
+ * 抽成纯函数是因为这里全是"哪些组合**不**该拦"的判断，而那部分最容易写错：
+ * - 带 Alt 的一律放过：那些是操作系统和窗口管理器的地盘，抢过来会让用户的窗口快捷键
+ *   在文件树里莫名失效；
+ * - `Ctrl+Shift+C` 之类的不认领，返回 null 而不是当成 Copy —— VS Code 里那是另一个
+ *   命令，把它悄悄映射成复制比不支持更糟；
+ * - Delete 和 Backspace 都算删除：Mac 键盘上没有独立的 Delete 键。
+ *
+ * react-arborist 自己只在 `onDelete` 存在时处理 Backspace，我们不传那个 handler，
+ * 所以这里认领它不会造成两次删除。
+ */
+export function explorerShortcut(event: {
+  key: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}): ExplorerShortcut | null {
+  if (event.altKey) return null;
+  const modified = event.ctrlKey || event.metaKey;
+
+  if (!modified && !event.shiftKey) {
+    if (event.key === "F2") return "rename";
+    if (event.key === "Delete" || event.key === "Backspace") return "delete";
+  }
+  if (modified && !event.shiftKey) {
+    const key = event.key.toLowerCase();
+    if (key === "c") return "copy";
+    if (key === "x") return "cut";
+    if (key === "v") return "paste";
+  }
+  return null;
+}
+
 /**
  * 把重新列出来的子节点按路径接回新树。
  *

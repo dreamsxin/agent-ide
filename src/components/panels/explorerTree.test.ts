@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   attachLoadedChildren,
   copyNameCandidates,
+  explorerShortcut,
   findNodeById,
   loadedDirectoryPaths,
   resolveMoveDestination,
@@ -217,6 +218,45 @@ describe("findNodeById", () => {
   it("finds a top-level node and returns null for an unknown id", () => {
     expect(findNodeById(tree, "README.md")?.path).toBe("README.md");
     expect(findNodeById(tree, "nowhere.ts")).toBeNull();
+  });
+});
+
+describe("explorerShortcut", () => {
+  const press = (key: string, modifiers: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey", boolean>> = {}) => ({
+    key,
+    ctrlKey: modifiers.ctrlKey ?? false,
+    metaKey: modifiers.metaKey ?? false,
+    shiftKey: modifiers.shiftKey ?? false,
+    altKey: modifiers.altKey ?? false,
+  });
+
+  it("maps the keys a file manager is expected to have", () => {
+    expect(explorerShortcut(press("F2"))).toBe("rename");
+    expect(explorerShortcut(press("Delete"))).toBe("delete");
+    expect(explorerShortcut(press("c", { ctrlKey: true }))).toBe("copy");
+    expect(explorerShortcut(press("x", { ctrlKey: true }))).toBe("cut");
+    expect(explorerShortcut(press("v", { ctrlKey: true }))).toBe("paste");
+    // Mac 上 Cmd 是同一档操作，而键盘上没有独立的 Delete 键
+    expect(explorerShortcut(press("c", { metaKey: true }))).toBe("copy");
+    expect(explorerShortcut(press("Backspace"))).toBe("delete");
+  });
+
+  /** 大写来自 Shift 之外的原因（CapsLock），不该因此失效 */
+  it("does not care about letter case", () => {
+    expect(explorerShortcut(press("C", { ctrlKey: true }))).toBe("copy");
+  });
+
+  /**
+   * 不认领的组合必须返回 null，而不是"就近"当成某个操作。`Ctrl+Shift+C` 在 VS Code 里
+   * 是另一个命令，悄悄映射成复制比不支持更糟；带 Alt 的是操作系统和窗口管理器的地盘。
+   */
+  it("leaves combinations it does not own alone", () => {
+    expect(explorerShortcut(press("c", { ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(explorerShortcut(press("c", { ctrlKey: true, altKey: true }))).toBeNull();
+    expect(explorerShortcut(press("F2", { altKey: true }))).toBeNull();
+    expect(explorerShortcut(press("Delete", { shiftKey: true }))).toBeNull();
+    expect(explorerShortcut(press("a", { ctrlKey: true }))).toBeNull();
+    expect(explorerShortcut(press("Enter"))).toBeNull();
   });
 });
 

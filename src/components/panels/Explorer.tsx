@@ -7,6 +7,7 @@ import { isTauriRuntime } from "../../utils/tauri";
 import {
   attachLoadedChildren,
   copyNameCandidates,
+  explorerShortcut,
   findNodeById,
   loadedDirectoryPaths,
   resolveMoveDestination,
@@ -180,6 +181,8 @@ export default function Explorer() {
   // `loadRoot` 需要读上一棵树来决定重新展开哪些目录，但它不能把 rootData 放进依赖：
   // 那会让它每次树变化都换一个新函数，而挂载 effect 依赖它 —— 无限重载。
   const rootDataRef = useRef<TreeNodeData[]>([]);
+  /** 当前有焦点的那一行，供键盘操作用；ref 而不是 state，避免方向键导航重渲染整棵树 */
+  const focusedNodeRef = useRef<TreeNodeData | null>(null);
   useEffect(() => {
     rootDataRef.current = rootData;
   }, [rootData]);
@@ -714,6 +717,44 @@ export default function Explorer() {
     [deletePath, closeContextMenu]
   );
 
+  /**
+   * 键盘操作：F2 改名、Delete / Backspace 删除、Ctrl/Cmd + C / X / V 复制剪切粘贴。
+   *
+   * 作用对象是**当前有焦点的那一行**，由 `onFocus` 记在 ref 里 —— 用 state 会让每次
+   * 方向键移动都重渲染整棵树。哪些组合该拦、哪些必须放过（Alt、Ctrl+Shift+C 之类）
+   * 的判断在 `explorerShortcut` 里，纯函数、可测。
+   */
+  const handleTreeKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      // 名字对话框开着的时候键盘属于它：这里再抢一遍会一边打字一边触发删除
+      if (nameDialog) return;
+      const action = explorerShortcut(event);
+      if (!action) return;
+      const node = focusedNodeRef.current;
+      // 粘贴不需要选中任何东西：没有焦点时粘到工作区根目录，和空白处右键一致
+      if (!node && action !== "paste") return;
+      event.preventDefault();
+      switch (action) {
+        case "rename":
+          if (node) void handleRename(node);
+          return;
+        case "delete":
+          if (node) void handleDelete(node);
+          return;
+        case "copy":
+          if (node) handleCopy(node);
+          return;
+        case "cut":
+          if (node) handleCut(node);
+          return;
+        case "paste":
+          void handlePaste(node);
+          return;
+      }
+    },
+    [handleCopy, handleCut, handleDelete, handlePaste, handleRename, nameDialog]
+  );
+
   return (
     <div className="h-full flex flex-col">
       {/* 标题栏 + 新建按钮 */}
@@ -760,6 +801,7 @@ export default function Explorer() {
           event.preventDefault();
           handleContextMenu(event, null);
         }}
+        onKeyDown={handleTreeKeyDown}
       >
         {loading && (
           <div className="p-2 text-xs text-surface-muted">Loading files...</div>
@@ -789,6 +831,11 @@ export default function Explorer() {
             openByDefault={false}
             onToggle={handleToggle}
             onMove={handleMove}
+            // 键盘操作要作用在有焦点的那一行；记进 ref 而不是 state，否则每次方向键
+            // 移动都会重渲染整棵树
+            onFocus={(node) => {
+              focusedNodeRef.current = node.data;
+            }}
             onActivate={(node) => {
               // 方向键导航之后按 Enter 走到这里。目录切换，文件打开 ——
               // 以前这里只处理目录，键盘用户因此打不开文件。
