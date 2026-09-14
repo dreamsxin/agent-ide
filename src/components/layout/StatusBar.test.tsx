@@ -4,7 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 
 import StatusBar from "./StatusBar";
 import { useAgentStore } from "../../stores/useAgentStore";
-import { UNVERIFIED_LLM_CONNECTION } from "../../stores/llmConnection";
+import { llmTargetFingerprint, UNVERIFIED_LLM_CONNECTION } from "../../stores/llmConnection";
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore } from "../../stores/useProblemStore";
@@ -150,16 +150,32 @@ describe("branch segment", () => {
  * 模型名不存在，它一概照绿 —— 用户点了发送才知道不通。中间那档就是为此存在的。
  */
 describe("LLM segment", () => {
-  it("没有凭据时说没配置", () => {
-    useAgentStore.setState({ llmConfigured: false, llmConnection: UNVERIFIED_LLM_CONNECTION });
+  beforeEach(() => {
+    useAgentStore.setState({
+      llmConfigured: false,
+      llmConnection: UNVERIFIED_LLM_CONNECTION,
+      llmProfiles: [],
+      activeProfileId: "",
+      chatProfileId: null,
+      llmEndpoint: "https://api.example.com/v1/chat/completions",
+      llmModel: "gpt-4o",
+      apiKeyMasked: "sk-1****cdef",
+    });
+  });
 
+  /** 当前目标的指纹；测过的结果必须带着它才算数 */
+  function currentTarget() {
+    return llmTargetFingerprint(useAgentStore.getState());
+  }
+
+  it("没有凭据时说没配置", () => {
     render(<StatusBar />);
 
     expect(screen.getByTestId("status-bar-llm").textContent).toContain("not configured");
   });
 
   it("配置了但没测过，不说 connected", () => {
-    useAgentStore.setState({ llmConfigured: true, llmConnection: UNVERIFIED_LLM_CONNECTION });
+    useAgentStore.setState({ llmConfigured: true });
 
     render(<StatusBar />);
 
@@ -169,9 +185,9 @@ describe("LLM segment", () => {
   });
 
   it("测通了才说 connected", () => {
+    useAgentStore.setState({ llmConfigured: true });
     useAgentStore.setState({
-      llmConfigured: true,
-      llmConnection: { status: "ok", checkedAt: 1, detail: "pong", target: "t" },
+      llmConnection: { status: "ok", checkedAt: 1, detail: "pong", target: currentTarget() },
     });
 
     render(<StatusBar />);
@@ -180,13 +196,13 @@ describe("LLM segment", () => {
   });
 
   it("测失败时把失败原因带在 title 上，而不是只留一个红点", () => {
+    useAgentStore.setState({ llmConfigured: true });
     useAgentStore.setState({
-      llmConfigured: true,
       llmConnection: {
         status: "failed",
         checkedAt: 1,
         detail: "401 Unauthorized",
-        target: "t",
+        target: currentTarget(),
       },
     });
 
@@ -195,6 +211,19 @@ describe("LLM segment", () => {
     const segment = screen.getByTestId("status-bar-llm");
     expect(segment.textContent).toContain("unreachable");
     expect(segment.getAttribute("title")).toContain("401 Unauthorized");
+  });
+
+  // 测完之后端点被改掉：那份 ok 说的是另一个地址，绿点不能继续替它作保
+  it("目标变了之后，测通过的结果不再显示为 connected", () => {
+    useAgentStore.setState({ llmConfigured: true });
+    useAgentStore.setState({
+      llmConnection: { status: "ok", checkedAt: 1, detail: "pong", target: currentTarget() },
+    });
+    useAgentStore.setState({ llmEndpoint: "http://localhost:11434/v1/chat/completions" });
+
+    render(<StatusBar />);
+
+    expect(screen.getByTestId("status-bar-llm").textContent).not.toContain("connected");
   });
 });
 

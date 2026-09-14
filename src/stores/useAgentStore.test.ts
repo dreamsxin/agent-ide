@@ -7,7 +7,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { useAgentStore } from "./useAgentStore";
-import { UNVERIFIED_LLM_CONNECTION } from "./llmConnection";
+import {
+  llmIndicator,
+  llmTargetFingerprint,
+  UNVERIFIED_LLM_CONNECTION,
+} from "./llmConnection";
 import { permissionsForPreset } from "../types/agent";
 import type { LlmProfile } from "../types/agent";
 
@@ -47,6 +51,7 @@ beforeEach(() => {
     activeProfileId: "",
     llmEndpoint: "",
     llmModel: "",
+    apiKeyMasked: "",
   });
 });
 
@@ -100,7 +105,9 @@ describe("testLlmConnection", () => {
 
     useAgentStore.getState().setChatProfileId("p2");
 
-    expect(useAgentStore.getState().llmConnection.status).toBe("unknown");
+    // 判断在渲染处：结果留在 store 里，但它带着的目标已经和当前目标不一致
+    const state = useAgentStore.getState();
+    expect(llmIndicator(true, state.llmConnection, llmTargetFingerprint(state)).tone).toBe("warn");
   });
 
   it("目标没变的一次配置刷新不该把验证过的结果抹掉", async () => {
@@ -117,7 +124,8 @@ describe("testLlmConnection", () => {
     });
     await useAgentStore.getState().fetchLlmConfig();
 
-    expect(useAgentStore.getState().llmConnection.status).toBe("ok");
+    const state = useAgentStore.getState();
+    expect(llmIndicator(true, state.llmConnection, llmTargetFingerprint(state)).tone).toBe("ok");
   });
 
   it("同一个 profile 改了端点，验证过的结果作废", async () => {
@@ -136,7 +144,24 @@ describe("testLlmConnection", () => {
     });
     await useAgentStore.getState().fetchLlmConfig();
 
-    expect(useAgentStore.getState().llmConnection.status).toBe("unknown");
+    const state = useAgentStore.getState();
+    expect(llmIndicator(true, state.llmConnection, llmTargetFingerprint(state)).tone).toBe("warn");
+  });
+
+  /**
+   * 后端拿到不认识的 profileId 会静默退回列表里的第一个。留着一个已删除的 id，
+   * 前端说的目标和实际打出去的目标就不是同一个 —— 连通性和每一次 prompt 都算错账。
+   */
+  it("删掉正在用的 profile 后，chatProfileId 不会停在那个死 id 上", async () => {
+    invokeMock.mockResolvedValueOnce({
+      profiles: [testProfile({ id: "p2", model: "gpt-4o-mini" })],
+      active_profile_id: "p2",
+      context_compression: "focused",
+    });
+
+    await useAgentStore.getState().deleteLlmProfile("p1");
+
+    expect(useAgentStore.getState().chatProfileId).toBe("p2");
   });
 });
 

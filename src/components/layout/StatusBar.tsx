@@ -5,7 +5,7 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
-import { llmIndicator } from "../../stores/llmConnection";
+import { llmIndicator, llmTargetFingerprint } from "../../stores/llmConnection";
 import { describeRunUsage } from "../../types/agent";
 import { formatMicrosUsd } from "../../utils/money";
 import StatusDot from "../shared/StatusDot";
@@ -45,6 +45,9 @@ export default function StatusBar() {
   const agentState = useAgentStore((s) => s.state);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
   const llmConnection = useAgentStore((s) => s.llmConnection);
+  // 指纹在渲染时算，和存下来的那个比：这样"上一次测的还是不是现在这个目标"不依赖
+  // 任何一处改配置的代码记得作废旧结果
+  const llmTarget = useAgentStore(llmTargetFingerprint);
   const runUsage = useAgentStore((s) => s.runUsage);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
@@ -68,7 +71,7 @@ export default function StatusBar() {
 
   const activeTab = openFiles.find((file) => file.path === activeFile) ?? null;
   const usageDisplay = runUsage ? describeRunUsage(runUsage, formatMicrosUsd) : null;
-  const llm = llmIndicator(llmConfigured, llmConnection);
+  const llm = llmIndicator(llmConfigured, llmConnection, llmTarget);
 
   // 点数字就该到得了列表，否则这个数字只是让人知道有问题却不知道去哪看
   const showProblems = () => {

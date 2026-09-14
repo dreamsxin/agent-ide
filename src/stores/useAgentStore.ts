@@ -29,7 +29,6 @@ import type {
   RunUsage,
 } from "../types/agent";
 import {
-  connectionForTarget,
   llmTargetFingerprint,
   UNVERIFIED_LLM_CONNECTION,
 } from "./llmConnection";
@@ -186,7 +185,6 @@ interface AgentStore {
 
   // ====== 模型配置 ======
   fetchLlmConfig: () => Promise<void>;
-  updateLlmConfig: (endpoint: string, apiKey: string, model: string) => Promise<void>;
   saveLlmProfile: (request: SaveLlmProfileRequest) => Promise<void>;
   deleteLlmProfile: (profileId: string) => Promise<void>;
   setActiveLlmProfile: (profileId: string) => Promise<void>;
@@ -1077,46 +1075,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         return;
       }
       const cfg = await invoke<LlmConfigResponse>("get_llm_config");
-      commitLlmTarget(
-        {
-          llmConfigured: true,
-          llmEndpoint: cfg.endpoint,
-          llmModel: cfg.model,
-          apiKeyMasked: cfg.api_key_masked,
-          contextCompression: cfg.context_compression,
-          llmProfiles: cfg.profiles ?? [],
-          activeProfileId: cfg.active_profile_id ?? "",
-          chatProfileId: get().chatProfileId ?? cfg.active_profile_id ?? null,
-        },
-        set,
-        get
-      );
+      set({
+        llmConfigured: true,
+        llmEndpoint: cfg.endpoint,
+        llmModel: cfg.model,
+        apiKeyMasked: cfg.api_key_masked,
+        contextCompression: cfg.context_compression,
+        llmProfiles: cfg.profiles ?? [],
+        activeProfileId: cfg.active_profile_id ?? "",
+        chatProfileId: resolveChatProfileId(
+          get().chatProfileId,
+          cfg.profiles ?? [],
+          cfg.active_profile_id ?? null
+        ),
+      });
     } catch {
       set({ llmConfigured: false });
     }
-  },
-
-  updateLlmConfig: async (endpoint, apiKey, model) => {
-    if (!isTauriRuntime()) {
-      throw new Error("LLM configuration is available in the Tauri app runtime.");
-    }
-    await invoke("update_llm_config", {
-      endpoint,
-      apiKey,
-      model,
-    });
-    commitLlmTarget(
-      {
-        llmConfigured: true,
-        llmEndpoint: endpoint,
-        llmModel: model,
-        apiKeyMasked: apiKey.length > 8
-          ? apiKey.slice(0, 4) + "****" + apiKey.slice(-4)
-          : "****",
-      },
-      set,
-      get
-    );
   },
 
   saveLlmProfile: async (request) => {
@@ -1137,14 +1112,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setActiveLlmProfile: async (profileId) => {
     if (!isTauriRuntime()) {
-      commitLlmTarget({ activeProfileId: profileId, chatProfileId: profileId }, set, get);
+      set({ activeProfileId: profileId, chatProfileId: profileId });
       return;
     }
     const response = await invoke<LlmProfilesResponse>("set_active_llm_profile", { profileId });
     applyProfilesResponse(response, set, get);
   },
 
-  setChatProfileId: (profileId) => commitLlmTarget({ chatProfileId: profileId }, set, get),
+  setChatProfileId: (profileId) => set({ chatProfileId: profileId }),
   setChatContextCompression: (mode) => set({ chatContextCompression: mode }),
 
   /** 显式取一次明文密钥，只在用户点击"显示"时调用 */
@@ -1242,22 +1217,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 }));
 
 /**
- * 改动 LLM 配置的统一入口：写进 store，然后按目标指纹决定上一次的连通性结果还算不算。
+ * chat 用哪个 profile：保留用户的选择，但选择必须还存在。
  *
- * 之所以集中在一处，是因为能改目标的地方有五个（`fetchLlmConfig`、
- * `updateLlmConfig`、`setChatProfileId`、`setActiveLlmProfile`、
- * `applyProfilesResponse`）。少接一处，那条路径上就会留下一个替新端点作保的绿点。
+ * 后端拿到一个不认识的 id 时会**静默退回列表里的第一个**
+ * （`llm_profiles.rs` 的 `.or_else(|| config.profiles.first())`）。所以删掉正在用的
+ * profile 之后，如果还留着那个死 id，前端说的是一个目标，实际发出去的是另一个 ——
+ * 连通性和每一次 prompt 都会算错账。
  */
-function commitLlmTarget(
-  partial: Partial<AgentStore>,
-  set: (partial: Partial<AgentStore>) => void,
-  get: () => AgentStore
-) {
-  const next = { ...get(), ...partial };
-  set({
-    ...partial,
-    llmConnection: connectionForTarget(next.llmConnection, llmTargetFingerprint(next)),
-  });
+function resolveChatProfileId(
+  current: string | null,
+  profiles: LlmProfile[],
+  activeProfileId: string | null
+): string | null {
+  if (current && profiles.some((profile) => profile.id === current)) {
+    return current;
+  }
+  return activeProfileId ?? profiles[0]?.id ?? null;
 }
 
 function applyProfilesResponse(
@@ -1268,20 +1243,20 @@ function applyProfilesResponse(
   const active =
     response.profiles.find((profile) => profile.id === response.active_profile_id) ??
     response.profiles[0];
-  commitLlmTarget(
-    {
-      llmConfigured: response.profiles.length > 0,
-      llmProfiles: response.profiles,
-      activeProfileId: response.active_profile_id,
-      chatProfileId: get().chatProfileId ?? response.active_profile_id,
-      contextCompression: response.context_compression,
-      llmEndpoint: active?.endpoint ?? "",
-      llmModel: active?.model ?? "",
-      apiKeyMasked: active?.api_key_masked ?? "",
-    },
-    set,
-    get
-  );
+  set({
+    llmConfigured: response.profiles.length > 0,
+    llmProfiles: response.profiles,
+    activeProfileId: response.active_profile_id,
+    chatProfileId: resolveChatProfileId(
+      get().chatProfileId,
+      response.profiles,
+      response.active_profile_id
+    ),
+    contextCompression: response.context_compression,
+    llmEndpoint: active?.endpoint ?? "",
+    llmModel: active?.model ?? "",
+    apiKeyMasked: active?.api_key_masked ?? "",
+  });
 }
 
 function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
