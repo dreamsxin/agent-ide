@@ -2,10 +2,18 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
+import { llmConnectionIndicator } from "../../stores/llmConnection";
 import McpPanel from "./McpPanel";
 import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
+
+/** 连通性三档的字色；判断在 `stores/llmConnection.ts`，这里只是配色 */
+const CONNECTION_TONE_TEXT = {
+  ok: "text-accent-green",
+  warn: "text-diff-modify",
+  error: "text-diff-remove",
+} as const;
 
 // ====== 提供商预设 ======
 const providerLabels: Record<string, string> = {
@@ -89,6 +97,7 @@ export default function SettingsPanel() {
   const llmModel = useAgentStore((s) => s.llmModel);
   const apiKeyMasked = useAgentStore((s) => s.apiKeyMasked);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
+  const llmConnection = useAgentStore((s) => s.llmConnection);
   const llmProfiles = useAgentStore((s) => s.llmProfiles);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
@@ -341,6 +350,7 @@ export default function SettingsPanel() {
   }, [deleteLlmProfile, profileId]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
+  const connectionState = llmConnectionIndicator(llmConnection);
 
   return (
     <div className="p-3 text-xs overflow-auto h-full">
@@ -374,6 +384,18 @@ export default function SettingsPanel() {
             <div className="flex justify-between">
               <span className="text-surface-muted">Tools</span>
               <span className="text-surface-text font-mono text-[10px]">{toolCallMode}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-muted">Connection</span>
+              <span
+                className={`font-mono text-[10px] ${CONNECTION_TONE_TEXT[connectionState.tone]}`}
+                title={connectionState.title}
+              >
+                {connectionState.label}
+                {llmConnection.checkedAt
+                  ? ` · ${new Date(llmConnection.checkedAt).toLocaleTimeString()}`
+                  : ""}
+              </span>
             </div>
           </div>
         </div>

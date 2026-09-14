@@ -7,7 +7,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { useAgentStore } from "./useAgentStore";
+import { UNVERIFIED_LLM_CONNECTION } from "./llmConnection";
 import { permissionsForPreset } from "../types/agent";
+import type { LlmProfile } from "../types/agent";
 
 /** 内存版 Storage，够 persistAgentSession / currentWorkspacePath 用 */
 function memoryStorage(): Storage {
@@ -40,6 +42,101 @@ beforeEach(() => {
     isStreaming: false,
     chatProfileId: null,
     permissions: permissionsForPreset("read-only"),
+    llmConnection: UNVERIFIED_LLM_CONNECTION,
+    llmProfiles: [],
+    activeProfileId: "",
+    llmEndpoint: "",
+    llmModel: "",
+  });
+});
+
+/** 一个够用的 profile；连通性只关心 id / endpoint / model */
+function testProfile(overrides: Partial<LlmProfile> & { id: string }): LlmProfile {
+  return {
+    name: overrides.id,
+    provider: "openai",
+    endpoint: "https://api.example.com/v1/chat/completions",
+    api_key_masked: "sk-1****cdef",
+    model: "gpt-4o",
+    ...overrides,
+  };
+}
+
+describe("testLlmConnection", () => {
+  beforeEach(() => {
+    useAgentStore.setState({
+      llmConfigured: true,
+      llmProfiles: [testProfile({ id: "p1" }), testProfile({ id: "p2", model: "gpt-4o-mini" })],
+      activeProfileId: "p1",
+      chatProfileId: "p1",
+    });
+  });
+
+  it("记下测通的结果，连同被测的那个目标", async () => {
+    invokeMock.mockResolvedValueOnce("pong");
+
+    await useAgentStore.getState().testLlmConnection();
+
+    const connection = useAgentStore.getState().llmConnection;
+    expect(connection.status).toBe("ok");
+    expect(connection.detail).toBe("pong");
+    expect(connection.target).toContain("gpt-4o");
+  });
+
+  // 失败原本只是抛出去，被调用方变成一句转瞬即逝的提示；状态栏那个点继续说"ready"。
+  it("失败也留痕，而且照样往上抛", async () => {
+    invokeMock.mockRejectedValueOnce("401 Unauthorized");
+
+    await expect(useAgentStore.getState().testLlmConnection()).rejects.toBeTruthy();
+
+    const connection = useAgentStore.getState().llmConnection;
+    expect(connection.status).toBe("failed");
+    expect(connection.detail).toContain("401 Unauthorized");
+  });
+
+  it("换 chat profile 之后，上一次的 ok 不再替新目标作保", async () => {
+    invokeMock.mockResolvedValueOnce("pong");
+    await useAgentStore.getState().testLlmConnection();
+
+    useAgentStore.getState().setChatProfileId("p2");
+
+    expect(useAgentStore.getState().llmConnection.status).toBe("unknown");
+  });
+
+  it("目标没变的一次配置刷新不该把验证过的结果抹掉", async () => {
+    invokeMock.mockResolvedValueOnce("pong");
+    await useAgentStore.getState().testLlmConnection();
+
+    invokeMock.mockResolvedValueOnce({
+      endpoint: "https://api.example.com/v1/chat/completions",
+      model: "gpt-4o",
+      api_key_masked: "sk-1****cdef",
+      context_compression: "focused",
+      profiles: [testProfile({ id: "p1" }), testProfile({ id: "p2", model: "gpt-4o-mini" })],
+      active_profile_id: "p1",
+    });
+    await useAgentStore.getState().fetchLlmConfig();
+
+    expect(useAgentStore.getState().llmConnection.status).toBe("ok");
+  });
+
+  it("同一个 profile 改了端点，验证过的结果作废", async () => {
+    invokeMock.mockResolvedValueOnce("pong");
+    await useAgentStore.getState().testLlmConnection();
+
+    invokeMock.mockResolvedValueOnce({
+      endpoint: "http://localhost:11434/v1/chat/completions",
+      model: "gpt-4o",
+      api_key_masked: "sk-1****cdef",
+      context_compression: "focused",
+      profiles: [
+        testProfile({ id: "p1", endpoint: "http://localhost:11434/v1/chat/completions" }),
+      ],
+      active_profile_id: "p1",
+    });
+    await useAgentStore.getState().fetchLlmConfig();
+
+    expect(useAgentStore.getState().llmConnection.status).toBe("unknown");
   });
 });
 
