@@ -24,6 +24,7 @@ import type {
   SavedSddArtifactResponse,
   GhostSuggestion,
   AgentPermission,
+  BooleanPermissionKey,
   AgentPermissionPreset,
   DestructiveOpConfirm,
   RunUsage,
@@ -211,7 +212,8 @@ interface AgentStore {
 
   // ====== 权限管理 ======
   setPermissionPreset: (preset: AgentPermissionPreset) => void;
-  togglePermission: (key: keyof AgentPermission) => void;
+  togglePermission: (key: BooleanPermissionKey) => void;
+  setBrowserOrigins: (origins: string[]) => void;
   requestConfirm: (confirm: DestructiveOpConfirm) => void;
   clearConfirm: () => void;
 
@@ -586,6 +588,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => ({
       permissions: { ...s.permissions, [key]: !s.permissions[key] },
     })),
+  setBrowserOrigins: (origins) =>
+    set((s) => ({
+      permissions: { ...s.permissions, browserOrigins: origins },
+    })),
   requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
   clearConfirm: () => set({ pendingConfirm: null }),
 
@@ -619,6 +625,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           ideRuntime: params.ideRuntime ?? null,
           toolApproval: mcpApprovalForPermissions(get().permissions),
           allowFileCreate: get().permissions.allowFileCreate,
+          allowBrowserUse: get().permissions.allowBrowserUse,
+          browserOrigins: get().permissions.browserOrigins,
           allowCommandRun: get().permissions.allowCommandRun,
           runId,
           ideMode: requestIdeMode,
@@ -999,6 +1007,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           toolApproval: mcpApprovalForPermissions(get().permissions),
           allowCommandRun: get().permissions.allowCommandRun,
           allowFileCreate: get().permissions.allowFileCreate,
+          allowBrowserUse: get().permissions.allowBrowserUse,
+          browserOrigins: get().permissions.browserOrigins,
           extraPrompt: params.extraPrompt ?? null,
           regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
           regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,

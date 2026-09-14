@@ -27,6 +27,8 @@ pub const RUN_COMMAND: &str = "workspace_run_command";
 pub const WRITE_FILE: &str = "workspace_write_file";
 pub const DELETE_FILE: &str = "workspace_delete_file";
 pub const MOVE_FILE: &str = "workspace_move_file";
+pub const BROWSER_OPEN: &str = "workspace_browser_open";
+pub const BROWSER_TABS: &str = "workspace_browser_tabs";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -100,10 +102,36 @@ pub struct WorkspaceToolPermissions {
     /// 是否允许新建文件（对应 `allowFileCreate`）。false 时只能改已存在的文件，
     /// 与 Auto 模式自动应用时对新建文件的处理保持一致。
     pub allow_create: bool,
+    /// 是否允许驱动浏览器。和写盘分开：打开一个页面不改工作区，但它会把工作区里的
+    /// 内容送到一个网站去，是另一种权限。
+    pub allow_browser: bool,
+    /// 允许访问的 origin 清单（`scheme://host[:port]`，`*` 表示不限）。
+    ///
+    /// 空清单等于不许访问任何站点，`allow_browser` 也救不了 —— 两者是"能不能用浏览器"
+    /// 和"能去哪些站点"两个问题，任何一个没给都不该放行。
+    pub browser_origins: Vec<String>,
     /// 已经发生的写入。跟着 `Clone` 共享同一份（`Arc`），所以命令层可以克隆一份
     /// 交给工具、另一份记在 orchestrator 上，事后从任一份都取得到记录。
     writes: AgentWriteLog,
+    /// 已经发生的、**撤不回**的外部动作（目前只有浏览器）。
+    ///
+    /// 单独一份而不是塞进 `writes`：文件写入有 `previous` 可以还原，导航没有。混在
+    /// 一起会让"撤销"这个词在同一个列表里有两种意思，而其中一种是假的。
+    external: AgentExternalLog,
 }
+
+/// 一次撤不回的外部动作。记录是这里唯一能承诺的东西，所以它必须完整到能复盘。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentExternalAction {
+    /// 动作类别，例如 `browser_open`
+    pub kind: String,
+    /// 作用对象；浏览器动作是 URL 或 origin
+    pub target: String,
+    /// 结果摘要，成功和失败都记
+    pub detail: String,
+}
+
+type AgentExternalLog = std::sync::Arc<std::sync::Mutex<Vec<AgentExternalAction>>>;
 
 impl WorkspaceToolPermissions {
     pub fn read_only() -> Self {
@@ -122,8 +150,35 @@ impl WorkspaceToolPermissions {
             allowed_commands,
             allow_write,
             allow_create,
-            writes: AgentWriteLog::default(),
+            ..Self::default()
         }
+    }
+
+    /// 浏览器授权单独给，而不是加进 `new` 的参数表：调用点已经有十几处，多一个位置
+    /// 参数只会让"这个 true 是哪个权限"变成读代码时的猜谜。
+    pub fn with_browser(mut self, allow_browser: bool, browser_origins: Vec<String>) -> Self {
+        self.allow_browser = allow_browser;
+        self.browser_origins = browser_origins;
+        self
+    }
+
+    /// 取出并清空外部动作记录。
+    pub fn take_external_actions(&self) -> Vec<AgentExternalAction> {
+        match self.external.lock() {
+            Ok(mut actions) => std::mem::take(&mut *actions),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn record_external(&self, action: AgentExternalAction) {
+        if let Ok(mut actions) = self.external.lock() {
+            actions.push(action);
+        }
+    }
+
+    /// 浏览器工具是否可用：开关和清单都要有。
+    fn allows_browser(&self) -> bool {
+        self.allow_browser && !self.browser_origins.is_empty()
     }
 
     /// 取出并清空写入记录。
@@ -294,6 +349,38 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
     }
 
 
+    if permissions.allows_browser() {
+        // 通告里就把清单写出来：模型看不到授权范围时只会不断试探被拒的站点，把轮次
+        // 浪费在注定失败的调用上。
+        definitions.push(ToolDefinition {
+            name: BROWSER_OPEN.to_string(),
+            description: format!(
+                "Open a page in the user's Chrome (attached over the DevTools protocol) and \
+                 bring it to the front. Allowed origins for this run: {}. A navigation cannot be \
+                 undone — it is recorded in the run's action log instead. Use it to look at a \
+                 local preview or a documentation page, not to submit forms or log in.",
+                permissions.browser_origins.join(", ")
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute http:// or https:// URL within an allowed origin"
+                    }
+                },
+                "required": ["url"]
+            }),
+        });
+        definitions.push(ToolDefinition {
+            name: BROWSER_TABS.to_string(),
+            description: "List the pages currently open in the attached Chrome, with their \
+                          titles and URLs. Read-only."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        });
+    }
+
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
             name: RUN_COMMAND.to_string(),
@@ -370,6 +457,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             // "不存在的工具"变成一个"总是失败的工具"
             RUN_COMMAND => self.permissions.allows_commands(),
             WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
+            BROWSER_OPEN | BROWSER_TABS => self.permissions.allows_browser(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -415,6 +503,11 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 string_arg(&args, "to").ok_or("Missing 'to'")?,
                 &self.permissions,
             ),
+            BROWSER_OPEN => browser_open_tool(
+                string_arg(&args, "url").ok_or("Missing 'url'")?,
+                &self.permissions,
+            ),
+            BROWSER_TABS => browser_tabs_tool(&self.permissions),
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
@@ -851,6 +944,106 @@ fn move_file_tool(
     ))
 }
 
+/// 在同步的工具接口里跑一次异步请求。
+///
+/// `ToolInvoker::invoke` 是同步的（其他工具都是文件和进程操作），而浏览器走 HTTP。
+/// `block_in_place` 把当前工作线程让出去，所以不会把整个多线程 runtime 堵死；没有
+/// runtime 时（单元测试直接调用）如实说明，而不是 panic。
+fn block_on_browser<T>(
+    future: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| "Browser tools need the app runtime; not available here.".to_string())?;
+    tokio::task::block_in_place(|| handle.block_on(future))
+}
+
+/// 打开一个页面。
+///
+/// 两道闸门，缺一不可：`allow_browser`（能不能用浏览器）和 origin 清单（能去哪儿）。
+/// 拒绝也要记进外部动作日志 —— "模型试图打开某个没授权的站点"正是用户事后最想知道的
+/// 事情之一，只在返回值里说一句会随着这一轮对话消失。
+fn browser_open_tool(
+    url: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allows_browser() {
+        return Err(
+            "Browser use is not authorized for this run, or no origin is allowed.".to_string(),
+        );
+    }
+    let origin = match crate::services::browser::origin_of(url) {
+        Ok(origin) => origin,
+        Err(error) => {
+            permissions.record_external(AgentExternalAction {
+                kind: "browser_open_refused".to_string(),
+                target: url.to_string(),
+                detail: error.clone(),
+            });
+            return Err(error);
+        }
+    };
+    if !crate::services::browser::origin_allowed(&origin, &permissions.browser_origins) {
+        let detail = format!(
+            "{} is not in the allowed origins for this run ({}).",
+            origin,
+            permissions.browser_origins.join(", ")
+        );
+        permissions.record_external(AgentExternalAction {
+            kind: "browser_open_refused".to_string(),
+            target: origin,
+            detail: detail.clone(),
+        });
+        return Err(detail);
+    }
+
+    let port = crate::services::browser::configured_port();
+    match block_on_browser(crate::services::browser::open_url(port, url)) {
+        Ok(tab) => {
+            permissions.record_external(AgentExternalAction {
+                kind: "browser_open".to_string(),
+                target: tab.url.clone(),
+                detail: format!("Opened \"{}\" (tab {})", tab.title, tab.id),
+            });
+            Ok(format!(
+                "Opened {} in Chrome (title: {}). This navigation is recorded and cannot be undone.",
+                tab.url, tab.title
+            ))
+        }
+        Err(error) => {
+            permissions.record_external(AgentExternalAction {
+                kind: "browser_open_failed".to_string(),
+                target: url.to_string(),
+                detail: error.clone(),
+            });
+            Err(error)
+        }
+    }
+}
+
+/// 列出标签页。只读，但同样记录：它把用户所有打开页面的标题和 URL 交给了模型。
+fn browser_tabs_tool(permissions: &WorkspaceToolPermissions) -> Result<String, String> {
+    if !permissions.allows_browser() {
+        return Err(
+            "Browser use is not authorized for this run, or no origin is allowed.".to_string(),
+        );
+    }
+    let port = crate::services::browser::configured_port();
+    let tabs = block_on_browser(crate::services::browser::list_tabs(port))?;
+    permissions.record_external(AgentExternalAction {
+        kind: "browser_tabs".to_string(),
+        target: format!("127.0.0.1:{}", port),
+        detail: format!("Listed {} open page(s)", tabs.len()),
+    });
+    if tabs.is_empty() {
+        return Ok("Chrome is attached but has no open pages.".to_string());
+    }
+    Ok(tabs
+        .iter()
+        .map(|tab| format!("- {} — {}", tab.title, tab.url))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 
 /// 把多个执行器合成一个。
 ///
@@ -1254,6 +1447,83 @@ mod tests {
         // 目录不接受，和 delete 一致
         let error = move_file_tool("src", "src2", &permissions).unwrap_err();
         assert!(error.contains("directory"), "{}", error);
+    }
+
+    /// 浏览器工具需要**两样**：开关，以及一份非空的 origin 清单。
+    ///
+    /// 空清单不当成"没配置就全放"：默认放开的清单在出事那天读起来像是用户批准过。
+    #[test]
+    fn browser_tools_need_the_switch_and_a_non_empty_allowlist() {
+        let switch_only = WorkspaceToolPermissions::new(Vec::new(), false, false)
+            .with_browser(true, Vec::new());
+        let names: Vec<String> = tool_definitions(&switch_only)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(!names.contains(&BROWSER_OPEN.to_string()), "{:?}", names);
+        assert!(!WorkspaceToolInvoker::without_logging(switch_only.clone()).handles(BROWSER_OPEN));
+        // 即使被直接调用也要拒绝，不能只靠"没通告出去"
+        assert!(browser_open_tool("https://example.com/", &switch_only).is_err());
+
+        let granted = WorkspaceToolPermissions::new(Vec::new(), false, false)
+            .with_browser(true, vec!["https://example.com".to_string()]);
+        let names: Vec<String> = tool_definitions(&granted)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(names.contains(&BROWSER_OPEN.to_string()));
+        assert!(names.contains(&BROWSER_TABS.to_string()));
+        assert!(WorkspaceToolInvoker::without_logging(granted).handles(BROWSER_TABS));
+    }
+
+    /// 通告里要写出授权的站点：模型看不到范围时只会不断试探被拒的站点。
+    #[test]
+    fn the_allowlist_is_visible_in_the_tool_description() {
+        let granted = WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()]);
+
+        let description = tool_definitions(&granted)
+            .into_iter()
+            .find(|definition| definition.name == BROWSER_OPEN)
+            .expect("browser tool")
+            .description;
+
+        assert!(description.contains("http://127.0.0.1:1420"), "{}", description);
+        // 也要说清它撤不回，否则模型会以为这和写文件一样可以回滚
+        assert!(description.to_lowercase().contains("cannot be undone"));
+    }
+
+    /// 被拒绝的调用也要留痕：'模型试图打开一个没授权的站点'正是用户事后最想知道的事。
+    #[test]
+    fn a_refused_origin_is_recorded_not_just_returned() {
+        let granted = WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()]);
+
+        let error = browser_open_tool("https://evil.example/steal", &granted).unwrap_err();
+        assert!(error.contains("not in the allowed origins"), "{}", error);
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_refused");
+        assert_eq!(actions[0].target, "https://evil.example");
+    }
+
+    /// scheme 不对时同样记录，而且在任何网络请求之前就拒掉。
+    #[test]
+    fn a_hostile_scheme_never_reaches_the_browser() {
+        let granted = WorkspaceToolPermissions::default().with_browser(true, vec!["*".to_string()]);
+
+        for hostile in [
+            "javascript:alert(document.cookie)",
+            "file:///c:/Windows/System32/drivers/etc/hosts",
+            "chrome://settings",
+        ] {
+            assert!(browser_open_tool(hostile, &granted).is_err(), "{}", hostile);
+        }
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 3);
+        assert!(actions.iter().all(|action| action.kind == "browser_open_refused"));
     }
 
     /// 两个授权位都要有，而且缺哪个都不通告、也不认领。

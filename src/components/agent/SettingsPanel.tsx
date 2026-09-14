@@ -137,6 +137,7 @@ export default function SettingsPanel() {
   const permissions = useAgentStore((s) => s.permissions);
   const setPermissionPreset = useAgentStore((s) => s.setPermissionPreset);
   const togglePermission = useAgentStore((s) => s.togglePermission);
+  const setBrowserOrigins = useAgentStore((s) => s.setBrowserOrigins);
 
   const [profileId, setProfileId] = useState("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
@@ -759,6 +760,41 @@ export default function SettingsPanel() {
             checked={permissions.allowCommandRun}
             onChange={() => togglePermission("allowCommandRun")}
           />
+          <PermissionToggle
+            label="Browser Use"
+            desc="Allow Agent to open pages in your Chrome (needs an allowed origin below; navigation cannot be undone)"
+            checked={permissions.allowBrowserUse}
+            onChange={() => togglePermission("allowBrowserUse")}
+          />
+          {permissions.allowBrowserUse && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="browser-origins">
+                Allowed origins (one per line, `*` for any)
+              </label>
+              <textarea
+                id="browser-origins"
+                rows={2}
+                spellCheck={false}
+                value={permissions.browserOrigins.join("\n")}
+                onChange={(event) =>
+                  setBrowserOrigins(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="http://127.0.0.1:1420"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 空清单时开关等于没开，这句话必须说出来，否则那个开关就是个假承诺 */}
+              {permissions.browserOrigins.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  No origin allowed yet — the browser tools stay hidden from the Agent.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

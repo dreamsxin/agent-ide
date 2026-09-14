@@ -153,6 +153,31 @@ pub fn parse_page_targets(body: &str) -> Result<Vec<BrowserTab>, String> {
         .collect())
 }
 
+/// URL 的 origin（`scheme://host[:port]`），授权就按这个粒度给。
+///
+/// 按 origin 而不是按完整 URL：用户授权的是"这个站点"，页面内的路径跳转是同一次授权
+/// 里的事；按完整 URL 会变成每点一下都要重新批一次，那种提示只会被无脑点掉。
+pub fn origin_of(url: &str) -> Result<String, String> {
+    let normalized = normalize_target_url(url)?;
+    let (scheme, rest) = normalized
+        .split_once("://")
+        .ok_or_else(|| "URL has no scheme.".to_string())?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    Ok(format!("{}://{}", scheme, authority.to_ascii_lowercase()))
+}
+
+/// 这个 origin 在不在允许清单里。
+///
+/// 清单为空就是**一个都不许**，而不是"没配就全放"：默认放开的清单在出事那天读起来
+/// 像是用户批准过。`*` 是唯一的通配，而且必须由用户显式写进去 —— 它在界面上看得见，
+/// 不是一个藏在代码里的默认。
+pub fn origin_allowed(origin: &str, allowlist: &[String]) -> bool {
+    allowlist.iter().any(|entry| {
+        let entry = entry.trim();
+        entry == "*" || entry.eq_ignore_ascii_case(origin)
+    })
+}
+
 /// 端点连不上时给出可执行的下一步，而不是一句网络错误。
 fn unreachable_message(port: u16, error: &reqwest::Error) -> String {
     format!(
@@ -290,5 +315,46 @@ mod tests {
         assert_eq!(cdp_base(9222), "http://127.0.0.1:9222");
         assert!(list_endpoint(1234).starts_with("http://127.0.0.1:1234/json/list"));
         assert!(activate_endpoint(9222, "AB/CD").contains("AB%2FCD"));
+    }
+
+    #[test]
+    fn origin_is_scheme_host_and_port() {
+        assert_eq!(
+            origin_of("https://Example.COM/docs/a?b=1").unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            origin_of("http://127.0.0.1:1420/index.html").unwrap(),
+            "http://127.0.0.1:1420"
+        );
+        // 端口不同就是另一个 origin：dev server 和线上站点不该共用一次授权
+        assert_ne!(
+            origin_of("http://127.0.0.1:1420/").unwrap(),
+            origin_of("http://127.0.0.1:4173/").unwrap()
+        );
+    }
+
+    /// 空清单是"一个都不许"。默认放开的清单在出事那天读起来像是用户批准过。
+    #[test]
+    fn an_empty_allowlist_allows_nothing() {
+        assert!(!origin_allowed("https://example.com", &[]));
+        assert!(origin_allowed(
+            "https://example.com",
+            &["https://example.com".to_string()]
+        ));
+        assert!(!origin_allowed(
+            "https://evil.example",
+            &["https://example.com".to_string()]
+        ));
+        // 大小写不敏感，但子域名不算：`a.example.com` 不在 `example.com` 的授权里
+        assert!(origin_allowed(
+            "https://example.com",
+            &["https://EXAMPLE.com".to_string()]
+        ));
+        assert!(!origin_allowed(
+            "https://a.example.com",
+            &["https://example.com".to_string()]
+        ));
+        assert!(origin_allowed("https://anything.example", &["*".to_string()]));
     }
 }

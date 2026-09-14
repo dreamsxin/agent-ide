@@ -147,24 +147,59 @@ export type AgentPermissionPreset = "read-only" | "create-files" | "run-commands
 export interface AgentPermission {
   allowFileCreate: boolean;
   allowCommandRun: boolean;
+  /**
+   * 是否允许 Agent 驱动浏览器。
+   *
+   * 和写盘分开：打开一个页面不改工作区，但它会把工作区里的内容送到某个站点去，而且
+   * 导航**撤不回**。后端两道闸门都要过（这个开关 + 下面的 origin 清单），所以单独打开
+   * 它不会让 Agent 能去任何地方。
+   */
+  allowBrowserUse: boolean;
+  /**
+   * 允许访问的 origin（`scheme://host[:port]`，`*` 表示不限）。
+   *
+   * 空清单等于不许，即使开关是开的 —— 默认放开的清单在出事那天读起来像是用户批准过。
+   */
+  browserOrigins: string[];
 }
 
-/** `read-only` 预设：既不新建文件，也不跑命令。 */
+/**
+ * 只有布尔那几项能被"切换"。
+ *
+ * `browserOrigins` 是一个数组，落进 `togglePermission` 会被 `!value` 变成 `false`，
+ * 一个类型上不该存在的值就这样进了 store。用类型把它挡在外面，而不是靠调用方记得。
+ */
+export type BooleanPermissionKey = {
+  [K in keyof AgentPermission]: AgentPermission[K] extends boolean ? K : never;
+}[keyof AgentPermission];
+
+/** `read-only` 预设：既不新建文件，也不跑命令，也不碰浏览器。 */
 export const READ_ONLY_PERMISSIONS: AgentPermission = {
   allowFileCreate: false,
   allowCommandRun: false,
+  allowBrowserUse: false,
+  browserOrigins: [],
 };
 
 /** `create-files` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
 export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
   allowCommandRun: false,
+  allowBrowserUse: false,
+  browserOrigins: [],
 };
 
-/** `run-commands` 预设：可以新建文件，也可以跑项目自己声明的命令。 */
+/**
+ * `run-commands` 预设：可以新建文件，也可以跑项目自己声明的命令。
+ *
+ * 浏览器不跟着这个预设一起开：能跑本地检查命令和能访问外部站点是两件不同性质的事，
+ * 把它们绑在一个预设里，用户为了跑测试就顺手批准了出网。
+ */
 export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
   allowCommandRun: true,
+  allowBrowserUse: false,
+  browserOrigins: [],
 };
 
 /** 根据预设获取权限 */

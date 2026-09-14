@@ -96,6 +96,24 @@ The Agent has three built-in read-only tools — `workspace_read_file`, `workspa
 
 They are advertised when the profile's `toolCallMode` is `native_tools`, which is the default for cloud profiles. If the endpoint rejects a `tools` parameter the client drops it, retries once, and writes a `tool_capability_degraded` warning to the action log — so a run without tools is visible rather than silent. The tool loop is bounded at 12 rounds per stage, with the per-run token cap as the real cost limit.
 
+## Browser Use
+
+Two further tools — `workspace_browser_open` and `workspace_browser_tabs` — drive the user's own Chrome over the DevTools Protocol. They are the first Agent capability whose effects the product **cannot undo**, so the guarantee offered is authority plus a record, not reversibility.
+
+What the backend enforces:
+
+- **Two independent gates.** `WorkspaceToolPermissions::allows_browser()` requires *both* the `allowBrowserUse` grant and a non-empty origin allowlist. An empty list is not read as "unconfigured, so allow everything" — that reading is exactly what looks like user approval after an incident. Neither gate alone advertises the tools, and `handles()` returns false, so a model that names the tool anyway gets "unknown tool" rather than a tool that always fails.
+- **The gate is re-checked inside the tool.** `browser_open_tool` refuses on its own, so "it was never advertised" is not the only defence.
+- **Origin-scoped, not URL-scoped.** `services::browser::origin_of` reduces a URL to `scheme://host[:port]` with the authority lowercased, and `origin_allowed` compares case-insensitively against the list — exact match, or `*` for any. The allowlist is per run, carried in the request (`browserOrigins`).
+- **Scheme allowlist before any network call.** `normalize_target_url` accepts only `http` and `https`, and rejects control characters, a missing host, and `user:pass@` credentials. `javascript:` would run script in the *current* page's origin, `file:` reads local files outside the workspace boundary, and `chrome:` reaches the browser's own settings — all three are refused before a request is made.
+- **Loopback only.** The CDP endpoint is `http://127.0.0.1:{port}` (`AGENT_IDE_CDP_PORT`, default 9222). CDP has no authentication whatsoever: anything that can reach the port controls the browser, so the port is never taken from remote input.
+- **Every attempt is recorded, including the refused ones.** Successes, refusals and transport failures all land in the run's action log as `browser_open` / `browser_open_refused` / `browser_open_failed` / `browser_tabs`, with the text "These cannot be undone." A refusal that only appears in the tool's return value disappears with the conversation, and "the model tried to open a site it was not allowed to" is precisely what the user wants to find afterwards.
+- **External actions are a separate log from writes.** File writes carry their previous content and an undo checkpoint; a navigation carries neither. Mixing them would let the word "undo" mean two things in one list, one of them false.
+
+What it does **not** do: there is no page interaction — no clicking, typing, form submission or script evaluation. `workspace_browser_tabs` is read-only with respect to the browser, but it hands the titles and URLs of every open page to the model, which is why it is gated and logged like the navigation tool.
+
+Browser use is deliberately **not** part of the permission preset ladder. All three presets (`read-only`, `create-files`, `run-commands`) set `allowBrowserUse: false` and an empty origin list; choosing `run-commands` to let the Agent run tests must not silently also approve outbound navigation.
+
 ## MCP Tool Exposure
 
 Model Context Protocol servers are the largest privilege surface in the product, and the one with the fewest backend guarantees. This section states plainly what is and is not enforced.
