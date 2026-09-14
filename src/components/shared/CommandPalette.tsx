@@ -4,11 +4,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
+import { useLogStore } from "../../stores/useLogStore";
 import type { AgentViewId } from "../../stores/useLayoutStore";
 import { useThemeStore } from "../../stores/useThemeStore";
 import type { AgentMode } from "../../types/agent";
 import type { ProjectTaskDefinition } from "../../stores/useTaskStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { describeTabs, selectionUrlOrError } from "../../utils/browserTabs";
+import type { BrowserTab } from "../../types/browser";
 
 export interface PaletteCommand {
   id: string;
@@ -151,9 +154,73 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
   const agentState = useAgentStore((s) => s.state);
   const pendingUndo = useAgentStore((s) => s.pendingUndo);
   const undoLastApply = useAgentStore((s) => s.undoLastApply);
+  const selectedText = useEditorStore((s) => s.selectedText);
+  const addLog = useLogStore((s) => s.addLog);
+
+  /**
+   * 浏览器动作的结果走日志面板，并把面板切过去。
+   *
+   * 不用 alert：这两条命令的失败信息是可执行的（"Chrome 要带
+   * --remote-debugging-port 启动"），需要能留在屏幕上被读完、被复制。
+   */
+  const reportBrowser = useMemo(
+    () =>
+      (level: "info" | "error", message: string, details?: string) => {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          level,
+          source: "system",
+          message,
+          details,
+        });
+        setBottomTab("logs");
+      },
+    [addLog, setBottomTab]
+  );
 
   return useMemo<PaletteCommand[]>(() => {
     const commands: PaletteCommand[] = [
+      {
+        id: "browser.open-selection",
+        title: "Browser: Open Selected URL in Chrome",
+        subtitle: "Open the editor selection as a page in your own Chrome",
+        group: "Browser",
+        keywords: ["chrome", "url", "open", "cdp", "preview"],
+        run: async () => {
+          if (!isTauriRuntime()) return;
+          const { url, error } = selectionUrlOrError(selectedText);
+          if (!url) {
+            reportBrowser("error", error ?? "Nothing to open.");
+            return;
+          }
+          try {
+            const tab = await invoke<BrowserTab>("browser_open_url", { url });
+            reportBrowser("info", `Opened in Chrome: ${tab.url}`);
+          } catch (e) {
+            reportBrowser("error", "Could not open the page in Chrome", String(e));
+          }
+        },
+      },
+      {
+        id: "browser.list-tabs",
+        title: "Browser: List Chrome Tabs",
+        subtitle: "Show the pages Agent IDE can currently reach",
+        group: "Browser",
+        keywords: ["chrome", "tabs", "cdp", "attach"],
+        run: async () => {
+          if (!isTauriRuntime()) return;
+          try {
+            const tabs = await invoke<BrowserTab[]>("browser_list_tabs");
+            reportBrowser(
+              "info",
+              describeTabs(tabs),
+              tabs.map((tab) => `${tab.title} — ${tab.url}`).join("\n")
+            );
+          } catch (e) {
+            reportBrowser("error", "Could not reach Chrome", String(e));
+          }
+        },
+      },
       {
         id: "workspace.open-folder",
         title: "Open Workspace Folder",
@@ -310,6 +377,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
 
     return commands;
   }, [
+    addLog,
     agentState,
     bottomVisible,
     changeMode,
@@ -318,6 +386,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     performanceOverlay,
     rightVisible,
     runProjectTask,
+    selectedText,
     setBottomTab,
     setAgentView,
     setLeftTab,
