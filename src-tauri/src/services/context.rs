@@ -274,7 +274,11 @@ impl AgentContext {
         }
         // 问题面板 / 终端 / 失败的检查 / 日志。以前前端把这段直接拼在提示词后面，于是
         // 估算和裁剪都看不见它 —— 一个上万字符的块可以把预算悄悄挤爆。
-        if let Some(ref runtime) = self.ide_runtime {
+        //
+        // 空串要当成"没有"：`buildIdeRuntimeContext` 在无事可报或开关全关时返回 ""，
+        // 照样建段的话，面板上会出现一行绿点的 "IDE runtime"，而模型收到的只是一个空
+        // 标题 —— "关掉了"和"开着但没内容"变得无法区分。
+        if let Some(runtime) = self.ide_runtime.as_ref().filter(|text| !text.trim().is_empty()) {
             sections.push(ContextSection {
                 id: "ide_runtime",
                 label: "IDE runtime",
@@ -856,6 +860,28 @@ mod tests {
             squeezed_section.trimmed || !squeezed_section.included,
             "{:?}",
             squeezed_section
+        );
+    }
+
+    /// 空的运行状况不建段。
+    ///
+    /// `buildIdeRuntimeContext` 在无事可报、或者四个开关全关时返回 ""。照样建段的话，
+    /// 面板上会多出一行绿点的 "IDE runtime"，模型收到一个只有标题的空块，而"关掉了"和
+    /// "开着但没内容"变得无法区分 —— 这个面板存在的意义就是说清发了什么。
+    #[test]
+    fn an_empty_ide_runtime_is_not_a_section() {
+        let mut context = sample_context("const a = 1;\n");
+        context.ide_runtime = Some("   \n".to_string());
+
+        let estimate = context.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            None,
+        ));
+
+        assert!(
+            !estimate.sections.iter().any(|section| section.id == "ide_runtime"),
+            "{:?}",
+            estimate.sections.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
         );
     }
 
