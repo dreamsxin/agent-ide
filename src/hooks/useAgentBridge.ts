@@ -115,6 +115,11 @@ export function useAgentBridge() {
               contextSummary: entry.contextSummary ?? null,
               diffSummary: entry.diffSummary ?? null,
             });
+            // 外部动作的那条日志到了，说明后端刚登记了新的撤不回动作；把审查区那份
+            // 拉一次，否则它要等到下次刷新才出现。
+            if (entry.phase === "external_action") {
+              void useAgentStore.getState().refreshExternalActions();
+            }
             if (entry.level === "error") {
               upsertProblems("agent", [
                 {

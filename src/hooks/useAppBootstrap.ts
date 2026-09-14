@@ -34,6 +34,8 @@ export function useAppBootstrap() {
           useLogStore.getState().restoreLogs(saved);
           useAgentStore.getState().restoreAgentSession(saved);
           void useAgentStore.getState().restoreDiffs(saved);
+          // 撤不回的动作也要在刷新后回到界面上：它们唯一的补偿就是这份记录
+          void useAgentStore.getState().refreshExternalActions();
           void useAgentStore.getState().reconcileBackendRun();
           void useEditorStore.getState().restoreEditorSession(saved);
           // 分支要在状态栏里一直显示，所以启动就取一次。以前只有 GitPanel 挂载时

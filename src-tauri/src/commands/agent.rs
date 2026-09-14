@@ -474,13 +474,17 @@ fn agent_tool_permissions(
     .with_browser(allow_browser, browser_origins)
 }
 
-/// 把撤不回的外部动作写进操作日志。
+/// 把撤不回的外部动作登记到 orchestrator，并写进操作日志。
 ///
 /// 浏览器动作没有 `previous` 可以还原，所以记录**就是**我们唯一能兑现的承诺：哪个
 /// 站点、什么时候、成功还是被拒。被拒的调用也记 —— "模型试图打开一个没授权的站点"
 /// 只在返回值里说一句，会随着这一轮对话一起消失。
+///
+/// 登记和发日志都要做：日志是当场能看见的那一份，orchestrator 上那份是刷新前端、
+/// 重新读回时还在的那一份。只发日志的版本在审计里被指出来过 —— 窗口没在听，记录
+/// 就随着 `take_external_actions` 的排空一起没了。
 fn publish_external_actions(
-    orch: &crate::agent::orchestrator::AgentOrchestrator,
+    orch: &mut crate::agent::orchestrator::AgentOrchestrator,
     app_handle: &AppHandle,
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
 ) {
@@ -488,11 +492,12 @@ fn publish_external_actions(
     if actions.is_empty() {
         return;
     }
-    let refused = actions
+    let recorded = orch.record_external_actions(actions);
+    let refused = recorded
         .iter()
         .filter(|action| action.kind.ends_with("_refused") || action.kind.ends_with("_failed"))
         .count();
-    let details = actions
+    let details = recorded
         .iter()
         .map(|action| format!("{}: {} — {}", action.kind, action.target, action.detail))
         .collect::<Vec<_>>()
@@ -503,7 +508,7 @@ fn publish_external_actions(
         "external_action",
         &format!(
             "Agent performed {} browser action(s){}",
-            actions.len(),
+            recorded.len(),
             if refused > 0 {
                 format!(", {} refused or failed", refused)
             } else {
@@ -829,7 +834,7 @@ pub async fn run_agent_step(
     // 之前，否则工具写入产生的 diff 会被算进"这一步新增了几个 diff"的计数里。
     // `finish_agent_run` 里那次登记因此是空操作，留着是为了别的入口不必记得这条顺序。
     publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
-    publish_external_actions(&orch, &app_handle, &tool_permissions);
+    publish_external_actions(&mut orch, &app_handle, &tool_permissions);
     match response {
         Ok(response) => {
             // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
@@ -1755,6 +1760,18 @@ pub async fn get_agent_diffs(
 ) -> Result<Vec<FileDiff>, String> {
     let orch = agent_state.orchestrator.lock().await;
     Ok(orch.diffs.clone())
+}
+
+/// 读回撤不回的外部动作。
+///
+/// 和 `get_agent_diffs` 同一个位置：前端刷新后还能把"这次运行动了外面什么"拿回来，
+/// 而不是只靠那条可能没人接收的事件。
+#[tauri::command]
+pub async fn get_agent_external_actions(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<Vec<crate::agent::orchestrator::ExternalActionRecord>, String> {
+    let orch = agent_state.orchestrator.lock().await;
+    Ok(orch.external_actions.clone())
 }
 
 #[tauri::command]

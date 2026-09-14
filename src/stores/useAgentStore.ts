@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "../utils/tauri";
+import {
+  normalizeExternalActions,
+  type ExternalActionRecord,
+} from "../utils/externalActions";
 import type {
   AgentState,
   AgentMode,
@@ -48,6 +52,13 @@ interface AgentStore {
   currentTask: Task | null;
   tasks: Task[];
   diffs: DiffEntry[];
+  /**
+   * 本次运行里撤不回的外部动作（浏览器导航等）。
+   *
+   * 和 `diffs` 并列而不是塞进它：diff 有 `previous` 和撤销入口，这些没有。混在一起
+   * 会让审查区里的"撤销"对其中一半是假的。
+   */
+  externalActions: ExternalActionRecord[];
   sddArtifacts: SddArtifact[];
   activeSddArtifact: SddArtifact | null;
   ghostSuggestions: GhostSuggestion[];
@@ -125,6 +136,8 @@ interface AgentStore {
   setGhostSuggestions: (suggestions: GhostSuggestion[]) => void;
   dismissGhostSuggestion: (id: string) => void;
   restoreDiffs: (workspacePath?: string) => Promise<void>;
+  /** 从后端读回撤不回的外部动作（`get_agent_external_actions`）。 */
+  refreshExternalActions: () => Promise<void>;
   restoreAgentSession: (workspacePath?: string) => void;
   reconcileBackendRun: () => Promise<void>;
   clearAgentSession: () => void;
@@ -288,6 +301,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   currentTask: null,
   tasks: [],
   diffs: [],
+  externalActions: [],
   sddArtifacts: [],
   activeSddArtifact: null,
   ghostSuggestions: [],
@@ -440,6 +454,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
     } catch (err: unknown) {
       console.warn("[AgentStore] get_agent_diffs failed:", err);
+    }
+  },
+  refreshExternalActions: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      // 撤不回的动作在后端有一份，和 diff 同级；只靠那条 action-log 事件的话，
+      // 刷新一次界面就再也看不到"这次运行动了外面什么"。
+      const backend = await invoke<unknown>("get_agent_external_actions");
+      set({ externalActions: normalizeExternalActions(backend) });
+    } catch (err: unknown) {
+      console.warn("[AgentStore] get_agent_external_actions failed:", err);
     }
   },
   restoreAgentSession: (workspacePath) => {
