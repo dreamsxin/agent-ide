@@ -258,6 +258,21 @@ pub fn copy_path(src: String, dest: String) -> Result<(), String> {
     }
     let dest_resolved = workspace::resolve_for_write(&dest)?;
     let dest_path = dest_resolved.as_path();
+    // 目录不能拷进自己内部。`copy_dir_recursive` 先建 dest 再遍历 src，dest 落在 src
+    // 里就意味着遍历会撞上自己刚创建的那个目录 —— 会不会一路递归下去取决于平台
+    // `read_dir` 的语义，所以结果是"不可预测"，不是"慢"。这条路径两次点击就能走到：
+    // Explorer 的粘贴目标取的是被右击的那个目录本身，复制一个文件夹再右击它自己
+    // 粘贴就落在这里。
+    //
+    // 放在 `dest_path.exists()` 之前：dest 恰好等于 src 时那条检查也会拦住，但报的是
+    // "目标已存在"，把问题指向了错的地方。`starts_with` 是按路径分量比的，所以
+    // `/w/ab` 不会被误判成在 `/w/a` 里面。
+    if src_path.is_dir() && dest_path.starts_with(src_path) {
+        return Err(format!(
+            "Cannot copy a directory into itself: {} -> {}",
+            src, dest
+        ));
+    }
     if dest_path.exists() {
         return Err(format!("Destination already exists: {}", dest));
     }
@@ -479,3 +494,106 @@ pub fn watch_stop(state: tauri::State<'_, FileWatcherState>) -> Result<(), Strin
     *r = false;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    struct TestEnv {
+        root: PathBuf,
+        config_dir: PathBuf,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let base = std::env::temp_dir().join(format!("agent-ide-fs-test-{}", Uuid::new_v4()));
+            let root = base.join("workspace");
+            let config_dir = base.join("config");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&config_dir).unwrap();
+            let root = root.canonicalize().unwrap();
+            std::env::set_var("AGENT_IDE_CONFIG_DIR", &config_dir);
+            workspace::save_workspace_path(root.to_string_lossy().as_ref()).unwrap();
+            Self { root, config_dir }
+        }
+
+        fn write(&self, relative: &str, content: &str) {
+            let path = self.root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
+        }
+
+        fn at(&self, relative: &str) -> String {
+            self.root.join(relative).to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            std::env::remove_var("AGENT_IDE_CONFIG_DIR");
+            let _ = std::fs::remove_dir_all(self.config_dir.parent().unwrap());
+        }
+    }
+
+    /// 把一个目录粘贴到它自己里面：`copy_dir_recursive` 会先建好目标目录，再去遍历
+    /// 源目录，于是遍历有机会撞上刚创建的那个目标。断言落在"什么都没发生"上，而不是
+    /// 具体错误文案。
+    #[test]
+    fn copying_a_directory_into_itself_is_refused() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("a/f.txt", "x\n");
+
+        let error = copy_path(env.at("a"), env.at("a/a Copy")).unwrap_err();
+        assert!(error.contains("into itself"), "{}", error);
+        assert!(!env.root.join("a/a Copy").exists());
+    }
+
+    /// 粘贴到自己的子目录同样不行 —— 这是 Explorer 里更容易点到的那一种：复制父目录，
+    /// 右击它下面的某个子目录粘贴。
+    #[test]
+    fn copying_a_directory_into_its_own_descendant_is_refused() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("a/b/f.txt", "x\n");
+
+        let error = copy_path(env.at("a"), env.at("a/b/a Copy")).unwrap_err();
+        assert!(error.contains("into itself"), "{}", error);
+        assert!(!env.root.join("a/b/a Copy").exists());
+    }
+
+    /// 守卫不能拦过头。第二个断言是关键：`ab` 只是名字以 `a` 开头，并不在 `a` 里面 ——
+    /// 用字符串前缀比而不是路径分量比，就会把它误判成"拷进自己内部"。
+    #[test]
+    fn copying_a_directory_elsewhere_still_works() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("a/f.txt", "x\n");
+        std::fs::create_dir_all(env.root.join("ab")).unwrap();
+
+        copy_path(env.at("a"), env.at("c")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("c/f.txt")).unwrap(),
+            "x\n"
+        );
+
+        copy_path(env.at("a"), env.at("ab/a Copy")).unwrap();
+        assert!(env.root.join("ab/a Copy/f.txt").is_file());
+    }
+
+    /// 文件不受这条守卫影响：只有目录才有"拷进自己内部"这回事。
+    #[test]
+    fn copying_a_file_next_to_itself_still_works() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("a/f.txt", "x\n");
+
+        copy_path(env.at("a/f.txt"), env.at("a/f Copy.txt")).unwrap();
+        assert!(env.root.join("a/f Copy.txt").is_file());
+    }
+}
+
