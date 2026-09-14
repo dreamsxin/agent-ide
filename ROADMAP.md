@@ -886,6 +886,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The `reject_*` commands keep their fixed `"info"`: rejecting is the user's own decision, so there is no success/failure to report. Not folded into the helper.
    - 278 → 279 tests.
 
+35. **Pasting a folder into itself had no guard at either layer (fixed 2026-09-13)**
+   - `copy_path` resolved both paths, refused an existing destination, then called `copy_dir_recursive`, which does `create_dir_all(dest)` **first** and only then `read_dir(src)`. With `dest` inside `src`, the enumeration can meet the directory it just created. Whether that recurses is filesystem-dependent — I am not claiming it always does — but the outcome is unpredictable rather than merely slow, and at best it is a partial copy of a directory into itself.
+   - **Two clicks away in the UI.** `Explorer`'s paste target is the directory that was right-clicked (`targetNode?.isDir ? targetNode.path : workspacePath`), and Paste is offered on any folder. Copy a folder, right-click that same folder, Paste → destination `a/a Copy`. Right-click a child instead → `a/b/a Copy`. Neither the frontend nor the backend checked containment.
+   - Fixed in the **backend**, not the menu: `copy_path` is a command the CLI and any future caller can reach, and a guard in the context menu would only cover the one path I happened to look at. `if src_path.is_dir() && dest_path.starts_with(src_path)`. It sits *before* the `dest_path.exists()` check on purpose — when `dest == src` the existing check already refuses, but it says "Destination already exists", which points at the wrong problem.
+   - `Path::starts_with` is component-wise, which matters: a string-prefix comparison would reject copying `a` into `ab/`, since `"…/ab"` starts with `"…/a"`. The third test pins exactly that, and it is the one that would catch the plausible wrong implementation.
+   - **`commands/fs.rs` had no tests at all**; it now has four, with the `TestEnv` pattern the other modules use. Assertions are on "nothing happened" (the destination does not exist) rather than on error prose, and the file case is covered too — only directories can contain themselves.
+   - 279 → 283 tests.
+   - **Found while exploring `Explorer.tsx` for extractable logic; not fixed here, recorded so it is not lost:** paste always renames (`foo Copy.ts` even when pasting into a folder where `foo.ts` does not exist), collision detection substring-matches the backend's `"Destination already exists"` prose so rewording that string silently breaks the retry loop, `joinPath` always emits `/` so destinations on Windows are mixed-separator, name dialogs validate only non-empty (`../x` and `a/b/c` reach `joinPath` intact), and `loadRoot` discards every loaded subtree on any create/delete/rename/paste while react-arborist still believes those folders are open — so an expanded folder renders open-and-empty until toggled twice.
+
 
 
 
