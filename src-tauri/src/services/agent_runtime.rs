@@ -166,6 +166,7 @@ pub fn attach_step_provenance(
             source_stage: None,
             regenerated_from_diff_id: None,
             regenerated_from_hunk_index: None,
+            moved_from: None,
         });
         provenance.source_role = Some("agent-step".to_string());
         provenance.source_stage = Some(step.title.clone());

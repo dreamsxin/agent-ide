@@ -168,6 +168,12 @@ pub struct DiffProvenance {
     pub regenerated_from_diff_id: Option<String>,
     #[serde(rename = "regeneratedFromHunkIndex", default)]
     pub regenerated_from_hunk_index: Option<usize>,
+    /// 这个文件是从哪里移过来的。
+    ///
+    /// `FileDiff` 只有一个 `file`，所以"A 移到了 B"必须在这里补上另一半，否则一次移动
+    /// 只能显示成"B 凭空出现"（外加一张"A 消失了"的卡片，两张卡片还互不相干）。
+    #[serde(rename = "movedFrom", default)]
+    pub moved_from: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -627,6 +627,12 @@ impl AgentOrchestrator {
         for write in writes {
             match merged.get_mut(&write.file) {
                 Some(existing) => {
+                    // 移动之后又被改了：`previous` 此前是 None（移动没有"之前的内容"），
+                    // 而这条编辑记录的 previous 恰好就是移动那一刻的内容 —— 不接住它，
+                    // 撤销只能把改坏的内容移回原处。
+                    if existing.moved_from.is_some() && existing.previous.is_none() {
+                        existing.previous = write.previous.clone();
+                    }
                     existing.updated = write.updated;
                     // 最后一次操作决定这个文件最终是"改了"还是"没了"：先写后删是删除，
                     // 先删后写（重建）是编辑。只看第一条会把删除显示成一次普通修改。
@@ -649,8 +655,11 @@ impl AgentOrchestrator {
                 file: write.file.clone(),
                 path: write.path.clone(),
                 previous: write.previous.clone(),
+                // 移动的逆操作是移回去，`restore_snapshots` 按这个字段分派
+                move_back_to: write.moved_from.as_ref().map(|source| source.path.clone()),
             });
             let is_new = write.previous.is_none();
+            let moved_from = write.moved_from.as_ref().map(|source| source.file.clone());
             let diff = FileDiff {
                 id: uuid::Uuid::new_v4().to_string(),
                 file: write.file.clone(),
@@ -661,6 +670,10 @@ impl AgentOrchestrator {
                     // 只有这个标签能告诉用户文件已经不在了。
                     operation: if write.removed {
                         "delete"
+                    } else if moved_from.is_some() {
+                        // 移动排在 create 之前：落点确实是个新路径，但说"新建"会让人以为
+                        // 内容是刚写出来的，而源文件那边的消失就没人解释了。
+                        "move"
                     } else if is_new {
                         "create"
                     } else {
@@ -670,6 +683,8 @@ impl AgentOrchestrator {
                     rationale: Some(
                         if write.removed {
                             "Deleted by the Agent through workspace_delete_file"
+                        } else if moved_from.is_some() {
+                            "Moved by the Agent through workspace_move_file"
                         } else {
                             "Written directly by the Agent through workspace_write_file"
                         }
@@ -681,6 +696,7 @@ impl AgentOrchestrator {
                     source_stage: Some("Tool Call".to_string()),
                     regenerated_from_diff_id: None,
                     regenerated_from_hunk_index: None,
+                    moved_from,
                 }),
                 hunks: vec![DiffHunk {
                     old_start: 1,
@@ -2329,6 +2345,7 @@ fn attach_stage_provenance(
             source_stage: None,
             regenerated_from_diff_id: None,
             regenerated_from_hunk_index: None,
+            moved_from: None,
         });
         provenance.source_role = Some(role.to_string());
         provenance.source_stage = Some(stage.to_string());
@@ -2445,6 +2462,7 @@ mod tests {
             previous: Some("goodbye\n".to_string()),
             updated: String::new(),
             removed: true,
+            moved_from: None,
         }]);
 
         assert_eq!(recorded.len(), 1);
@@ -2470,6 +2488,7 @@ mod tests {
                 previous: Some("original\n".to_string()),
                 updated: "rewritten\n".to_string(),
                 removed: false,
+                moved_from: None,
             },
             AgentFileWrite {
                 file: "src/tmp.ts".to_string(),
@@ -2477,6 +2496,7 @@ mod tests {
                 previous: Some("rewritten\n".to_string()),
                 updated: String::new(),
                 removed: true,
+                moved_from: None,
             },
         ]);
 
@@ -2489,6 +2509,81 @@ mod tests {
         assert_eq!(recorded[0].hunks[0].original, "original\n");
     }
 
+    /// 一次移动是一张卡片，而且卡片上必须写着"从哪来"。
+    ///
+    /// `FileDiff` 只有一个 `file`，所以少了 `provenance.moved_from`，一次移动只能显示成
+    /// "B 凭空出现"，源文件的消失没有任何解释。
+    #[test]
+    fn a_recorded_move_names_both_paths_and_undoes_by_moving_back() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "src/new/home.ts".to_string(),
+            path: PathBuf::from("src/new/home.ts"),
+            previous: None,
+            updated: String::new(),
+            removed: false,
+            moved_from: Some(crate::agent::workspace_tools::MovedFrom {
+                file: "src/old/home.ts".to_string(),
+                path: PathBuf::from("src/old/home.ts"),
+            }),
+        }]);
+
+        assert_eq!(recorded.len(), 1);
+        let provenance = recorded[0].provenance.as_ref().expect("provenance");
+        // "create" 会让人以为内容是刚写出来的，而源文件的消失没人解释
+        assert_eq!(provenance.operation, "move");
+        assert_eq!(provenance.moved_from.as_deref(), Some("src/old/home.ts"));
+        assert!(provenance
+            .rationale
+            .as_deref()
+            .unwrap_or_default()
+            .contains("workspace_move_file"));
+
+        // 撤销这一笔是移回去，不是在源路径重写内容
+        let (label, files) = orchestrator.pending_undo().expect("undo point");
+        assert!(!label.is_empty());
+        assert_eq!(files, vec!["src/new/home.ts".to_string()]);
+    }
+
+    /// 移动之后又改内容：撤销必须回到移动那一刻的内容，而不是把改过的版本搬回原处。
+    ///
+    /// 移动那条记录的 `previous` 是 None（落点此前不存在），后面那条编辑记录的
+    /// `previous` 恰好是移动时的内容 —— 合并时不接住它，这份内容就没了。
+    #[test]
+    fn a_move_then_edit_keeps_the_content_as_of_the_move() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_tool_writes(vec![
+            AgentFileWrite {
+                file: "src/moved.ts".to_string(),
+                path: PathBuf::from("src/moved.ts"),
+                previous: None,
+                updated: String::new(),
+                removed: false,
+                moved_from: Some(crate::agent::workspace_tools::MovedFrom {
+                    file: "src/before.ts".to_string(),
+                    path: PathBuf::from("src/before.ts"),
+                }),
+            },
+            AgentFileWrite {
+                file: "src/moved.ts".to_string(),
+                path: PathBuf::from("src/moved.ts"),
+                previous: Some("as it was when moved\n".to_string()),
+                updated: "edited after the move\n".to_string(),
+                removed: false,
+                moved_from: None,
+            },
+        ]);
+
+        assert_eq!(recorded.len(), 1, "same file must merge into one entry");
+        let provenance = recorded[0].provenance.as_ref().expect("provenance");
+        assert_eq!(provenance.operation, "move");
+        assert_eq!(provenance.moved_from.as_deref(), Some("src/before.ts"));
+        assert_eq!(recorded[0].hunks[0].original, "as it was when moved\n");
+        assert_eq!(recorded[0].hunks[0].updated, "edited after the move\n");
+    }
+
     #[test]
     fn tool_writes_become_applied_diffs_with_an_undo_point() {        let mut orchestrator = AgentOrchestrator::new();
 
@@ -2499,6 +2594,7 @@ mod tests {
                 previous: Some("before run\n".to_string()),
                 updated: "first write\n".to_string(),
                 removed: false,
+                moved_from: None,
             },
             AgentFileWrite {
                 file: "src/app.ts".to_string(),
@@ -2506,6 +2602,7 @@ mod tests {
                 previous: Some("first write\n".to_string()),
                 updated: "second write\n".to_string(),
                 removed: false,
+                moved_from: None,
             },
             AgentFileWrite {
                 file: "src/new.ts".to_string(),
@@ -2513,6 +2610,7 @@ mod tests {
                 previous: None,
                 updated: "created\n".to_string(),
                 removed: false,
+                moved_from: None,
             },
         ]);
 

@@ -3,13 +3,14 @@ import { isReviewableDiff, useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
-import { HUNK_BANNER, hunkKind } from "./diffPresentation";
+import { hunkBanner, hunkKind } from "./diffPresentation";
 
 function HunkBlock({
   hunk,
   index,
   diffStatus,
   operation,
+  movedFrom,
   onApply,
   onReject,
   onRegenerate,
@@ -18,8 +19,10 @@ function HunkBlock({
   hunk: DiffHunk;
   index: number;
   diffStatus: DiffEntry["status"];
-  /** 这份 diff 的操作（"create" / "edit" / "delete"）；决定删除和清空的区别 */
+  /** 这份 diff 的操作（"create" / "edit" / "delete" / "move"）；决定删除和清空的区别 */
   operation?: string | null;
+  /** 移动过来的话，源路径 —— `DiffEntry.file` 只有落点 */
+  movedFrom?: string | null;
   onApply: () => void;
   onReject: () => void;
   onRegenerate: () => void;
@@ -104,6 +107,21 @@ function HunkBlock({
     </div>
   );
 
+  // 纯移动：内容没变，这张卡片要讲的就是"从哪搬到哪"。落到兜底分支的话它会渲染出
+  // 一个空行，用户只能看到落点路径，源文件的消失无人解释。
+  if (kind === "moved") {
+    return (
+      <div data-testid={`diff-hunk-${index}`} className="border-b border-surface-border text-xs font-mono leading-relaxed">
+        {header}
+        {provenancePanel}
+        {findingPanel}
+        <div className="border-b border-accent-blue/20 bg-accent-blue/10 px-2 py-0.5 text-[10px] font-semibold text-accent-blue">
+          {hunkBanner(kind, movedFrom)}
+        </div>
+      </div>
+    );
+  }
+
   if (kind === "created") {
     const lines = hunk.updated.split("\n");
     return (
@@ -112,7 +130,7 @@ function HunkBlock({
         {provenancePanel}
         {findingPanel}
         <div className="border-b border-diff-add/20 bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
-          {HUNK_BANNER.created}
+          {hunkBanner("created")}
         </div>
         {lines.map((line, i) => (
           <div key={i} className="bg-diff-add/5 px-2">
@@ -133,7 +151,7 @@ function HunkBlock({
         {provenancePanel}
         {findingPanel}
         <div className="border-b border-diff-remove/20 bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
-          {kind === "deleted" ? HUNK_BANNER.deleted : HUNK_BANNER.emptied}
+          {hunkBanner(kind)}
         </div>
         {lines.map((line, i) => (
           <div key={i} className="bg-diff-remove/5 px-2">
@@ -474,6 +492,7 @@ export default function DiffView() {
                     index={i}
                     diffStatus={diff.status}
                     operation={diff.provenance?.operation}
+                    movedFrom={diff.provenance?.movedFrom}
                     findings={fileFindings.filter((problem) => problemMatchesHunk(problem, hunk))}
                     onApply={() => void applyDiffHunk(diff.id, i)}
                     onReject={() => void rejectDiffHunk(diff.id, i)}

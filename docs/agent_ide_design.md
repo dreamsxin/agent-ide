@@ -211,6 +211,8 @@ Two tool families are exposed:
 | Workspace read | `workspace_read_file`, `workspace_search_text`, `workspace_list_files` | Read-only, resolved through `workspace::resolve_existing`, credential files refused, 64 KB read cap, 60 search hits, 200 listed entries. |
 | Workspace verify | `workspace_run_command` | Only advertised when the run grants `allowCommandRun`. The allow-list is derived by the backend from the project's declared tasks, never from model input. Long-running commands are refused regardless of the list. Output tail-truncated to 12,000 chars. |
 | Workspace write | `workspace_write_file` | Only advertised in `auto` mode. Whole-file replacement through `resolve_for_agent_write`; creating a file needs `allowFileCreate`. Each write is recorded as an `applied` diff with its pre-write content and covered by an undo checkpoint. |
+| Workspace delete | `workspace_delete_file` | Same `allow_write` gate and same boundary as writing. Directories refused; the content is read before removal so undo can rebuild the file. The review entry is labelled `delete`, not shown as an emptied file. |
+| Workspace move | `workspace_move_file` | Needs `allow_write` **and** `allowFileCreate`; both paths go through `resolve_for_agent_write`. An existing destination is refused rather than overwritten, directories are refused, and the move is one `fs::rename` — so no half-done state, and binary files move too. The review entry is labelled `move` and names the source in `provenance.movedFrom`; undo moves the file back. |
 | MCP | `mcp__{server}__{tool}` | External stdio servers, gated by `McpToolPolicy`. |
 
 Notes:

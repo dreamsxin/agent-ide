@@ -26,6 +26,7 @@ pub const LIST_FILES: &str = "workspace_list_files";
 pub const RUN_COMMAND: &str = "workspace_run_command";
 pub const WRITE_FILE: &str = "workspace_write_file";
 pub const DELETE_FILE: &str = "workspace_delete_file";
+pub const MOVE_FILE: &str = "workspace_move_file";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -63,6 +64,20 @@ pub struct AgentFileWrite {
     /// 长得不一样 —— 把删除显示成"文件被清空"会让用户以为文件还在。撤销侧不需要
     /// 区分：`previous` 有内容就写回去，恰好就是重建那个文件。
     pub removed: bool,
+    /// 这条记录是一次移动的落点，值是移动前的位置。
+    ///
+    /// 移动不能拆成"删一条 + 建一条"两条记录：那样审查区会出现两张互不相干的卡片，
+    /// 各自的 rationale 还会指向根本没被调用的工具；而且两条记录之间没有原子性，
+    /// 大小写不敏感的文件系统上 `Foo.ts` → `foo.ts` 更会变成两条指向同一个文件的
+    /// 记录，撤销时先写回源、再删掉它，净结果是文件消失。
+    pub moved_from: Option<MovedFrom>,
+}
+
+/// 移动前的位置：相对路径用于显示，绝对路径用于撤销时移回去
+#[derive(Clone, Debug)]
+pub struct MovedFrom {
+    pub file: String,
+    pub path: std::path::PathBuf,
 }
 
 type AgentWriteLog = std::sync::Arc<std::sync::Mutex<Vec<AgentFileWrite>>>;
@@ -246,6 +261,36 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                 "required": ["path"]
             }),
         });
+
+        // 只在 allow_create 也给了的时候通告：移动会产生一个此前不存在的路径，没有这个
+        // 授权它必然失败，而通告一个总是失败的工具比不通告更糟。
+        if permissions.allow_create {
+            definitions.push(ToolDefinition {
+                name: MOVE_FILE.to_string(),
+                description: "Move or rename one workspace file. Use this instead of writing the \
+                              content to a new path and deleting the old one — that leaves the \
+                              file duplicated if the second step fails, and the review entry \
+                              would not say the file moved. Directories are not accepted, an \
+                              existing destination is refused rather than overwritten, and the \
+                              move is recorded as a reviewable entry whose undo puts the file \
+                              back at its original path."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "from": {
+                            "type": "string",
+                            "description": "Workspace-relative path of the file to move"
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "Workspace-relative destination path, including the file name"
+                        }
+                    },
+                    "required": ["from", "to"]
+                }),
+            });
+        }
     }
 
 
@@ -325,6 +370,8 @@ impl ToolInvoker for WorkspaceToolInvoker {
             // "不存在的工具"变成一个"总是失败的工具"
             RUN_COMMAND => self.permissions.allows_commands(),
             WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
+            // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
+            MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
         }
     }
@@ -361,6 +408,11 @@ impl ToolInvoker for WorkspaceToolInvoker {
             ),
             DELETE_FILE => delete_file_tool(
                 string_arg(&args, "path").ok_or("Missing 'path'")?,
+                &self.permissions,
+            ),
+            MOVE_FILE => move_file_tool(
+                string_arg(&args, "from").ok_or("Missing 'from'")?,
+                string_arg(&args, "to").ok_or("Missing 'to'")?,
                 &self.permissions,
             ),
             other => Err(format!("Unknown workspace tool: {}", other)),
@@ -618,6 +670,7 @@ fn write_file_tool(
         previous: previous.clone(),
         updated: content.to_string(),
         removed: false,
+        moved_from: None,
     });
 
     Ok(format!(
@@ -672,6 +725,7 @@ fn delete_file_tool(path: &str, permissions: &WorkspaceToolPermissions) -> Resul
         previous: Some(previous.clone()),
         updated: String::new(),
         removed: true,
+        moved_from: None,
     });
 
     Ok(format!(
@@ -679,6 +733,107 @@ fn delete_file_tool(path: &str, permissions: &WorkspaceToolPermissions) -> Resul
         path,
         previous.len()
     ))
+}
+
+/// 把一个文件移到另一个路径 —— 同一个操作也覆盖重命名。
+///
+/// 为什么必须内置：`workspace_run_command` 只认项目自己声明的检查命令，`mv` / `move`
+/// 都不在其中；而且这两个命令在不同平台上语义并不一致，跨平台该由我们抹平，而不是
+/// 让模型去猜操作系统。写 + 删两步也不行：中间失败就是内容留在磁盘上而记录只有一半。
+///
+/// 实现用 `fs::rename` 而不是"读内容 → 写到新路径 → 删旧路径"：
+/// - 一次系统调用，不存在只做了一半的中间态；
+/// - 不读内容，所以二进制文件也能移动。`delete_file` 受 `read_to_string` 限制只能处理
+///   UTF-8 文本，是因为它的撤销要靠内容重建；移动的撤销是**移回去**，不需要内容。
+///
+/// 约束：
+/// - 两端都过 `resolve_for_agent_write`，所以 `.git/`、`.agent-ide/`、凭据文件既不能当
+///   源也不能当目标；
+/// - 目标已存在时拒绝，不静默覆盖 —— 覆盖会连带毁掉目标原有的内容，而这一步没有任何
+///   记录能撤销它；
+/// - 目录拒绝，和 `delete_file` 一致；
+/// - 需要 `allow_write`（源要消失）**和** `allow_create`（目标是一个此前不存在的路径）。
+fn move_file_tool(
+    from: &str,
+    to: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allow_write {
+        return Err(
+            "Moving files is not authorized for this run. Return an agent-changes block for \
+             review instead."
+                .to_string(),
+        );
+    }
+    if !permissions.allow_create {
+        return Err(format!(
+            "Moving {} to {} would create a new path and creating files is not authorized for \
+             this run.",
+            from, to
+        ));
+    }
+
+    let source = workspace::resolve_for_agent_write(from)?;
+    let destination = workspace::resolve_for_agent_write(to)?;
+    if source == destination {
+        return Err(format!(
+            "{} and {} are the same path; nothing to move.",
+            from, to
+        ));
+    }
+    if source.is_dir() {
+        return Err(format!(
+            "{} is a directory; this tool moves single files only.",
+            from
+        ));
+    }
+    if !source.exists() {
+        return Err(format!("{} does not exist.", from));
+    }
+    if destination.exists() && !same_file_different_case(&source, &destination) {
+        return Err(format!(
+            "{} already exists. Refusing to overwrite it — delete it first if that is really \
+             intended.",
+            to
+        ));
+    }
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Create parent directory for {}: {}", to, error))?;
+    }
+    std::fs::rename(&source, &destination)
+        .map_err(|error| format!("Move {} to {}: {}", from, to, error))?;
+
+    permissions.record_write(AgentFileWrite {
+        file: to.to_string(),
+        path: destination,
+        // 移动没有"之前的内容"：目标路径此前不存在，撤销靠移回去而不是靠内容
+        previous: None,
+        updated: String::new(),
+        removed: false,
+        moved_from: Some(MovedFrom {
+            file: from.to_string(),
+            path: source,
+        }),
+    });
+
+    Ok(format!(
+        "Moved {} to {}. The move is recorded and undo puts it back at {}.",
+        from, to, from
+    ))
+}
+
+/// 只差大小写的同一个文件。
+///
+/// `foo.ts` → `Foo.ts` 是一次正当的重命名，但在大小写不敏感的文件系统上
+/// `destination.exists()` 会为真，于是"不覆盖已存在的目标"这条规则会把它一起挡掉。
+/// Linux 上 `foo.ts` 和 `Foo.ts` 是两个文件，那里就必须按存在处理。
+fn same_file_different_case(source: &std::path::Path, destination: &std::path::Path) -> bool {
+    if cfg!(target_os = "linux") {
+        return false;
+    }
+    source.to_string_lossy().to_lowercase() == destination.to_string_lossy().to_lowercase()
 }
 
 
@@ -1025,5 +1180,95 @@ mod tests {
         let read_only = WorkspaceToolPermissions::read_only();
         let error = write_file_tool("src/app.ts", "x\n", &read_only).unwrap_err();
         assert!(error.contains("not authorized"), "{}", error);
+    }
+
+    /// 移动记的是"从哪来"，不是"删一条 + 建一条"。
+    ///
+    /// 两条记录会在审查区变成两张互不相干的卡片，各自的 rationale 还会指向没被调用的
+    /// 工具；这里断言的是一条记录带着 `moved_from`，以及磁盘上真的搬过去了。
+    #[test]
+    fn move_tool_records_where_the_file_came_from() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/old.ts", "export const a = 1;\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        let message = move_file_tool("src/old.ts", "src/nested/new.ts", &permissions).unwrap();
+        assert!(message.contains("src/old.ts"), "{}", message);
+
+        assert!(!env.root.join("src/old.ts").exists());
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("src/nested/new.ts")).unwrap(),
+            "export const a = 1;\n"
+        );
+
+        let writes = permissions.take_writes();
+        assert_eq!(writes.len(), 1, "一次移动是一条记录");
+        assert_eq!(writes[0].file, "src/nested/new.ts");
+        let source = writes[0].moved_from.as_ref().expect("moved_from");
+        assert_eq!(source.file, "src/old.ts");
+        // 撤销靠移回去，所以不需要内容；`previous` 是 None 正是这个意思
+        assert!(writes[0].previous.is_none());
+    }
+
+    /// 目标已存在时必须拒绝：覆盖会毁掉目标原有的内容，而那份内容没有任何记录能撤销。
+    #[test]
+    fn move_tool_refuses_to_overwrite_and_to_move_denied_paths() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/a.ts", "a\n");
+        env.write("src/b.ts", "b\n");
+        env.write(".env", "SECRET=1\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        let error = move_file_tool("src/a.ts", "src/b.ts", &permissions).unwrap_err();
+        assert!(error.contains("already exists"), "{}", error);
+        // 被拒绝的调用不能留下任何记录，否则审查区会出现一次没发生的移动
+        assert!(permissions.take_writes().is_empty());
+        assert_eq!(std::fs::read_to_string(env.root.join("src/b.ts")).unwrap(), "b\n");
+
+        // 拒绝清单两端都管：凭据文件既不能当源也不能当目标
+        let error = move_file_tool(".env", "src/leaked.ts", &permissions).unwrap_err();
+        assert!(error.to_lowercase().contains("credential"), "{}", error);
+        let error = move_file_tool("src/a.ts", ".env.local", &permissions).unwrap_err();
+        assert!(error.to_lowercase().contains("credential"), "{}", error);
+
+        let error = move_file_tool("src/missing.ts", "src/c.ts", &permissions).unwrap_err();
+        assert!(error.contains("does not exist"), "{}", error);
+
+        // 目录不接受，和 delete 一致
+        let error = move_file_tool("src", "src2", &permissions).unwrap_err();
+        assert!(error.contains("directory"), "{}", error);
+    }
+
+    /// 两个授权位都要有，而且缺哪个都不通告、也不认领。
+    #[test]
+    fn move_tool_needs_both_write_and_create() {
+        let edit_only = WorkspaceToolPermissions::new(Vec::new(), true, false);
+        let names: Vec<String> = tool_definitions(&edit_only)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(!names.contains(&MOVE_FILE.to_string()), "{:?}", names);
+        assert!(!WorkspaceToolInvoker::without_logging(edit_only.clone()).handles(MOVE_FILE));
+
+        let full = WorkspaceToolPermissions::new(Vec::new(), true, true);
+        let names: Vec<String> = tool_definitions(&full)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(names.contains(&MOVE_FILE.to_string()));
+        assert!(WorkspaceToolInvoker::without_logging(full).handles(MOVE_FILE));
+
+        // 即使被直接调用也要拒绝，不能只依赖"没通告出去"
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/a.ts", "a\n");
+        let error = move_file_tool("src/a.ts", "src/b.ts", &edit_only).unwrap_err();
+        assert!(error.contains("not authorized"), "{}", error);
+        let read_only = WorkspaceToolPermissions::read_only();
+        let error = move_file_tool("src/a.ts", "src/b.ts", &read_only).unwrap_err();
+        assert!(error.contains("not authorized"), "{}", error);
+        assert!(env.root.join("src/a.ts").exists());
     }
 }
