@@ -117,6 +117,15 @@ pub struct WorkspaceToolPermissions {
     /// 它的记录，那时读到的是**后一次**运行的 id，于是前一次的导航被记在了后一次名下 ——
     /// 正好是这个字段本来要防的事。
     pub run_id: Option<String>,
+    /// 这次运行的取消开关，**副作用**的那道闸门。
+    ///
+    /// 取消原本只拦得住模型调用和两次工具调用之间的间隙：一旦一次调用已经进到工具里，
+    /// Stop 就管不着它了 —— 界面变空闲，而命令还在跑、页面还在被打开。撤不回的动作
+    /// 尤其不能这样，所以有副作用的工具在动手之前先看这个开关。
+    ///
+    /// 和 `RunLease.cancel` 是**同一个** `Arc`（由命令层在拿执行权时交进去），不是第二
+    /// 份状态。每次运行一个新的开关，从不复位旧的 —— 复位会把还在排空的旧运行解除取消。
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 已经发生的写入。跟着 `Clone` 共享同一份（`Arc`），所以命令层可以克隆一份
     /// 交给工具、另一份记在 orchestrator 上，事后从任一份都取得到记录。
     writes: AgentWriteLog,
@@ -186,6 +195,21 @@ impl WorkspaceToolPermissions {
     /// 浏览器工具是否可用：开关和清单都要有。
     fn allows_browser(&self) -> bool {
         self.allow_browser && !self.browser_origins.is_empty()
+    }
+
+    /// 换一个全新的副作用开关，并把它交出去当这次运行的取消开关。
+    ///
+    /// 换而不是复位：旧开关可能还被一个正在排空的运行握着，复位等于把用户已经点过的
+    /// Stop 撤销掉。命令层在拿执行权时调这个，然后把返回的 `Arc` 交给 `try_begin_run`，
+    /// 所以工具面和 `RunLease` 看的是同一个开关，而不是两份状态。
+    pub fn fresh_cancel(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancel.clone()
+    }
+
+    /// 这次运行是否已经被取消。有副作用的工具动手前问它。
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 取出并清空写入记录。
@@ -480,6 +504,33 @@ impl ToolInvoker for WorkspaceToolInvoker {
             &format!("Agent called {}", tool_name),
             &format!("Arguments:\n{}", arguments.trim()),
         );
+        // 副作用的闸门在这里，而不是在每个工具里各写一遍：取消原本只在两次工具调用
+        // **之间**生效，一次已经进到这里的调用照旧会跑命令、照旧会打开页面 —— 用户点了
+        // Stop，界面变空闲，世界还在被改。只读工具放过：它们不改变任何东西，拒掉只会
+        // 给一份马上要丢掉的对话再添噪声。
+        if self.permissions.cancelled() {
+            let side_effecting = matches!(
+                tool_name,
+                RUN_COMMAND | WRITE_FILE | DELETE_FILE | MOVE_FILE | BROWSER_OPEN | BROWSER_TABS
+            );
+            if side_effecting {
+                let detail = format!(
+                    "This run was stopped, so {} was refused before it could take effect.",
+                    tool_name
+                );
+                // 浏览器的尝试仍然进外部动作日志：它没有发生，但"停了之后模型还想出网"
+                // 是用户会想知道的事
+                if matches!(tool_name, BROWSER_OPEN | BROWSER_TABS) {
+                    self.permissions.record_external(AgentExternalAction {
+                        kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
+                        target: string_arg(&args, "url").unwrap_or("chrome").to_string(),
+                        detail: detail.clone(),
+                    });
+                }
+                self.log("warn", &format!("Refused {} after Stop", tool_name), &detail);
+                return Err(detail);
+            }
+        }
         let result = match tool_name {
             READ_FILE => read_file_tool(string_arg(&args, "path").ok_or("Missing 'path'")?),
             SEARCH_TEXT => search_text_tool(
@@ -1500,6 +1551,56 @@ mod tests {
         // 目录不接受，和 delete 一致
         let error = move_file_tool("src", "src2", &permissions).unwrap_err();
         assert!(error.contains("directory"), "{}", error);
+    }
+
+    /// Stop 之后，已经排到工具里的调用也不许再产生副作用。
+    ///
+    /// 取消原本只在两次工具调用**之间**生效：一次已经进到 `invoke` 的调用照旧会跑命令、
+    /// 照旧会打开页面 —— 界面显示空闲，而世界还在被改。撤不回的动作尤其不能这样。
+    #[test]
+    fn stop_refuses_side_effecting_tools_and_records_the_browser_attempt() {
+        let mut permissions = WorkspaceToolPermissions::new(Vec::new(), true, true)
+            .with_browser(true, vec!["*".to_string()]);
+        let switch = permissions.fresh_cancel();
+        switch.store(true, std::sync::atomic::Ordering::Relaxed);
+        let invoker = WorkspaceToolInvoker::without_logging(permissions.clone());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let error = runtime
+            .block_on(invoker.invoke(WRITE_FILE, "{\"path\":\"a.ts\",\"content\":\"x\"}"))
+            .unwrap_err();
+        assert!(error.contains("stopped"), "{}", error);
+        // 拒绝掉的写入不能留下审查区卡片：那份卡片会声称磁盘上有一次没发生的改动
+        assert!(permissions.take_writes().is_empty());
+
+        let error = runtime
+            .block_on(invoker.invoke(BROWSER_OPEN, "{\"url\":\"https://example.com/\"}"))
+            .unwrap_err();
+        assert!(error.contains("stopped"), "{}", error);
+        // 没发生，但"停了之后模型还想出网"要留痕
+        let actions = permissions.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_cancelled");
+        assert_eq!(actions[0].target, "https://example.com/");
+    }
+
+    /// 只读工具在 Stop 之后照旧放行：它们不改变任何东西，拒掉只会给一份马上要丢掉的
+    /// 对话再添一条噪声。
+    #[test]
+    fn stop_does_not_block_read_only_tools() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("readme.md", "hello\n");
+        let mut permissions = WorkspaceToolPermissions::read_only();
+        let switch = permissions.fresh_cancel();
+        switch.store(true, std::sync::atomic::Ordering::Relaxed);
+        let invoker = WorkspaceToolInvoker::without_logging(permissions);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let output = runtime
+            .block_on(invoker.invoke(READ_FILE, "{\"path\":\"readme.md\"}"))
+            .expect("read-only tools stay available");
+        assert!(output.contains("hello"), "{}", output);
     }
 
     /// 浏览器工具需要**两样**：开关，以及一份非空的 origin 清单。

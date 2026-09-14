@@ -313,6 +313,9 @@ pub async fn send_agent_prompt(
         request.allow_browser_use,
         request.browser_origins.clone().unwrap_or_default(),
     );
+    // 副作用开关要在工具面装起来**之前**定下来：执行器拿的是 permissions 的克隆，
+    // 两者共享同一个 `Arc`，晚一步换开关就换不到执行器手里那一份了。
+    let side_effect_switch = tool_permissions.fresh_cancel();
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -354,7 +357,7 @@ pub async fn send_agent_prompt(
         let mut orch = agent_state.orchestrator.lock().await;
         // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
         // 覆写它的工具面或记账器会把那次运行改坏
-        let lease = orch.try_begin_run(request.run_id.clone())?;
+        let lease = orch.try_begin_run(request.run_id.clone(), side_effect_switch)?;
         // 撤不回的动作要认领**这一次**运行：id 只在这里是确定的，排空记录时再去读
         // orchestrator 就可能读到下一次运行的 id
         tool_permissions.run_id = orch.current_run_id.clone();
@@ -750,6 +753,9 @@ pub async fn run_agent_step(
         request.allow_browser_use,
         request.browser_origins.clone().unwrap_or_default(),
     );
+    // 副作用开关要在工具面装起来**之前**定下来：执行器拿的是 permissions 的克隆，
+    // 两者共享同一个 `Arc`，晚一步换开关就换不到执行器手里那一份了。
+    let side_effect_switch = tool_permissions.fresh_cancel();
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -794,7 +800,7 @@ pub async fn run_agent_step(
         // 单步执行也要抢执行权：它同样改 steps / diffs / 状态机，还会换掉工具面
         // 和记账器。以前这里直接 begin_run，等于绕过守卫从一次流水线运行手里抢走
         // 这些字段。
-        let lease = orch.try_begin_run(request.run_id.clone())?;
+        let lease = orch.try_begin_run(request.run_id.clone(), side_effect_switch)?;
         tool_permissions.run_id = orch.current_run_id.clone();
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
@@ -926,13 +932,16 @@ pub async fn continue_agent_pipeline(
             return Err("No paused Agent pipeline to continue.".to_string());
         }
         let run_id = orch.last_run_id.clone();
-        let lease = orch.try_begin_run(run_id)?;
+        let mut permissions = orch.tool_permissions.clone();
+        // 续跑是一次新的运行：新开关、新 id。沿用暂停前那个开关的话，如果当时是被
+        // Stop 停下的，续跑会一上来就被自己拦住。
+        let side_effect_switch = permissions.fresh_cancel();
+        let lease = orch.try_begin_run(run_id, side_effect_switch)?;
         let paused = orch
             .paused_run
             .take()
             .expect("paused run checked in this critical section");
         let policy = orch.tool_policy;
-        let mut permissions = orch.tool_permissions.clone();
         // 续跑是一次新的运行：记录要认领续跑这次的 id，而不是暂停前那次的
         permissions.run_id = orch.current_run_id.clone();
         orch.emit_review_action_log(
@@ -1263,7 +1272,7 @@ pub async fn repair_workspace(
 
     // 只在准备阶段持锁。循环本身由 `drive_repair` 按轮次短持锁 —— 整段持锁会连
     // `get_agent_state` 一起堵住，界面因此永远不知道后端在忙。
-    let (lease, original_prompt) = {
+    let (lease, original_prompt, repair_permissions) = {
         let mut orch = agent_state.orchestrator.lock().await;
         if !matches!(orch.mode, AgentMode::Auto) {
             return Err(
@@ -1273,13 +1282,20 @@ pub async fn repair_workspace(
         // 抢执行权放在模式检查之后：检查不通过就直接返回，先抢会把执行权漏掉。
         // 自动修复会自己往磁盘上落改动，和一次普通运行同等重量，所以必须走同一个守卫。
         let last_run_id = orch.last_run_id.clone();
-        let lease = orch.try_begin_run(last_run_id)?;
+        // 修复循环不自己装工具面 —— `drive_repair` 直接克隆上一次运行留下的
+        // `tool_invoker`，那份授权里的副作用开关是上一次运行的。所以这里给 lease 一个
+        // 新开关（Stop 照旧能停住模型调用），但**工具那一侧的副作用闸门在这条路径上
+        // 没有接通**：要接通就得连工具面一起重建，记在 ROADMAP 59 里。
+        let mut repair_permissions = orch.tool_permissions.clone();
+        let side_effect_switch = repair_permissions.fresh_cancel();
+        let lease = orch.try_begin_run(last_run_id, side_effect_switch)?;
+        repair_permissions.run_id = orch.current_run_id.clone();
         let original_prompt = resolve_original_prompt(
             request.original_prompt,
             orch.conversation.last().map(|turn| turn.prompt.clone()),
         );
         orch.start_usage_accounting(usage_meter.clone());
-        (lease, original_prompt)
+        (lease, original_prompt, repair_permissions)
     };
 
     let outcome = crate::agent::orchestrator::drive_repair(
@@ -1297,11 +1313,9 @@ pub async fn repair_workspace(
     // 记账写在两条路径上：修复轮次花掉的 token 和别的运行一样要能查到
     emit_usage_action_log(&orch, &app_handle, &usage_meter);
     // 修复循环用的是上一次运行留在 orchestrator 上的工具面（`drive_repair` 直接克隆
-    // `tool_invoker`），那份授权和这里的 `tool_permissions` 共享同一份日志 `Arc`。
+    // `tool_invoker`），那份授权和这里的 `repair_permissions` 共享同一份日志 `Arc`。
     // 不在这里排空的话，修复轮里发生的写入和导航就要等下一个 prompt —— 而下一个
     // prompt 会换上一份全新的 `Arc`，于是那些记录永远没人取走。
-    let mut repair_permissions = orch.tool_permissions.clone();
-    repair_permissions.run_id = orch.current_run_id.clone();
     publish_tool_writes(&mut orch, &app_handle, &repair_permissions);
     publish_external_actions(&mut orch, &app_handle, &repair_permissions);
     // 释放要在 `?` 之前：修复失败也得把执行权交回去，否则后面所有运行都被拒
