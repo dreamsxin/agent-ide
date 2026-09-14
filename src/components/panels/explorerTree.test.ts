@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   attachLoadedChildren,
+  copyNameCandidates,
   loadedDirectoryPaths,
+  validateEntryName,
   type ExplorerNode,
 } from "./explorerTree";
 
@@ -90,3 +92,69 @@ describe("attachLoadedChildren", () => {
     expect(merged[1]).toBe(fresh[1]);
   });
 });
+
+describe("copyNameCandidates", () => {
+  /**
+   * 原名必须是第一个候选。调用方按顺序试到后端不再报"目标已存在"为止，所以粘到一个
+   * 没有同名文件的目录里就该保留原名 —— 之前列表从 " Copy" 开始，把 `foo.ts` 粘到
+   * 另一个目录也会变成 `foo Copy.ts`，用户还得再重命名一次。
+   */
+  it("offers the original name first so a free destination keeps it", () => {
+    expect(copyNameCandidates("foo.ts")[0]).toBe("foo.ts");
+  });
+
+  it("falls back to Copy, Copy 2 … when the name is taken", () => {
+    const candidates = copyNameCandidates("foo.ts", 3);
+    expect(candidates).toEqual(["foo.ts", "foo Copy.ts", "foo Copy 2.ts", "foo Copy 3.ts"]);
+  });
+
+  /** 点文件的整个名字都是主干，不能变成 " Copy.gitignore" */
+  it("keeps a dotfile whole", () => {
+    expect(copyNameCandidates(".gitignore", 1)).toEqual([".gitignore", ".gitignore Copy"]);
+  });
+});
+
+describe("validateEntryName", () => {
+  it("accepts ordinary names", () => {
+    expect(validateEntryName("App.tsx")).toBeNull();
+    expect(validateEntryName(".gitignore")).toBeNull();
+    expect(validateEntryName("a.tar.gz")).toBeNull();
+  });
+
+  /**
+   * 这是这个校验存在的理由：之前输入的字符串直接进 `joinPath`，`a/b/c` 会静默建出
+   * 一层嵌套路径，`../x` 会跑到父目录。后端仍然把路径夹在工作区内，所以不是越权，
+   * 但结果和用户的意图不符，而且事后看不出发生了什么。
+   */
+  it("rejects anything that is a path rather than a name", () => {
+    expect(validateEntryName("a/b")).toContain("path separator");
+    expect(validateEntryName("a\\b")).toContain("path separator");
+    expect(validateEntryName("..")).not.toBeNull();
+    expect(validateEntryName(".")).not.toBeNull();
+    expect(validateEntryName("../x")).not.toBeNull();
+  });
+
+  it("rejects an empty name", () => {
+    expect(validateEntryName("")).not.toBeNull();
+    expect(validateEntryName("   ")).not.toBeNull();
+  });
+
+  /** Windows 会静默丢掉结尾的点，于是拿到的名字和输入的不是一个 */
+  it("rejects a trailing dot", () => {
+    expect(validateEntryName("notes.")).not.toBeNull();
+  });
+
+  /** `name::$DATA` 这类写法在 NTFS 上指向别的东西 */
+  it("rejects a colon", () => {
+    expect(validateEntryName("name::$DATA")).not.toBeNull();
+  });
+
+  it("rejects Windows device names, with or without an extension", () => {
+    expect(validateEntryName("CON")).not.toBeNull();
+    expect(validateEntryName("nul.txt")).not.toBeNull();
+    expect(validateEntryName("COM1")).not.toBeNull();
+    // 只是以设备名开头不算
+    expect(validateEntryName("console.ts")).toBeNull();
+  });
+});
+
