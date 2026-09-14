@@ -192,6 +192,13 @@ pub struct ApplyCheckpoint {
     /// 触发这次应用的操作，用于告诉用户将要撤销什么
     pub label: String,
     snapshots: Vec<crate::agent::diff_apply::FileSnapshot>,
+    /// 这次应用动了哪几张卡片。
+    ///
+    /// 撤销时必须按 id 找卡片，不能只按文件路径：同一个文件很可能有两张卡片（Agent 先
+    /// 用工具写了一次，用户后来又应用了一份模型提议），路径匹配会把**没有被这次撤销
+    /// 影响**的那张也改掉 —— 而工具写入记录的新状态 `reverted` 是终态，那就成了一句
+    /// 永久的假话："你撤销过这条"，而它其实还在磁盘上。
+    diff_ids: Vec<String>,
 }
 
 impl ApplyCheckpoint {
@@ -575,6 +582,7 @@ impl AgentOrchestrator {
         &mut self,
         label: &str,
         snapshots: Vec<crate::agent::diff_apply::FileSnapshot>,
+        diff_ids: Vec<String>,
     ) {
         if snapshots.is_empty() {
             return;
@@ -582,6 +590,7 @@ impl AgentOrchestrator {
         self.undo_stack.push(ApplyCheckpoint {
             label: label.to_string(),
             snapshots,
+            diff_ids,
         });
         if self.undo_stack.len() > MAX_UNDO_CHECKPOINTS {
             let excess = self.undo_stack.len() - MAX_UNDO_CHECKPOINTS;
@@ -719,7 +728,11 @@ impl AgentOrchestrator {
             created.push(diff);
         }
 
-        self.push_undo_checkpoint("Agent tool writes", snapshots);
+        self.push_undo_checkpoint(
+            "Agent tool writes",
+            snapshots,
+            created.iter().map(|diff| diff.id.clone()).collect(),
+        );
         self.diffs.extend(created.clone());
         // 磁盘内容变了，其他还挂着的 diff 的 baseHash 要跟着刷新，
         // 否则它们会被误判 stale
@@ -752,7 +765,9 @@ impl AgentOrchestrator {
         let (restored, failed) = crate::agent::diff_apply::restore_snapshots(&checkpoint.snapshots);
 
         for diff in &mut self.diffs {
-            if !restored.contains(&diff.file) {
+            // 按 id 认卡片，再要求这个文件真的恢复成功了。同一个文件可能挂着两张卡片，
+            // 只按路径匹配会把不属于这次撤销的那张也改掉。
+            if !checkpoint.diff_ids.contains(&diff.id) || !restored.contains(&diff.file) {
                 continue;
             }
             if is_tool_write_record(diff) {
@@ -1491,7 +1506,11 @@ impl AgentOrchestrator {
 
         let (result, snapshots) =
             crate::agent::diff_apply::apply_pending_diffs_with_snapshots(&applicable);
-        self.push_undo_checkpoint("Auto-apply", snapshots);
+        self.push_undo_checkpoint(
+            "Auto-apply",
+            snapshots,
+            result.applied.iter().map(|item| item.id.clone()).collect(),
+        );
 
         for diff in &mut self.diffs {
             if result.applied.iter().any(|item| item.id == diff.id) {
@@ -1637,7 +1656,11 @@ impl AgentOrchestrator {
         };
         let (result, snapshots) =
             crate::agent::diff_apply::apply_pending_diffs_with_snapshots(&[synthetic]);
-        self.push_undo_checkpoint(&format!("Apply file {}", diff.file), snapshots);
+        self.push_undo_checkpoint(
+            &format!("Apply file {}", diff.file),
+            snapshots,
+            vec![diff_id.to_string()],
+        );
 
         if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
             let applied = result.applied.iter().any(|entry| entry.id == item.id);
@@ -1706,6 +1729,7 @@ impl AgentOrchestrator {
         self.push_undo_checkpoint(
             &format!("Apply hunk {} in {}", hunk_index + 1, diff.file),
             snapshots,
+            vec![diff_id.to_string()],
         );
 
         if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
@@ -1768,6 +1792,10 @@ pub fn status_from_hunks(hunks: &[crate::agent::state_machine::DiffHunk]) -> Str
         "applied".to_string()
     } else if all_match("rejected") {
         "rejected".to_string()
+    } else if all_match("reverted") {
+        // 撤销掉的工具写入记录是终态。少了这一档，这个函数会把它算成 `pending`，
+        // 于是一条删除记录又变成"可以应用"，而应用它会把文件写成 0 字节。
+        "reverted".to_string()
     } else if any_match("failed") {
         "failed".to_string()
     } else if any_match("applied") || any_match("rejected") {
@@ -2662,6 +2690,55 @@ mod tests {
         assert!(error.contains("reverted"), "{}", error);
         // 文件保持恢复后的样子：被拒绝的 Apply 不能把它写成 0 字节
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 同一个文件先后被写了两次，每次各留一个回滚点。撤销一次只该动最近那张卡片。
+    ///
+    /// 以前 `undo_last_apply` 只按文件路径找卡片，于是两张卡片一起被改 —— 而工具写入
+    /// 记录的新状态是**终态**，那就成了一句永久的假话：第一张卡片说"你撤销过这条"，
+    /// 而它的改动其实正躺在磁盘上。
+    #[test]
+    fn undo_only_touches_the_cards_from_the_checkpoint_it_pops() {
+        let base = std::env::temp_dir().join(format!("agent-ide-two-ckpt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("a.ts");
+        let mut orchestrator = AgentOrchestrator::new();
+
+        std::fs::write(&path, "v1\n").unwrap();
+        let first = orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "a.ts".to_string(),
+            path: path.clone(),
+            previous: Some("v0\n".to_string()),
+            updated: "v1\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+        std::fs::write(&path, "v2\n").unwrap();
+        let second = orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "a.ts".to_string(),
+            path: path.clone(),
+            previous: Some("v1\n".to_string()),
+            updated: "v2\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+
+        orchestrator.undo_last_apply().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1\n");
+        let status_of = |id: &str| {
+            orchestrator
+                .diffs
+                .iter()
+                .find(|diff| diff.id == id)
+                .map(|diff| diff.status.clone())
+                .expect("diff")
+        };
+        assert_eq!(status_of(&second[0].id), "reverted");
+        // 第一次写入还在磁盘上（现在的内容就是它写的 v1），卡片不能说它被撤销了
+        assert_eq!(status_of(&first[0].id), "applied");
 
         let _ = std::fs::remove_dir_all(&base);
     }
