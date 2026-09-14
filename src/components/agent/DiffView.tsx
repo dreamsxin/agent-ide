@@ -572,7 +572,9 @@ function getHunkStatusCounts(hunks: DiffHunk[]) {
       counts[status] += 1;
       return counts;
     },
-    { pending: 0, applied: 0, rejected: 0, failed: 0 } as Record<NonNullable<DiffHunk["status"]>, number>
+    // 每一档都要有初值。少一档就是 `undefined + 1` → NaN，而 `as Record<...>` 恰恰
+    // 会把这个错误藏起来（AGENTS.md 里点名的那种断言）。
+    { pending: 0, applied: 0, rejected: 0, failed: 0, reverted: 0 } as Record<NonNullable<DiffHunk["status"]>, number>
   );
 }
 
