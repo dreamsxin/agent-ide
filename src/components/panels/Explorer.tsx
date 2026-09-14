@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
-import { Tree, type NodeRendererProps } from "react-arborist";
+import { Tree, type NodeRendererProps, type TreeApi } from "react-arborist";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEditorStore } from "../../stores/useEditorStore";
@@ -12,6 +12,7 @@ import {
   loadedDirectoryPaths,
   resolveMoveDestination,
   validateEntryName,
+  withoutDraggedDescendants,
   type ExplorerNode,
 } from "./explorerTree";
 
@@ -181,8 +182,14 @@ export default function Explorer() {
   // `loadRoot` 需要读上一棵树来决定重新展开哪些目录，但它不能把 rootData 放进依赖：
   // 那会让它每次树变化都换一个新函数，而挂载 effect 依赖它 —— 无限重载。
   const rootDataRef = useRef<TreeNodeData[]>([]);
-  /** 当前有焦点的那一行，供键盘操作用；ref 而不是 state，避免方向键导航重渲染整棵树 */
-  const focusedNodeRef = useRef<TreeNodeData | null>(null);
+  /**
+   * react-arborist 的 api，用来读"当前有焦点的是哪一行"。
+   *
+   * 不能自己用 `onFocus` 记进 ref：那个回调只在 `TreeApi.focus()` 走到时才触发，而
+   * 焦点从外面进入树时（点击空白、Tab 进来）走的是 `TreeApi.onFocus()`，它只 dispatch
+   * 不回调 —— 于是界面上有焦点环、我们手里却是 null。直接问 api 就没有第二份状态。
+   */
+  const treeRef = useRef<TreeApi<TreeNodeData> | null>(null);
   useEffect(() => {
     rootDataRef.current = rootData;
   }, [rootData]);
@@ -622,22 +629,26 @@ export default function Explorer() {
    */
   const handleMove = useCallback(
     async (args: { dragIds: string[]; parentId: string | null }) => {
+      // `parentId` 一定是目录或 null：arborist 的 `compute-drop` 只会把落点算到
+      // `isInternal` 的节点或根上（落在文件行上给的是它的父目录）。
       const parent = args.parentId ? findNodeById(rootDataRef.current, args.parentId) : null;
-      const targetDirectory = parent
-        ? parent.isDir
-          ? parent.path
-          : parentOf(parent.path)
-        : workspacePath;
+      const targetDirectory = parent ? parent.path : workspacePath;
       if (!targetDirectory) return;
+
+      const dragged = args.dragIds
+        .map((id) => findNodeById(rootDataRef.current, id))
+        .filter((node): node is TreeNodeData => node != null);
 
       const moved: string[] = [];
       const failures: string[] = [];
-      for (const id of args.dragIds) {
-        const source = findNodeById(rootDataRef.current, id);
-        if (!source) continue;
+      for (const source of withoutDraggedDescendants(dragged)) {
         const outcome = resolveMoveDestination(source.path, source.name, targetDirectory);
         if ("error" in outcome) {
-          failures.push(outcome.error);
+          // 拖到它已经在的目录里：arborist 画的那条插入线让人以为能排序，而这里做不到
+          // 排序。这是一次无害的手势，不该报错，静默忽略就好。
+          if (outcome.reason !== "sameFolder") {
+            failures.push(outcome.error);
+          }
           continue;
         }
         try {
@@ -648,9 +659,11 @@ export default function Explorer() {
         }
       }
 
+      // 两边都要说：只报第一条失败会让"四个成功一个失败"看起来像整体失败
       if (failures.length > 0) {
-        // 失败优先显示：成功的那些用户已经在树上看见了，失败的才是他需要知道的
-        showToast(failures[0]);
+        const failureSummary =
+          failures.length === 1 ? failures[0] : `${failures[0]} (+${failures.length - 1} more)`;
+        showToast(moved.length > 0 ? `Moved ${moved.length}; ${failureSummary}` : failureSummary);
       } else if (moved.length > 0) {
         showToast(moved.length === 1 ? `Moved: ${moved[0]}` : `Moved ${moved.length} items`);
       }
@@ -720,9 +733,12 @@ export default function Explorer() {
   /**
    * 键盘操作：F2 改名、Delete / Backspace 删除、Ctrl/Cmd + C / X / V 复制剪切粘贴。
    *
-   * 作用对象是**当前有焦点的那一行**，由 `onFocus` 记在 ref 里 —— 用 state 会让每次
-   * 方向键移动都重渲染整棵树。哪些组合该拦、哪些必须放过（Alt、Ctrl+Shift+C 之类）
-   * 的判断在 `explorerShortcut` 里，纯函数、可测。
+   * 挂在**捕获阶段**，认领的键还要 `stopPropagation`。冒泡阶段不行：事件先到
+   * react-arborist 自己的容器，它对认不出来的键会走"首字母跳转"（`focusSearchTerm`
+   * 累加后 `tree.focus(...)`），于是 `Ctrl+X` 的 `x`、`Ctrl+V` 的 `v` 会先把焦点挪到
+   * 另一行 —— 我们再去读焦点，剪的就是另一个文件。
+   *
+   * 作用对象直接问 `TreeApi`，不另存一份"当前焦点"。
    */
   const handleTreeKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -730,17 +746,30 @@ export default function Explorer() {
       if (nameDialog) return;
       const action = explorerShortcut(event);
       if (!action) return;
-      const node = focusedNodeRef.current;
+      const api = treeRef.current;
+      const focused = api?.focusedNode ?? null;
+      const node = focused?.data ?? null;
       // 粘贴不需要选中任何东西：没有焦点时粘到工作区根目录，和空白处右键一致
       if (!node && action !== "paste") return;
       event.preventDefault();
+      event.stopPropagation();
+
       switch (action) {
         case "rename":
           if (node) void handleRename(node);
           return;
-        case "delete":
-          if (node) void handleDelete(node);
+        case "delete": {
+          if (!node || !focused) return;
+          // 先把焦点挪到下一个兄弟或父目录，再删。删完那一行会卸载，焦点跟着丢，
+          // 之后所有按键都落到 body 上，键盘操作就整体失效了 —— arborist 自己的
+          // Backspace 分支也是先挪焦点再删。
+          const next = focused.nextSibling ?? focused.parent;
+          if (next && !next.isRoot) {
+            api?.focus(next, { scroll: false });
+          }
+          void handleDelete(node);
           return;
+        }
         case "copy":
           if (node) handleCopy(node);
           return;
@@ -801,7 +830,7 @@ export default function Explorer() {
           event.preventDefault();
           handleContextMenu(event, null);
         }}
-        onKeyDown={handleTreeKeyDown}
+        onKeyDownCapture={handleTreeKeyDown}
       >
         {loading && (
           <div className="p-2 text-xs text-surface-muted">Loading files...</div>
@@ -819,6 +848,7 @@ export default function Explorer() {
         )}
         {!loading && !error && rootData.length > 0 && (
           <Tree<TreeNodeData>
+            ref={treeRef}
             data={rootData}
             idAccessor="id"
             childrenAccessor={(d) => d.children ?? null}
@@ -831,11 +861,6 @@ export default function Explorer() {
             openByDefault={false}
             onToggle={handleToggle}
             onMove={handleMove}
-            // 键盘操作要作用在有焦点的那一行；记进 ref 而不是 state，否则每次方向键
-            // 移动都会重渲染整棵树
-            onFocus={(node) => {
-              focusedNodeRef.current = node.data;
-            }}
             onActivate={(node) => {
               // 方向键导航之后按 Enter 走到这里。目录切换，文件打开 ——
               // 以前这里只处理目录，键盘用户因此打不开文件。

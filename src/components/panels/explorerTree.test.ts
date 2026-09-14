@@ -7,6 +7,7 @@ import {
   loadedDirectoryPaths,
   resolveMoveDestination,
   validateEntryName,
+  withoutDraggedDescendants,
   type ExplorerNode,
 } from "./explorerTree";
 
@@ -218,6 +219,33 @@ describe("findNodeById", () => {
   it("finds a top-level node and returns null for an unknown id", () => {
     expect(findNodeById(tree, "README.md")?.path).toBe("README.md");
     expect(findNodeById(tree, "nowhere.ts")).toBeNull();
+  });
+});
+
+describe("withoutDraggedDescendants", () => {
+  /**
+   * 一起选中 `src/` 和 `src/main.ts` 拖走：目录先搬，子节点跟着一起走了，第二次
+   * rename 打在一个已经不存在的路径上 —— 报一句后端原话，而磁盘其实是对的。
+   */
+  it("drops nodes already carried by a dragged directory", () => {
+    const dragged = [dir("src", [file("src/main.ts")]), file("src/main.ts"), file("README.md")];
+
+    expect(withoutDraggedDescendants(dragged).map((node) => node.path)).toEqual([
+      "src",
+      "README.md",
+    ]);
+  });
+
+  it("keeps siblings whose paths merely share a prefix", () => {
+    const dragged = [dir("src"), file("src-old.ts")];
+
+    expect(withoutDraggedDescendants(dragged)).toHaveLength(2);
+  });
+
+  it("handles the Windows separator the backend returns", () => {
+    const dragged = [dir("src"), { ...file("src/deep/main.ts"), path: "src\\deep\\main.ts" }];
+
+    expect(withoutDraggedDescendants(dragged).map((node) => node.path)).toEqual(["src"]);
   });
 });
 
