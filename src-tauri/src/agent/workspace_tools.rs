@@ -957,6 +957,24 @@ fn block_on_browser<T>(
     tokio::task::block_in_place(|| handle.block_on(future))
 }
 
+/// 未授权就调用也要记一笔。
+///
+/// 这条路径原本只返回错误：审计里发现"模型在浏览器权限关着的时候还是调了浏览器工具"
+/// 根本没进记录，而它和"调了但站点不在清单里"对用户是同一类信息 —— 都是模型想出网。
+fn refuse_browser(
+    kind: &str,
+    target: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    let detail = "Browser use is not authorized for this run, or no origin is allowed.".to_string();
+    permissions.record_external(AgentExternalAction {
+        kind: kind.to_string(),
+        target: target.to_string(),
+        detail: detail.clone(),
+    });
+    Err(detail)
+}
+
 /// 打开一个页面。
 ///
 /// 两道闸门，缺一不可：`allow_browser`（能不能用浏览器）和 origin 清单（能去哪儿）。
@@ -967,9 +985,7 @@ fn browser_open_tool(
     permissions: &WorkspaceToolPermissions,
 ) -> Result<String, String> {
     if !permissions.allows_browser() {
-        return Err(
-            "Browser use is not authorized for this run, or no origin is allowed.".to_string(),
-        );
+        return refuse_browser("browser_open_refused", url, permissions);
     }
     let origin = match crate::services::browser::origin_of(url) {
         Ok(origin) => origin,
@@ -1021,18 +1037,48 @@ fn browser_open_tool(
 }
 
 /// 列出标签页。只读，但同样记录：它把用户所有打开页面的标题和 URL 交给了模型。
+///
+/// 记录里写出被披露的 origin 而不是只写一个数量：清单只决定这个工具是否存在，不限制
+/// 结果 —— 只放行了本地开发服务器的用户，同样把内部站点、带 token 的回调 URL 交出去了，
+/// 事后光看"列了 7 个页面"复盘不出泄了什么。
 fn browser_tabs_tool(permissions: &WorkspaceToolPermissions) -> Result<String, String> {
     if !permissions.allows_browser() {
-        return Err(
-            "Browser use is not authorized for this run, or no origin is allowed.".to_string(),
-        );
+        return refuse_browser("browser_tabs_refused", "chrome", permissions);
     }
     let port = crate::services::browser::configured_port();
-    let tabs = block_on_browser(crate::services::browser::list_tabs(port))?;
+    let tabs = match block_on_browser(crate::services::browser::list_tabs(port)) {
+        Ok(tabs) => tabs,
+        Err(error) => {
+            // 这里原来是 `?`：读工具的传输失败一条记录都没留下，而空记录会让
+            // `publish_external_actions` 提前返回，整轮运行看起来什么都没发生过。
+            permissions.record_external(AgentExternalAction {
+                kind: "browser_tabs_failed".to_string(),
+                target: format!("127.0.0.1:{}", port),
+                detail: error.clone(),
+            });
+            return Err(error);
+        }
+    };
+    let mut origins: Vec<String> = Vec::new();
+    for tab in &tabs {
+        if let Ok(origin) = crate::services::browser::origin_of(&tab.url) {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+    }
     permissions.record_external(AgentExternalAction {
         kind: "browser_tabs".to_string(),
         target: format!("127.0.0.1:{}", port),
-        detail: format!("Listed {} open page(s)", tabs.len()),
+        detail: format!(
+            "Disclosed the title and URL of {} open page(s) to the model. Origins: {}",
+            tabs.len(),
+            if origins.is_empty() {
+                "(none)".to_string()
+            } else {
+                origins.join(", ")
+            }
+        ),
     });
     if tabs.is_empty() {
         return Ok("Chrome is attached but has no open pages.".to_string());
@@ -1464,6 +1510,17 @@ mod tests {
         assert!(!WorkspaceToolInvoker::without_logging(switch_only.clone()).handles(BROWSER_OPEN));
         // 即使被直接调用也要拒绝，不能只靠"没通告出去"
         assert!(browser_open_tool("https://example.com/", &switch_only).is_err());
+        assert!(browser_tabs_tool(&switch_only).is_err());
+        // 权限关着时的调用也要留痕：它和"站点不在清单里"是同一类信息 —— 模型想出网
+        let refusals = switch_only.take_external_actions();
+        assert_eq!(
+            refusals
+                .iter()
+                .map(|action| action.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["browser_open_refused", "browser_tabs_refused"]
+        );
+
 
         let granted = WorkspaceToolPermissions::new(Vec::new(), false, false)
             .with_browser(true, vec!["https://example.com".to_string()]);
