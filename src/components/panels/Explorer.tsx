@@ -8,6 +8,7 @@ import {
   attachLoadedChildren,
   copyNameCandidates,
   loadedDirectoryPaths,
+  resolveMoveDestination,
   validateEntryName,
   type ExplorerNode,
 } from "./explorerTree";
@@ -32,8 +33,10 @@ interface ContextMenuState {
 
 interface FileClipboardState {
   node: TreeNodeData;
-  operation: "copy";
+  /** `cut` 粘贴一次之后剪贴板就清空：源已经不在原处了 */
+  operation: "copy" | "cut";
 }
+
 
 interface NameDialogState {
   title: string;
@@ -546,11 +549,50 @@ export default function Explorer() {
     [closeContextMenu]
   );
 
+  const handleCut = useCallback(
+    (node: TreeNodeData) => {
+      setFileClipboard({ node, operation: "cut" });
+      showToast(`Cut: ${node.name}`);
+      closeContextMenu();
+    },
+    [closeContextMenu]
+  );
+
   const handlePaste = useCallback(
     async (targetNode?: TreeNodeData | null) => {
       if (!fileClipboard) return;
-      const targetDirectory = targetNode?.isDir ? targetNode.path : workspacePath;
+      // 右击到文件上时用它所在的目录，而不是退回工作区根目录 —— 后者会把粘贴的东西
+      // 扔到一个用户没指的地方。菜单目前只在目录上给 Paste，所以这条是防患。
+      const targetDirectory = targetNode
+        ? targetNode.isDir
+          ? targetNode.path
+          : parentOf(targetNode.path)
+        : workspacePath;
       if (!targetDirectory) return;
+
+      if (fileClipboard.operation === "cut") {
+        const outcome = resolveMoveDestination(
+          fileClipboard.node.path,
+          fileClipboard.node.name,
+          targetDirectory
+        );
+        if ("error" in outcome) {
+          showToast(outcome.error);
+          closeContextMenu();
+          return;
+        }
+        try {
+          await renamePath(fileClipboard.node.path, outcome.destination);
+          showToast(`Moved: ${fileClipboard.node.name}`);
+          // 剪切只能粘一次：留着剪贴板会让第二次粘贴去找一个已经不存在的源
+          setFileClipboard(null);
+        } catch (e) {
+          showToast(`Failed to move: ${e}`);
+        }
+        closeContextMenu();
+        return;
+      }
+
       try {
         const destination = await copyWithUniqueName(fileClipboard.node.path, targetDirectory, fileClipboard.node.name, copyPath);
         showToast(`Pasted: ${basename(destination)}`);
@@ -559,8 +601,9 @@ export default function Explorer() {
       }
       closeContextMenu();
     },
-    [closeContextMenu, copyPath, fileClipboard, workspacePath]
+    [closeContextMenu, copyPath, fileClipboard, renamePath, workspacePath]
   );
+
 
   // 复制绝对路径
   const handleCopyFilePath = useCallback(
@@ -731,7 +774,8 @@ export default function Explorer() {
 
       {fileClipboard && (
         <div className="border-t border-surface-border/50 px-2 py-1.5 text-[10px] text-surface-muted">
-          Copied: <span className="font-mono text-surface-text">{fileClipboard.node.name}</span>
+          {fileClipboard.operation === "cut" ? "Cut" : "Copied"}:{" "}
+          <span className="font-mono text-surface-text">{fileClipboard.node.name}</span>
           <button
             onClick={() => handlePaste(null)}
             className="ml-2 rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
@@ -780,6 +824,12 @@ export default function Explorer() {
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
                 <span>📋</span> Copy File
+              </button>
+              <button
+                onClick={() => handleCut(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>✂</span> Cut
               </button>
               <button
                 onClick={() => handleCopyFilePath(contextMenu.node)}
@@ -907,6 +957,14 @@ function joinPath(parent: string, name: string) {
 function basename(path: string) {
   return normalizePath(path).split("/").pop() || path;
 }
+
+/** 一个路径所在的目录；没有分隔符时返回空串，调用方按"没有父目录"处理 */
+function parentOf(path: string) {
+  const normalized = normalizePath(path);
+  const separator = normalized.lastIndexOf("/");
+  return separator === -1 ? "" : normalized.slice(0, separator);
+}
+
 
 async function copyWithUniqueName(
   sourcePath: string,

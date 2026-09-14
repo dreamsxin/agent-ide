@@ -3,6 +3,7 @@ import {
   attachLoadedChildren,
   copyNameCandidates,
   loadedDirectoryPaths,
+  resolveMoveDestination,
   validateEntryName,
   type ExplorerNode,
 } from "./explorerTree";
@@ -111,6 +112,45 @@ describe("copyNameCandidates", () => {
   /** 点文件的整个名字都是主干，不能变成 " Copy.gitignore" */
   it("keeps a dotfile whole", () => {
     expect(copyNameCandidates(".gitignore", 1)).toEqual([".gitignore", ".gitignore Copy"]);
+  });
+});
+
+describe("resolveMoveDestination", () => {
+  it("moves an item into the target folder under its own name", () => {
+    expect(resolveMoveDestination("/w/src/app.ts", "app.ts", "/w/lib")).toEqual({
+      destination: "/w/lib/app.ts",
+    });
+  });
+
+  /** `fs::rename` 也会拒，但返回的是一句裸的 EINVAL，看不出问题在哪 */
+  it("refuses to move a folder into itself or into its own subtree", () => {
+    const intoItself = resolveMoveDestination("/w/a", "a", "/w/a");
+    const intoChild = resolveMoveDestination("/w/a", "a", "/w/a/b");
+
+    expect("error" in intoItself && intoItself.error).toContain("into itself");
+    expect("error" in intoChild && intoChild.error).toContain("inside it");
+  });
+
+  /**
+   * 搬到它已经在的目录：后端只会说"目标已存在"，读起来像撞了同名文件，
+   * 而实际上什么都不需要做。
+   */
+  it("says nothing needs doing when the item is already in the target folder", () => {
+    const result = resolveMoveDestination("/w/src/app.ts", "app.ts", "/w/src");
+    expect("error" in result && result.error).toContain("already in this folder");
+  });
+
+  /** 分隔符要先统一：list_directory 在 Windows 上给的是反斜杠 */
+  it("compares paths across separator styles", () => {
+    const result = resolveMoveDestination("D:\\w\\a", "a", "D:/w/a/b");
+    expect("error" in result && result.error).toContain("inside it");
+  });
+
+  /** `ab` 只是名字以 `a` 开头，并不在 `a` 里面 */
+  it("does not mistake a similarly named sibling for a descendant", () => {
+    expect(resolveMoveDestination("/w/a", "a", "/w/ab")).toEqual({
+      destination: "/w/ab/a",
+    });
   });
 });
 

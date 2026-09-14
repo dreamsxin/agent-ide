@@ -134,6 +134,16 @@ pub fn rename_path(old_path: String, new_path: String) -> Result<(), String> {
     if new_resolved.exists() {
         return Err(format!("Target path already exists: {}", new_path));
     }
+    // 和 `copy_path` 同一条守卫，理由略有不同：`fs::rename` 本身会拒绝把目录搬进自己
+    // 内部（Linux 上 EINVAL），但报出来的是一句裸的操作系统错误，看不出问题在哪。
+    // 这里提前拦住，给一句说得清的话，也让这两个命令的行为对得上。
+    // `starts_with` 按路径分量比，所以 `/w/ab` 不会被误判成在 `/w/a` 里面。
+    if old_resolved.is_dir() && new_resolved.starts_with(&old_resolved) {
+        return Err(format!(
+            "Cannot move a directory into itself: {} -> {}",
+            old_path, new_path
+        ));
+    }
     // 确保目标父目录存在
     if let Some(parent) = new_resolved.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
@@ -537,6 +547,32 @@ mod tests {
             std::env::remove_var("AGENT_IDE_CONFIG_DIR");
             let _ = std::fs::remove_dir_all(self.config_dir.parent().unwrap());
         }
+    }
+
+    /// 移动目录进自己内部：`fs::rename` 自己也会拒，但报的是一句裸的系统错误。
+    /// 断言落在"说得清"和"什么都没动"上。
+    #[test]
+    fn moving_a_directory_into_itself_is_refused_with_a_clear_message() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("a/b/f.txt", "x\n");
+
+        let error = rename_path(env.at("a"), env.at("a/b/a")).unwrap_err();
+        assert!(error.contains("into itself"), "{}", error);
+        assert!(env.root.join("a/b/f.txt").is_file());
+    }
+
+    /// 守卫不能拦过头：`ab` 只是名字以 `a` 开头，并不在 `a` 里面。
+    #[test]
+    fn moving_a_directory_next_to_a_similarly_named_sibling_works() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("a/f.txt", "x\n");
+        std::fs::create_dir_all(env.root.join("ab")).unwrap();
+
+        rename_path(env.at("a"), env.at("ab/a")).unwrap();
+        assert!(env.root.join("ab/a/f.txt").is_file());
+        assert!(!env.root.join("a").exists());
     }
 
     /// 把一个目录粘贴到它自己里面：`copy_dir_recursive` 会先建好目标目录，再去遍历
