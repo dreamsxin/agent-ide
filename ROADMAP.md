@@ -1011,6 +1011,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Two smaller things the audit found, both fixed here: `status_from_hunks` had no `reverted` arm, so it would have turned an all-reverted card back into `pending` — correct today only because every caller is gated, which is the kind of "correct by luck" that breaks on the next caller. And `getHunkStatusCounts` in `DiffView.tsx` initialises one counter per status behind an `as Record<...>` assertion; without a `reverted: 0` entry the increment is `undefined + 1` → `NaN`, invisible to `tsc` for exactly the reason AGENTS.md warns about that assertion.
    - Recorded, not fixed: the same over-matching still affects **model** diffs (an older applied card returns to `pending` when a later checkpoint for the same file is undone). It is now id-filtered too, so the case is gone in practice; what remains is that a card whose change is still on disk has no state of its own — that is the `applied`-versus-disk-truth question, a bigger design item than this fix. Rust 304 → 305.
 
+47. **The file tree's rows were draggable and dropping did nothing (2026-09-13)**
+   - Not a missing feature, an inert affordance — the thing this project's conventions call out as worse than an absent control. Evidence, not inference: react-arborist marks every row draggable unless `disableDrag` is set (`interfaces/tree-api.js`: `const check = this.props.disableDrag || (() => false)`), and its drop hook ends in `safeRun(tree.props.onMove, …)`, which no-ops when the handler is absent (`dnd/drop-hook.js`). The tree had no `onMove`. So the row lifted, the drop indicator appeared, and nothing happened.
+   - `onMove` now moves through the same path as cut-paste: `resolveMoveDestination` for the destination and its three refusals (onto itself, into its own subtree, into the folder it is already in — each with a readable reason instead of the backend's bare EINVAL), then `renamePath`.
+   - Multi-select drags are handled properly rather than by taking `dragIds[0]`: arborist allows multi-select by default, so dropping three files while handling one would silently lose two. They move **sequentially**, because concurrent renames race the file-watcher refresh, and a failure has to be able to name which item failed. Failures take precedence in the toast — a success the user can already see in the tree, a refusal they cannot.
+   - `findNodeById` (recursive, in `explorerTree.ts`, tested) exists because the drop handler receives ids, not nodes, and the destination needs the real path plus its `isDir` flag. Scanning only the top level would fail to find a second-level folder and then do nothing — the same silent no-op, one layer down. Frontend 167 → 169.
+
+
 
 
 
