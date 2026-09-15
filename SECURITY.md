@@ -121,6 +121,8 @@ What it enforces:
 - **Two size gates, in this order**: the pixel count (4 000 000, so a 2560×1440 window fits) is checked before any bitmap is copied, and the encoded PNG is checked against the same 4 MiB per-image cap `workspace_read_image` uses. It also charges the same 16 MiB per-run and 12 MiB per-request image budgets, so a capture and a file read compete for one allowance.
 - **Every attempt is an external action record** — `computer_capture`, `computer_capture_refused`, `computer_capture_failed`, `computer_capture_cancelled` — naming the app, the title and the pixel size on success. A screenshot cannot be taken back, so it is logged like a navigation, not like a read.
 
+One consequence worth stating plainly: capture is not *fully* independent of observation in what it reveals. With `captureApps` set to `*`, a run holding only the capture grant can probe `title_contains` and learn window titles plus a count of allowed windows from the refusal messages — the same class of information Desktop Observation gates. It is arguably subsumed (such a run could screenshot those windows anyway), but "capture without observation" should not be read as "cannot learn what is open".
+
 Not implemented, deliberately: **input injection**. Clicking and typing are irreversible and can dismiss any confirmation dialog; that needs an authority model narrower than "allow the desktop" and a record that can be replayed, so the shape is being proven on the read-only and capture surfaces first.
 
 ## Browser Use
