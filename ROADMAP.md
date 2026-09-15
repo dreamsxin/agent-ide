@@ -1198,6 +1198,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Left open, deliberately: the warning is filed at `stage: "Diff Review"` like every other `emit_review_action_log` entry, so it lands in the Logs panel rather than beside the stage that lost the image, and being `warn` it is not lifted into Problems (only `error` is). That is consistent with `tool_capability_degraded`, and changing it means giving the review-log helper a stage parameter — worth doing, not worth doing blind. Also still open: a drop is recorded when the request is *built*, so a run cancelled between build and send reports a drop for a request that never left.
    - Rust 349 → 350.
 
+71. **The layer where the last four cycles' defects lived is now testable (2026-09-15)**
+   - Every audit since 58 found its defect in `commands/agent.rs`, and always the same kind: a count that included something that did not happen, a header that named the wrong thing, a record published on three exit paths out of four. None of it was catchable, because each helper took `&AppHandle` — and an `AppHandle` cannot be constructed in a unit test. The 14 tests in that file covered the pure functions around the wiring and nothing in it.
+   - `finish_agent_run`, `publish_tool_writes`, `publish_external_actions`, `emit_usage_action_log` and both `emit_*_degradation_log` now take `&dyn RunEvents` instead. This is the rule `agent/orchestrator.rs` and `McpToolInvoker` already follow, extended one layer out; `AppHandle` implements the trait, so all nine call sites are unchanged apart from coercion, and the two `app_handle.emit(…)` calls became `events.emit_json(…)`. Now recorded in AGENTS.md, because the next person to add a helper here will reach for `AppHandle` by default.
+   - **The first test is the one that would have caught ROADMAP 60.** It builds real permissions with browser authority, pulls the cancel switch, and calls `invoke` — no test-only mutator, no hand-built record: the tool itself writes `browser_open_cancelled`, then the command layer counts it. The assertions are that the summary says "performed **0** external action(s)" *and* "1 refused, failed or stopped", and that the record still lands on the orchestrator. The old bug — `_cancelled` counted as performed — announced "1 browser action(s) — cannot be undone" for a navigation that never happened, in the one place this product asks to be trusted.
+   - **The second pins the reporting seam from 69 and 70.** A `mock://` client with an image in the message really drops it, and `finish_agent_run` must emit `image_input_degraded` naming one image; a client with no drops must emit nothing under that phase. A warning that always appears is the same as no warning, so the negative half is load-bearing.
+   - Both tests exercise the production path end to end rather than asserting the shape of a struct. That is the point: the defects were never in the data, they were in the sentence the user reads.
+   - Rust 350 → 352.
+
+
 
 
 
