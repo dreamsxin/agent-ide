@@ -212,6 +212,11 @@ impl WorkspaceToolPermissions {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 把开关交给需要在执行途中反复检查它的工具（目前只有命令执行：它要靠这个杀子进程）。
+    fn cancel_switch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.clone()
+    }
+
     /// 取出并清空写入记录。
     ///
     /// 锁中毒时返回空而不是 panic：丢掉审计记录已经够糟，再让整次运行崩掉
@@ -542,6 +547,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 run_command_tool(
                     string_arg(&args, "command").ok_or("Missing 'command'")?,
                     &self.permissions.allowed_commands,
+                    self.permissions.cancel_switch(),
                 )
                 .await
             }
@@ -717,7 +723,11 @@ fn walk_and_match(
 ///    这是安全不变量，不由允许清单覆盖，所以先判它。
 /// 2. 必须命中允许清单。清单由后端从项目自己声明的任务里推导，不是模型自选。
 /// 3. 输出保尾部截断：报错在末尾，保头部等于只把编译进度喂给模型。
-async fn run_command_tool(command: &str, allowed: &[String]) -> Result<String, String> {
+async fn run_command_tool(
+    command: &str,
+    allowed: &[String],
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<String, String> {
     use crate::services::verification;
 
     if verification::is_long_running_command(command) {
@@ -737,8 +747,12 @@ async fn run_command_tool(command: &str, allowed: &[String]) -> Result<String, S
     }
 
     let root = workspace::workspace_root()?;
-    let result =
-        crate::services::project_tasks::run_project_command(command.to_string(), root).await?;
+    let result = crate::services::project_tasks::run_project_command_cancellable(
+        command.to_string(),
+        root,
+        cancel,
+    )
+    .await?;
     let output = [result.stdout.as_str(), result.stderr.as_str()]
         .into_iter()
         .filter(|value| !value.trim().is_empty())
@@ -1217,6 +1231,11 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// 测试里"没有被取消"的开关。
+    fn test_cancel() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
     struct TestEnv {
         root: std::path::PathBuf,
         config_dir: std::path::PathBuf,
@@ -1370,17 +1389,19 @@ mod tests {
     async fn command_tool_enforces_allow_list_and_refuses_long_running() {
         let allowed = vec!["npm test".to_string(), "cargo *".to_string()];
 
-        let error = run_command_tool("rm -rf /", &allowed).await.unwrap_err();
+        let error = run_command_tool("rm -rf /", &allowed, test_cancel())
+            .await
+            .unwrap_err();
         assert!(error.contains("not authorized"), "{}", error);
 
         // 前缀通配命中，但这是长驻命令 —— 先判长驻，所以给出的是长驻的理由
-        let error = run_command_tool("cargo watch -x test", &allowed)
+        let error = run_command_tool("cargo watch -x test", &allowed, test_cancel())
             .await
             .unwrap_err();
         assert!(error.contains("long-running"), "{}", error);
 
         // 清单里写了也不行：长驻判定不受清单覆盖
-        let error = run_command_tool("npm run dev", &["npm run dev".to_string()])
+        let error = run_command_tool("npm run dev", &["npm run dev".to_string()], test_cancel())
             .await
             .unwrap_err();
         assert!(error.contains("long-running"), "{}", error);
@@ -1405,7 +1426,7 @@ mod tests {
         };
         let output = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(run_command_tool(command, &[command.to_string()]))
+            .block_on(run_command_tool(command, &[command.to_string()], test_cancel()))
             .unwrap();
 
         assert!(output.contains("exit code: 3"), "{}", output);
