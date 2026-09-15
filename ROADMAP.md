@@ -1263,6 +1263,19 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Also corrected in 77**: the test's justification was inverted. `Arc::ptr_eq` is the strong half (it fails on two separate flags); the behavioural half is the weak one, since a separate flag already set to `true` would satisfy it.
    - Still open, recorded: `try_begin_run` stays `pub`, so a fifth command could re-copy the two lines and the new test would stay green — the structural fix is to have it take `&WorkspaceToolPermissions`, which the orchestrator already owns. And `permissions.run_id` is stamped *after* the built-in surface is cloned on two of four paths, harmless only because nothing inside `workspace_tools` reads that field today.
 
+79. **Two CDP endpoints nobody called, and the design for screen capture (2026-09-15)**
+   - `browser.rs` carried `activate_endpoint` and `close_endpoint` with **no production caller** — only a test asserting the URL shape, which is the "control that does nothing" rule applied to a helper: it reads as though the Agent can focus or close a tab, and it cannot. Deleted rather than wired: closing a user's tab is an irreversible action on something the Agent did not create, and it would need its own authority line, not a free ride on `allowBrowserUse`. The loopback assertion it was carrying moved onto `new_tab_endpoint`, which does have a caller.
+   - **Where browser use and computer use actually stand**, since the docs describe pieces and never the whole: browser use is *open a URL* and *list tabs* — no DOM read, no click, no type, no wait-for-load, and it needs the user's own Chrome started with `--remote-debugging-port`. Computer use is *enumerate visible windows* — read-only, Windows-only. Both carry the full authority apparatus (switch + non-empty allowlist, irreversible-action records including `_refused` / `_failed` / `_cancelled`, the Stop gate, an action-log line per call). The apparatus is the part that has been audited five times; the capability surface is deliberately thin.
+   - **Screen capture design, decided here so the next cycle does not start from a blank page** (the shape ROADMAP 66 used for multimodal):
+     - Its old blocker is gone. 66 refused it because `ChatMessage.content` was a `String`, so a captured image had no consumer. Images now have three budgets and honest degradation reporting, so a capture has somewhere to go.
+     - **Capture one window, never the screen.** `PrintWindow` on a specific `HWND` chosen from the same enumeration `workspace_computer_windows` already gates. A full-screen grab cannot be scoped by any allowlist the user has agreed to, and "allow this app" is a promise about that app only.
+     - **A separate grant from observation.** Window *titles* and window *contents* are different disclosures — a title says "Signal is open", a capture shows the messages. Reusing `allowComputerUse` would silently upgrade an authority the user already gave. That means a new toggle plus a backend reader in the same commit, or it is an inert control.
+     - **PNG via a pinned `png` dependency.** The hand-rolled base64 was 25 lines; a PNG encoder is not, and BMP is not in the media-type intersection every provider accepts (`png/jpg/gif/webp`).
+     - **It charges the same image budgets** as `workspace_read_image` — per image 4 MiB, per run 16 MiB, per request 12 MiB — and a capture that would exceed them is refused before the bitmap is copied, not after.
+     - **The record is a disclosure record**: `computer_capture` with app, window title and pixel size, in the external-action log, because a screenshot cannot be taken back.
+   - Rust 361, unchanged: this is a deletion plus a decision.
+
+
 
 
 
