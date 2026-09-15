@@ -411,18 +411,38 @@ pub async fn send_agent_prompt(
     let mut orch = agent_state.orchestrator.lock().await;
     match outcome {
         Ok(()) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             orch.record_conversation_turn(&prompt_for_history);
-            emit_tool_degradation_log(&orch, &app_handle, &llm);
         }
         Err(err) if is_cancelled_error(&err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             return Ok("Agent task cancelled".to_string());
         }
         Err(err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             return Err(err);
         }
     }
@@ -607,12 +627,17 @@ fn finish_agent_run(
     app_handle: &AppHandle,
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
     meter: &crate::services::llm_client::RunUsageMeter,
+    llm: &crate::services::llm_client::LlmClient,
     claim: crate::agent::orchestrator::RunClaim,
 ) {
     orch.finish_run(claim);
     publish_tool_writes(orch, app_handle, permissions);
     publish_external_actions(orch, app_handle, permissions);
     emit_usage_action_log(orch, app_handle, meter);
+    // 两种降级都写在这里，而不是各自的成功分支上：降级是**请求已经发生过**的事实，
+    // 运行最后失败或被取消并不会把它取消掉，而失败的那次运行恰恰最需要这条线索。
+    emit_tool_degradation_log(orch, app_handle, llm);
+    emit_image_degradation_log(orch, app_handle, llm);
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -635,6 +660,34 @@ fn emit_tool_degradation_log(
         "The endpoint returned a client error naming the 'tools' parameter, so it was dropped and \
          the request retried. Workspace read tools and MCP tools were unavailable for this run. \
          Set Tool Call Mode to 'Text protocol' for this profile to skip the failed attempt.",
+    );
+}
+
+/// 图片被摘掉时告诉用户。
+///
+/// 原因本来只写进了发给模型的那段文本 —— 也就是只有模型知道。用户看到的是一次正常的
+/// 回答，无从判断"它到底看没看见那张图"，而这恰恰是回答不对劲时第一个要排除的可能。
+fn emit_image_degradation_log(
+    orch: &AgentOrchestrator,
+    app_handle: &AppHandle,
+    llm: &crate::services::llm_client::LlmClient,
+) {
+    let drops = llm.image_drops();
+    if drops.is_empty() {
+        return;
+    }
+    let total: usize = drops.iter().map(|drop| drop.count).sum();
+    let details = drops
+        .iter()
+        .map(|drop| format!("{} image(s): {}.", drop.count, drop.reason))
+        .collect::<Vec<_>>()
+        .join("\n");
+    orch.emit_review_action_log(
+        app_handle,
+        "warn",
+        "image_input_degraded",
+        &format!("{} image(s) were not sent to the model", total),
+        &details,
     );
 }
 
@@ -911,8 +964,14 @@ pub async fn run_agent_step(
                 "agent-diff-ready",
                 serde_json::to_value(&orch.diffs).unwrap_or_default(),
             );
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
-            emit_tool_degradation_log(&orch, &app_handle, &llm);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             orch.emit_review_action_log(
                 &app_handle,
@@ -928,14 +987,28 @@ pub async fn run_agent_step(
             Ok("Agent step completed".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             orch.record_step_status(&step, "todo", "Single step execution cancelled");
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             let failed = orch.record_step_status(&step, "error", &format!("Error: {}", err));
             let _ = app_handle.emit(
                 "agent-step-update",
@@ -1046,17 +1119,38 @@ pub async fn continue_agent_pipeline(
     let mut orch = agent_state.orchestrator.lock().await;
     match outcome {
         Ok(()) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             Ok("Agent pipeline continued".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             orch.state_mgr.set(AgentState::Idle);
             let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
-            finish_agent_run(&mut orch, &app_handle, &tool_permissions, &usage_meter, claim);
+            finish_agent_run(
+                &mut orch,
+                &app_handle,
+                &tool_permissions,
+                &usage_meter,
+                &llm,
+                claim,
+            );
             Err(err)
         }
     }
@@ -1187,7 +1281,6 @@ pub async fn undo_last_apply(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
-    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         apply_log_level(result.failed.len()),

@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use tokio::sync::mpsc;
 
@@ -910,6 +910,13 @@ impl RequestRecorder {
     }
 }
 
+/// 一次被摘掉的图片附件：数量 + 摘掉的原因。原因要能直接给用户看。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageDrop {
+    pub count: usize,
+    pub reason: String,
+}
+
 /// LLM 客户端
 #[derive(Clone)]
 pub struct LlmClient {
@@ -923,6 +930,9 @@ pub struct LlmClient {
     usage_meter: Option<Arc<RunUsageMeter>>,
     /// 供应商明确拒绝过 `tools` 参数：后续请求不再附带，避免每次都白撞一次 400
     tools_rejected: Arc<AtomicBool>,
+    /// 本次运行里被摘掉的图片。命令层在运行结束时读它，把降级写进 action log ——
+    /// 只在消息文本里写原因等于只告诉模型，用户看到的仍是一次"正常"的运行
+    image_drops: Arc<Mutex<Vec<ImageDrop>>>,
     /// 只在测试里挂上，用来断言提示词的组成
     request_recorder: Option<Arc<RequestRecorder>>,
 }
@@ -944,6 +954,7 @@ impl LlmClient {
             extra_tools: Vec::new(),
             usage_meter: None,
             tools_rejected: Arc::new(AtomicBool::new(false)),
+            image_drops: Arc::new(Mutex::new(Vec::new())),
             request_recorder: None,
         }
     }
@@ -957,6 +968,37 @@ impl LlmClient {
     /// 这次运行里供应商是否拒绝过 `tools`（即工具能力已被降级掉）
     pub fn tools_were_rejected(&self) -> bool {
         self.tools_rejected.load(Ordering::SeqCst)
+    }
+
+    /// 这次运行里被摘掉的图片附件。命令层用它写 action log。
+    ///
+    /// 不清空：同一个 client 会被 clone 到各个 stage（clone 共享同一个 Arc），
+    /// 运行结束时读一次要能拿到整轮运行的全部降级。
+    pub fn image_drops(&self) -> Vec<ImageDrop> {
+        self.image_drops
+            .lock()
+            .map(|drops| drops.clone())
+            .unwrap_or_default()
+    }
+
+    /// 记下一次图片降级。锁中毒时静默放弃：这条记录不值得让请求失败。
+    fn record_image_drop(&self, drop: ImageDrop) {
+        if let Ok(mut drops) = self.image_drops.lock() {
+            drops.push(drop);
+        }
+    }
+
+    /// 发请求前的图片降级：摘掉之余还要记下来。
+    ///
+    /// `build_chat_request` 里同样调了 `adapt_images_for_model` —— 那是兜底，保证任何
+    /// 新的请求路径都不会把图片发给看不了图的模型。这里先做一遍是为了**记账**，
+    /// 到那边时图片已经空了，兜底自然是空操作，不会重复写记录。
+    fn adapt_and_record_images(&self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+        let (messages, drop) = adapt_images_for_model(&self.config.model, messages);
+        if let Some(drop) = drop {
+            self.record_image_drop(drop);
+        }
+        messages
     }
 
     /// 挂上本次运行的用量记账器（同一个 Arc 可以跨 stage / 工具回合共享）
@@ -1048,7 +1090,15 @@ impl LlmClient {
             || self.config.provider == "local"
             || self.config.endpoint.starts_with("mock://");
         let messages = if text_only_endpoint {
-            drop_images_with_note(messages, "this endpoint takes a flattened text prompt")
+            const REASON: &str = "this endpoint takes a flattened text prompt";
+            let (messages, dropped) = drop_images_with_note(messages, REASON);
+            if dropped > 0 {
+                self.record_image_drop(ImageDrop {
+                    count: dropped,
+                    reason: REASON.to_string(),
+                });
+            }
+            messages
         } else {
             messages
         };
@@ -1129,7 +1179,7 @@ impl LlmClient {
         );
         let body = build_chat_request(
             &self.config,
-            messages,
+            self.adapt_and_record_images(messages),
             true,
             &self.extra_tools,
             !self.tools_were_rejected(),
@@ -1257,7 +1307,7 @@ impl LlmClient {
         );
         let body = build_chat_request(
             &self.config,
-            messages,
+            self.adapt_and_record_images(messages),
             false,
             &self.extra_tools,
             !self.tools_were_rejected(),
@@ -1705,19 +1755,23 @@ pub fn model_supports_images(model: &str) -> bool {
     VISION_MARKERS.iter().any(|marker| model.contains(marker))
 }
 
-/// 摘掉图片并在文本里写清为什么。
+/// 摘掉图片并在文本里写清为什么，返回摘掉的张数。
 ///
 /// 为什么不直接报错：图片通常是补充信息，一次运行不该因为换了个模型或换了个端点就整体
 /// 失败。但**必须说出来** —— 静悄悄丢掉会让模型对着"如图所示"发挥想象，而工具结果里
 /// 那句"已附上图片"还留着，等于让转录自己说了假话。
-fn drop_images_with_note(messages: Vec<ChatMessage>, reason: &str) -> Vec<ChatMessage> {
-    messages
+///
+/// 返回张数是给用户那一侧用的：只往消息里写原因等于只告诉了模型。
+fn drop_images_with_note(messages: Vec<ChatMessage>, reason: &str) -> (Vec<ChatMessage>, usize) {
+    let mut dropped_total = 0usize;
+    let messages = messages
         .into_iter()
         .map(|mut message| {
             if message.images.is_empty() {
                 return message;
             }
             let dropped = message.images.len();
+            dropped_total += dropped;
             message.images.clear();
             message.content = format!(
                 "{}\n\n[{} image(s) were not sent: {}.]",
@@ -1725,18 +1779,25 @@ fn drop_images_with_note(messages: Vec<ChatMessage>, reason: &str) -> Vec<ChatMe
             );
             message
         })
-        .collect()
+        .collect();
+    (messages, dropped_total)
 }
 
 /// 模型看不了图时的降级。
-fn adapt_images_for_model(model: &str, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+fn adapt_images_for_model(
+    model: &str,
+    messages: Vec<ChatMessage>,
+) -> (Vec<ChatMessage>, Option<ImageDrop>) {
     if model_supports_images(model) {
-        return messages;
+        return (messages, None);
     }
-    drop_images_with_note(
-        messages,
-        &format!("the configured model ({}) does not accept image input", model),
-    )
+    let reason = format!("the configured model ({}) does not accept image input", model);
+    let (messages, dropped) = drop_images_with_note(messages, &reason);
+    let drop = (dropped > 0).then_some(ImageDrop {
+        count: dropped,
+        reason,
+    });
+    (messages, drop)
 }
 
 fn build_chat_request(
@@ -1746,7 +1807,7 @@ fn build_chat_request(
     extra_tools: &[ToolDefinition],
     include_tools: bool,
 ) -> serde_json::Value {
-    let messages = adapt_images_for_model(&config.model, messages);
+    let (messages, _) = adapt_images_for_model(&config.model, messages);
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": messages,
@@ -2099,8 +2160,9 @@ mod image_wire_tests {
     #[test]
     fn a_text_only_endpoint_says_the_images_were_not_sent() {
         let messages = vec![ChatMessage::user("Attached 1 image(s).").with_images(vec![png()])];
-        let adapted =
+        let (adapted, dropped) =
             drop_images_with_note(messages, "this endpoint takes a flattened text prompt");
+        assert_eq!(dropped, 1);
         assert!(adapted[0].images.is_empty());
         assert!(
             adapted[0].content.contains("1 image(s) were not sent"),
@@ -2112,6 +2174,54 @@ mod image_wire_tests {
             "{}",
             adapted[0].content
         );
+    }
+
+    /// 降级必须**用户**也能知道，不只是写进给模型的那段文本。
+    ///
+    /// 这条钉住的是命令层的取数口：`image_drops()` 空就意味着 action log 里什么都不会有，
+    /// 用户看到的是一次"正常"的运行，而模型其实从没看到那张图。
+    #[test]
+    fn a_text_only_endpoint_records_the_drop_for_the_action_log() {
+        let mut cfg = config("gpt-4o");
+        cfg.endpoint = "mock://images".to_string();
+        let client = LlmClient::new(cfg);
+        // rx 要活到请求结束：mock 流会往里发 token
+        let (tx, _rx) = mpsc::channel::<String>(8);
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            client.stream_chat_with_tools(
+                vec![ChatMessage::user("look at this").with_images(vec![png()])],
+                Arc::new(AtomicBool::new(false)),
+                tx,
+            ),
+        );
+        assert!(result.is_ok(), "{:?}", result);
+        let drops = client.image_drops();
+        assert_eq!(drops.len(), 1, "{:?}", drops);
+        assert_eq!(drops[0].count, 1);
+        assert!(
+            drops[0].reason.contains("flattened text prompt"),
+            "{}",
+            drops[0].reason
+        );
+    }
+
+    /// 模型看不了图这条路径也要记账，而且重复适配不能重复记账。
+    ///
+    /// 重复那一半不是洁癖：`build_chat_request` 里还有一遍兜底适配，如果它也会记一次，
+    /// 用户就会看到"2 张图没发出去"而实际只有 1 张。
+    #[test]
+    fn a_non_vision_model_records_the_drop_once() {
+        let client = LlmClient::new(config("deepseek-chat"));
+        let messages = client
+            .adapt_and_record_images(vec![
+                ChatMessage::user("as shown").with_images(vec![png()])
+            ]);
+        assert!(messages[0].images.is_empty());
+        assert_eq!(client.image_drops().len(), 1);
+        assert!(client.image_drops()[0].reason.contains("deepseek-chat"));
+
+        let _again = client.adapt_and_record_images(messages);
+        assert_eq!(client.image_drops().len(), 1);
     }
 
     #[test]
