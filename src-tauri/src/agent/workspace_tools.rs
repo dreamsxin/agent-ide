@@ -249,16 +249,45 @@ impl WorkspaceToolPermissions {
         self.image_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 这次运行重新开始记图片预算。
+    ///
+    /// 和 `adopt_cancel` 并排存在，理由一样：`continue_agent_pipeline` 和
+    /// `repair_workspace` 是**克隆上一次运行的授权对象**来建自己的工具面的，而 `Clone`
+    /// 共享同一个 `Arc`。不显式换一份的话，一次修复会带着上一个 prompt 花掉的额度出生，
+    /// 于是它第一次读图就被拒，而拒绝的话术会说"这次运行已经附了 16 MiB"——一句假话，
+    /// 而且给出的建议（少读几张）它做不到。哪条路径算新运行是个判断，所以要写出来，
+    /// 不能靠"忘了改"来决定。
+    pub fn reset_image_budget(&mut self) {
+        self.image_bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    }
+
     /// 记上这一张图的字节数。超预算就拒绝，且**不**记账。
     ///
-    /// 检查和累加放在一起，是为了不给"先检查后累加"留出两次调用之间的窗口。
+    /// `fetch_update` 而不是"读一次、判一下、再加"：后者在两次原子操作之间留了一个窗口，
+    /// 两个并发调用可以都通过检查再都累加。今天工具调用是顺序执行的，所以那只是个
+    /// 隐患而不是缺陷 —— 但注释里写着"没有窗口"就得真的没有。
     fn charge_image_bytes(&self, len: usize) -> Result<(), String> {
-        let used = self.images_bytes_used();
-        crate::services::images::check_run_image_budget(used, len)?;
-        self.image_bytes
-            .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+        let mut refusal = None;
+        let updated = self
+            .image_bytes
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |used| match crate::services::images::check_run_image_budget(used, len) {
+                    Ok(()) => Some(used.saturating_add(len)),
+                    Err(error) => {
+                        refusal = Some(error);
+                        None
+                    }
+                },
+            )
+            .is_ok();
+        if updated {
+            return Ok(());
+        }
+        Err(refusal.unwrap_or_else(|| "Image budget refused this attachment.".to_string()))
     }
+
 
 
 
@@ -1987,6 +2016,44 @@ mod tests {
             "a refused read must not spend the run's budget"
         );
     }
+
+    /// 预算要在**读之前**就问一次，而不是读完、base64 完了再说超了。
+    ///
+    /// 直接观察不了"有没有读进内存"，所以钉一个等价的事实：拿一个**不是图片**的文件，
+    /// 在额度已经用满的情况下，报出来的必须是预算那句话。如果检查挪到解析之后，
+    /// 这里会先撞上"png, jpg, gif, webp"，那说明文件已经被整个读进来了。
+    #[test]
+    fn the_budget_is_checked_before_the_file_is_read() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("notes.txt", "hello");
+        let permissions = WorkspaceToolPermissions::read_only();
+        permissions
+            .charge_image_bytes(crate::services::images::MAX_RUN_IMAGE_BYTES - 2)
+            .expect("the first charge fits");
+
+        let error = read_image_tool("notes.txt", &permissions).unwrap_err();
+        assert!(error.contains("per-run limit"), "{}", error);
+    }
+
+    /// 克隆共享同一份额度（工具面和 orchestrator 拿的是同一次运行），但换新运行时
+    /// 必须能明确地重开一份 —— 续跑和修复都是克隆上一次运行的授权来建工具面的。
+    #[test]
+    fn resetting_the_image_budget_detaches_from_the_cloned_run() {
+        let permissions = WorkspaceToolPermissions::read_only();
+        permissions.charge_image_bytes(1_000).expect("fits");
+        let shared = permissions.clone();
+        assert_eq!(shared.images_bytes_used(), 1_000, "clone shares the counter");
+
+        let mut next_run = permissions.clone();
+        next_run.reset_image_budget();
+        assert_eq!(next_run.images_bytes_used(), 0);
+        next_run.charge_image_bytes(500).expect("fits");
+        // 换过之后两边互不影响：新运行花的不记在旧运行头上，反之亦然
+        assert_eq!(next_run.images_bytes_used(), 500);
+        assert_eq!(permissions.images_bytes_used(), 1_000);
+    }
+
 
 
     /// 不是图片的文件要在这里就被拒，而不是发出去让 provider 报一个看不懂的错。

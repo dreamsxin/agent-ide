@@ -1038,6 +1038,9 @@ pub async fn continue_agent_pipeline(
         let run_id = orch.last_run_id.clone();
         let mut permissions = orch.tool_permissions.clone();
         permissions.adopt_cancel(side_effect_switch.clone());
+        // 续跑按新运行算额度：它有自己的 run id、自己的取消开关、自己的一份用量记账，
+        // 图片预算跟着这三样走，而不是跟着"被克隆的那份授权"走
+        permissions.reset_image_budget();
         let lease = orch.try_begin_run(run_id, side_effect_switch.clone())?;
         let paused = orch
             .paused_run
@@ -1420,6 +1423,9 @@ pub async fn repair_workspace(
         // 全新的修复运行会把自己的每一次写盘都拒掉。
         let mut repair_permissions = orch.tool_permissions.clone();
         repair_permissions.adopt_cancel(side_effect_switch.clone());
+        // 修复是一次新运行（新 id、新开关），图片额度也要从零算起：带着上一个 prompt
+        // 花掉的额度出生，会让第一次读图就被一句假话拒掉
+        repair_permissions.reset_image_budget();
         let lease = orch.try_begin_run(last_run_id, side_effect_switch.clone())?;
         repair_permissions.run_id = orch.current_run_id.clone();
         let tool_policy = orch.tool_policy;
