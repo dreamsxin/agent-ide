@@ -11,14 +11,19 @@ not a feature.
 
 ## Verify before claiming done
 
-Four commands, all of which must pass. Run them; do not infer.
+Five commands, all of which must pass. Run them; do not infer.
 
 ```
+cd src-tauri && cargo fmt --check
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo test --lib
 npx tsc --noEmit
 npm test
 ```
+
+- `cargo fmt --check` is in CI and was **not** in this list, which is how the
+  crate drifted to ~15 unformatted files while every local check passed. It is
+  first because it is the cheapest.
 
 - `cargo test --lib` is the suite. `cargo test --bin agent_cli` runs **zero**
   tests — the CLI's tests live in the lib target.
