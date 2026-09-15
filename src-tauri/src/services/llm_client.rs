@@ -1009,6 +1009,20 @@ impl LlmClient {
         }
     }
 
+    /// 让上层（执行器）把它自己做的图片降级记到同一个账上。
+    ///
+    /// 执行器也会丢图 —— 一轮里读太多、单个请求装不下。它没有别的汇报渠道，而再造一条
+    /// 就意味着用户要在两个地方找同一件事。
+    pub fn note_dropped_images(&self, count: usize, reason: &str) {
+        if count == 0 {
+            return;
+        }
+        self.record_image_drop(ImageDrop {
+            count,
+            reason: reason.to_string(),
+        });
+    }
+
     /// 发请求前的图片降级：摘掉之余还要记下来。
     ///
     /// `build_chat_request` 里同样调了 `adapt_images_for_model` —— 那是兜底，保证任何
