@@ -21,6 +21,8 @@ use std::path::Path;
 pub const WORKSPACE_TOOL_PREFIX: &str = "workspace_";
 
 pub const READ_FILE: &str = "workspace_read_file";
+/// 把工作区里的一张图片附到工具结果上给模型看。只读，和 `READ_FILE` 同一条边界。
+pub const READ_IMAGE: &str = "workspace_read_image";
 pub const SEARCH_TEXT: &str = "workspace_search_text";
 pub const LIST_FILES: &str = "workspace_list_files";
 pub const RUN_COMMAND: &str = "workspace_run_command";
@@ -147,7 +149,15 @@ pub struct WorkspaceToolPermissions {
     /// 单独一份而不是塞进 `writes`：文件写入有 `previous` 可以还原，导航没有。混在
     /// 一起会让"撤销"这个词在同一个列表里有两种意思，而其中一种是假的。
     external: AgentExternalLog,
+    /// 本次工具调用产生的、要随工具结果一起发给模型的图片。
+    ///
+    /// 又是一份单独的日志，理由和 `external` 一样：它和写入、和外部动作都不是同一种
+    /// 东西 —— 图片既不需要撤销，也不是"已经发生的副作用"，它只是这次调用的返回值里
+    /// 文本装不下的那部分。执行器在拼 `role: "tool"` 消息时排空它。
+    images: AgentImageLog,
 }
+
+type AgentImageLog = std::sync::Arc<std::sync::Mutex<Vec<crate::services::images::ImagePart>>>;
 
 /// 一次撤不回的外部动作。记录是这里唯一能承诺的东西，所以它必须完整到能复盘。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,6 +223,21 @@ impl WorkspaceToolPermissions {
         }
     }
 
+    /// 取走这次工具调用产生的图片。执行器每次 `invoke` 之后都调一次。
+    pub fn take_images(&self) -> Vec<crate::services::images::ImagePart> {
+        match self.images.lock() {
+            Ok(mut images) => std::mem::take(&mut *images),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn record_image(&self, image: crate::services::images::ImagePart) {
+        if let Ok(mut images) = self.images.lock() {
+            images.push(image);
+        }
+    }
+
+
     /// 浏览器工具是否可用：开关和清单都要有。
     fn allows_browser(&self) -> bool {
         self.allow_browser && !self.browser_origins.is_empty()
@@ -271,6 +296,25 @@ impl WorkspaceToolPermissions {
 
 pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefinition> {
     let mut definitions = vec![
+        ToolDefinition {
+            name: READ_IMAGE.to_string(),
+            description:
+                "Look at an image file in the workspace (png, jpg, gif, webp). Use it when the task \
+                 refers to a mockup, a diagram or a screenshot that is committed to the repo. The \
+                 image is attached to the tool result; if the configured model cannot read images, \
+                 the result says so instead."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path, e.g. docs/mockup.png"
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
         ToolDefinition {
             name: READ_FILE.to_string(),
             description:
@@ -534,7 +578,7 @@ impl WorkspaceToolInvoker {
 impl ToolInvoker for WorkspaceToolInvoker {
     fn handles(&self, tool_name: &str) -> bool {
         match tool_name {
-            READ_FILE | SEARCH_TEXT | LIST_FILES => true,
+            READ_FILE | SEARCH_TEXT | LIST_FILES | READ_IMAGE => true,
             // 未授权时不认领：工具本来也没有被通告出去，认领它只会把一个
             // "不存在的工具"变成一个"总是失败的工具"
             RUN_COMMAND => self.permissions.allows_commands(),
@@ -598,6 +642,10 @@ impl ToolInvoker for WorkspaceToolInvoker {
         }
         let result = match tool_name {
             READ_FILE => read_file_tool(string_arg(&args, "path").ok_or("Missing 'path'")?),
+            READ_IMAGE => read_image_tool(
+                string_arg(&args, "path").ok_or("Missing 'path'")?,
+                &self.permissions,
+            ),
             SEARCH_TEXT => search_text_tool(
                 string_arg(&args, "query").ok_or("Missing 'query'")?,
                 string_arg(&args, "extension"),
@@ -645,6 +693,11 @@ impl ToolInvoker for WorkspaceToolInvoker {
         }
         result
     }
+
+    /// 把 `read_image_tool` 挂上来的图片交给执行器。
+    fn take_images(&self) -> Vec<crate::services::images::ImagePart> {
+        self.permissions.take_images()
+    }
 }
 
 fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -680,6 +733,33 @@ fn read_file_tool(path: &str) -> Result<String, String> {
     Ok(format!(
         "{}\n... [truncated at {} bytes; read a narrower range or search instead]",
         head, MAX_READ_BYTES
+    ))
+}
+
+/// 让模型看工作区里的一张图片。
+///
+/// 这是多模态这条线上的第一个生产者，选它的理由是代价：图片已经在工作区里，走的是和
+/// `workspace_read_file` 同一条解析和拒绝规则（凭据路径照样拒），不需要任何新的 OS 权限，
+/// 也不需要编码器。截屏才需要那些，而多模态真正要先验证的是**线格式和能力降级**。
+///
+/// 文本结果只说清读到了什么：图片本身通过 `record_image` 挂到这次工具结果上，由执行器
+/// 拼进 `role: "tool"` 消息。模型看不了图的时候由 `adapt_images_for_model` 摘掉并说明，
+/// 所以这里不需要判断模型能力 —— 判断在只有一处的地方做。
+fn read_image_tool(
+    path: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    reject_credential_path(path)?;
+    let resolved = workspace::resolve_existing(path)?;
+    let bytes = std::fs::read(&resolved).map_err(|error| format!("Read {}: {}", path, error))?;
+    let image = crate::services::images::image_part_from_bytes(path, &bytes)?;
+    let media_type = image.media_type.clone();
+    permissions.record_image(image);
+    Ok(format!(
+        "Attached {} ({}, {} bytes) to this tool result.",
+        path,
+        media_type,
+        bytes.len()
     ))
 }
 
@@ -1307,6 +1387,17 @@ impl ToolInvoker for CompositeToolInvoker {
         }
         Err(format!("No invoker handles tool {}", tool_name))
     }
+
+    /// 向所有子执行器要图片。
+    ///
+    /// 不记住"上一次是谁处理的"：那是一份会和真相分叉的状态。只有产生了图片的那个
+    /// 子执行器会返回非空，其余返回默认的空 vec。
+    fn take_images(&self) -> Vec<crate::services::images::ImagePart> {
+        self.invokers
+            .iter()
+            .flat_map(|invoker| invoker.take_images())
+            .collect()
+    }
 }
 
 /// 把内置工作区工具接到一次运行上，并与已有的（MCP）执行器合并。
@@ -1791,6 +1882,43 @@ mod tests {
         assert!(names.contains(&BROWSER_OPEN.to_string()));
         assert!(names.contains(&BROWSER_TABS.to_string()));
         assert!(WorkspaceToolInvoker::without_logging(granted).handles(BROWSER_TABS));
+    }
+
+    /// 读图片的工具把图片挂到这次调用上，执行器再取走。
+    ///
+    /// 断言落在"取一次就没了"上：不排空的话，这次的图会跟到下一个工具结果上，模型看到的
+    /// 图和它问的问题就错位了 —— 那种错比没有图更难查。
+    #[test]
+    fn reading_an_image_attaches_it_once() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        // 一个最小的 PNG 头就够了：这一层不解码，只判扩展名和大小
+        std::fs::write(env.root.join("mock.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
+        let permissions = WorkspaceToolPermissions::read_only();
+
+        let text = read_image_tool("mock.png", &permissions).expect("image is attached");
+        assert!(text.contains("image/png"), "{}", text);
+        assert!(text.contains("mock.png"), "{}", text);
+
+        let images = permissions.take_images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].media_type, "image/png");
+        assert!(images[0].data_url().starts_with("data:image/png;base64,"));
+        // 取过一次就空了
+        assert!(permissions.take_images().is_empty());
+    }
+
+    /// 不是图片的文件要在这里就被拒，而不是发出去让 provider 报一个看不懂的错。
+    #[test]
+    fn reading_a_non_image_is_refused_locally() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("notes.txt", "hello");
+        let permissions = WorkspaceToolPermissions::read_only();
+
+        let error = read_image_tool("notes.txt", &permissions).unwrap_err();
+        assert!(error.contains("png, jpg, gif, webp"), "{}", error);
+        assert!(permissions.take_images().is_empty());
     }
 
     /// 桌面观察和浏览器同构：开关 + 非空应用清单，缺一不可，被拒也要留痕。

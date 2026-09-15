@@ -85,7 +85,7 @@ Known limitations:
 
 ## Built-in Workspace Tools
 
-The Agent has three built-in read-only tools — `workspace_read_file`, `workspace_search_text`, `workspace_list_files` — so it can decide what to read instead of relying only on the pre-assembled context bundle. Unlike MCP tools, these are constrained:
+The Agent has four built-in read-only tools — `workspace_read_file`, `workspace_search_text`, `workspace_list_files`, `workspace_read_image` — so it can decide what to read instead of relying only on the pre-assembled context bundle. Unlike MCP tools, these are constrained:
 
 - Every path goes through `resolve_existing`, so reads are confined to the workspace.
 - Credential files are refused outright, matching the context egress rule. Without that they would be a bypass: the model could simply call the read tool to get the `.env` contents the prompt builder withholds.
@@ -93,6 +93,7 @@ The Agent has three built-in read-only tools — `workspace_read_file`, `workspa
 - Output is capped (64 KB per file read, 60 search hits, 200 directory entries).
 - They cannot write, delete, move, or execute anything.
 - Every call is written to the action log as a `workspace_tool_call` entry, so what the Agent read is auditable.
+- `workspace_read_image` adds two limits of its own: the type must be png / jpg / gif / webp (an unknown extension is refused locally rather than guessed) and one image is capped at 4 MiB of raw bytes. The image rides on that one tool result as an OpenAI content block; if the configured model is not a known vision model, `adapt_images_for_model` removes it and says so in the text, because a silently dropped image leaves the model reasoning about a picture that is not there.
 
 They are advertised when the profile's `toolCallMode` is `native_tools`, which is the default for cloud profiles. If the endpoint rejects a `tools` parameter the client drops it, retries once, and writes a `tool_capability_degraded` warning to the action log — so a run without tools is visible rather than silent. The tool loop is bounded at 12 rounds per stage, with the per-run token cap as the real cost limit.
 

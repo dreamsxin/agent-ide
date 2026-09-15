@@ -3,6 +3,7 @@ pub mod browser;
 pub mod computer;
 pub mod context;
 pub mod credentials;
+pub mod images;
 pub mod llm_client;
 pub mod llm_profiles;
 pub mod mcp;
