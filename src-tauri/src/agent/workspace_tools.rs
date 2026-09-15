@@ -155,7 +155,14 @@ pub struct WorkspaceToolPermissions {
     /// 东西 —— 图片既不需要撤销，也不是"已经发生的副作用"，它只是这次调用的返回值里
     /// 文本装不下的那部分。执行器在拼 `role: "tool"` 消息时排空它。
     images: AgentImageLog,
+    /// 这次运行到目前为止已经附上的原始图片字节数。
+    ///
+    /// 单独一个计数器而不是数 `images` 的长度：`images` 每轮都被 `take_images` 排空，
+    /// 拿它做预算等于每轮重新开始，而钱是按整次运行付的。跟着 `Clone` 共享同一个
+    /// `Arc`，每次运行一份新的（授权对象本身就是每次运行新建的）。
+    image_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+
 
 type AgentImageLog = std::sync::Arc<std::sync::Mutex<Vec<crate::services::images::ImagePart>>>;
 
@@ -236,6 +243,23 @@ impl WorkspaceToolPermissions {
             images.push(image);
         }
     }
+
+    /// 这次运行到现在附了多少字节的图。
+    pub fn images_bytes_used(&self) -> usize {
+        self.image_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 记上这一张图的字节数。超预算就拒绝，且**不**记账。
+    ///
+    /// 检查和累加放在一起，是为了不给"先检查后累加"留出两次调用之间的窗口。
+    fn charge_image_bytes(&self, len: usize) -> Result<(), String> {
+        let used = self.images_bytes_used();
+        crate::services::images::check_run_image_budget(used, len)?;
+        self.image_bytes
+            .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
 
 
     /// 浏览器工具是否可用：开关和清单都要有。
@@ -766,8 +790,17 @@ fn read_image_tool(path: &str, permissions: &WorkspaceToolPermissions) -> Result
             crate::services::images::MAX_IMAGE_BYTES
         ));
     }
+    // 预算在**读之前**就问一次：超了的图连读进内存都不必，理由和单张上限用
+    // `metadata` 先量一遍一样。
+    crate::services::images::check_run_image_budget(
+        permissions.images_bytes_used(),
+        size as usize,
+    )?;
     let bytes = std::fs::read(&resolved).map_err(|error| format!("Read {}: {}", path, error))?;
     let image = crate::services::images::image_part_from_bytes(path, &bytes)?;
+    // 记账放在解析成功之后：类型不认或文件是空的那些请求根本没出网，不该占预算。
+    // 检查在读之前也做过一次（见上），所以超预算的图从来不会被整个读进内存。
+    permissions.charge_image_bytes(bytes.len())?;
     let media_type = image.media_type.clone();
     permissions.record_image(image);
     // 文本里写解析后的路径：事后复盘时"哪张图出去了"要对得上磁盘上的文件，
@@ -1924,7 +1957,37 @@ mod tests {
         assert!(images[0].data_url().starts_with("data:image/png;base64,"));
         // 取过一次就空了
         assert!(permissions.take_images().is_empty());
+        // 预算按整次运行累计，所以排空图片不能把账也清掉
+        assert_eq!(permissions.images_bytes_used(), 4);
     }
+
+    /// 一次运行的图片总量要有账，而被拒的读取不能占账。
+    ///
+    /// 单张 4 MiB 的上限管不住重复调用：模型可以一轮一张地读下去，每张都合规。这里
+    /// 断言的是计数器随成功的读取累加、且解析失败（不是图片）不计 —— 不然一串
+    /// `.txt` 就能把合法图片的预算耗光。
+    #[test]
+    fn the_run_image_budget_counts_only_what_was_attached() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        std::fs::write(env.root.join("a.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
+        std::fs::write(env.root.join("b.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D]).unwrap();
+        env.write("notes.txt", "hello");
+        let permissions = WorkspaceToolPermissions::read_only();
+
+        read_image_tool("a.png", &permissions).expect("first image is attached");
+        assert_eq!(permissions.images_bytes_used(), 4);
+        read_image_tool("b.png", &permissions).expect("second image is attached");
+        assert_eq!(permissions.images_bytes_used(), 9);
+
+        read_image_tool("notes.txt", &permissions).unwrap_err();
+        assert_eq!(
+            permissions.images_bytes_used(),
+            9,
+            "a refused read must not spend the run's budget"
+        );
+    }
+
 
     /// 不是图片的文件要在这里就被拒，而不是发出去让 provider 报一个看不懂的错。
     #[test]
