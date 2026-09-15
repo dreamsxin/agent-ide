@@ -377,11 +377,8 @@ pub async fn send_agent_prompt(
     let lease = {
         let mut orch = agent_state.orchestrator.lock().await;
         // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
-        // 覆写它的工具面或记账器会把那次运行改坏
-        let lease = orch.try_begin_run(request.run_id.clone(), side_effect_switch)?;
-        // 撤不回的动作要认领**这一次**运行：id 只在这里是确定的，排空记录时再去读
-        // orchestrator 就可能读到下一次运行的 id
-        tool_permissions.run_id = orch.current_run_id.clone();
+        // 覆写它的工具面或记账器会把那次运行改坏。开关从授权里取，见 `claim_run_for`
+        let lease = claim_run_for(&mut orch, request.run_id.clone(), &mut tool_permissions)?;
         orch.tool_invoker = tool_invoker;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
@@ -522,6 +519,24 @@ fn agent_tool_permissions(
     )
     .with_browser(allow_browser, browser_origins)
     .with_computer(allow_computer, computer_apps)
+}
+
+/// 用这次授权自己带着的副作用开关去抢执行权，并把运行 id 记进授权。
+///
+/// 开关只有一个来源：命令层铸造它、`adopt_cancel` 交给授权，`try_begin_run` 再从
+/// **这一份**取出来。以前这是两行相邻代码、四条命令各抄一遍：一次是给授权、一次是给
+/// 租约，两次传的都可以是不同的 `Arc` 而编译器不会说话 —— 传错的后果是 Stop 之后工具
+/// 照跑。这里只读一次，于是"两边是同一个开关"由结构保证，而不是靠抄对。
+///
+/// run_id 也在这里写：撤不回的动作要认领**这一次**运行，而 id 只有拿到执行权之后才确定。
+fn claim_run_for(
+    orch: &mut crate::agent::orchestrator::AgentOrchestrator,
+    run_id: Option<String>,
+    permissions: &mut crate::agent::workspace_tools::WorkspaceToolPermissions,
+) -> Result<crate::agent::orchestrator::RunLease, String> {
+    let lease = orch.try_begin_run(run_id, permissions.cancel_switch())?;
+    permissions.run_id = orch.current_run_id.clone();
+    Ok(lease)
 }
 
 /// 把撤不回的外部动作登记到 orchestrator，并写进操作日志。
@@ -881,8 +896,7 @@ pub async fn run_agent_step(
         // 单步执行也要抢执行权：它同样改 steps / diffs / 状态机，还会换掉工具面
         // 和记账器。以前这里直接 begin_run，等于绕过守卫从一次流水线运行手里抢走
         // 这些字段。
-        let lease = orch.try_begin_run(request.run_id.clone(), side_effect_switch)?;
-        tool_permissions.run_id = orch.current_run_id.clone();
+        let lease = claim_run_for(&mut orch, request.run_id.clone(), &mut tool_permissions)?;
         orch.tool_policy = tool_policy;
         orch.tool_permissions = tool_permissions.clone();
         orch.start_usage_accounting(usage_meter.clone());
@@ -1041,14 +1055,12 @@ pub async fn continue_agent_pipeline(
         // 续跑按新运行算额度：它有自己的 run id、自己的取消开关、自己的一份用量记账，
         // 图片预算跟着这三样走，而不是跟着"被克隆的那份授权"走
         permissions.reset_image_budget();
-        let lease = orch.try_begin_run(run_id, side_effect_switch.clone())?;
+        let lease = claim_run_for(&mut orch, run_id, &mut permissions)?;
         let paused = orch
             .paused_run
             .take()
             .expect("paused run checked in this critical section");
         let policy = orch.tool_policy;
-        // 续跑是一次新的运行：记录要认领续跑这次的 id，而不是暂停前那次的
-        permissions.run_id = orch.current_run_id.clone();
         orch.emit_review_action_log(
             &app_handle,
             "info",
@@ -1081,6 +1093,10 @@ pub async fn continue_agent_pipeline(
     let usage_meter = {
         let mut orch = agent_state.orchestrator.lock().await;
         orch.tool_invoker = tool_invoker;
+        // 授权也写回去，和另外三条路径一致：`repair_workspace` 是从这个字段克隆出它的
+        // 工具面的，不写回就意味着"暂停 → 续跑 → 修复"里的修复用的是暂停**之前**那份
+        // 授权（旧 run id、旧开关）。
+        orch.tool_permissions = tool_permissions.clone();
         // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
         // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
         let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
@@ -1426,8 +1442,7 @@ pub async fn repair_workspace(
         // 修复是一次新运行（新 id、新开关），图片额度也要从零算起：带着上一个 prompt
         // 花掉的额度出生，会让第一次读图就被一句假话拒掉
         repair_permissions.reset_image_budget();
-        let lease = orch.try_begin_run(last_run_id, side_effect_switch.clone())?;
-        repair_permissions.run_id = orch.current_run_id.clone();
+        let lease = claim_run_for(&mut orch, last_run_id, &mut repair_permissions)?;
         let tool_policy = orch.tool_policy;
         let original_prompt = resolve_original_prompt(
             request.original_prompt,
@@ -1749,6 +1764,37 @@ mod tests {
             model_type: crate::services::llm_client::ModelType::OpenAI,
             local_model_config: None,
         })
+    }
+
+    /// 授权和租约必须拿着**同一个**副作用开关。
+    ///
+    /// 以前这是两行相邻的代码、四条命令各抄一遍：一行交给授权，一行交给租约，两处传的
+    /// 完全可以是不同的 `Arc` 而编译器不会说一个字。传错的后果是 Stop 之后工具照跑，
+    /// 而 ROADMAP 60 正是把"没有东西检查这条接线"记为未覆盖。
+    #[test]
+    fn the_lease_and_the_permissions_share_one_cancel_switch() {
+        let switch = Arc::new(AtomicBool::new(false));
+        let mut permissions =
+            crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
+        permissions.adopt_cancel(switch.clone());
+        let mut orch = AgentOrchestrator::new();
+
+        let lease = claim_run_for(&mut orch, Some("run-9".to_string()), &mut permissions)
+            .expect("a fresh orchestrator hands out the lease");
+
+        assert!(
+            Arc::ptr_eq(&lease.cancel, &switch),
+            "the lease must carry the switch the tool surface already holds"
+        );
+        // 记录要认领这一次运行，而不是上一次
+        assert!(permissions.run_id.is_some());
+        assert_eq!(permissions.run_id, orch.current_run_id);
+
+        // Stop 拉的是租约那一份，工具那一侧必须立刻看见
+        lease
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(permissions.cancelled());
     }
 
     /// 被 Stop 拦下的浏览器调用要进记录，但**不能**被算成"已经发生"。

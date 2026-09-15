@@ -1247,6 +1247,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Corrected in 75 in place: "12 MB" (the constant is 12 MiB = 12.58 MB), and the claim that the request envelope is enforced — it is a rationale for the number, nothing measures the serialized body.
    - Rust 358 → 360.
 
+77. **The side-effect gate now has one source instead of two hand-copied ones (2026-09-15)**
+   - Open since 60, restated by the audits of 71 and 72: the finish side of a run became testable, the *start* side did not. The switch was handed out twice — once to `WorkspaceToolPermissions::adopt_cancel`, once to `orch.try_begin_run` — as two adjacent lines copied into four commands. Nothing checked that the two were the same `Arc`, and the compiler cannot: a mismatch type-checks, and the consequence is Stop leaving tool calls running while the UI says idle.
+   - **`claim_run_for(orch, run_id, permissions)` reads the switch back out of the permissions** rather than taking it as a second parameter. One read, so divergence is structurally impossible; the mint and `adopt_cancel` stay where each command needs them (before the tool surface is cloned from the permissions). It also absorbs `permissions.run_id = orch.current_run_id.clone()`, the other line all four had copied, so the id is claimed in the one place it becomes known.
+   - **Pinned by `Arc::ptr_eq`, plus the behaviour that matters**: setting the lease's flag must make `permissions.cancelled()` true. Asserting pointer identity alone would pass on two clones of one flag *and* on two flags that happen to be equal, so the test does both.
+   - The four commands still differ in shape (two build the surface before the lease, two after; two derive permissions from the request, two clone the previous run's). Unifying that is the `build_run_surface` refactor the audit sketched — deliberately not done here: it touches the most sensitive path in the app, and this cycle's point was to make the *invariant* checkable, not to restructure four command bodies at once.
+   - **One inconsistency fixed on the way**: `continue_agent_pipeline` was the only path that never wrote its permissions back to `orch.tool_permissions`, so a *pause → continue → repair* sequence built the repair surface from the pre-pause authority (old run id, old switch). It writes back like the other three now.
+   - Rust 360 → 361.
+
+
 
 
 
