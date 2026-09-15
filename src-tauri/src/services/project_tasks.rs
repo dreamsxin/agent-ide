@@ -54,9 +54,54 @@ pub async fn run_project_task(
     run_project_command(request.command, root).await
 }
 
+/// 尽力杀掉整棵进程树。
+///
+/// `child.kill()` 只杀我们启的那个 shell。Windows 上 `cmd /C npm test` 的真正工作在
+/// 孙子进程里（npm → node），杀掉 cmd 之后它们继续跑、继续占管道 —— 用户点了 Stop，
+/// 测试还在跑。所以 Windows 上走 `taskkill /T /F`，把整棵树带走。
+///
+/// Unix 上 `sh -lc "cmd"` 通常会 exec 成那条命令本身，所以 `kill()` 就是杀它；真正需要
+/// 进程组的情况（命令自己再 fork）留给 ROADMAP 61，那需要 `setsid`。
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 pub async fn run_project_command(
     command: String,
     root: PathBuf,
+) -> Result<RunProjectTaskResult, String> {
+    // 用户从终端面板发起的命令没有"运行取消开关"，给一个永远为 false 的
+    run_project_command_cancellable(
+        command,
+        root,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .await
+}
+
+/// 可被取消的命令执行：取消时**杀掉子进程**，而不是等它自己跑完。
+///
+/// 之前这里是 `Command::output()`，它一直阻塞到进程退出。于是 Stop 之后一次
+/// `npm test` 照旧跑到底：界面显示空闲，CPU 还在转，写出来的文件还在落盘。取消一个
+/// 已经在跑的命令只能靠杀进程，没有别的办法。
+///
+/// 诚实的限制：`kill()` 杀的是我们启的那个 shell（Windows 上是 `cmd`）。它的孙子进程
+/// （`npm` 拉起的 `node`）不一定跟着死 —— 要做到那一步需要 job object / 进程组，
+/// 记在 ROADMAP 61 里。
+pub async fn run_project_command_cancellable(
+    command: String,
+    root: PathBuf,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<RunProjectTaskResult, String> {
     let command = command.trim().to_string();
     if command.is_empty() {
@@ -64,22 +109,74 @@ pub async fn run_project_command(
     }
 
     tokio::task::spawn_blocking(move || {
+        use std::io::Read;
         let start = Instant::now();
-        let output = if cfg!(windows) {
+        let mut child = if cfg!(windows) {
             Command::new("cmd")
                 .args(["/C", &command])
                 .current_dir(&root)
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
         } else {
             Command::new("sh")
                 .args(["-lc", &command])
                 .current_dir(&root)
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
         }
         .map_err(|e| format!("Run task command: {}", e))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // 两根管道都必须在**另外的线程**里读空：管道缓冲区满了子进程就阻塞在写上，
+        // 而我们在等它退出 —— 那是互等。`output()` 帮我们做过这件事，改成 `spawn()`
+        // 之后就得自己做。
+        let mut out_pipe = child.stdout.take();
+        let mut err_pipe = child.stderr.take();
+        let out_reader = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            if let Some(pipe) = out_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut buffer);
+            }
+            buffer
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            if let Some(pipe) = err_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut buffer);
+            }
+            buffer
+        });
+
+        let mut killed = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {}
+                Err(error) => return Err(format!("Wait for task command: {}", error)),
+            }
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                kill_process_tree(&mut child);
+                killed = true;
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+
+        if killed {
+            // 不 join 读取线程：管道还被孙子进程握着的时候 `read_to_end` 会一直阻塞，
+            // 那就等于我们杀了进程还是要等它跑完 —— 这条路径上的 29 秒就是这么来的。
+            // 线程会在管道关闭时自己结束；这里只欠一个缓冲区，不欠正确性。
+            //
+            // 报成错误而不是"退出码未知"的成功：这次检查没有结论，把它当结果会让修复
+            // 循环以为检查通过了。
+            return Err(format!(
+                "Stopped: {:?} was killed because the run was cancelled.",
+                command
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).to_string();
+        let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).to_string();
         let combined = [stdout.as_str(), stderr.as_str()]
             .into_iter()
             .filter(|value| !value.is_empty())
@@ -89,7 +186,7 @@ pub async fn run_project_command(
 
         Ok(RunProjectTaskResult {
             command,
-            exit_code: output.status.code(),
+            exit_code: status.and_then(|status| status.code()),
             duration_ms: start.elapsed().as_millis(),
             stdout,
             stderr,
@@ -210,6 +307,44 @@ fn score_package_script(name: &str) -> usize {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    /// 取消要杀掉子进程，而不是等它跑完。
+    ///
+    /// 断言落在"没有等它自己结束"这个性质上，而不是具体耗时：命令用的是一个会跑
+    /// 半分钟的命令，如果实现退回成 `output()`，这条测试会因为超时而暴露出来。
+    #[test]
+    fn a_cancelled_command_is_killed_instead_of_waited_out() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        // 两个平台上都跑约 30 秒
+        let command = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let started = Instant::now();
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_project_command_cancellable(
+                command.to_string(),
+                std::env::temp_dir(),
+                cancel,
+            ))
+            .unwrap_err();
+
+        assert!(error.contains("Stopped"), "{}", error);
+        // 被杀掉的命令没有结论，所以是错误而不是"退出码未知"的成功结果
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     struct TestEnv {
         root: PathBuf,
