@@ -1466,7 +1466,6 @@ async fn execute_steps(
         eprintln!("warning: {}\n{}", summary, details);
     }
 
-
     Ok(results
         .into_iter()
         .flat_map(|result| result.diffs)

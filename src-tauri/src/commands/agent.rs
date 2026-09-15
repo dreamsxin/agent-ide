@@ -1758,12 +1758,9 @@ mod tests {
     /// performed，于是一次被拦下的导航会在唯一可信的那块地方被写成"已经做了，撤不回"。
     #[test]
     fn a_stopped_browser_call_is_recorded_but_not_counted_as_performed() {
-        let mut permissions = crate::agent::workspace_tools::WorkspaceToolPermissions::new(
-            Vec::new(),
-            false,
-            false,
-        )
-        .with_browser(true, vec!["https://example.com".to_string()]);
+        let mut permissions =
+            crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false)
+                .with_browser(true, vec!["https://example.com".to_string()]);
         permissions.adopt_cancel(Arc::new(AtomicBool::new(true)));
 
         let invoker = crate::agent::workspace_tools::WorkspaceToolInvoker::new(
@@ -1841,7 +1838,14 @@ mod tests {
             .try_begin_run(Some("run-1".to_string()), Arc::new(AtomicBool::new(false)))
             .expect("a fresh orchestrator hands out the lease");
         let events = RecordingEvents::new();
-        finish_agent_run(&mut orch, &events, &permissions, &meter, &dropped, lease.claim);
+        finish_agent_run(
+            &mut orch,
+            &events,
+            &permissions,
+            &meter,
+            &dropped,
+            lease.claim,
+        );
         let phases = action_log_summaries(&events)
             .into_iter()
             .map(|(_, phase, summary)| (phase, summary))
@@ -1861,7 +1865,9 @@ mod tests {
         let clean = mock_llm("gpt-4o", "mock://images");
         let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
         let sent = runtime.block_on(clean.stream_chat_with_tools(
-            vec![crate::services::llm_client::ChatMessage::user("no picture here")],
+            vec![crate::services::llm_client::ChatMessage::user(
+                "no picture here",
+            )],
             Arc::new(AtomicBool::new(false)),
             tx,
         ));
@@ -1871,7 +1877,14 @@ mod tests {
             .try_begin_run(Some("run-2".to_string()), Arc::new(AtomicBool::new(false)))
             .expect("a fresh orchestrator hands out the lease");
         let events = RecordingEvents::new();
-        finish_agent_run(&mut orch, &events, &permissions, &meter, &clean, lease.claim);
+        finish_agent_run(
+            &mut orch,
+            &events,
+            &permissions,
+            &meter,
+            &clean,
+            lease.claim,
+        );
         assert!(
             !action_log_summaries(&events)
                 .iter()
@@ -1960,7 +1973,10 @@ mod tests {
             ],
             true,
         );
-        assert_eq!(allowed, vec!["npm test".to_string(), "cargo build".to_string()]);
+        assert_eq!(
+            allowed,
+            vec!["npm test".to_string(), "cargo build".to_string()]
+        );
     }
 
     /// 三个 bool 全靠位置传，换一下顺序照样编译得过。这条把它们各自落到哪个字段
@@ -2372,10 +2388,7 @@ pub async fn test_llm_connection(
         full
     });
 
-    match llm
-        .stream_chat(messages, cancel_flag, tx)
-        .await
-    {
+    match llm.stream_chat(messages, cancel_flag, tx).await {
         Ok(response) => {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let full = handle.await.unwrap_or(response);

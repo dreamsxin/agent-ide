@@ -41,7 +41,6 @@ pub enum AgentMode {
     Auto,
 }
 
-
 /// IDE work mode. This is separate from the Agent's suggest/auto permission mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdeMode {

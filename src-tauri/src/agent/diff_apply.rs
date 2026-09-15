@@ -315,8 +315,7 @@ fn restore_move(snapshot: &FileSnapshot, target: &PathBuf) -> Result<(), String>
         ));
     }
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("{}: {}", snapshot.file, error))?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("{}: {}", snapshot.file, error))?;
     }
     match std::fs::rename(&snapshot.path, target) {
         Ok(()) => {}

@@ -54,9 +54,12 @@ pub fn normalize_target_url(raw: &str) -> Result<String, String> {
         return Err("URL contains control characters.".to_string());
     }
 
-    let (scheme, rest) = trimmed
-        .split_once("://")
-        .ok_or_else(|| format!("Only http:// and https:// URLs are allowed, got: {}", trimmed))?;
+    let (scheme, rest) = trimmed.split_once("://").ok_or_else(|| {
+        format!(
+            "Only http:// and https:// URLs are allowed, got: {}",
+            trimmed
+        )
+    })?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "http" && scheme != "https" {
         return Err(format!(
@@ -126,8 +129,8 @@ pub fn close_endpoint(port: u16, target_id: &str) -> String {
 /// 把它们当成"标签页"报给用户，他会在自己的浏览器里找不到对应的东西。
 /// 也过滤 `devtools://`：那是 DevTools 自己的窗口。
 pub fn parse_page_targets(body: &str) -> Result<Vec<BrowserTab>, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|error| format!("Unexpected CDP response: {}", error))?;
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("Unexpected CDP response: {}", error))?;
     let array = value
         .as_array()
         .ok_or_else(|| "CDP /json/list did not return a list.".to_string())?;
@@ -248,7 +251,10 @@ pub async fn open_url(port: u16, raw_url: &str) -> Result<BrowserTab, String> {
         .await
         .map_err(|error| format!("Read CDP response: {}", error))?;
     if !status.is_success() {
-        return Err(format!("Chrome refused to open the tab ({}): {}", status, body));
+        return Err(format!(
+            "Chrome refused to open the tab ({}): {}",
+            status, body
+        ));
     }
 
     let value: serde_json::Value = serde_json::from_str(&body)
@@ -386,6 +392,9 @@ mod tests {
             "https://a.example.com",
             &["https://example.com".to_string()]
         ));
-        assert!(origin_allowed("https://anything.example", &["*".to_string()]));
+        assert!(origin_allowed(
+            "https://anything.example",
+            &["*".to_string()]
+        ));
     }
 }

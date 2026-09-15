@@ -84,8 +84,10 @@ impl McpToolInvoker {
             context_summary: None,
             diff_summary: None,
         };
-        self.events
-            .emit_json("agent-action-log", serde_json::to_value(entry).unwrap_or_default());
+        self.events.emit_json(
+            "agent-action-log",
+            serde_json::to_value(entry).unwrap_or_default(),
+        );
     }
 }
 
@@ -103,7 +105,11 @@ impl ToolInvoker for McpToolInvoker {
                 "This run was stopped, so MCP tool {} was not called.",
                 tool_name
             );
-            self.log("warn", &format!("Refused {} after Stop", tool_name), &detail);
+            self.log(
+                "warn",
+                &format!("Refused {} after Stop", tool_name),
+                &detail,
+            );
             return Err(detail);
         }
         self.log(

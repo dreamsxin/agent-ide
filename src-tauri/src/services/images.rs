@@ -57,27 +57,31 @@ pub fn check_run_image_budget(used: usize, requested: usize) -> Result<(), Strin
 /// base64 之后约 22 MB —— 运行预算放得过，这个请求照样会以一条和图片无关的 413 结束。
 pub const MAX_REQUEST_IMAGE_BASE64_BYTES: usize = 12 * 1024 * 1024;
 
-/// 按顺序保留这一轮里装得下的图片，返回 (保留下来的, 丢掉的张数)。
+/// 按顺序保留这一轮里装得下的图片，返回 (保留下来的, 装不下的)。
 ///
-/// 从**尾部**截断而不是挑着丢：模型收到的那句话是"上面这些工具调用附了 N 张图"，它靠
+/// 从**尾部**截断而不是挑着丢：模型收到的那句话是"上面这些工具调用附了前 N 张图"，它靠
 /// 顺序把图和调用对上。跳过中间一张再保留后面的，会让每张图都对错位置，比少几张更糟。
-pub fn fit_images_in_request(images: Vec<ImagePart>) -> (Vec<ImagePart>, usize) {
-    let total = images.len();
+///
+/// 装不下的那些**原样交回去**，不是只报个数：它们已经从磁盘读出来、已经花掉了运行预算，
+/// 让模型"回头再读一遍"等于让它撞第二次预算 —— 而那次拒绝给出的建议它做不到。
+pub fn fit_images_in_request(images: Vec<ImagePart>) -> (Vec<ImagePart>, Vec<ImagePart>) {
     let mut kept: Vec<ImagePart> = Vec::new();
+    let mut deferred: Vec<ImagePart> = Vec::new();
     let mut used = 0usize;
     for image in images {
         let cost = image.base64_data.len();
         // 第一张无条件留下：单张已经被 4 MiB 卡过一遍，留一张也比"一张都没有"有用
-        if !kept.is_empty() && used.saturating_add(cost) > MAX_REQUEST_IMAGE_BASE64_BYTES {
-            break;
+        let fits = kept.is_empty() || used.saturating_add(cost) <= MAX_REQUEST_IMAGE_BASE64_BYTES;
+        if fits && deferred.is_empty() {
+            used = used.saturating_add(cost);
+            kept.push(image);
+        } else {
+            // 一旦开始推迟就不再往前挑：顺序是模型把图对上调用的唯一线索
+            deferred.push(image);
         }
-        used = used.saturating_add(cost);
-        kept.push(image);
     }
-    let dropped = total - kept.len();
-    (kept, dropped)
+    (kept, deferred)
 }
-
 
 /// 带上限参数的版本，测试用它把边界做成可达的。
 ///
@@ -96,8 +100,6 @@ pub fn check_run_image_budget_with_limit(
         used, requested, limit
     ))
 }
-
-
 
 /// 从扩展名判断 MIME 类型。
 ///
@@ -249,9 +251,12 @@ mod tests {
         assert!(error.contains("100 bytes"), "{}", error);
         assert!(error.contains("4096 more"), "{}", error);
         assert!(error.contains("1000 byte per-run limit"), "{}", error);
-        assert!(error.contains("Attach fewer or smaller images"), "{}", error);
+        assert!(
+            error.contains("Attach fewer or smaller images"),
+            "{}",
+            error
+        );
     }
-
 
     /// 溢出不能变成"放行"。`used + requested` 用饱和加法，否则一个荒谬的大小
     /// 会绕过预算 —— 上游确实拿不到不可信的 `usize`，但这条断言比推理便宜。
@@ -267,36 +272,40 @@ mod tests {
         }
     }
 
-    /// 一轮里读了太多图时，从尾部截断，并把丢掉的张数交出去。
+    /// 一轮里读了太多图时，从尾部截断，装不下的原样交回去。
     ///
     /// 顺序是断言的重点：模型靠顺序把图对上工具调用，所以保留的必须是前几张，而不是
     /// "挑装得下的"。第一张无条件保留，否则一次合法的读图会得到一条没有图的消息。
     #[test]
-    fn images_that_do_not_fit_one_request_are_dropped_from_the_tail() {
-        let half = MAX_REQUEST_IMAGE_BASE64_BYTES / 2 + 1;
-        let (kept, dropped) = fit_images_in_request(vec![
-            image_of(half),
-            image_of(half),
-            image_of(8),
-        ]);
-        assert_eq!(kept.len(), 1, "the second one already passes the limit");
-        assert_eq!(dropped, 2);
-        assert_eq!(kept[0].base64_data.len(), half);
+    fn images_that_do_not_fit_one_request_are_deferred_from_the_tail() {
+        let half = MAX_REQUEST_IMAGE_BASE64_BYTES / 2;
+        let (kept, deferred) =
+            fit_images_in_request(vec![image_of(half), image_of(half), image_of(8)]);
+        // 边界要能用满：两个正好等于上限的必须都留下
+        assert_eq!(kept.len(), 2, "exactly at the limit still fits");
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].base64_data.len(), 8);
+
+        // 多一个字节就装不下第二张
+        let (kept, deferred) =
+            fit_images_in_request(vec![image_of(half + 1), image_of(half), image_of(8)]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(deferred.len(), 2);
+        // 推迟之后不再往前挑小的：顺序不能乱
+        assert_eq!(deferred[0].base64_data.len(), half);
+        assert_eq!(deferred[1].base64_data.len(), 8);
 
         // 装得下的一批不动
-        let (kept, dropped) = fit_images_in_request(vec![image_of(8), image_of(8)]);
+        let (kept, deferred) = fit_images_in_request(vec![image_of(8), image_of(8)]);
         assert_eq!(kept.len(), 2);
-        assert_eq!(dropped, 0);
+        assert!(deferred.is_empty());
 
         // 单张超限也留着：单张上限已经卡过一遍，这里再丢就等于白读了一次
-        let (kept, dropped) = fit_images_in_request(vec![image_of(
-            MAX_REQUEST_IMAGE_BASE64_BYTES + 1,
-        )]);
+        let (kept, deferred) =
+            fit_images_in_request(vec![image_of(MAX_REQUEST_IMAGE_BASE64_BYTES + 1)]);
         assert_eq!(kept.len(), 1);
-        assert_eq!(dropped, 0);
+        assert!(deferred.is_empty());
 
-        assert_eq!(fit_images_in_request(Vec::new()).1, 0);
+        assert!(fit_images_in_request(Vec::new()).0.is_empty());
     }
 }
-
-

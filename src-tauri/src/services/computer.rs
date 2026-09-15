@@ -36,11 +36,7 @@ pub struct DesktopWindow {
 /// "看起来配了但从不命中" —— 比空白名单更糟，因为它让人以为已经授权了。
 pub fn normalize_app_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"');
-    let file = trimmed
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let file = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed).trim();
     let stem = file.strip_suffix(".exe").unwrap_or(file);
     stem.to_lowercase()
 }
@@ -251,10 +247,7 @@ mod platform {
         let full = std::ffi::OsString::from_wide(&buffer[..size as usize])
             .to_string_lossy()
             .into_owned();
-        full.rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(&full)
-            .to_string()
+        full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string()
     }
 }
 
