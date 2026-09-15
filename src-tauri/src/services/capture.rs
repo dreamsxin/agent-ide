@@ -35,7 +35,12 @@ pub fn matches_target(
     title_contains: Option<&str>,
 ) -> bool {
     if let Some(app) = app_filter {
-        if crate::services::computer::normalize_app_name(app) != window.app {
+        // 两边都要归一化。枚举给出的是 `chrome.exe`（带扩展名、大小写照抄系统），
+        // 只归一化模型给的那一侧，`chrome` 和 `chrome.exe` 都对不上 —— 这个筛选条件
+        // 就成了一个永远不命中的死控件，而且失败方向是"拒绝"，不会有人报错。
+        if crate::services::computer::normalize_app_name(app)
+            != crate::services::computer::normalize_app_name(&window.app)
+        {
             return false;
         }
     }
@@ -153,7 +158,7 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
 mod platform {
     use super::{check_capture_pixels, encode_png, select_capture_target, WindowCapture};
     use crate::services::computer::DesktopWindow;
-    use windows_sys::Win32::Foundation::{HWND, TRUE};
+    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Graphics::Gdi::{
         CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetWindowDC,
         ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC,
@@ -250,6 +255,10 @@ mod platform {
                 }],
             };
             let mut buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+            // 读之前先把位图从 DC 里取出来：`GetDIBits` 的契约要求 `hbmp` 不处于选中状态。
+            // 现在的 GDI 实现容忍这一点，但契约就是契约，而"某台机器上截图全黑"是一种
+            // 只有那台机器的用户会遇到、且没法从日志里看出来的坏法。
+            SelectObject(memory_dc, previous);
             let rows = GetDIBits(
                 memory_dc,
                 bitmap,
@@ -260,18 +269,22 @@ mod platform {
                 DIB_RGB_COLORS,
             );
 
-            SelectObject(memory_dc, previous);
             DeleteObject(bitmap as _);
             DeleteDC(memory_dc);
             ReleaseDC(hwnd, window_dc);
 
-            if printed != TRUE {
+            if printed == 0 {
                 return Err(
                     "PrintWindow refused to render that window (it may be protected).".to_string(),
                 );
             }
-            if rows == 0 {
-                return Err("GetDIBits returned no scan lines.".to_string());
+            // 少抄了几行也要报错。缓冲区是零初始化的，所以不会泄露别的内存，但没抄到的
+            // 部分会被下面那圈 alpha 补成**不透明的黑**，模型会把它当成真实内容读。
+            if rows != height as i32 {
+                return Err(format!(
+                    "GetDIBits copied {} of {} scan lines, so the capture would be partly blank.",
+                    rows, height
+                ));
             }
             // GDI 给的是 BGRA，PNG 要 RGBA；同时把 alpha 拍成不透明 —— `PrintWindow`
             // 对很多窗口不写 alpha，照抄会得到一张全透明的图。
@@ -303,6 +316,9 @@ pub use platform::capture_window;
 mod tests {
     use super::*;
 
+    /// 枚举给出的 app 名字是**带扩展名**的（`chrome.exe`），大小写照抄系统。测试里的
+    /// 假窗口必须长这样 —— 上一版写成 `chrome`，于是"筛选条件永远不命中"这个缺陷被
+    /// 一个不可能出现的值盖住了。
     fn window(title: &str, app: &str) -> DesktopWindow {
         DesktopWindow {
             title: title.to_string(),
@@ -315,7 +331,7 @@ mod tests {
     /// 没有筛选条件时不截图：多窗口桌面上"随便截一个"就是抽奖，而抽错是不可撤回的披露。
     #[test]
     fn capturing_without_a_filter_is_refused() {
-        let windows = [window("Inbox", "chrome")];
+        let windows = [window("Inbox", "chrome.exe")];
         let error =
             select_capture_target(&windows, None, None, &["*".to_string()]).expect_err("refused");
         assert!(error.contains("Name the window"), "{}", error);
@@ -326,7 +342,7 @@ mod tests {
     /// 白名单之外的窗口连"存在"都不该暴露：错误话术只说白名单里有几个。
     #[test]
     fn a_window_outside_the_allow_list_is_not_capturable_or_named() {
-        let windows = [window("Signal — Alice", "signal")];
+        let windows = [window("Signal — Alice", "signal.exe")];
         let error = select_capture_target(&windows, Some("signal"), None, &["chrome".to_string()])
             .expect_err("refused");
         assert!(error.contains("No capturable window matched"), "{}", error);
@@ -338,8 +354,8 @@ mod tests {
     #[test]
     fn an_ambiguous_match_captures_nothing_and_lists_the_candidates() {
         let windows = [
-            window("Docs — pricing", "chrome"),
-            window("Docs — roadmap", "chrome"),
+            window("Docs — pricing", "chrome.exe"),
+            window("Docs — roadmap", "chrome.exe"),
         ];
         let error =
             select_capture_target(&windows, Some("chrome"), Some("docs"), &["*".to_string()])
@@ -353,17 +369,33 @@ mod tests {
         assert_eq!(one.title, "Docs — pricing");
     }
 
-    /// 应用名比较和窗口枚举用同一套规则（去路径、去扩展名、大小写不敏感）。
+    /// `app` 这个筛选条件必须真的能命中枚举出来的窗口。
+    ///
+    /// 这条是本轮审计逼出来的：`matches_target` 原来只归一化模型给的那一侧，拿它去比
+    /// 系统给的 `chrome.exe`，于是 `chrome`、`chrome.exe`、整条路径**全都不命中** ——
+    /// 一个通告给模型、却永远返回"没找到"的死参数。三种写法都要过。
     #[test]
-    fn the_app_filter_is_compared_the_way_the_enumeration_normalizes() {
-        let windows = [window("Inbox", "chrome")];
-        assert!(matches_target(&windows[0], Some("C:\\x\\Chrome.EXE"), None));
+    fn the_app_filter_matches_the_names_the_enumeration_actually_produces() {
+        let windows = [window("Inbox", "chrome.exe")];
+        for spelling in ["chrome", "chrome.exe", "Chrome.EXE", "C:\\x\\chrome.exe"] {
+            assert!(
+                matches_target(&windows[0], Some(spelling), None),
+                "spelling {} should match chrome.exe",
+                spelling
+            );
+        }
         assert!(!matches_target(&windows[0], Some("firefox"), None));
+
+        // 而且要能一路走到选中：只测 `matches_target` 会漏掉白名单那一步
+        let picked =
+            select_capture_target(&windows, Some("chrome.exe"), None, &["chrome".to_string()])
+                .expect("the allow list spelling and the filter spelling both normalize");
+        assert_eq!(picked.app, "chrome.exe");
     }
 
-    /// 像素上限在编码之前就拦：不然一张 8000 万像素的位图会先整个进内存。
+    /// 像素上限本身的边界。它在拷贝之前被调用（见 `capture_window`），这条只钉数值。
     #[test]
-    fn the_pixel_limit_is_checked_before_anything_is_copied() {
+    fn the_pixel_limit_refuses_more_than_it_allows() {
         assert!(check_capture_pixels(2560, 1440).is_ok());
         assert!(check_capture_pixels(0, 1080).is_err());
         let error = check_capture_pixels(7680, 4320).expect_err("too many pixels");

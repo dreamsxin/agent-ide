@@ -1547,6 +1547,19 @@ fn computer_capture_tool(
         });
         return Err(detail);
     }
+    // 顺序和 `read_image_tool` 一致：先解析、再记账。解析失败就还没花额度 —— 反过来
+    // 会让一次失败的截图吃掉别的图的预算，而这一条要么两处都对，要么就是两套规则。
+    let image = match crate::services::images::image_part_from_bytes("capture.png", &capture.png) {
+        Ok(image) => image,
+        Err(error) => {
+            permissions.record_external(AgentExternalAction {
+                kind: "computer_capture_failed".to_string(),
+                target: "desktop".to_string(),
+                detail: error.clone(),
+            });
+            return Err(error);
+        }
+    };
     if let Err(error) = permissions.charge_image_bytes(bytes) {
         permissions.record_external(AgentExternalAction {
             kind: "computer_capture_failed".to_string(),
@@ -1556,7 +1569,6 @@ fn computer_capture_tool(
         return Err(error);
     }
 
-    let image = crate::services::images::image_part_from_bytes("capture.png", &capture.png)?;
     permissions.record_image(image);
     permissions.record_external(AgentExternalAction {
         kind: "computer_capture".to_string(),
@@ -2255,6 +2267,64 @@ mod tests {
         } else {
             // 没有实现的平台上不通告：一个必然失败的工具会被模型反复调用，
             // 而它的失败看起来像"桌面上没有窗口"
+            assert!(advertised.is_none());
+        }
+    }
+
+    /// 截图是**独立**的一档授权：观察的开关和清单不能替它开门，反之也不行。
+    ///
+    /// 这条钉的是本产品最重的一次披露 —— 窗口内容。没有它的话，把 `allows_capture()`
+    /// 改成读 `computer_apps`、或者把 `handles()` 那一行写成 `allows_computer()`，
+    /// 整个测试套都会保持绿色。
+    #[test]
+    fn window_capture_is_gated_separately_from_desktop_observation() {
+        // 只给观察：截图既不通告也不受理
+        let observation_only = WorkspaceToolPermissions::new(Vec::new(), false, false)
+            .with_computer(true, vec!["Code.exe".to_string()]);
+        let names: Vec<String> = tool_definitions(&observation_only)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(
+            !names.contains(&COMPUTER_CAPTURE.to_string()),
+            "observation must not advertise capture: {:?}",
+            names
+        );
+        assert!(
+            !WorkspaceToolInvoker::without_logging(observation_only.clone())
+                .handles(COMPUTER_CAPTURE)
+        );
+        assert!(computer_capture_tool(Some("Code.exe"), None, &observation_only).is_err());
+        let refusals = observation_only.take_external_actions();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].kind, "computer_capture_refused");
+        // 被拒的记录不能带上它想截哪个窗口：那句话本身就是一次未授权的披露
+        assert_eq!(refusals[0].target, "desktop");
+
+        // 开关有了但清单是空的，同样不放行 —— 空清单不等于"没配置所以随便"
+        let switch_only =
+            WorkspaceToolPermissions::new(Vec::new(), false, false).with_capture(true, Vec::new());
+        assert!(!WorkspaceToolInvoker::without_logging(switch_only).handles(COMPUTER_CAPTURE));
+
+        // 只给截图：窗口枚举不跟着开
+        let capture_only = WorkspaceToolPermissions::new(Vec::new(), false, false)
+            .with_capture(true, vec!["Code.exe".to_string()]);
+        let invoker = WorkspaceToolInvoker::without_logging(capture_only.clone());
+        assert!(!invoker.handles(COMPUTER_WINDOWS));
+        assert_eq!(invoker.handles(COMPUTER_CAPTURE), cfg!(windows));
+        let advertised = tool_definitions(&capture_only)
+            .into_iter()
+            .find(|definition| definition.name == COMPUTER_CAPTURE);
+        if cfg!(windows) {
+            let description = advertised.expect("advertised on Windows").description;
+            // 范围要写出来，而且要说清这是撤不回的
+            assert!(description.contains("Code.exe"), "{}", description);
+            assert!(
+                description.contains("cannot be taken back"),
+                "{}",
+                description
+            );
+        } else {
             assert!(advertised.is_none());
         }
     }
