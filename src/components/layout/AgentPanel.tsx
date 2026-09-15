@@ -13,6 +13,8 @@ import PanelLoading from "../shared/PanelLoading";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore, type AgentViewId } from "../../stores/useLayoutStore";
 import { summarizeAgentRun } from "../../utils/agentExperience";
+import { summarizeExternalActions } from "../../utils/externalActions";
+import { changesBadge } from "./agentTabBadges";
 
 const AgentSelector = lazy(() => import("../agent/AgentSelector"));
 const DiffView = lazy(() => import("../agent/DiffView"));
@@ -38,11 +40,16 @@ export default function AgentPanel() {
   const setActiveView = useLayoutStore((store) => store.setAgentView);
   const steps = useAgentStore((store) => store.steps);
   const diffs = useAgentStore((store) => store.diffs);
+  const externalActions = useAgentStore((store) => store.externalActions);
   const summary = summarizeAgentRun(steps, diffs);
+  const externalSummary = summarizeExternalActions(externalActions);
+  const changes = changesBadge(summary.pendingChanges, externalSummary.performed);
 
   const badgeFor = (view: PrimaryViewId) => {
-    if (view === "plan" && summary.totalSteps > 0) return summary.totalSteps;
-    if (view === "changes" && summary.pendingChanges > 0) return summary.pendingChanges;
+    if (view === "plan" && summary.totalSteps > 0) {
+      return { text: String(summary.totalSteps), tone: "plan" as const, hint: "" };
+    }
+    if (view === "changes" && changes) return changes;
     return null;
   };
 
@@ -78,13 +85,16 @@ export default function AgentPanel() {
                 <span className="truncate">{view.label}</span>
                 {badge !== null && (
                   <span
+                    title={badge.hint || undefined}
                     className={`min-w-4 rounded px-1 py-0.5 text-center font-mono text-[9px] leading-none ${
-                      view.id === "changes"
+                      badge.tone === "pending"
                         ? "bg-diff-modify/15 text-diff-modify"
-                        : "bg-surface-border/70 text-surface-muted"
+                        : badge.tone === "external"
+                          ? "bg-amber-500/15 text-amber-300"
+                          : "bg-surface-border/70 text-surface-muted"
                     }`}
                   >
-                    {badge}
+                    {badge.text}
                   </span>
                 )}
                 {active && <span className="absolute inset-x-1 bottom-0 h-0.5 bg-accent-blue" />}
