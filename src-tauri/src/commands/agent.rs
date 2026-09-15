@@ -335,7 +335,7 @@ pub async fn send_agent_prompt(
         std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
-        tool_permissions.cancel_switch(),
+        &tool_permissions,
     )
     .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -850,7 +850,7 @@ pub async fn run_agent_step(
         std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
-        tool_permissions.cancel_switch(),
+        &tool_permissions,
     )
     .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -1081,7 +1081,7 @@ pub async fn continue_agent_pipeline(
         std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
-        tool_permissions.cancel_switch(),
+        &tool_permissions,
     )
     .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -1461,7 +1461,7 @@ pub async fn repair_workspace(
         std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
-        repair_permissions.cancel_switch(),
+        &repair_permissions,
     )
     .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -1854,8 +1854,11 @@ mod tests {
     /// 取消也报"这件事靠的是那唯一入口，而不是这条测试 —— 调用点本身仍然要靠读代码。
     #[test]
     fn finishing_a_run_reports_a_dropped_image_and_stays_quiet_otherwise() {
-        let permissions =
+        let mut permissions =
             crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
+        // 走真实路径：开关在这里铸造并交给授权，`try_begin_run` 再从授权里取。
+        // 直接用 `Default` 那个开关也能过断言，但那条路生产代码从不走。
+        permissions.adopt_cancel(Arc::new(AtomicBool::new(false)));
         let meter = crate::services::llm_client::RunUsageMeter::new(None);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

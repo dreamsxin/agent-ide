@@ -65,12 +65,14 @@ npm test
     See Known Issues 16 first.
 - **The side-effect gate is one flag with one source.** The command layer mints an
   `Arc<AtomicBool>` per run and **moves** it into
-  `WorkspaceToolPermissions::adopt_cancel`. Everything else reads it back from there:
-  the MCP invoker via `permissions.cancel_switch()`, and `try_begin_run`, which takes
-  `&WorkspaceToolPermissions` rather than a flag, so no caller can hand the lease a
-  different one. After Stop, `invoke()` refuses calls that have not started and
-  `run_project_command_cancellable` kills the process tree of one that has. One flag
-  per run, never reset: a shared flag let a new prompt un-cancel a draining old run.
+  `WorkspaceToolPermissions::adopt_cancel`. Nothing else takes a flag: both
+  `attach_mcp_tools` and `try_begin_run` take `&WorkspaceToolPermissions` and read
+  `cancel_switch()` themselves, so no caller can put the lease, the built-in tools and
+  the MCP tools on different flags. (`adopt_cancel` *after* a claim would still split
+  them; adopt before claiming, as all four commands do.) After Stop, `invoke()` refuses
+  calls that have not started and `run_project_command_cancellable` kills the process
+  tree of one that has. One flag per run, never reset: a shared flag let a new prompt
+  un-cancel a draining old run.
 - **Stop must not need the lock held by the work being cancelled.** It pulls the
   switch from `CancelRegistry` *before* taking the orchestrator lock.
 - **Every change the Agent lands must be visible and undoable.** Diffs go through the
