@@ -44,16 +44,6 @@ keyring = { version = "3", features = [
 ] }
 async-trait = "0.1"
 
-# 桌面观察面（窗口枚举）只需要几个 Win32 调用，所以用 `windows-sys` 而不是 `windows`：
-# 后者会把整套 COM/WinRT 投影和一次可观的编译时间带进来，而这里要的是三个函数。
-# 版本钉死：这层是 unsafe FFI，签名变化必须由人看过再升。
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.59.0", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
-] }
-
 # 性能监控依赖
 flamegraph = { version = "0.6", optional = true }
 criterion = { version = "0.5", features = ["html_reports"], optional = true }
@@ -64,3 +54,18 @@ criterion = { version = "0.5", features = ["html_reports"], optional = true }
 # libclang 的机器上直接失败。
 [features]
 performance-tools = ["flamegraph", "criterion"]
+
+# 桌面观察面（窗口枚举）只需要几个 Win32 调用，所以用 `windows-sys` 而不是 `windows`：
+# 后者会把整套 COM/WinRT 投影和一次可观的编译时间带进来，而这里要的是三个函数。
+# 版本钉死：这层是 unsafe FFI，签名变化必须由人看过再升。
+#
+# 这张表放在文件末尾：TOML 的表头会终止上一张表，插在 `[dependencies]` 中间会把它
+# 后面的条目一起变成 windows-only —— 上一版就是这样把 flamegraph / criterion 划到了
+# `cfg(windows)` 下面，而且 Cargo 不报错、非 Windows 上 `--features performance-tools`
+# 静默什么都不启用。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.59.0", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }

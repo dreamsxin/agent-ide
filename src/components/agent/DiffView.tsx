@@ -333,7 +333,7 @@ export default function DiffView() {
               记录本身。放在审查区顶部而不是只写进日志，是因为用户来这里就是为了
               看"Agent 做了什么"。 */}
           <div className="mb-1 font-medium text-amber-300">
-            {externalSummary.performed} browser action(s) — cannot be undone
+            {externalSummary.performed} external action(s) — cannot be undone
             {externalSummary.refused > 0 &&
               `, ${externalSummary.refused} refused, failed or stopped`}
           </div>
