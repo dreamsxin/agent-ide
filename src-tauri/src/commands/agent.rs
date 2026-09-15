@@ -306,18 +306,10 @@ pub async fn send_agent_prompt(
     let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let tool_policy =
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
-    // 这次运行的副作用开关先造出来，再装工具面：执行器拿的都是它的克隆，晚一步造就
-    // 换不到执行器手里那一份。三处共用同一个 `Arc` —— MCP 执行器、内置工具面、
-    // `try_begin_run`（进 `RunLease` 和 `CancelRegistry`）。
+    // 这次运行的副作用开关先造出来，**交给授权**，之后所有需要它的地方都从授权里取：
+    // MCP 执行器、内置工具面、`claim_run_for`（进 `RunLease` 和 `CancelRegistry`）。
+    // 一个来源，所以"三处拿到的是同一个开关"是结构性的，而不是靠三行抄对。
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
-        &mcp_state.registry,
-        std::sync::Arc::new(app_handle.clone()),
-        llm,
-        tool_policy,
-        side_effect_switch.clone(),
-    )
-    .await;
     // 内置工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文。
     // 命令执行和写入按本次运行的权限决定是否暴露。
     //
@@ -336,7 +328,16 @@ pub async fn send_agent_prompt(
         request.allow_computer_use,
         request.computer_apps.clone().unwrap_or_default(),
     );
-    tool_permissions.adopt_cancel(side_effect_switch.clone());
+    // 移进去而不是克隆：局部变量之后就不能再交给别人，多一个消费者会编译不过
+    tool_permissions.adopt_cancel(side_effect_switch);
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        std::sync::Arc::new(app_handle.clone()),
+        llm,
+        tool_policy,
+        tool_permissions.cancel_switch(),
+    )
+    .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -826,16 +827,8 @@ pub async fn run_agent_step(
     let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let tool_policy =
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
-    // 开关先造，再装工具面 —— 和 `send_agent_prompt` 同一个理由
+    // 开关先造、交给授权，之后一律从授权里取 —— 和 `send_agent_prompt` 同一个理由
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
-        &mcp_state.registry,
-        std::sync::Arc::new(app_handle.clone()),
-        llm,
-        tool_policy,
-        side_effect_switch.clone(),
-    )
-    .await;
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
     // 单步执行也走同一套授权：写权限只跟 Auto 模式挂钩
     let allow_write = {
@@ -851,7 +844,15 @@ pub async fn run_agent_step(
         request.allow_computer_use,
         request.computer_apps.clone().unwrap_or_default(),
     );
-    tool_permissions.adopt_cancel(side_effect_switch.clone());
+    tool_permissions.adopt_cancel(side_effect_switch);
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        std::sync::Arc::new(app_handle.clone()),
+        llm,
+        tool_policy,
+        tool_permissions.cancel_switch(),
+    )
+    .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -1051,7 +1052,7 @@ pub async fn continue_agent_pipeline(
         }
         let run_id = orch.last_run_id.clone();
         let mut permissions = orch.tool_permissions.clone();
-        permissions.adopt_cancel(side_effect_switch.clone());
+        permissions.adopt_cancel(side_effect_switch);
         // 续跑按新运行算额度：它有自己的 run id、自己的取消开关、自己的一份用量记账，
         // 图片预算跟着这三样走，而不是跟着"被克隆的那份授权"走
         permissions.reset_image_budget();
@@ -1080,7 +1081,7 @@ pub async fn continue_agent_pipeline(
         std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
-        side_effect_switch.clone(),
+        tool_permissions.cancel_switch(),
     )
     .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -1438,7 +1439,7 @@ pub async fn repair_workspace(
         // 沿用它的开关，而那个开关可能被上一次 Stop 永久置成了 true，于是这一次
         // 全新的修复运行会把自己的每一次写盘都拒掉。
         let mut repair_permissions = orch.tool_permissions.clone();
-        repair_permissions.adopt_cancel(side_effect_switch.clone());
+        repair_permissions.adopt_cancel(side_effect_switch);
         // 修复是一次新运行（新 id、新开关），图片额度也要从零算起：带着上一个 prompt
         // 花掉的额度出生，会让第一次读图就被一句假话拒掉
         repair_permissions.reset_image_budget();
@@ -1460,7 +1461,7 @@ pub async fn repair_workspace(
         std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
-        side_effect_switch.clone(),
+        repair_permissions.cancel_switch(),
     )
     .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
