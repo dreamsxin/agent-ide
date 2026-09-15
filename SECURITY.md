@@ -96,6 +96,19 @@ The Agent has three built-in read-only tools — `workspace_read_file`, `workspa
 
 They are advertised when the profile's `toolCallMode` is `native_tools`, which is the default for cloud profiles. If the endpoint rejects a `tools` parameter the client drops it, retries once, and writes a `tool_capability_degraded` warning to the action log — so a run without tools is visible rather than silent. The tool loop is bounded at 12 rounds per stage, with the per-run token cap as the real cost limit.
 
+## Desktop Observation
+
+`workspace_computer_windows` lists the visible top-level desktop windows — title, app, size, and which one is in the foreground. This is the first slice of computer use and it is **read-only**: nothing on the desktop is clicked, typed into or captured.
+
+- **Two independent gates, plus the platform.** `allows_computer()` requires the `allowComputerUse` grant, a non-empty app allowlist, *and* `cfg!(windows)`. Only Windows has an implementation; elsewhere the tool is not advertised at all, because a tool that always fails gets called repeatedly and its failure reads as "there are no windows".
+- **The allowlist filters the results, not just the tool's existence.** This is the mistake `workspace_browser_tabs` made: there, allowlisting one origin still disclosed every open tab. Here, windows whose app is not on the list are removed from the output, and only the *count* of hidden ones is reported. App names are compared without path, case or `.exe`, so `Code.exe`, `code` and a full path all mean the same app.
+- **Window titles are the thing being protected.** They carry document names, page titles and the other party's name in a chat window. That is why the authority is per-app and the disclosure is recorded, even though the tool changes nothing.
+- **A window whose process cannot be read is reported as `unknown`** and therefore matches no allowlist entry — the failure direction is "do not disclose".
+- **Recorded like an irreversible action.** Success and refusal both land in the run's external action log (`computer_windows`, `computer_windows_refused`, `computer_windows_failed`), naming how many windows were disclosed, how many were hidden, and which apps. The disclosure itself cannot be taken back, which is the same reason navigation is recorded.
+- **Stop applies.** The tool is in the side-effect gate list, so a call that has not started is refused after Stop.
+
+Not implemented, deliberately: **screenshots and input injection**. A screenshot would be useless today — `ChatMessage.content` is a `String`, the LLM client has no multimodal content, so the model could not read the image, and shipping a tool whose output nothing can consume is an inert control. Input injection (clicking, typing) is irreversible and can dismiss any confirmation dialog; it needs an authority model narrower than "allow the desktop" and a record that can be replayed, so the shape is being proven on the read-only surface first.
+
 ## Browser Use
 
 Two further tools — `workspace_browser_open` and `workspace_browser_tabs` — drive the user's own Chrome over the DevTools Protocol. They are the first Agent capability whose effects the product **cannot undo**, so the guarantee offered is authority plus a record, not reversibility.

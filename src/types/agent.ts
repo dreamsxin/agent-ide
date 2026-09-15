@@ -161,6 +161,21 @@ export interface AgentPermission {
    * 空清单等于不许，即使开关是开的 —— 默认放开的清单在出事那天读起来像是用户批准过。
    */
   browserOrigins: string[];
+  /**
+   * 是否允许 Agent 观察桌面（枚举可见窗口，只读）。
+   *
+   * 和浏览器分开：那边的范围是"哪些站点"，这里是"哪些应用"，互不蕴含。窗口标题里有
+   * 文档名、网页标题、聊天对象，所以后端同样要两道闸门：这个开关 + 下面的应用清单。
+   * 目前只有 Windows 有实现，其他平台上工具不会通告。
+   */
+  allowComputerUse: boolean;
+  /**
+   * 允许被观察的应用（可执行文件名，`*` 表示不限）。
+   *
+   * 空清单等于不许。它过滤的是**结果**：不在清单里的窗口不会出现在返回值里，只回报
+   * 被挡掉的数量。
+   */
+  computerApps: string[];
 }
 
 /**
@@ -179,6 +194,8 @@ export const READ_ONLY_PERMISSIONS: AgentPermission = {
   allowCommandRun: false,
   allowBrowserUse: false,
   browserOrigins: [],
+  allowComputerUse: false,
+  computerApps: [],
 };
 
 /** `create-files` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
@@ -187,6 +204,8 @@ export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   allowCommandRun: false,
   allowBrowserUse: false,
   browserOrigins: [],
+  allowComputerUse: false,
+  computerApps: [],
 };
 
 /**
@@ -200,6 +219,8 @@ export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   allowCommandRun: true,
   allowBrowserUse: false,
   browserOrigins: [],
+  allowComputerUse: false,
+  computerApps: [],
 };
 
 /** 根据预设获取权限 */
