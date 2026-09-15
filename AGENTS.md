@@ -58,7 +58,9 @@ npm test
 - **`agent/orchestrator.rs` imports no Tauri types.** Emission goes through the
   `RunEvents` trait (`agent/events.rs`); `AppHandle` implements it and tests pass
   `RecordingEvents`. Reintroducing `AppHandle` there makes the pipeline
-  untestable, which is how it used to be.
+  untestable, which is how it used to be. The same rule now covers
+  `McpToolInvoker`: a type that both decides something and emits takes
+  `Arc<dyn RunEvents>`, or its decision cannot be tested at all.
 - **A pipeline run is driven by `drive_run` / `drive_pipeline` / `drive_repair`**,
   free functions taking `&Mutex<AgentOrchestrator>`. Every state mutation lives in a
   *synchronous* method (`begin_planning`, `record_plan`, `prepare_stage`,

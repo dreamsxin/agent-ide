@@ -300,7 +300,7 @@ pub async fn send_agent_prompt(
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
-        &app_handle,
+        std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
         side_effect_switch.clone(),
@@ -756,7 +756,7 @@ pub async fn run_agent_step(
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
-        &app_handle,
+        std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
         side_effect_switch.clone(),
@@ -981,7 +981,7 @@ pub async fn continue_agent_pipeline(
     // 处理调用，或者根本没人处理。
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
-        &app_handle,
+        std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
         side_effect_switch.clone(),
@@ -1333,7 +1333,7 @@ pub async fn repair_workspace(
     // 于是这一次修复的每一次写盘都会被拒 —— 一个新运行被上一个运行的 Stop 掐死。
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
-        &app_handle,
+        std::sync::Arc::new(app_handle.clone()),
         llm,
         tool_policy,
         side_effect_switch.clone(),

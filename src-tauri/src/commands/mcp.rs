@@ -1,5 +1,6 @@
 //! MCP 命令层：服务器配置管理、工具发现、工具调用，以及 Agent 运行时的工具接线。
 
+use crate::agent::events::RunEvents;
 use crate::agent::executor::ToolInvoker;
 use crate::agent::orchestrator::ActionLogEntry;
 use crate::services::llm_client::LlmClient;
@@ -35,7 +36,7 @@ impl Default for McpState {
 /// 策略过滤后没有可用工具时返回原样的 client 和 None，Agent 行为与未启用 MCP 时一致。
 pub async fn attach_mcp_tools(
     registry: &Arc<McpRegistry>,
-    app: &AppHandle,
+    events: Arc<dyn RunEvents>,
     llm: LlmClient,
     policy: McpToolPolicy,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -46,7 +47,7 @@ pub async fn attach_mcp_tools(
     }
     let invoker: Arc<dyn ToolInvoker> = Arc::new(McpToolInvoker {
         registry: registry.clone(),
-        app: app.clone(),
+        events,
         policy,
         cancel,
     });
@@ -55,7 +56,11 @@ pub async fn attach_mcp_tools(
 
 struct McpToolInvoker {
     registry: Arc<McpRegistry>,
-    app: AppHandle,
+    /// 发事件走 trait，不直接持 `AppHandle`。
+    ///
+    /// 持 `AppHandle` 的版本在单元测试里根本没法构造，于是"Stop 之后拒绝调用"这条
+    /// 分支一行都没有覆盖 —— 和 orchestrator 当初的问题是同一个。
+    events: Arc<dyn RunEvents>,
     policy: McpToolPolicy,
     /// 这次运行的副作用开关，和内置工具面、`RunLease` 共用同一个 `Arc`。
     ///
@@ -79,7 +84,8 @@ impl McpToolInvoker {
             context_summary: None,
             diff_summary: None,
         };
-        let _ = self.app.emit("agent-action-log", entry);
+        self.events
+            .emit_json("agent-action-log", serde_json::to_value(entry).unwrap_or_default());
     }
 }
 
@@ -274,7 +280,71 @@ pub async fn disconnect_mcp_servers(mcp_state: State<'_, McpState>) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_arguments, truncate};
+    use super::{redact_arguments, truncate, McpToolInvoker};
+    use crate::agent::events::RecordingEvents;
+    use crate::agent::executor::ToolInvoker;
+    use crate::services::mcp::{McpRegistry, McpToolPolicy};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Stop 之后不再往外发 MCP 调用，而且这次拒绝要留在操作日志里。
+    ///
+    /// 这条分支之前一行都没覆盖：执行器持的是 `AppHandle`，单元测试构造不出来。
+    /// 现在发事件走 `RunEvents`，测试传 `RecordingEvents` 就能断言。MCP 是本产品最大的
+    /// 副作用面，"停了还在发调用"是这里最贵的失败。
+    #[test]
+    fn a_stopped_run_refuses_further_mcp_calls_and_says_so() {
+        let events = Arc::new(RecordingEvents::new());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let invoker = McpToolInvoker {
+            registry: Arc::new(McpRegistry::new()),
+            events: events.clone(),
+            policy: McpToolPolicy::AllowAll,
+            cancel: cancel.clone(),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        cancel.store(true, Ordering::Relaxed);
+        let error = runtime
+            .block_on(invoker.invoke("mcp__fs__write_file", "{\"path\":\"a.txt\"}"))
+            .unwrap_err();
+
+        assert!(error.contains("stopped"), "{}", error);
+        // 拦下来的调用也要能被复盘：只返回错误的话，这件事随对话一起消失
+        let logged = events.payloads_for("agent-action-log");
+        assert_eq!(logged.len(), 1);
+        assert_eq!(logged[0]["level"], "warn");
+        assert!(
+            logged[0]["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("mcp__fs__write_file"),
+            "{:?}",
+            logged[0]
+        );
+    }
+
+    /// 没被取消时闸门不挡路：拒绝要来自策略或注册表，不能来自开关。
+    #[test]
+    fn an_active_run_is_not_blocked_by_the_switch() {
+        let events = Arc::new(RecordingEvents::new());
+        let invoker = McpToolInvoker {
+            registry: Arc::new(McpRegistry::new()),
+            events: events.clone(),
+            policy: McpToolPolicy::AllowAll,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // 注册表是空的，所以这次调用注定失败 —— 但失败的理由必须是"找不到工具"，
+        // 而不是"运行被停了"
+        let error = runtime
+            .block_on(invoker.invoke("mcp__fs__write_file", "{}"))
+            .unwrap_err();
+        assert!(!error.contains("stopped"), "{}", error);
+        // 正常路径会先记一条"正在调用"
+        assert_eq!(events.payloads_for("agent-action-log")[0]["level"], "info");
+    }
 
     /// MCP 工具参数会进 action log。模型把密钥当参数传进来时，日志不能原样留存。
     #[test]
