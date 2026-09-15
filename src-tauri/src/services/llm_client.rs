@@ -917,6 +917,26 @@ pub struct ImageDrop {
     pub reason: String,
 }
 
+/// 把降级记录变成一句给用户的话（摘要 + 明细）。没有降级就返回 None。
+///
+/// 措辞放在这里而不是命令层：命令层要 `AppHandle` 才能调用，措辞就没法测 —— 用量日志
+/// 那三句话曾经因为同样的原因长期共用一句错的。
+pub fn image_degradation_report(drops: &[ImageDrop]) -> Option<(String, String)> {
+    if drops.is_empty() {
+        return None;
+    }
+    let total: usize = drops.iter().map(|drop| drop.count).sum();
+    let details = drops
+        .iter()
+        .map(|drop| format!("{} image(s): {}.", drop.count, drop.reason))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((
+        format!("{} image(s) were not sent to the model", total),
+        details,
+    ))
+}
+
 /// LLM 客户端
 #[derive(Clone)]
 pub struct LlmClient {
@@ -931,7 +951,8 @@ pub struct LlmClient {
     /// 供应商明确拒绝过 `tools` 参数：后续请求不再附带，避免每次都白撞一次 400
     tools_rejected: Arc<AtomicBool>,
     /// 本次运行里被摘掉的图片。命令层在运行结束时读它，把降级写进 action log ——
-    /// 只在消息文本里写原因等于只告诉模型，用户看到的仍是一次"正常"的运行
+    /// 只在消息文本里写原因等于只告诉模型，用户看到的仍是一次"正常"的运行。
+    /// 用 `Arc` 是因为 `LlmClient` 是 `Clone`：真要出现克隆时两份必须记在一处
     image_drops: Arc<Mutex<Vec<ImageDrop>>>,
     /// 只在测试里挂上，用来断言提示词的组成
     request_recorder: Option<Arc<RequestRecorder>>,
@@ -972,8 +993,8 @@ impl LlmClient {
 
     /// 这次运行里被摘掉的图片附件。命令层用它写 action log。
     ///
-    /// 不清空：同一个 client 会被 clone 到各个 stage（clone 共享同一个 Arc），
-    /// 运行结束时读一次要能拿到整轮运行的全部降级。
+    /// 不清空：`drive_run` / `drive_repair` 全程借用同一个实例，运行结束时读一次要能
+    /// 拿到整轮运行的全部降级。
     pub fn image_drops(&self) -> Vec<ImageDrop> {
         self.image_drops
             .lock()
@@ -2207,8 +2228,9 @@ mod image_wire_tests {
 
     /// 模型看不了图这条路径也要记账，而且重复适配不能重复记账。
     ///
-    /// 重复那一半不是洁癖：`build_chat_request` 里还有一遍兜底适配，如果它也会记一次，
-    /// 用户就会看到"2 张图没发出去"而实际只有 1 张。
+    /// 重复那一半不是洁癖：`build_chat_request` 里还有一遍兜底适配，如果哪天它也拿到了
+    /// 记账能力，用户就会看到"2 张图没发出去"而实际只有 1 张。这里钉的是这个函数本身
+    /// 幂等 —— 图片已经空了就什么都不记。
     #[test]
     fn a_non_vision_model_records_the_drop_once() {
         let client = LlmClient::new(config("deepseek-chat"));
@@ -2222,6 +2244,28 @@ mod image_wire_tests {
 
         let _again = client.adapt_and_record_images(messages);
         assert_eq!(client.image_drops().len(), 1);
+    }
+
+    /// 报告的措辞和"没有降级就什么都不说"都在这里钉住 —— 命令层要 `AppHandle` 才能调，
+    /// 那一层测不到。
+    #[test]
+    fn the_report_sums_the_counts_and_is_absent_when_nothing_was_dropped() {
+        assert!(image_degradation_report(&[]).is_none());
+        let (summary, details) = image_degradation_report(&[
+            ImageDrop {
+                count: 1,
+                reason: "the configured model (deepseek-chat) does not accept image input"
+                    .to_string(),
+            },
+            ImageDrop {
+                count: 2,
+                reason: "this endpoint takes a flattened text prompt".to_string(),
+            },
+        ])
+        .expect("two drops produce a report");
+        assert_eq!(summary, "3 image(s) were not sent to the model");
+        assert!(details.contains("deepseek-chat"), "{}", details);
+        assert!(details.contains("flattened text prompt"), "{}", details);
     }
 
     #[test]

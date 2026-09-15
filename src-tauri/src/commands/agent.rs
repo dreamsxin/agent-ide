@@ -672,23 +672,12 @@ fn emit_image_degradation_log(
     app_handle: &AppHandle,
     llm: &crate::services::llm_client::LlmClient,
 ) {
-    let drops = llm.image_drops();
-    if drops.is_empty() {
+    let Some((summary, details)) =
+        crate::services::llm_client::image_degradation_report(&llm.image_drops())
+    else {
         return;
-    }
-    let total: usize = drops.iter().map(|drop| drop.count).sum();
-    let details = drops
-        .iter()
-        .map(|drop| format!("{} image(s): {}.", drop.count, drop.reason))
-        .collect::<Vec<_>>()
-        .join("\n");
-    orch.emit_review_action_log(
-        app_handle,
-        "warn",
-        "image_input_degraded",
-        &format!("{} image(s) were not sent to the model", total),
-        &details,
-    );
+    };
+    orch.emit_review_action_log(app_handle, "warn", "image_input_degraded", &summary, &details);
 }
 
 /// 把本次运行的 token 用量写进 action log。措辞和分支判断在
@@ -1281,6 +1270,8 @@ pub async fn undo_last_apply(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
+    // 撤销可用性跟在这个事件的 payload 里，漏掉这一处撤销按钮会静默停在旧值
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
     orch.emit_review_action_log(
         &app_handle,
         apply_log_level(result.failed.len()),
@@ -1484,6 +1475,10 @@ pub async fn repair_workspace(
     // prompt 会换上一份全新的 `Arc`，于是那些记录永远没人取走。
     publish_tool_writes(&mut orch, &app_handle, &repair_permissions);
     publish_external_actions(&mut orch, &app_handle, &repair_permissions);
+    // 降级也要报：修复循环用的是同一个 client，工具被拒或图片被摘掉在这里同样会发生，
+    // 而这条路径自己拼装收尾流程，不经过 `finish_agent_run`
+    emit_tool_degradation_log(&orch, &app_handle, &llm);
+    emit_image_degradation_log(&orch, &app_handle, &llm);
     // 释放要在 `?` 之前：修复失败也得把执行权交回去，否则后面所有运行都被拒
     orch.finish_run(lease.claim);
     let outcome = outcome?;

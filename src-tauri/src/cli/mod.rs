@@ -1457,6 +1457,15 @@ async fn execute_steps(
     }
     .map_err(|err| (ExitCode::ProviderFailed, err))?;
     output.events.extend(deferred_events.into_inner());
+    // CLI 没有 action log 可以写，图片降级只好走 stderr。不报的话这里和桌面端犯的是
+    // 同一个错：转录里留着"已附上图片"，而模型其实什么都没看到。stderr 是因为
+    // JSON / NDJSON 的消费者在读 stdout，警告不能混进去。
+    if let Some((summary, details)) =
+        crate::services::llm_client::image_degradation_report(&llm.image_drops())
+    {
+        eprintln!("warning: {}\n{}", summary, details);
+    }
+
 
     Ok(results
         .into_iter()
