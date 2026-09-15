@@ -60,7 +60,12 @@ npm test
   `RecordingEvents`. Reintroducing `AppHandle` there makes the pipeline
   untestable, which is how it used to be. The same rule now covers
   `McpToolInvoker`: a type that both decides something and emits takes
-  `Arc<dyn RunEvents>`, or its decision cannot be tested at all.
+  `Arc<dyn RunEvents>`, or its decision cannot be tested at all. It reaches the
+  command layer too: the run-finish helpers (`finish_agent_run`,
+  `publish_tool_writes`, `publish_external_actions`, both `emit_*_degradation_log`)
+  take `&dyn RunEvents`, because every defect found in them for four cycles was a
+  *wording or counting* defect, and a signature taking `AppHandle` cannot be tested
+  for either.
 - **A pipeline run is driven by `drive_run` / `drive_pipeline` / `drive_repair`**,
   free functions taking `&Mutex<AgentOrchestrator>`. Every state mutation lives in a
   *synchronous* method (`begin_planning`, `record_plan`, `prepare_stage`,

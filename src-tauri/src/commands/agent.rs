@@ -535,7 +535,7 @@ fn agent_tool_permissions(
 /// 就随着 `take_external_actions` 的排空一起没了。
 fn publish_external_actions(
     orch: &mut crate::agent::orchestrator::AgentOrchestrator,
-    app_handle: &AppHandle,
+    events: &dyn crate::agent::events::RunEvents,
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
 ) {
     let actions = permissions.take_external_actions();
@@ -561,7 +561,7 @@ fn publish_external_actions(
         .collect::<Vec<_>>()
         .join("\n");
     orch.emit_review_action_log(
-        app_handle,
+        events,
         if refused > 0 { "warn" } else { "info" },
         "external_action",
         &format!(
@@ -583,7 +583,7 @@ fn publish_external_actions(
 /// Agent 改了什么，也没有撤销入口。
 fn publish_tool_writes(
     orch: &mut crate::agent::orchestrator::AgentOrchestrator,
-    app_handle: &AppHandle,
+    events: &dyn crate::agent::events::RunEvents,
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
 ) {
     let writes = permissions.take_writes();
@@ -597,20 +597,20 @@ fn publish_tool_writes(
         .collect::<Vec<_>>()
         .join(", ");
     orch.emit_review_action_log(
-        app_handle,
+        events,
         "info",
         "tool_write",
         &format!("Agent wrote {} file(s) directly", recorded.len()),
         &format!("{}\nUndo Apply restores them.", files),
     );
-    let _ = app_handle.emit(
+    events.emit_json(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
     // 工具写入刚往撤销栈里压了一个 checkpoint，但它本身不改变运行状态，所以要
     // 显式发一次 state：撤销可用性挂在这个事件的 payload 上，不发就意味着运行期间
     // 每次工具写入之后界面上的 Undo 都还停在旧的那个 checkpoint 上。
-    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
+    events.emit_json("agent-state-changed", orch.state_payload());
 }
 
 /// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
@@ -624,20 +624,20 @@ fn publish_tool_writes(
 /// `take_writes` 会把记录取空，第二次直接返回。
 fn finish_agent_run(
     orch: &mut crate::agent::orchestrator::AgentOrchestrator,
-    app_handle: &AppHandle,
+    events: &dyn crate::agent::events::RunEvents,
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
     meter: &crate::services::llm_client::RunUsageMeter,
     llm: &crate::services::llm_client::LlmClient,
     claim: crate::agent::orchestrator::RunClaim,
 ) {
     orch.finish_run(claim);
-    publish_tool_writes(orch, app_handle, permissions);
-    publish_external_actions(orch, app_handle, permissions);
-    emit_usage_action_log(orch, app_handle, meter);
+    publish_tool_writes(orch, events, permissions);
+    publish_external_actions(orch, events, permissions);
+    emit_usage_action_log(orch, events, meter);
     // 两种降级都写在这里，而不是各自的成功分支上：降级是**请求已经发生过**的事实，
     // 运行最后失败或被取消并不会把它取消掉，而失败的那次运行恰恰最需要这条线索。
-    emit_tool_degradation_log(orch, app_handle, llm);
-    emit_image_degradation_log(orch, app_handle, llm);
+    emit_tool_degradation_log(orch, events, llm);
+    emit_image_degradation_log(orch, events, llm);
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -646,14 +646,14 @@ fn finish_agent_run(
 /// 只能靠运行开始时打包的上下文，而用户无从得知。
 fn emit_tool_degradation_log(
     orch: &AgentOrchestrator,
-    app_handle: &AppHandle,
+    events: &dyn crate::agent::events::RunEvents,
     llm: &crate::services::llm_client::LlmClient,
 ) {
     if !llm.tools_were_rejected() {
         return;
     }
     orch.emit_review_action_log(
-        app_handle,
+        events,
         "warn",
         "tool_capability_degraded",
         "Provider rejected tool calling; this run fell back to the text protocol",
@@ -669,7 +669,7 @@ fn emit_tool_degradation_log(
 /// 回答，无从判断"它到底看没看见那张图"，而这恰恰是回答不对劲时第一个要排除的可能。
 fn emit_image_degradation_log(
     orch: &AgentOrchestrator,
-    app_handle: &AppHandle,
+    events: &dyn crate::agent::events::RunEvents,
     llm: &crate::services::llm_client::LlmClient,
 ) {
     let Some((summary, details)) =
@@ -677,14 +677,14 @@ fn emit_image_degradation_log(
     else {
         return;
     };
-    orch.emit_review_action_log(app_handle, "warn", "image_input_degraded", &summary, &details);
+    orch.emit_review_action_log(events, "warn", "image_input_degraded", &summary, &details);
 }
 
 /// 把本次运行的 token 用量写进 action log。措辞和分支判断在
 /// `RunUsageSnapshot::action_log_summary` / `action_log_details` 里，那里有测试。
 fn emit_usage_action_log(
     orch: &AgentOrchestrator,
-    app_handle: &AppHandle,
+    events: &dyn crate::agent::events::RunEvents,
     meter: &crate::services::llm_client::RunUsageMeter,
 ) {
     let snapshot = meter.snapshot();
@@ -693,7 +693,7 @@ fn emit_usage_action_log(
         return;
     }
     orch.emit_review_action_log(
-        app_handle,
+        events,
         "info",
         "run_token_usage",
         &snapshot.action_log_summary(),
@@ -1708,6 +1708,151 @@ fn resolve_context_compression(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::events::RecordingEvents;
+    use crate::agent::executor::ToolInvoker;
+    use crate::agent::orchestrator::AgentOrchestrator;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    /// action log 条目里 `summary` 那一段。断言措辞是有意的：这一层的缺陷全都是措辞
+    /// 缺陷 —— "0 个动作" 曾经被报成 "1 browser action(s) … cannot be undone"。
+    fn action_log_summaries(events: &RecordingEvents) -> Vec<(String, String, String)> {
+        events
+            .payloads_for("agent-action-log")
+            .into_iter()
+            .map(|payload| {
+                (
+                    payload["level"].as_str().unwrap_or_default().to_string(),
+                    payload["phase"].as_str().unwrap_or_default().to_string(),
+                    payload["summary"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn mock_llm(model: &str, endpoint: &str) -> crate::services::llm_client::LlmClient {
+        crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+            endpoint: endpoint.to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            provider: "openai".to_string(),
+            max_output_tokens: None,
+            tool_call_mode: "text_protocol".to_string(),
+            model_type: crate::services::llm_client::ModelType::OpenAI,
+            local_model_config: None,
+        })
+    }
+
+    /// 被 Stop 拦下的浏览器调用要进记录，但**不能**被算成"已经发生"。
+    ///
+    /// 这条走的是真实路径：授权齐备 + 开关已拉，`invoke` 自己写下
+    /// `browser_open_cancelled`，然后由命令层来数。以前这一层把 `_cancelled` 算作
+    /// performed，于是一次被拦下的导航会在唯一可信的那块地方被写成"已经做了，撤不回"。
+    #[test]
+    fn a_stopped_browser_call_is_recorded_but_not_counted_as_performed() {
+        let mut permissions = crate::agent::workspace_tools::WorkspaceToolPermissions::new(
+            Vec::new(),
+            false,
+            false,
+        )
+        .with_browser(true, vec!["https://example.com".to_string()]);
+        permissions.adopt_cancel(Arc::new(AtomicBool::new(true)));
+
+        let invoker = crate::agent::workspace_tools::WorkspaceToolInvoker::new(
+            Arc::new(|_: &str, _: &str, _: &str| {}),
+            permissions.clone(),
+        );
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            invoker.invoke(
+                crate::agent::workspace_tools::BROWSER_OPEN,
+                "{\"url\":\"https://example.com/pricing\"}",
+            ),
+        );
+        assert!(result.is_err(), "a stopped run must not navigate");
+
+        let mut orch = AgentOrchestrator::new();
+        let events = RecordingEvents::new();
+        publish_external_actions(&mut orch, &events, &permissions);
+
+        let logs = action_log_summaries(&events);
+        assert_eq!(logs.len(), 1, "{:?}", logs);
+        assert_eq!(logs[0].0, "warn");
+        assert_eq!(logs[0].1, "external_action");
+        assert!(
+            logs[0].2.contains("performed 0 external action(s)"),
+            "{}",
+            logs[0].2
+        );
+        assert!(
+            logs[0].2.contains("1 refused, failed or stopped"),
+            "{}",
+            logs[0].2
+        );
+        // 记录本身要留在 orchestrator 上，否则前端刷新后这次尝试就查不到了
+        assert_eq!(orch.external_actions.len(), 1);
+        assert_eq!(orch.external_actions[0].kind, "browser_open_cancelled");
+    }
+
+    /// 图片降级必须跟着运行收尾一起送出去，没有降级时则一个字都不说。
+    ///
+    /// `finish_agent_run` 是所有退出分支的共同出口，所以这条同时钉住了"失败/取消也报"。
+    #[test]
+    fn finishing_a_run_reports_a_dropped_image_and_stays_quiet_otherwise() {
+        let permissions =
+            crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
+        let meter = crate::services::llm_client::RunUsageMeter::new(None);
+
+        // mock 端点把消息拍平成文本，图片没有位置可去 —— 真实的降级路径
+        let dropped = mock_llm("gpt-4o", "mock://images");
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let sent = tokio::runtime::Runtime::new().unwrap().block_on(
+            dropped.stream_chat_with_tools(
+                vec![crate::services::llm_client::ChatMessage::user("look at this")
+                    .with_images(vec![crate::services::images::ImagePart {
+                        media_type: "image/png".to_string(),
+                        base64_data: "Zm9vYmFy".to_string(),
+                    }])],
+                Arc::new(AtomicBool::new(false)),
+                tx,
+            ),
+        );
+        assert!(sent.is_ok(), "{:?}", sent);
+
+        let mut orch = AgentOrchestrator::new();
+        let lease = orch
+            .try_begin_run(Some("run-1".to_string()), Arc::new(AtomicBool::new(false)))
+            .expect("a fresh orchestrator hands out the lease");
+        let events = RecordingEvents::new();
+        finish_agent_run(&mut orch, &events, &permissions, &meter, &dropped, lease.claim);
+        let phases = action_log_summaries(&events)
+            .into_iter()
+            .map(|(_, phase, summary)| (phase, summary))
+            .collect::<Vec<_>>();
+        assert!(
+            phases
+                .iter()
+                .any(|(phase, summary)| phase == "image_input_degraded"
+                    && summary == "1 image(s) were not sent to the model"),
+            "{:?}",
+            phases
+        );
+
+        // 没有降级的运行不能写这条：一条永远出现的警告等于没有警告
+        let clean = mock_llm("gpt-4o", "mock://images");
+        let mut orch = AgentOrchestrator::new();
+        let lease = orch
+            .try_begin_run(Some("run-2".to_string()), Arc::new(AtomicBool::new(false)))
+            .expect("a fresh orchestrator hands out the lease");
+        let events = RecordingEvents::new();
+        finish_agent_run(&mut orch, &events, &permissions, &meter, &clean, lease.claim);
+        assert!(
+            !action_log_summaries(&events)
+                .iter()
+                .any(|(_, phase, _)| phase == "image_input_degraded"),
+            "{:?}",
+            action_log_summaries(&events)
+        );
+    }
     // status_from_hunks 已随业务逻辑搬到 orchestrator，命令层只剩适配代码
     use crate::agent::orchestrator::status_from_hunks;
 
