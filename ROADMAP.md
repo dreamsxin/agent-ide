@@ -1279,7 +1279,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Left open by 78: `try_begin_run(run_id, cancel)` still took a flag, so a fifth command could re-copy the two lines 77 removed and every test would stay green. It now takes `&WorkspaceToolPermissions` and reads `cancel_switch()` itself. There is no longer *any* way to give the lease a different flag from the tool surface — not by convention, by signature.
    - The orchestrator gains no new dependency for this: it already owns a `WorkspaceToolPermissions` field. And the 13 test call sites got better rather than noisier — `test_switch()` became `test_permissions()`, so the tests now travel the production path (mint → `adopt_cancel` → read back) instead of fabricating a switch the real code would never produce.
    - **Two stale doc references deleted**: both `try_begin_run`'s comment and the old test helper pointed at `WorkspaceToolPermissions::fresh_cancel`, a function that has never existed under that name. A comment naming a function that is not there is the cheapest possible way to send the next reader looking for a mechanism that isn't the real one.
+   - **Overstated when written, corrected in 81**: "there is no longer *any* way to give the lease a different flag" holds at the moment of the claim, not forever — a stray `adopt_cancel` afterwards would still split them — and at the time the sentence was written `attach_mcp_tools` still took a bare flag.
    - Rust 361, unchanged: a signature change and a test-helper rename, no new cases.
+
+81. **Audit of 80: one door closed, the door beside it still open (2026-09-15)**
+   - **`attach_mcp_tools` still took a bare `Arc<AtomicBool>` (fixed).** 80 closed the lease side by signature and left the MCP side on convention, in the same paragraph that called it the last open door. All four commands happened to pass `permissions.cancel_switch()`; a fifth could have passed anything and every test would have stayed green — on the surface whose own comment calls it "本产品最大的副作用面". It now takes `&WorkspaceToolPermissions` and reads the switch itself, so both consumers and the lease are signature-bound to one source.
+   - **What is still convention, stated plainly**: `adopt_cancel` can be called *after* a claim, which would move the tools to a new flag while the lease and `CancelRegistry` keep the old one. No production path does it — all four adopt before claiming — and the fix would be a type state (`UnclaimedPermissions` → `ClaimedPermissions`) whose cost is not justified by a hazard nothing currently walks into. Recorded rather than sealed.
+   - **Two tests were not travelling the path they claimed.** The image-degradation tests in `commands/agent.rs` built permissions with `new(...)` and never called `adopt_cancel`, so their flag was the derived `Default` one — 80's "the tests now travel the production path" was true of the 13 orchestrator sites only. They adopt now.
+   - The audit also noted that `the_lease_and_the_permissions_share_one_cancel_switch` has lost most of its bite: the defect it was written for is now unrepresentable, and what it still pins is the `run_id` assignment. Kept, because a test that can only fail if `adopt_cancel`/`cancel_switch` break is still a test of `adopt_cancel`/`cancel_switch`.
+   - Rust 361, unchanged.
+
 
 
 

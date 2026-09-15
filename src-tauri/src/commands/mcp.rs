@@ -34,12 +34,16 @@ impl Default for McpState {
 /// 把 MCP 工具接到一次 Agent 运行上：按策略注入工具定义 + 提供执行器。
 ///
 /// 策略过滤后没有可用工具时返回原样的 client 和 None，Agent 行为与未启用 MCP 时一致。
+///
+/// 取消开关从**这次运行的授权**里取，不接受单独传进来的 `Arc`：MCP 是本产品最大的副作用
+/// 面，而"调用方记得传对那一个开关"是靠不住的约定 —— 传错编译器不会说话，后果是 Stop
+/// 之后 MCP 调用照旧一个个发出去。内置工具面和 `try_begin_run` 走的是同一条规则。
 pub async fn attach_mcp_tools(
     registry: &Arc<McpRegistry>,
     events: Arc<dyn RunEvents>,
     llm: LlmClient,
     policy: McpToolPolicy,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+    permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
 ) -> (LlmClient, Option<Arc<dyn ToolInvoker>>) {
     let definitions = registry.tool_definitions(policy).await;
     if definitions.is_empty() {
@@ -49,7 +53,7 @@ pub async fn attach_mcp_tools(
         registry: registry.clone(),
         events,
         policy,
-        cancel,
+        cancel: permissions.cancel_switch(),
     });
     (llm.with_extra_tools(definitions), Some(invoker))
 }
