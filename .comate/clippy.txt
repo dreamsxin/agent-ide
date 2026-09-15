@@ -1,2 +1,0 @@
-    Checking agent-ide v0.1.0 (D:\work\agent-ide\src-tauri)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.50s

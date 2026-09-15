@@ -11,3 +11,7 @@ rustup-init.exe
 # agent_cli 把每次运行的产物写进 <workspace>/.agent-ide/runs/<run-id>/，
 # 所以在本仓库里跑 CLI 会污染工作区。
 .agent-ide/
+
+# 开发时用来接住 clippy / 测试全量输出的临时目录，不属于交付物
+.comate/
+
