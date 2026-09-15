@@ -1214,6 +1214,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Also from the audit, taken: the two tests build current-thread runtimes rather than full multi-thread ones, and the `_rx` binding now says why it must stay alive (the mock stream errors if the receiver is gone).
    - Rust 352, unchanged: this round fixed a composition and a weak assertion rather than adding cases.
 
+73. **A per-run image budget, and one fewer imaginary problem (2026-09-15)**
+   - Open since 68: the per-image 4 MiB cap says nothing about repetition. The model can read one compliant image per round for as many rounds as the tool loop allows, and nothing was watching the total — with 12 rounds and 4 MiB each that is ~64 MB of raw bytes, ~85 MB of base64, for a tool the user authorised as "look at a mockup". `MAX_RUN_IMAGE_BYTES = 16 MiB` now bounds it, tracked on `WorkspaceToolPermissions` as an `AtomicUsize` that is *not* the length of the image log — the log is drained every round by `take_images`, so counting it would restart the budget each round, and the bill is per run.
+   - **Checked before the read, charged after a successful parse.** The check happens on the `metadata` size so an over-budget image is never loaded into memory, for the same reason the per-image cap moved to `metadata` in 68. The charge lands only once `image_part_from_bytes` succeeds, so a `.txt` or an empty file cannot drain the budget that legitimate images need — a test pins exactly that, because the natural implementation (charge where you check) gets it wrong.
+   - **The refusal names three numbers** — used, requested, limit — because the model's next move should be "attach a smaller one" or "attach fewer", and an error that only says "over the limit" produces a retry of the same call. The boundary test asserts that exactly-at-limit is allowed: a budget that refuses its own last byte would look like a bug to whoever hits it.
+   - **Deliberately not done: charging images to the token estimate.** 68 recorded that "the trimmer charges an image 0 tokens", and I was about to fix it before checking. `bound_transcript` only ever sees a *prior stage's* transcript, and the executor clears `images` right after each request, so no image is ever alive when the trimmer runs — the number it produces is correct today. The other estimator (`services/context.rs`) works on already-flattened `String` sections and there is no image on `SendPromptRequest`, so the context panel has nothing to charge either. Both would have been changes in service of a defect that cannot occur; what remains true is that if a *prompt*-attached image is ever added, both estimators need the addend, and that is the moment to write it.
+   - Rust 352 → 355.
+
+
 
 
 
