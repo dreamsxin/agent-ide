@@ -545,7 +545,7 @@ fn publish_external_actions(
         if refused > 0 { "warn" } else { "info" },
         "external_action",
         &format!(
-            "Agent performed {} browser action(s){}",
+            "Agent performed {} external action(s){}",
             performed,
             if refused > 0 {
                 format!(", {} refused, failed or stopped", refused)

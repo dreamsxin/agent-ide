@@ -45,13 +45,24 @@ pub fn normalize_app_name(raw: &str) -> String {
     stem.to_lowercase()
 }
 
+/// 进程名读不出来时用的占位。
+///
+/// 单独成一个常量，因为它在授权判断里有特殊地位：见 `app_allowed`。
+pub const UNKNOWN_APP: &str = "unknown";
+
 /// 这个应用是否在白名单里。空白名单一律不允许。
 ///
 /// 和 origin 白名单同一个判断：空列表不读成"没配所以全放"。事后看，默认全放的
 /// 列表和用户真的批准过的列表长得一模一样。
+///
+/// **`unknown` 永远不匹配，`*` 也不例外。** 拿不到进程名最常见的原因是那是个提权进程
+/// （非提权的 Agent IDE 打不开它的句柄），而提权窗口恰恰是更敏感的那批。一个身份不明的
+/// 窗口没法被归到任何"已批准的应用"名下，所以它不披露 —— 这样"读不到就不披露"才是
+/// 一条真的不变量，而不是一句好听的话。代价是真有个叫 `unknown.exe` 的进程也看不到，
+/// 这个代价可以接受。
 pub fn app_allowed(app: &str, allowlist: &[String]) -> bool {
     let target = normalize_app_name(app);
-    if target.is_empty() {
+    if target.is_empty() || target == UNKNOWN_APP {
         return false;
     }
     allowlist.iter().any(|entry| {
@@ -126,7 +137,7 @@ pub fn disclosed_apps(windows: &[DesktopWindow]) -> Vec<String> {
 
 #[cfg(windows)]
 mod platform {
-    use super::DesktopWindow;
+    use super::{DesktopWindow, UNKNOWN_APP};
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, MAX_PATH, RECT, TRUE};
     use windows_sys::Win32::System::Threading::{
@@ -224,18 +235,18 @@ mod platform {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, &mut pid);
         if pid == 0 {
-            return "unknown".to_string();
+            return UNKNOWN_APP.to_string();
         }
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return "unknown".to_string();
+            return UNKNOWN_APP.to_string();
         }
         let mut buffer = vec![0u16; MAX_PATH as usize];
         let mut size = buffer.len() as u32;
         let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size);
         windows_sys::Win32::Foundation::CloseHandle(handle);
         if ok != TRUE || size == 0 {
-            return "unknown".to_string();
+            return UNKNOWN_APP.to_string();
         }
         let full = std::ffi::OsString::from_wide(&buffer[..size as usize])
             .to_string_lossy()
@@ -293,8 +304,27 @@ mod tests {
         // 空列表不读成"没配就全放"：事后看，默认全放和用户批准过长得一样
         assert!(!app_allowed("code.exe", &[]));
         assert!(app_allowed("anything.exe", &["*".to_string()]));
-        // 拿不到进程名的窗口不会命中任何条目，也就不会被披露
-        assert!(!app_allowed("", &["*".to_string()]));
+    }
+
+    /// 身份不明的窗口不披露，`*` 也不例外。
+    ///
+    /// 上一版的断言写的是 `!app_allowed("", ...)` —— 空串是 `window_app` 永远不会返回的
+    /// 值，所以那条测试测的是一个不可达分支，而真正会出现的 `unknown` 当时是**放行**的。
+    /// 拿不到进程名最常见的原因是提权进程，而那批窗口更敏感。
+    #[test]
+    fn a_window_whose_app_cannot_be_read_is_never_disclosed() {
+        assert!(!app_allowed(UNKNOWN_APP, &["*".to_string()]));
+        // 连显式写进清单也不放行：那一栏是"已批准的应用"，不是一个可以点名的桶
+        assert!(!app_allowed(UNKNOWN_APP, &[UNKNOWN_APP.to_string()]));
+
+        let windows = vec![
+            window("Elevated tool", UNKNOWN_APP, false),
+            window("main.rs", "Code.exe", true),
+        ];
+        let (allowed, hidden) = filter_windows(windows, &["*".to_string()]);
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].app, "Code.exe");
+        assert_eq!(hidden, 1);
     }
 
     #[test]

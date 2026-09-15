@@ -576,12 +576,19 @@ impl ToolInvoker for WorkspaceToolInvoker {
                     "This run was stopped, so {} was refused before it could take effect.",
                     tool_name
                 );
-                // 浏览器的尝试仍然进外部动作日志：它没有发生，但"停了之后模型还想出网"
-                // 是用户会想知道的事
-                if matches!(tool_name, BROWSER_OPEN | BROWSER_TABS) {
+                // 浏览器和桌面观察的尝试仍然进外部动作日志：它没有发生，但"停了之后
+                // 模型还想出网 / 还想读窗口标题"是用户会想知道的事。上一版只记了浏览器，
+                // 桌面那条就悄悄只剩一行普通日志 —— 加了新工具没检查记录侧的老毛病。
+                if matches!(tool_name, BROWSER_OPEN | BROWSER_TABS | COMPUTER_WINDOWS) {
                     self.permissions.record_external(AgentExternalAction {
                         kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
-                        target: string_arg(&args, "url").unwrap_or("chrome").to_string(),
+                        target: string_arg(&args, "url")
+                            .unwrap_or(if tool_name == COMPUTER_WINDOWS {
+                                "desktop"
+                            } else {
+                                "chrome"
+                            })
+                            .to_string(),
                         detail: detail.clone(),
                     });
                 }
@@ -1711,6 +1718,21 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "browser_open_cancelled");
         assert_eq!(actions[0].target, "https://example.com/");
+
+        // 桌面观察也要留痕。上一版只记了浏览器：加了新工具没检查记录侧，那条尝试
+        // 就只剩一行普通日志，而外部动作列表 —— 用户被告知要看的那个地方 —— 空着。
+        let mut desktop = WorkspaceToolPermissions::new(Vec::new(), false, false)
+            .with_computer(true, vec!["*".to_string()]);
+        desktop.adopt_cancel(switch.clone());
+        let desktop_invoker = WorkspaceToolInvoker::without_logging(desktop.clone());
+        let error = runtime
+            .block_on(desktop_invoker.invoke(COMPUTER_WINDOWS, "{}"))
+            .unwrap_err();
+        assert!(error.contains("stopped"), "{}", error);
+        let actions = desktop.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "computer_windows_cancelled");
+        assert_eq!(actions[0].target, "desktop");
     }
 
     /// 只读工具在 Stop 之后照旧放行：它们不改变任何东西，拒掉只会给一份马上要丢掉的
@@ -1788,6 +1810,8 @@ mod tests {
             !WorkspaceToolInvoker::without_logging(switch_only.clone()).handles(COMPUTER_WINDOWS)
         );
         assert!(computer_windows_tool(&switch_only).is_err());
+        // 这条记录是给直接调用兜底用的：真实运行里 `handles()` 会先把调用丢掉，
+        // 所以 `computer_windows_refused` 不会出现在一次真的运行的记录里
         let refusals = switch_only.take_external_actions();
         assert_eq!(refusals.len(), 1);
         assert_eq!(refusals[0].kind, "computer_windows_refused");
