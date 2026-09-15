@@ -197,14 +197,15 @@ impl WorkspaceToolPermissions {
         self.allow_browser && !self.browser_origins.is_empty()
     }
 
-    /// 换一个全新的副作用开关，并把它交出去当这次运行的取消开关。
+    /// 接过这次运行的副作用开关。
     ///
-    /// 换而不是复位：旧开关可能还被一个正在排空的运行握着，复位等于把用户已经点过的
-    /// Stop 撤销掉。命令层在拿执行权时调这个，然后把返回的 `Arc` 交给 `try_begin_run`，
-    /// 所以工具面和 `RunLease` 看的是同一个开关，而不是两份状态。
-    pub fn fresh_cancel(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        self.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.cancel.clone()
+    /// 开关由命令层在装任何工具面**之前**造出来，然后交给三个地方：这份授权、MCP 执行器、
+    /// `try_begin_run`（进 `RunLease` 和 `CancelRegistry`）。三处同一个 `Arc`，不是三份
+    /// 状态 —— 同步三份布尔值的版本正是"第二份状态"那类缺陷。
+    ///
+    /// 每次运行造一个新的，从不复位旧的：复位会把还在排空的旧运行解除取消。
+    pub fn adopt_cancel(&mut self, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.cancel = cancel;
     }
 
     /// 这次运行是否已经被取消。有副作用的工具动手前问它。
@@ -1582,7 +1583,8 @@ mod tests {
     fn stop_refuses_side_effecting_tools_and_records_the_browser_attempt() {
         let mut permissions = WorkspaceToolPermissions::new(Vec::new(), true, true)
             .with_browser(true, vec!["*".to_string()]);
-        let switch = permissions.fresh_cancel();
+        let switch = test_cancel();
+        permissions.adopt_cancel(switch.clone());
         switch.store(true, std::sync::atomic::Ordering::Relaxed);
         let invoker = WorkspaceToolInvoker::without_logging(permissions.clone());
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1613,7 +1615,8 @@ mod tests {
         let env = TestEnv::new();
         env.write("readme.md", "hello\n");
         let mut permissions = WorkspaceToolPermissions::read_only();
-        let switch = permissions.fresh_cancel();
+        let switch = test_cancel();
+        permissions.adopt_cancel(switch.clone());
         switch.store(true, std::sync::atomic::Ordering::Relaxed);
         let invoker = WorkspaceToolInvoker::without_logging(permissions);
         let runtime = tokio::runtime::Runtime::new().unwrap();

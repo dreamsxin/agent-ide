@@ -38,6 +38,7 @@ pub async fn attach_mcp_tools(
     app: &AppHandle,
     llm: LlmClient,
     policy: McpToolPolicy,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> (LlmClient, Option<Arc<dyn ToolInvoker>>) {
     let definitions = registry.tool_definitions(policy).await;
     if definitions.is_empty() {
@@ -47,6 +48,7 @@ pub async fn attach_mcp_tools(
         registry: registry.clone(),
         app: app.clone(),
         policy,
+        cancel,
     });
     (llm.with_extra_tools(definitions), Some(invoker))
 }
@@ -55,6 +57,12 @@ struct McpToolInvoker {
     registry: Arc<McpRegistry>,
     app: AppHandle,
     policy: McpToolPolicy,
+    /// 这次运行的副作用开关，和内置工具面、`RunLease` 共用同一个 `Arc`。
+    ///
+    /// MCP 是本产品最大的副作用面（文件系统、git、HTTP 服务器都可能挂在这里），
+    /// 之前它完全不看取消开关：用户点了 Stop，界面变空闲，而排在后面的 MCP 调用
+    /// 照旧一个个发出去。
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl McpToolInvoker {
@@ -82,6 +90,16 @@ impl ToolInvoker for McpToolInvoker {
     }
 
     async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String> {
+        // Stop 之后不再往外发调用。MCP 工具做什么我们一概不知道，所以这里只能做能做的
+        // 那件事：不开始新的。已经在飞的那一次拦不住 —— 那需要 MCP 客户端支持取消。
+        if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            let detail = format!(
+                "This run was stopped, so MCP tool {} was not called.",
+                tool_name
+            );
+            self.log("warn", &format!("Refused {} after Stop", tool_name), &detail);
+            return Err(detail);
+        }
         self.log(
             "info",
             &format!("Calling MCP tool {}", tool_name),

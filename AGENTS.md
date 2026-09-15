@@ -76,11 +76,11 @@ npm test
   orchestrator lock. A run's cancel flag and its exclusivity claim both come from
   `try_begin_run` as a `RunLease`, one fresh pair per run — a shared flag let a new
   prompt un-cancel a still-draining old run. That flag is also the **side-effect gate**:
-  `WorkspaceToolPermissions::fresh_cancel()` mints it before the tool surface is built
-  and hands it to `try_begin_run`, so `WorkspaceToolInvoker::invoke()` refuses command /
-  write / browser calls that have not started, and `run_project_command_cancellable`
-  kills the process tree of one that has. One flag, not two copies. MCP tools have no
-  such gate.
+  the command layer mints it before any tool surface is built, then hands the same `Arc`
+  to the MCP invoker, to `WorkspaceToolPermissions::adopt_cancel`, and to
+  `try_begin_run`. So after Stop, `invoke()` refuses built-in and MCP calls that have not
+  started, and `run_project_command_cancellable` kills the process tree of one that has.
+  One flag, never reset — three copies of a bool would be the bug.
 - **Every change the Agent lands must be visible and undoable.** Diffs go through
   the review area; direct tool writes are published back as `applied` diffs with
   their pre-write content plus an undo checkpoint (`record_tool_writes`), on every
