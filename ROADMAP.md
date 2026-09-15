@@ -1275,6 +1275,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
      - **The record is a disclosure record**: `computer_capture` with app, window title and pixel size, in the external-action log, because a screenshot cannot be taken back.
    - Rust 361, unchanged: this is a deletion plus a decision.
 
+80. **The gate's last open door, closed (2026-09-15)**
+   - Left open by 78: `try_begin_run(run_id, cancel)` still took a flag, so a fifth command could re-copy the two lines 77 removed and every test would stay green. It now takes `&WorkspaceToolPermissions` and reads `cancel_switch()` itself. There is no longer *any* way to give the lease a different flag from the tool surface — not by convention, by signature.
+   - The orchestrator gains no new dependency for this: it already owns a `WorkspaceToolPermissions` field. And the 13 test call sites got better rather than noisier — `test_switch()` became `test_permissions()`, so the tests now travel the production path (mint → `adopt_cancel` → read back) instead of fabricating a switch the real code would never produce.
+   - **Two stale doc references deleted**: both `try_begin_run`'s comment and the old test helper pointed at `WorkspaceToolPermissions::fresh_cancel`, a function that has never existed under that name. A comment naming a function that is not there is the cheapest possible way to send the next reader looking for a mechanism that isn't the real one.
+   - Rust 361, unchanged: a signature change and a test-helper rename, no new cases.
+
+
 
 
 

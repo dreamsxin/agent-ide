@@ -535,7 +535,7 @@ fn claim_run_for(
     run_id: Option<String>,
     permissions: &mut crate::agent::workspace_tools::WorkspaceToolPermissions,
 ) -> Result<crate::agent::orchestrator::RunLease, String> {
-    let lease = orch.try_begin_run(run_id, permissions.cancel_switch())?;
+    let lease = orch.try_begin_run(run_id, permissions)?;
     permissions.run_id = orch.current_run_id.clone();
     Ok(lease)
 }
@@ -1882,7 +1882,7 @@ mod tests {
 
         let mut orch = AgentOrchestrator::new();
         let lease = orch
-            .try_begin_run(Some("run-1".to_string()), Arc::new(AtomicBool::new(false)))
+            .try_begin_run(Some("run-1".to_string()), &permissions)
             .expect("a fresh orchestrator hands out the lease");
         let events = RecordingEvents::new();
         finish_agent_run(
@@ -1921,7 +1921,7 @@ mod tests {
         assert!(sent.is_ok(), "{:?}", sent);
         let mut orch = AgentOrchestrator::new();
         let lease = orch
-            .try_begin_run(Some("run-2".to_string()), Arc::new(AtomicBool::new(false)))
+            .try_begin_run(Some("run-2".to_string()), &permissions)
             .expect("a fresh orchestrator hands out the lease");
         let events = RecordingEvents::new();
         finish_agent_run(
