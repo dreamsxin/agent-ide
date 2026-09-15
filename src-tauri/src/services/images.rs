@@ -39,23 +39,34 @@ pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 /// 一次运行总共能附上的原始图片字节数。
 ///
 /// 单张的上限管不住重复调用：模型可以在一次运行里读十几张图，每张都合规，总出网量
-/// 却没有任何东西看着。上限按**运行**计而不是按轮次计，因为付钱的是整次运行。
-/// 16 MiB ≈ 21 MB base64，正好是"四张最大尺寸的图"，够看完一套设计稿。
+/// 却没有任何东西看着 —— 一轮里能有几次工具调用，所以修复之前这个量是**无界**的，
+/// 不是"每轮一张"。上限按**运行**计而不是按轮次计，因为付钱的是整次运行。
+/// 16 MiB ≈ 22 MB base64，正好是"四张最大尺寸的图"，够看完一套设计稿。
 pub const MAX_RUN_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// 这次运行还能不能再附一张 `requested` 字节的图。
+pub fn check_run_image_budget(used: usize, requested: usize) -> Result<(), String> {
+    check_run_image_budget_with_limit(used, requested, MAX_RUN_IMAGE_BYTES)
+}
+
+/// 带上限参数的版本，测试用它把边界做成可达的。
 ///
 /// 错误话术要让模型能自己想出下一步（换小图、少读几张），所以三个数字都写出来：
 /// 已用、这一张、上限。只说"超了"会让它原地重试。
-pub fn check_run_image_budget(used: usize, requested: usize) -> Result<(), String> {
-    if used.saturating_add(requested) <= MAX_RUN_IMAGE_BYTES {
+pub fn check_run_image_budget_with_limit(
+    used: usize,
+    requested: usize,
+    limit: usize,
+) -> Result<(), String> {
+    if used.saturating_add(requested) <= limit {
         return Ok(());
     }
     Err(format!(
         "This run has already attached {} bytes of images; adding {} more would pass the {} byte per-run limit. Attach fewer or smaller images.",
-        used, requested, MAX_RUN_IMAGE_BYTES
+        used, requested, limit
     ))
 }
+
 
 
 /// 从扩展名判断 MIME 类型。
@@ -196,21 +207,21 @@ mod tests {
     /// 每张图都合规、总量却失控，是单张上限管不到的那一半。
     ///
     /// 边界要能用满：正好等于上限必须放行，否则最后一张合规的图会被莫名其妙地拒掉。
+    /// 三个数字用**互不相同**的值来断言 —— 用已用量等于上限那种对称情形，一个子串
+    /// 能同时满足两个断言，于是"三个数字都写出来"这句话可以在只写两个的情况下通过。
     #[test]
     fn the_run_budget_allows_exactly_the_limit_and_refuses_one_byte_more() {
         assert!(check_run_image_budget(0, MAX_RUN_IMAGE_BYTES).is_ok());
-        assert!(check_run_image_budget(MAX_RUN_IMAGE_BYTES, 0).is_ok());
         assert!(check_run_image_budget(MAX_RUN_IMAGE_BYTES - 1, 1).is_ok());
+        assert!(check_run_image_budget(MAX_RUN_IMAGE_BYTES, 1).is_err());
 
-        let error = check_run_image_budget(MAX_RUN_IMAGE_BYTES, 1).unwrap_err();
-        // 三个数字都要在话里：模型得据此决定换小图还是少读几张
-        assert!(error.contains(&MAX_RUN_IMAGE_BYTES.to_string()), "{}", error);
+        let error = check_run_image_budget_with_limit(100, 4096, 1000).unwrap_err();
+        assert!(error.contains("100 bytes"), "{}", error);
+        assert!(error.contains("4096 more"), "{}", error);
+        assert!(error.contains("1000 byte per-run limit"), "{}", error);
         assert!(error.contains("Attach fewer or smaller images"), "{}", error);
-
-        // 已用量加上这一张才超，也要拒 —— 一次运行的总量才是要守的东西
-        let error = check_run_image_budget(MAX_RUN_IMAGE_BYTES - 10, 11).unwrap_err();
-        assert!(error.contains("11"), "{}", error);
     }
+
 
     /// 溢出不能变成"放行"。`used + requested` 用饱和加法，否则一个荒谬的大小
     /// 会绕过预算 —— 上游确实拿不到不可信的 `usize`，但这条断言比推理便宜。
