@@ -278,7 +278,11 @@ impl AgentContext {
         // 空串要当成"没有"：`buildIdeRuntimeContext` 在无事可报或开关全关时返回 ""，
         // 照样建段的话，面板上会出现一行绿点的 "IDE runtime"，而模型收到的只是一个空
         // 标题 —— "关掉了"和"开着但没内容"变得无法区分。
-        if let Some(runtime) = self.ide_runtime.as_ref().filter(|text| !text.trim().is_empty()) {
+        if let Some(runtime) = self
+            .ide_runtime
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
             sections.push(ContextSection {
                 id: "ide_runtime",
                 label: "IDE runtime",
@@ -879,9 +883,16 @@ mod tests {
         ));
 
         assert!(
-            !estimate.sections.iter().any(|section| section.id == "ide_runtime"),
+            !estimate
+                .sections
+                .iter()
+                .any(|section| section.id == "ide_runtime"),
             "{:?}",
-            estimate.sections.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+            estimate
+                .sections
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>()
         );
     }
 

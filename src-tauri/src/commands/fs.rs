@@ -632,4 +632,3 @@ mod tests {
         assert!(env.root.join("a/f Copy.txt").is_file());
     }
 }
-

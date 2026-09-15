@@ -163,7 +163,6 @@ pub struct WorkspaceToolPermissions {
     image_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-
 type AgentImageLog = std::sync::Arc<std::sync::Mutex<Vec<crate::services::images::ImagePart>>>;
 
 /// 一次撤不回的外部动作。记录是这里唯一能承诺的东西，所以它必须完整到能复盘。
@@ -214,7 +213,6 @@ impl WorkspaceToolPermissions {
         self.computer_apps = computer_apps;
         self
     }
-
 
     /// 取出并清空外部动作记录。
     pub fn take_external_actions(&self) -> Vec<AgentExternalAction> {
@@ -287,9 +285,6 @@ impl WorkspaceToolPermissions {
         }
         Err(refusal.unwrap_or_else(|| "Image budget refused this attachment.".to_string()))
     }
-
-
-
 
     /// 浏览器工具是否可用：开关和清单都要有。
     fn allows_browser(&self) -> bool {
@@ -511,7 +506,6 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         }
     }
 
-
     if permissions.allows_browser() {
         // 通告里就把清单写出来：模型看不到授权范围时只会不断试探被拒的站点，把轮次
         // 浪费在注定失败的调用上。
@@ -558,7 +552,6 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
         });
     }
-
 
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
@@ -689,7 +682,11 @@ impl ToolInvoker for WorkspaceToolInvoker {
                         detail: detail.clone(),
                     });
                 }
-                self.log("warn", &format!("Refused {} after Stop", tool_name), &detail);
+                self.log(
+                    "warn",
+                    &format!("Refused {} after Stop", tool_name),
+                    &detail,
+                );
                 return Err(detail);
             }
         }
@@ -1273,10 +1270,7 @@ fn refuse_browser(
 /// 两道闸门，缺一不可：`allow_browser`（能不能用浏览器）和 origin 清单（能去哪儿）。
 /// 拒绝也要记进外部动作日志 —— "模型试图打开某个没授权的站点"正是用户事后最想知道的
 /// 事情之一，只在返回值里说一句会随着这一轮对话消失。
-fn browser_open_tool(
-    url: &str,
-    permissions: &WorkspaceToolPermissions,
-) -> Result<String, String> {
+fn browser_open_tool(url: &str, permissions: &WorkspaceToolPermissions) -> Result<String, String> {
     if !permissions.allows_browser() {
         return refuse_browser("browser_open_refused", url, permissions);
     }
@@ -1435,7 +1429,6 @@ fn computer_windows_tool(permissions: &WorkspaceToolPermissions) -> Result<Strin
     });
     Ok(crate::services::computer::format_windows(&allowed, hidden))
 }
-
 
 /// 把多个执行器合成一个。
 ///
@@ -1711,7 +1704,11 @@ mod tests {
         };
         let output = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(run_command_tool(command, &[command.to_string()], test_cancel()))
+            .block_on(run_command_tool(
+                command,
+                &[command.to_string()],
+                test_cancel(),
+            ))
             .unwrap();
 
         assert!(output.contains("exit code: 3"), "{}", output);
@@ -1843,7 +1840,10 @@ mod tests {
         assert!(error.contains("already exists"), "{}", error);
         // 被拒绝的调用不能留下任何记录，否则审查区会出现一次没发生的移动
         assert!(permissions.take_writes().is_empty());
-        assert_eq!(std::fs::read_to_string(env.root.join("src/b.ts")).unwrap(), "b\n");
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("src/b.ts")).unwrap(),
+            "b\n"
+        );
 
         // 拒绝清单两端都管：凭据文件既不能当源也不能当目标
         let error = move_file_tool(".env", "src/leaked.ts", &permissions).unwrap_err();
@@ -1931,8 +1931,8 @@ mod tests {
     /// 空清单不当成"没配置就全放"：默认放开的清单在出事那天读起来像是用户批准过。
     #[test]
     fn browser_tools_need_the_switch_and_a_non_empty_allowlist() {
-        let switch_only = WorkspaceToolPermissions::new(Vec::new(), false, false)
-            .with_browser(true, Vec::new());
+        let switch_only =
+            WorkspaceToolPermissions::new(Vec::new(), false, false).with_browser(true, Vec::new());
         let names: Vec<String> = tool_definitions(&switch_only)
             .into_iter()
             .map(|definition| definition.name)
@@ -1951,7 +1951,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["browser_open_refused", "browser_tabs_refused"]
         );
-
 
         let granted = WorkspaceToolPermissions::new(Vec::new(), false, false)
             .with_browser(true, vec!["https://example.com".to_string()]);
@@ -2043,7 +2042,11 @@ mod tests {
         let permissions = WorkspaceToolPermissions::read_only();
         permissions.charge_image_bytes(1_000).expect("fits");
         let shared = permissions.clone();
-        assert_eq!(shared.images_bytes_used(), 1_000, "clone shares the counter");
+        assert_eq!(
+            shared.images_bytes_used(),
+            1_000,
+            "clone shares the counter"
+        );
 
         let mut next_run = permissions.clone();
         next_run.reset_image_budget();
@@ -2053,8 +2056,6 @@ mod tests {
         assert_eq!(next_run.images_bytes_used(), 500);
         assert_eq!(permissions.images_bytes_used(), 1_000);
     }
-
-
 
     /// 不是图片的文件要在这里就被拒，而不是发出去让 provider 报一个看不懂的错。
     #[test]
@@ -2081,7 +2082,11 @@ mod tests {
             .into_iter()
             .map(|definition| definition.name)
             .collect();
-        assert!(!names.contains(&COMPUTER_WINDOWS.to_string()), "{:?}", names);
+        assert!(
+            !names.contains(&COMPUTER_WINDOWS.to_string()),
+            "{:?}",
+            names
+        );
         assert!(
             !WorkspaceToolInvoker::without_logging(switch_only.clone()).handles(COMPUTER_WINDOWS)
         );
@@ -2099,7 +2104,9 @@ mod tests {
             .into_iter()
             .find(|definition| definition.name == COMPUTER_WINDOWS);
         if cfg!(windows) {
-            let description = advertised.expect("tool is advertised on Windows").description;
+            let description = advertised
+                .expect("tool is advertised on Windows")
+                .description;
             assert!(description.contains("Code.exe"), "{}", description);
             // 也要说清这是子集，否则模型会把过滤后的列表当成整个桌面
             assert!(description.contains("hidden"), "{}", description);
@@ -2109,7 +2116,6 @@ mod tests {
             assert!(advertised.is_none());
         }
     }
-
 
     /// 通告里要写出授权的站点：模型看不到范围时只会不断试探被拒的站点。
     #[test]
@@ -2123,7 +2129,11 @@ mod tests {
             .expect("browser tool")
             .description;
 
-        assert!(description.contains("http://127.0.0.1:1420"), "{}", description);
+        assert!(
+            description.contains("http://127.0.0.1:1420"),
+            "{}",
+            description
+        );
         // 也要说清它撤不回，否则模型会以为这和写文件一样可以回滚
         assert!(description.to_lowercase().contains("cannot be undone"));
     }
@@ -2158,7 +2168,9 @@ mod tests {
 
         let actions = granted.take_external_actions();
         assert_eq!(actions.len(), 3);
-        assert!(actions.iter().all(|action| action.kind == "browser_open_refused"));
+        assert!(actions
+            .iter()
+            .all(|action| action.kind == "browser_open_refused"));
     }
 
     /// 两个授权位都要有，而且缺哪个都不通告、也不认领。

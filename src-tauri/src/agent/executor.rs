@@ -87,6 +87,9 @@ async fn stream_with_tool_loop(
 ) -> Result<StageOutcome, String> {
     let prompt_len = messages.len();
     let mut merged = String::new();
+    // 还没送出去的图片。跨轮存在，因为一个请求装不下的那些要留到下一轮，而不是让模型
+    // 回头再读一遍 —— 它们已经花过运行预算了。
+    let mut pending_images: Vec<crate::services::images::ImagePart> = Vec::new();
 
     for iteration in 0..=MAX_TOOL_ITERATIONS {
         let output = llm
@@ -112,6 +115,12 @@ async fn stream_with_tool_loop(
                     MAX_TOOL_ITERATIONS
                 ));
             }
+            // 循环到这里就结束了，留着的图片再也没有请求可搭。它们花过预算却没被看到，
+            // 所以要走和其他图片降级同一条汇报路径，而不是安静消失。
+            llm.note_dropped_images(
+                pending_images.len(),
+                "the tool loop ended before they fit in a request",
+            );
             merged.push_str(&final_text);
             let mut transcript = messages.split_off(prompt_len);
             transcript.push(ChatMessage::assistant(final_text));
@@ -132,7 +141,6 @@ async fn stream_with_tool_loop(
         // 这一轮工具产出的图片。它们**不能**挂在 `role: "tool"` 消息上：OpenAI 的
         // chat/completions 只在 user 消息里接受 image 块，tool 消息的 content 只能是文本，
         // 挂上去会得到一个和图片无关的 400，而唯一启用了图片的模型族恰好就是这一家。
-        let mut round_images: Vec<crate::services::images::ImagePart> = Vec::new();
         for call in &external {
             if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("Agent task cancelled".to_string());
@@ -144,27 +152,21 @@ async fn stream_with_tool_loop(
             };
             // 失败路径也要排空：不排的话，这次的图会挂到下一次工具调用上，模型看到的图
             // 和它问的问题就错位了 —— 那种错比没有图更难查。
-            round_images.extend(invoker.take_images());
+            pending_images.extend(invoker.take_images());
             messages.push(ChatMessage::tool_result(call.id.clone(), result));
         }
-        if !round_images.is_empty() {
+        if !pending_images.is_empty() {
             // 图片单独一条 user 消息跟在工具结果后面，这是 OpenAI 兼容端点唯一接受的位置。
             //
             // 一轮里可以有好几次读图调用，所以这里还要按**单个请求**再卡一次：运行预算
             // 放得过的四张图，base64 之后能把请求体顶到 provider 的上限之上，换来一条和
-            // 图片无关的 413。丢掉的要说出来 —— 转录里那句"附了 N 张图"必须和实际一致，
-            // 而且 `note_dropped_images` 会让这次降级出现在用户的 action log 里。
-            let (kept, dropped) = crate::services::images::fit_images_in_request(round_images);
-            let count = kept.len();
-            let mut text = format!("Attached {} image(s) from the tool call(s) above.", count);
-            if dropped > 0 {
-                text.push_str(&format!(
-                    "\n\n[{} more image(s) were not attached: they would not fit in one request. Read them again in a later step if you still need them.]",
-                    dropped
-                ));
-                llm.note_dropped_images(dropped, "they would not fit in one request");
-            }
-            messages.push(ChatMessage::user(text).with_images(kept));
+            // 图片无关的 413。装不下的**留到下一轮**，不是丢掉：它们已经花过运行预算，
+            // 让模型回头再读一遍会撞第二次预算，而那次拒绝给的建议它做不到。
+            let total = pending_images.len();
+            let (kept, deferred) =
+                crate::services::images::fit_images_in_request(std::mem::take(&mut pending_images));
+            messages.push(ChatMessage::user(round_image_note(kept.len(), total)).with_images(kept));
+            pending_images = deferred;
         }
     }
 
@@ -174,6 +176,24 @@ async fn stream_with_tool_loop(
         text: merged,
         transcript,
     })
+}
+
+/// 附图那条 user 消息的正文。
+///
+/// 措辞是这里唯一容易错的东西，所以它是个纯函数：`kept` 张已经附上，剩下的留到下一轮。
+/// 必须说清**是哪些** —— 截断从尾部走，模型靠顺序把图对上工具调用，只说"少了 2 张"
+/// 它无从判断少的是哪两张。也必须说清"别再读一遍"：重读会撞运行预算，而那条拒绝里
+/// 给出的建议（少读几张）它做不到。
+fn round_image_note(kept: usize, total: usize) -> String {
+    if kept >= total {
+        return format!("Attached {} image(s) from the tool call(s) above.", total);
+    }
+    format!(
+        "Attached the first {} of {} image(s) from the tool call(s) above. The last {} did not fit in this request and will be attached in the next step — do not read them again.",
+        kept,
+        total,
+        total - kept
+    )
 }
 
 /// 执行步骤的系统提示词
@@ -1287,6 +1307,23 @@ mod tests {
     #[test]
     fn carried_thread_is_empty_when_no_stage_has_run() {
         assert!(bound_transcript(&[]).is_empty());
+    }
+
+    /// 附图那句话必须说清"是哪些"，不然尾部截断这个设计对模型就是不可见的。
+    #[test]
+    fn the_image_note_says_which_images_are_missing_and_not_to_reread_them() {
+        assert_eq!(
+            round_image_note(2, 2),
+            "Attached 2 image(s) from the tool call(s) above."
+        );
+
+        let note = round_image_note(1, 3);
+        assert!(note.contains("first 1 of 3"), "{}", note);
+        // 少了几张、少的是哪几张，两件事都要说
+        assert!(note.contains("The last 2"), "{}", note);
+        // 重读会撞运行预算，所以必须明确劝住
+        assert!(note.contains("do not read them again"), "{}", note);
+        assert!(note.contains("next step"), "{}", note);
     }
 
     /// orchestrator 把 `[Stage / role]` 标签加在消息**头部**，而尾部截断会先吃掉头部。

@@ -1826,7 +1826,10 @@ fn adapt_images_for_model(
     if model_supports_images(model) {
         return (messages, None);
     }
-    let reason = format!("the configured model ({}) does not accept image input", model);
+    let reason = format!(
+        "the configured model ({}) does not accept image input",
+        model
+    );
     let (messages, dropped) = drop_images_with_note(messages, &reason);
     let drop = (dropped > 0).then_some(ImageDrop {
         count: dropped,
@@ -2222,13 +2225,14 @@ mod image_wire_tests {
         let client = LlmClient::new(cfg);
         // rx 要活到请求结束：mock 流会往里发 token
         let (tx, _rx) = mpsc::channel::<String>(8);
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            client.stream_chat_with_tools(
-                vec![ChatMessage::user("look at this").with_images(vec![png()])],
-                Arc::new(AtomicBool::new(false)),
-                tx,
-            ),
-        );
+        let result =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(client.stream_chat_with_tools(
+                    vec![ChatMessage::user("look at this").with_images(vec![png()])],
+                    Arc::new(AtomicBool::new(false)),
+                    tx,
+                ));
         assert!(result.is_ok(), "{:?}", result);
         let drops = client.image_drops();
         assert_eq!(drops.len(), 1, "{:?}", drops);
@@ -2249,9 +2253,7 @@ mod image_wire_tests {
     fn a_non_vision_model_records_the_drop_once() {
         let client = LlmClient::new(config("deepseek-chat"));
         let messages = client
-            .adapt_and_record_images(vec![
-                ChatMessage::user("as shown").with_images(vec![png()])
-            ]);
+            .adapt_and_record_images(vec![ChatMessage::user("as shown").with_images(vec![png()])]);
         assert!(messages[0].images.is_empty());
         assert_eq!(client.image_drops().len(), 1);
         assert!(client.image_drops()[0].reason.contains("deepseek-chat"));
@@ -2282,8 +2284,29 @@ mod image_wire_tests {
         assert!(details.contains("flattened text prompt"), "{}", details);
     }
 
+    /// 执行器自己丢的图也要落在同一个账上，而且 0 张不是一次降级。
+    ///
+    /// 这条钉的是 `note_dropped_images` 这个对外的口子：执行器没有别的汇报渠道，它写进来
+    /// 的东西必须和模型端的降级用同一句话呈现，否则用户要在两个地方找同一件事。
     #[test]
-    fn capability_detection_errs_towards_not_supported() {        assert!(model_supports_images("gpt-4o"));
+    fn a_drop_reported_by_the_executor_lands_in_the_same_report() {
+        let client = LlmClient::new(config("gpt-4o"));
+        client.note_dropped_images(0, "nothing was dropped");
+        assert!(
+            client.image_drops().is_empty(),
+            "zero images is not a degradation"
+        );
+
+        client.note_dropped_images(2, "the tool loop ended before they fit in a request");
+        let (summary, details) =
+            image_degradation_report(&client.image_drops()).expect("one drop produces a report");
+        assert_eq!(summary, "2 image(s) were not sent to the model");
+        assert!(details.contains("tool loop ended"), "{}", details);
+    }
+
+    #[test]
+    fn capability_detection_errs_towards_not_supported() {
+        assert!(model_supports_images("gpt-4o"));
         assert!(model_supports_images("claude-3-5-sonnet-20241022"));
         assert!(model_supports_images("Qwen2.5-VL-7B"));
         // 判不出来就是不支持：误判的代价是一次错误信息和图片无关的 400

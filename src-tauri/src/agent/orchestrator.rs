@@ -520,10 +520,10 @@ pub async fn drive_repair(
     };
 
     loop {
-        let plan = orch
-            .lock()
-            .await
-            .prepare_repair_iteration(&mut run, &cancel, events.as_ref())?;
+        let plan =
+            orch.lock()
+                .await
+                .prepare_repair_iteration(&mut run, &cancel, events.as_ref())?;
         let (iteration, step, prompt, tool_invoker) = match plan {
             RepairPlan::Done(outcome) => return Ok(outcome),
             RepairPlan::Iterate {
@@ -2228,12 +2228,7 @@ impl AgentOrchestrator {
 
         self.ensure_not_cancelled(cancel, events)?;
         let problems = collect_command_problems(&run.results);
-        let prompt = build_repair_prompt(
-            &run.original_prompt,
-            iteration,
-            &run.results,
-            &problems,
-        );
+        let prompt = build_repair_prompt(&run.original_prompt, iteration, &run.results, &problems);
         let step = TaskStep {
             id: format!("repair-{}-{}", iteration, uuid::Uuid::new_v4()),
             title: format!("Repair failed checks ({})", iteration),
@@ -2624,7 +2619,11 @@ mod tests {
 
         assert_eq!(recorded.len(), 1, "same file must merge into one entry");
         assert_eq!(
-            recorded[0].provenance.as_ref().expect("provenance").operation,
+            recorded[0]
+                .provenance
+                .as_ref()
+                .expect("provenance")
+                .operation,
             "delete"
         );
         // 撤销要回到这次运行之前的内容，不是中间那一版
@@ -2851,7 +2850,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_writes_become_applied_diffs_with_an_undo_point() {        let mut orchestrator = AgentOrchestrator::new();
+    fn tool_writes_become_applied_diffs_with_an_undo_point() {
+        let mut orchestrator = AgentOrchestrator::new();
 
         let recorded = orchestrator.record_tool_writes(vec![
             AgentFileWrite {
@@ -2939,8 +2939,12 @@ mod tests {
         assert_eq!(recorded.len(), 2);
         // 记录要能说出"哪一次运行做的"，而且用的是那批授权自己带的 id：
         // 事后再去读 orchestrator 会把被 Stop 的那次运行记到下一次名下
-        assert!(recorded.iter().all(|a| a.run_id.as_deref() == Some("run-7")));
-        assert!(recorded.iter().all(|a| !a.id.is_empty() && !a.timestamp.is_empty()));
+        assert!(recorded
+            .iter()
+            .all(|a| a.run_id.as_deref() == Some("run-7")));
+        assert!(recorded
+            .iter()
+            .all(|a| !a.id.is_empty() && !a.timestamp.is_empty()));
         assert_eq!(orchestrator.external_actions.len(), 2);
 
         // 无界列表会被一次长跑里反复被拒的调用撑爆；留最近的
@@ -4066,7 +4070,9 @@ mod tests {
         for index in 0..MAX_CONVERSATION_TURNS {
             orchestrator.record_conversation_turn(&format!("ask {}", index));
         }
-        let sixth = orchestrator.conversation[MAX_CONVERSATION_TURNS - 1].id.clone();
+        let sixth = orchestrator.conversation[MAX_CONVERSATION_TURNS - 1]
+            .id
+            .clone();
         let index_before = MAX_CONVERSATION_TURNS - 1;
 
         // 再来两轮，头部被挤掉两条
@@ -4077,7 +4083,10 @@ mod tests {
             .iter()
             .position(|turn| turn.id == sixth)
             .expect("the turn is still in the window");
-        assert_ne!(index_now, index_before, "下标应当已经平移，否则这条测试没在测东西");
+        assert_ne!(
+            index_now, index_before,
+            "下标应当已经平移，否则这条测试没在测东西"
+        );
 
         // 拿着当初那个 id 回来切，命中的仍然是同一轮
         assert_eq!(orchestrator.truncate_conversation_from(&sixth).unwrap(), 3);
@@ -4088,7 +4097,8 @@ mod tests {
 
     /// 每次运行原本都是冷启动，跟进一句"再处理下错误分支"读不到上一轮做了什么。
     #[test]
-    fn conversation_turns_carry_forward_and_stay_bounded() {        let mut orchestrator = AgentOrchestrator::new();
+    fn conversation_turns_carry_forward_and_stay_bounded() {
+        let mut orchestrator = AgentOrchestrator::new();
         assert!(orchestrator.conversation_digest().is_none());
 
         orchestrator
@@ -4411,7 +4421,10 @@ mod tests {
             stopped.cancel.load(Ordering::SeqCst),
             "新运行不该把被停掉那次的取消状态解除"
         );
-        assert!(!fresh.cancel.load(Ordering::SeqCst), "新运行自己不该是取消态");
+        assert!(
+            !fresh.cancel.load(Ordering::SeqCst),
+            "新运行自己不该是取消态"
+        );
 
         // run-1 终于醒来收尾
         orchestrator.finish_run(stopped.claim);
@@ -4442,7 +4455,9 @@ mod tests {
                 .try_begin_run(Some("run-1".to_string()), test_switch())
                 .expect("空闲时应当抢到执行权");
             assert!(
-                orchestrator.try_begin_run(Some("run-2".to_string()), test_switch()).is_err(),
+                orchestrator
+                    .try_begin_run(Some("run-2".to_string()), test_switch())
+                    .is_err(),
                 "凭证还活着时必须拒绝第二个运行"
             );
             drop(leaked);
@@ -4477,7 +4492,9 @@ mod tests {
         let _cancel = lease.cancel;
 
         assert!(
-            orchestrator.try_begin_run(Some("run-2".to_string()), test_switch()).is_err(),
+            orchestrator
+                .try_begin_run(Some("run-2".to_string()), test_switch())
+                .is_err(),
             "开关被移走不代表这次运行结束了"
         );
 
