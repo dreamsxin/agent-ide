@@ -43,6 +43,9 @@ keyring = { version = "3", features = [
     "sync-secret-service",
 ] }
 async-trait = "0.1"
+# 窗口截图要编码成 PNG：provider 只认 png/jpg/gif/webp，BMP 不在交集里，而手写一个
+# PNG 编码器（zlib + CRC + 过滤器）不是 base64 那种二十行的量级。
+png = "0.18.1"
 
 # 性能监控依赖
 flamegraph = { version = "0.6", optional = true }
@@ -66,6 +69,8 @@ performance-tools = ["flamegraph", "criterion"]
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.59.0", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
 ] }

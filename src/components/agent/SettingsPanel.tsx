@@ -139,6 +139,7 @@ export default function SettingsPanel() {
   const togglePermission = useAgentStore((s) => s.togglePermission);
   const setBrowserOrigins = useAgentStore((s) => s.setBrowserOrigins);
   const setComputerApps = useAgentStore((s) => s.setComputerApps);
+  const setCaptureApps = useAgentStore((s) => s.setCaptureApps);
 
   const [profileId, setProfileId] = useState("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
@@ -827,6 +828,41 @@ export default function SettingsPanel() {
               {permissions.computerApps.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
                   No app allowed yet — the desktop tool stays hidden from the Agent.
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label="Window Capture"
+            desc="Allow Agent to screenshot one named window (contents, not just the title; needs an allowed app below, Windows only)"
+            checked={permissions.allowComputerCapture}
+            onChange={() => togglePermission("allowComputerCapture")}
+          />
+          {permissions.allowComputerCapture && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="capture-apps">
+                Capturable apps (one per line, `*` for any)
+              </label>
+              <textarea
+                id="capture-apps"
+                rows={2}
+                spellCheck={false}
+                value={permissions.captureApps.join("\n")}
+                onChange={(event) =>
+                  setCaptureApps(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="Code.exe"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 这份清单和上面那份是分开的：能看见窗口存在 ≠ 能看见窗口里的东西 */}
+              {permissions.captureApps.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  No app allowed yet — the capture tool stays hidden from the Agent.
                 </p>
               )}
             </div>

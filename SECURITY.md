@@ -111,7 +111,17 @@ They are advertised when the profile's `toolCallMode` is `native_tools`, which i
 - **An *unauthorized* call never reaches the tool at all.** `handles()` returns false, and both `select_external_calls` and `CompositeToolInvoker::invoke` filter on it, so the model's call is dropped before dispatch and leaves no external-action record — `computer_windows_refused` exists only as a defence-in-depth check for a direct caller. The same is true of the browser tools' in-tool gate.
 - **Stop applies.** The tool is in the side-effect gate list, so a call that has not started is refused after Stop.
 
-Not implemented, deliberately: **screenshots and input injection**. A screenshot is no longer blocked by the message model — `ChatMessage` carries images since the multimodal slice — but it needs a Win32 capture surface plus a PNG encoder, and the per-app authority question is sharper there than for titles: a window's *contents* can include anything the user has open. Input injection (clicking, typing) is irreversible and can dismiss any confirmation dialog; it needs an authority model narrower than "allow the desktop" and a record that can be replayed, so the shape is being proven on the read-only surface first.
+**Window capture** (`workspace_computer_capture`) is a second, **separate** grant: its own switch plus its own non-empty app list. It deliberately does not ride on Desktop Observation — a title says "Signal is open", a capture shows the messages — so allowing the Agent to see that a window exists never implies allowing it to see what is inside.
+
+What it enforces:
+
+- **One named window, never the screen.** `PrintWindow(PW_RENDERFULLCONTENT)` against a specific `HWND` from the same enumeration, so windows stacked on top are not copied in. A full-screen grab has no scope any per-app allowlist could describe, which is why there is no such tool.
+- **Ambiguity captures nothing.** The model names the window with `app` and/or `title_contains`; zero matches, or more than one, is refused with the candidate list so it can narrow down. Guessing would be an unrecoverable disclosure of the wrong window.
+- **Windows outside the allowlist are not even named** in the refusal — it reports only how many allowed windows exist.
+- **Two size gates, in this order**: the pixel count (4 000 000, so a 2560×1440 window fits) is checked before any bitmap is copied, and the encoded PNG is checked against the same 4 MiB per-image cap `workspace_read_image` uses. It also charges the same 16 MiB per-run and 12 MiB per-request image budgets, so a capture and a file read compete for one allowance.
+- **Every attempt is an external action record** — `computer_capture`, `computer_capture_refused`, `computer_capture_failed`, `computer_capture_cancelled` — naming the app, the title and the pixel size on success. A screenshot cannot be taken back, so it is logged like a navigation, not like a read.
+
+Not implemented, deliberately: **input injection**. Clicking and typing are irreversible and can dismiss any confirmation dialog; that needs an authority model narrower than "allow the desktop" and a record that can be replayed, so the shape is being proven on the read-only and capture surfaces first.
 
 ## Browser Use
 
