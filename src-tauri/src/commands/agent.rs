@@ -1467,20 +1467,22 @@ pub async fn repair_workspace(
     .await;
 
     let mut orch = agent_state.orchestrator.lock().await;
-    // 记账写在两条路径上：修复轮次花掉的 token 和别的运行一样要能查到
-    emit_usage_action_log(&orch, &app_handle, &usage_meter);
     // 修复循环用的是上一次运行留在 orchestrator 上的工具面（`drive_repair` 直接克隆
     // `tool_invoker`），那份授权和这里的 `repair_permissions` 共享同一份日志 `Arc`。
     // 不在这里排空的话，修复轮里发生的写入和导航就要等下一个 prompt —— 而下一个
     // prompt 会换上一份全新的 `Arc`，于是那些记录永远没人取走。
-    publish_tool_writes(&mut orch, &app_handle, &repair_permissions);
-    publish_external_actions(&mut orch, &app_handle, &repair_permissions);
-    // 降级也要报：修复循环用的是同一个 client，工具被拒或图片被摘掉在这里同样会发生，
-    // 而这条路径自己拼装收尾流程，不经过 `finish_agent_run`
-    emit_tool_degradation_log(&orch, &app_handle, &llm);
-    emit_image_degradation_log(&orch, &app_handle, &llm);
-    // 释放要在 `?` 之前：修复失败也得把执行权交回去，否则后面所有运行都被拒
-    orch.finish_run(lease.claim);
+    //
+    // 走同一个 `finish_agent_run`，而不是在这里抄一份：这条路径已经因为"自己拼装收尾"
+    // 被漏掉三次（ROADMAP 58 漏了排空、70 漏了降级）。收尾里放的是**释放执行权**，
+    // 所以它必须落在 `?` 之前，否则修复失败会把执行权永久占住。
+    finish_agent_run(
+        &mut orch,
+        &app_handle,
+        &repair_permissions,
+        &usage_meter,
+        &llm,
+        lease.claim,
+    );
     let outcome = outcome?;
 
     Ok(RepairWorkspaceReport {
@@ -1762,12 +1764,14 @@ mod tests {
             Arc::new(|_: &str, _: &str, _: &str| {}),
             permissions.clone(),
         );
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            invoker.invoke(
-                crate::agent::workspace_tools::BROWSER_OPEN,
-                "{\"url\":\"https://example.com/pricing\"}",
-            ),
-        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime is enough for a refused call");
+        let result = runtime.block_on(invoker.invoke(
+            crate::agent::workspace_tools::BROWSER_OPEN,
+            "{\"url\":\"https://example.com/pricing\"}",
+        ));
         assert!(result.is_err(), "a stopped run must not navigate");
 
         let mut orch = AgentOrchestrator::new();
@@ -1795,27 +1799,35 @@ mod tests {
 
     /// 图片降级必须跟着运行收尾一起送出去，没有降级时则一个字都不说。
     ///
-    /// `finish_agent_run` 是所有退出分支的共同出口，所以这条同时钉住了"失败/取消也报"。
+    /// 这条钉的是 `finish_agent_run` 本身的行为。它是四个运行命令**唯一**的收尾入口
+    /// （包括 `repair_workspace`，那条路径以前自己拼装，被漏掉过两次），所以"失败和
+    /// 取消也报"这件事靠的是那唯一入口，而不是这条测试 —— 调用点本身仍然要靠读代码。
     #[test]
     fn finishing_a_run_reports_a_dropped_image_and_stays_quiet_otherwise() {
         let permissions =
             crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
         let meter = crate::services::llm_client::RunUsageMeter::new(None);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime is enough: nothing here waits on I/O");
 
         // mock 端点把消息拍平成文本，图片没有位置可去 —— 真实的降级路径
         let dropped = mock_llm("gpt-4o", "mock://images");
+        // rx 必须活到请求结束：mock 流会往里发 token，收端一关请求就报错
         let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
-        let sent = tokio::runtime::Runtime::new().unwrap().block_on(
-            dropped.stream_chat_with_tools(
-                vec![crate::services::llm_client::ChatMessage::user("look at this")
-                    .with_images(vec![crate::services::images::ImagePart {
+        let sent = runtime.block_on(dropped.stream_chat_with_tools(
+            vec![
+                crate::services::llm_client::ChatMessage::user("look at this").with_images(vec![
+                    crate::services::images::ImagePart {
                         media_type: "image/png".to_string(),
                         base64_data: "Zm9vYmFy".to_string(),
-                    }])],
-                Arc::new(AtomicBool::new(false)),
-                tx,
-            ),
-        );
+                    },
+                ]),
+            ],
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        ));
         assert!(sent.is_ok(), "{:?}", sent);
 
         let mut orch = AgentOrchestrator::new();
@@ -1837,8 +1849,17 @@ mod tests {
             phases
         );
 
-        // 没有降级的运行不能写这条：一条永远出现的警告等于没有警告
+        // 没有降级的运行不能写这条：一条永远出现的警告等于没有警告。这里要真的走一遍
+        // 同一个降级路径（同一个 mock 端点，只是消息里没有图），否则断言就只是在说
+        // "没调用过的 client 没有记录"，那是句废话。
         let clean = mock_llm("gpt-4o", "mock://images");
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let sent = runtime.block_on(clean.stream_chat_with_tools(
+            vec![crate::services::llm_client::ChatMessage::user("no picture here")],
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        ));
+        assert!(sent.is_ok(), "{:?}", sent);
         let mut orch = AgentOrchestrator::new();
         let lease = orch
             .try_begin_run(Some("run-2".to_string()), Arc::new(AtomicBool::new(false)))
