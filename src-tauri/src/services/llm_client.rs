@@ -330,14 +330,62 @@ impl LlmConfig {
 /// - tool 回合：`role = "tool"`，`tool_call_id` 关联对应调用，`content` 为工具结果。
 ///
 /// 两个字段为 None 时不参与序列化，因此普通请求体与扩展前完全一致。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+///
+/// `images` 不是 `content` 的一部分而是并列的一栏，序列化时才合成 OpenAI 的
+/// content block 数组（见手写的 `Serialize`）。这样做的理由是代价：把 `content` 改成
+/// 枚举要动 16 个构造点和 7 处读 `.content` 的地方；加一栏则一处都不用动，而带图的
+/// 请求体只在真的有图时才换形状。
+#[derive(Clone, Debug, Default)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OutboundToolCall>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 随这条消息一起发给模型的图片。空的时候线格式和以前逐字节相同。
+    pub images: Vec<crate::services::images::ImagePart>,
+}
+
+impl Serialize for ChatMessage {
+    /// 没图时 `content` 是字符串，有图时是 content block 数组。
+    ///
+    /// 不无条件用数组形式：老的兼容端点（以及本地 llama.cpp 那类服务）只认字符串，
+    /// 换成数组会让**所有**请求在这些端点上失败 —— 为了一个很少用到的能力把常规路径
+    /// 弄坏，是这里最不该犯的错。
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut len = 2;
+        if self.tool_calls.is_some() {
+            len += 1;
+        }
+        if self.tool_call_id.is_some() {
+            len += 1;
+        }
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("role", &self.role)?;
+        if self.images.is_empty() {
+            map.serialize_entry("content", &self.content)?;
+        } else {
+            let mut blocks: Vec<serde_json::Value> = Vec::new();
+            // 空文本不占一个 block：有 provider 会拒绝空的 text block
+            if !self.content.is_empty() {
+                blocks.push(serde_json::json!({ "type": "text", "text": self.content }));
+            }
+            for image in &self.images {
+                blocks.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": image.data_url() }
+                }));
+            }
+            map.serialize_entry("content", &blocks)?;
+        }
+        if let Some(tool_calls) = &self.tool_calls {
+            map.serialize_entry("tool_calls", tool_calls)?;
+        }
+        if let Some(tool_call_id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", tool_call_id)?;
+        }
+        map.end()
+    }
 }
 
 impl ChatMessage {
@@ -372,6 +420,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: Some(calls.iter().map(OutboundToolCall::from).collect()),
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -382,7 +431,17 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            images: Vec::new(),
         }
+    }
+
+    /// 给这条消息带上图片。
+    ///
+    /// 单独一个 builder 而不是给每个构造函数加参数：带图是少数情况，让多数调用点保持
+    /// 原样，改动就不会扩散到十几个地方。
+    pub fn with_images(mut self, images: Vec<crate::services::images::ImagePart>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -1603,6 +1662,65 @@ fn build_prompt_from_messages(messages: &[ChatMessage]) -> String {
     prompt
 }
 
+/// 这个模型是否接受图片输入。
+///
+/// 按模型名的子串判断，是个**启发式**，没有别的办法：OpenAI 兼容端点没有能力查询接口，
+/// 而这里的 `provider` 只是用户填的一个字符串。所以宁可漏判（把图丢掉并说明），
+/// 也不要误判 —— 误判的结果是一次 400，而且错误信息通常和图片无关，用户根本对不上。
+///
+/// 判不出来就是不支持。新模型上来时这里要手动加一条，这个代价是清楚的。
+pub fn model_supports_images(model: &str) -> bool {
+    let model = model.to_lowercase();
+    const VISION_MARKERS: &[&str] = &[
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-4-turbo",
+        "gpt-5",
+        "o3",
+        "o4",
+        "claude-3",
+        "claude-4",
+        "claude-sonnet",
+        "claude-opus",
+        "gemini",
+        "qwen-vl",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "llava",
+        "pixtral",
+        "internvl",
+        "minicpm-v",
+    ];
+    VISION_MARKERS.iter().any(|marker| model.contains(marker))
+}
+
+/// 模型看不了图时，把图片摘掉并在文本里说明。
+///
+/// 为什么不直接报错：图片通常是补充信息（"照着这张图实现"里的图是主角，但"这是报错截图"
+/// 里的文本往往已经够用），一次运行不该因为换了个模型就整体失败。但**必须说出来** ——
+/// 静悄悄丢掉会让模型看着一句"如图所示"发挥想象，那比失败更糟。
+fn adapt_images_for_model(model: &str, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    if model_supports_images(model) {
+        return messages;
+    }
+    messages
+        .into_iter()
+        .map(|mut message| {
+            if message.images.is_empty() {
+                return message;
+            }
+            let dropped = message.images.len();
+            message.images.clear();
+            message.content = format!(
+                "{}\n\n[{} image(s) were not sent: the configured model ({}) does not accept image \
+                 input.]",
+                message.content, dropped, model
+            );
+            message
+        })
+        .collect()
+}
+
 fn build_chat_request(
     config: &LlmConfig,
     messages: Vec<ChatMessage>,
@@ -1610,6 +1728,7 @@ fn build_chat_request(
     extra_tools: &[ToolDefinition],
     include_tools: bool,
 ) -> serde_json::Value {
+    let messages = adapt_images_for_model(&config.model, messages);
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": messages,
@@ -1871,6 +1990,100 @@ pub fn local_inference_removed(config: &LocalModelConfig) -> String {
          and configure it as a normal profile endpoint plus model name.",
         config.name
     )
+}
+
+#[cfg(test)]
+mod image_wire_tests {
+    use super::*;
+    use crate::services::images::ImagePart;
+
+    fn config(model: &str) -> LlmConfig {
+        LlmConfig {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            provider: "openai".to_string(),
+            max_output_tokens: None,
+            tool_call_mode: "text_protocol".to_string(),
+            model_type: ModelType::OpenAI,
+            local_model_config: None,
+        }
+    }
+
+    fn png() -> ImagePart {
+        ImagePart {
+            media_type: "image/png".to_string(),
+            base64_data: "Zm9vYmFy".to_string(),
+        }
+    }
+
+    /// 没有图片时线格式必须和加这个字段之前逐字节相同。
+    ///
+    /// 这是这个改动最重要的一条性质：老的兼容端点（本地 llama.cpp 那类）只认字符串形式的
+    /// `content`，无条件改成数组会让**所有**常规请求在这些端点上失败。
+    #[test]
+    fn a_message_without_images_serializes_content_as_a_bare_string() {
+        let body = serde_json::to_value(ChatMessage::user("hello")).unwrap();
+        assert_eq!(body["content"], serde_json::json!("hello"));
+        assert!(body.get("tool_calls").is_none());
+        assert!(body.get("images").is_none());
+    }
+
+    #[test]
+    fn a_message_with_images_switches_to_content_blocks() {
+        let message = ChatMessage::user("look at this").with_images(vec![png()]);
+        let body = serde_json::to_value(message).unwrap();
+        let blocks = body["content"].as_array().expect("content is an array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "look at this");
+        assert_eq!(blocks[1]["type"], "image_url");
+        assert_eq!(
+            blocks[1]["image_url"]["url"],
+            "data:image/png;base64,Zm9vYmFy"
+        );
+    }
+
+    #[test]
+    fn an_empty_text_does_not_become_an_empty_block() {
+        // 有 provider 会拒绝空的 text block，那是一次和图片无关的 400
+        let message = ChatMessage::tool_result("call-1", "").with_images(vec![png()]);
+        let body = serde_json::to_value(message).unwrap();
+        let blocks = body["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "image_url");
+        // tool 回合的关联 id 不能因为换了 content 形状就丢
+        assert_eq!(body["tool_call_id"], "call-1");
+    }
+
+    #[test]
+    fn a_model_that_cannot_see_gets_the_images_removed_and_told_why() {
+        let messages = vec![ChatMessage::user("as shown").with_images(vec![png()])];
+        let body = build_chat_request(&config("deepseek-chat"), messages, false, &[], false);
+        let content = body["messages"][0]["content"].as_str().expect("string");
+        // 静悄悄丢掉会让模型对着"如图所示"发挥想象，比失败更糟
+        assert!(content.contains("as shown"), "{}", content);
+        assert!(content.contains("1 image(s) were not sent"), "{}", content);
+        assert!(content.contains("deepseek-chat"), "{}", content);
+    }
+
+    #[test]
+    fn a_vision_model_keeps_the_blocks() {
+        let messages = vec![ChatMessage::user("as shown").with_images(vec![png()])];
+        let body = build_chat_request(&config("gpt-4o-mini"), messages, false, &[], false);
+        assert!(body["messages"][0]["content"].is_array());
+    }
+
+    #[test]
+    fn capability_detection_errs_towards_not_supported() {
+        assert!(model_supports_images("gpt-4o"));
+        assert!(model_supports_images("claude-3-5-sonnet-20241022"));
+        assert!(model_supports_images("Qwen2.5-VL-7B"));
+        // 判不出来就是不支持：误判的代价是一次错误信息和图片无关的 400
+        assert!(!model_supports_images("deepseek-chat"));
+        assert!(!model_supports_images("some-new-model"));
+        assert!(!model_supports_images(""));
+    }
 }
 
 #[cfg(test)]

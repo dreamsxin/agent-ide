@@ -32,6 +32,18 @@ pub trait ToolInvoker: Send + Sync {
 
     /// 执行工具并返回回传给模型的文本结果
     async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String>;
+
+    /// 取走上一次 `invoke` 产生的图片。
+    ///
+    /// 为什么是单独一个取回口，而不是让 `invoke` 返回一个带图的结构：`invoke` 的返回值
+    /// 是"给模型看的文本"，三个实现里只有一个可能产生图片，而改签名要动所有实现和所有
+    /// 测试替身。这条通道和写入日志、外部动作日志是同一个形状 —— 工具把副产物存进
+    /// 自己的日志，调用方排空一次。
+    ///
+    /// 默认实现返回空：MCP 工具的返回值只有文本。
+    fn take_images(&self) -> Vec<crate::services::images::ImagePart> {
+        Vec::new()
+    }
 }
 
 /// 单次 LLM 调用中允许的最大工具回合数。
@@ -118,7 +130,10 @@ async fn stream_with_tool_loop(
                 Ok(result) => result,
                 Err(error) => format!("Tool call failed: {}", error),
             };
-            messages.push(ChatMessage::tool_result(call.id.clone(), result));
+            // 图片跟着这一条工具结果走。失败路径也要排空：不排的话，这次的图会挂到
+            // 下一次工具调用的结果上，模型看到的图和它问的问题就错位了。
+            let images = invoker.take_images();
+            messages.push(ChatMessage::tool_result(call.id.clone(), result).with_images(images));
         }
     }
 
