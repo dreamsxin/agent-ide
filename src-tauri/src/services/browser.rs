@@ -107,22 +107,6 @@ pub fn list_endpoint(port: u16) -> String {
     format!("{}/json/list", cdp_base(port))
 }
 
-pub fn activate_endpoint(port: u16, target_id: &str) -> String {
-    format!(
-        "{}/json/activate/{}",
-        cdp_base(port),
-        encode_query_value(target_id)
-    )
-}
-
-pub fn close_endpoint(port: u16, target_id: &str) -> String {
-    format!(
-        "{}/json/close/{}",
-        cdp_base(port),
-        encode_query_value(target_id)
-    )
-}
-
 /// 从 `/json/list` 的响应里挑出真正的页面。
 ///
 /// 过滤 `type != "page"`：同一份列表里还有 service worker、扩展的背景页、iframe 目标，
@@ -351,7 +335,8 @@ mod tests {
     fn endpoints_stay_on_loopback() {
         assert_eq!(cdp_base(9222), "http://127.0.0.1:9222");
         assert!(list_endpoint(1234).starts_with("http://127.0.0.1:1234/json/list"));
-        assert!(activate_endpoint(9222, "AB/CD").contains("AB%2FCD"));
+        assert!(new_tab_endpoint(9222, "https://example.com/a b")
+            .starts_with("http://127.0.0.1:9222/json/new?"));
     }
 
     #[test]
