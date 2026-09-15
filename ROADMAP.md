@@ -1230,6 +1230,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Still open, recorded: the run budget does not bound a **single request**. Four 4 MiB images read in one round are sent in one request (~22 MB of base64), which is over the ~20 MB figure the per-image cap's own comment cites as the provider limit; that needs a per-round check, not a per-run one. And the budget is a hard constant while token and spend ceilings are per-profile — deliberate for a first cut, but the asymmetry is a choice, not an accident.
    - Rust 355 → 357.
 
+75. **The other half of the image cap: one request (2026-09-15)**
+   - Left open by 74, and the more likely failure of the two: the run budget lets four 4 MiB images through, and if the model reads them in *one* round they all ride the same request — ~22 MB of base64, over the ~20 MB most providers accept. The result would be a 413 whose message says nothing about images, on a run the user authorised for exactly this. `fit_images_in_request` now caps a request at 12 MB of base64, leaving the rest of a ~20 MB envelope for the transcript that travels with it.
+   - **Truncation is from the tail, not "keep whatever fits".** The model is told "Attached N image(s) from the tool call(s) above" and pairs images with calls by order; skipping a large image and keeping a later small one would silently re-pair *every* image with the wrong question. Dropping the tail is explainable in one sentence, which the message now contains, and the model is told it can read them again in a later step.
+   - **The first image is kept unconditionally.** It has already passed the 4 MiB per-image cap, so it always fits the 12 MB envelope in practice; the branch exists so that a future smaller envelope cannot produce "you read an image and got a message with no image", which is the one outcome worse than a truncated set.
+   - **The executor reports through the client's existing drop log** (`note_dropped_images`) rather than a second channel. The executor has no `RunEvents`, and a user hunting "did it see the mockup?" should not have to know that two different layers drop images for two different reasons — both now surface as the same `image_input_degraded` warning.
+   - Rust 357 → 358.
+
+
 
 
 

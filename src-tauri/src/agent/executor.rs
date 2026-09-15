@@ -149,14 +149,22 @@ async fn stream_with_tool_loop(
         }
         if !round_images.is_empty() {
             // 图片单独一条 user 消息跟在工具结果后面，这是 OpenAI 兼容端点唯一接受的位置。
-            let count = round_images.len();
-            messages.push(
-                ChatMessage::user(format!(
-                    "Attached {} image(s) from the tool call(s) above.",
-                    count
-                ))
-                .with_images(round_images),
-            );
+            //
+            // 一轮里可以有好几次读图调用，所以这里还要按**单个请求**再卡一次：运行预算
+            // 放得过的四张图，base64 之后能把请求体顶到 provider 的上限之上，换来一条和
+            // 图片无关的 413。丢掉的要说出来 —— 转录里那句"附了 N 张图"必须和实际一致，
+            // 而且 `note_dropped_images` 会让这次降级出现在用户的 action log 里。
+            let (kept, dropped) = crate::services::images::fit_images_in_request(round_images);
+            let count = kept.len();
+            let mut text = format!("Attached {} image(s) from the tool call(s) above.", count);
+            if dropped > 0 {
+                text.push_str(&format!(
+                    "\n\n[{} more image(s) were not attached: they would not fit in one request. Read them again in a later step if you still need them.]",
+                    dropped
+                ));
+                llm.note_dropped_images(dropped, "they would not fit in one request");
+            }
+            messages.push(ChatMessage::user(text).with_images(kept));
         }
     }
 
