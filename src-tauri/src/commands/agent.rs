@@ -166,6 +166,12 @@ pub struct SendPromptRequest {
     /// 允许访问的 origin 清单；空清单等于不许，`allowBrowserUse` 也救不了。
     #[serde(default, rename = "browserOrigins")]
     pub browser_origins: Option<Vec<String>>,
+    /// 是否允许观察桌面（窗口枚举，只读）。和浏览器分开：范围一个是站点、一个是应用。
+    #[serde(default, rename = "allowComputerUse")]
+    pub allow_computer_use: bool,
+    /// 允许被观察的应用清单；空清单等于不许，开关也救不了。
+    #[serde(default, rename = "computerApps")]
+    pub computer_apps: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +239,12 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::browser_origins`
     #[serde(default, rename = "browserOrigins")]
     pub browser_origins: Option<Vec<String>>,
+    /// 同 `SendPromptRequest::allow_computer_use`
+    #[serde(default, rename = "allowComputerUse")]
+    pub allow_computer_use: bool,
+    /// 同 `SendPromptRequest::computer_apps`
+    #[serde(default, rename = "computerApps")]
+    pub computer_apps: Option<Vec<String>>,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -321,6 +333,8 @@ pub async fn send_agent_prompt(
         request.allow_file_create,
         request.allow_browser_use,
         request.browser_origins.clone().unwrap_or_default(),
+        request.allow_computer_use,
+        request.computer_apps.clone().unwrap_or_default(),
     );
     tool_permissions.adopt_cancel(side_effect_switch.clone());
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -470,6 +484,8 @@ fn agent_tool_permissions(
     allow_create: bool,
     allow_browser: bool,
     browser_origins: Vec<String>,
+    allow_computer: bool,
+    computer_apps: Vec<String>,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
     // 未授权时连扫都不扫：`discover_project_tasks` 要读 package.json / Cargo.toml。
     // 下面 `allowed_agent_commands` 里那次判断不是重复 —— 那条是授权规则本身，
@@ -485,6 +501,7 @@ fn agent_tool_permissions(
         allow_create,
     )
     .with_browser(allow_browser, browser_origins)
+    .with_computer(allow_computer, computer_apps)
 }
 
 /// 把撤不回的外部动作登记到 orchestrator，并写进操作日志。
@@ -774,6 +791,8 @@ pub async fn run_agent_step(
         request.allow_file_create,
         request.allow_browser_use,
         request.browser_origins.clone().unwrap_or_default(),
+        request.allow_computer_use,
+        request.computer_apps.clone().unwrap_or_default(),
     );
     tool_permissions.adopt_cancel(side_effect_switch.clone());
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
@@ -1688,13 +1707,15 @@ mod tests {
     /// 钉住：只允许写盘时，命令清单必须是空的，新建文件必须仍然不允许。
     #[test]
     fn each_flag_lands_on_its_own_permission() {
-        let write_only = agent_tool_permissions(false, true, false, false, Vec::new());
+        let write_only =
+            agent_tool_permissions(false, true, false, false, Vec::new(), false, Vec::new());
         assert!(write_only.allowed_commands.is_empty());
         assert!(write_only.allow_write);
         assert!(!write_only.allow_create);
         assert!(!write_only.allow_browser);
 
-        let create_only = agent_tool_permissions(false, false, true, false, Vec::new());
+        let create_only =
+            agent_tool_permissions(false, false, true, false, Vec::new(), false, Vec::new());
         assert!(!create_only.allow_write);
         assert!(create_only.allow_create);
 
@@ -1705,10 +1726,28 @@ mod tests {
             false,
             true,
             vec!["http://127.0.0.1:1420".to_string()],
+            false,
+            Vec::new(),
         );
         assert!(!browser_only.allow_write);
         assert!(browser_only.allow_browser);
         assert_eq!(browser_only.browser_origins.len(), 1);
+        // 桌面观察也是独立的一档：给了浏览器不等于能看桌面
+        assert!(!browser_only.allow_computer);
+
+        let computer_only = agent_tool_permissions(
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            true,
+            vec!["Code.exe".to_string()],
+        );
+        assert!(computer_only.allow_computer);
+        assert_eq!(computer_only.computer_apps.len(), 1);
+        assert!(!computer_only.allow_browser);
+        assert!(!computer_only.allow_write);
     }
 
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。

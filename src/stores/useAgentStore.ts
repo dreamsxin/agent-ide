@@ -227,6 +227,8 @@ interface AgentStore {
   setPermissionPreset: (preset: AgentPermissionPreset) => void;
   togglePermission: (key: BooleanPermissionKey) => void;
   setBrowserOrigins: (origins: string[]) => void;
+  /** 设置允许被观察的应用清单（可执行文件名）。空清单等于不许观察。 */
+  setComputerApps: (apps: string[]) => void;
   requestConfirm: (confirm: DestructiveOpConfirm) => void;
   clearConfirm: () => void;
 
@@ -617,6 +619,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => ({
       permissions: { ...s.permissions, browserOrigins: origins },
     })),
+  setComputerApps: (apps) =>
+    set((s) => ({
+      permissions: { ...s.permissions, computerApps: apps },
+    })),
   requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
   clearConfirm: () => set({ pendingConfirm: null }),
 
@@ -652,6 +658,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           allowFileCreate: get().permissions.allowFileCreate,
           allowBrowserUse: get().permissions.allowBrowserUse,
           browserOrigins: get().permissions.browserOrigins,
+          allowComputerUse: get().permissions.allowComputerUse,
+          computerApps: get().permissions.computerApps,
           allowCommandRun: get().permissions.allowCommandRun,
           runId,
           ideMode: requestIdeMode,
@@ -1034,6 +1042,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           allowFileCreate: get().permissions.allowFileCreate,
           allowBrowserUse: get().permissions.allowBrowserUse,
           browserOrigins: get().permissions.browserOrigins,
+          allowComputerUse: get().permissions.allowComputerUse,
+          computerApps: get().permissions.computerApps,
           extraPrompt: params.extraPrompt ?? null,
           regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
           regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,

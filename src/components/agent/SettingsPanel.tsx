@@ -138,6 +138,7 @@ export default function SettingsPanel() {
   const setPermissionPreset = useAgentStore((s) => s.setPermissionPreset);
   const togglePermission = useAgentStore((s) => s.togglePermission);
   const setBrowserOrigins = useAgentStore((s) => s.setBrowserOrigins);
+  const setComputerApps = useAgentStore((s) => s.setComputerApps);
 
   const [profileId, setProfileId] = useState("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
@@ -791,6 +792,41 @@ export default function SettingsPanel() {
               {permissions.browserOrigins.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
                   No origin allowed yet — the browser tools stay hidden from the Agent.
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label="Desktop Observation"
+            desc="Allow Agent to list your visible windows (read-only; needs an allowed app below, Windows only)"
+            checked={permissions.allowComputerUse}
+            onChange={() => togglePermission("allowComputerUse")}
+          />
+          {permissions.allowComputerUse && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="computer-apps">
+                Observable apps (one per line, `*` for any)
+              </label>
+              <textarea
+                id="computer-apps"
+                rows={2}
+                spellCheck={false}
+                value={permissions.computerApps.join("\n")}
+                onChange={(event) =>
+                  setComputerApps(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="Code.exe"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 同浏览器：空清单时这个开关什么都不放行，必须说出来 */}
+              {permissions.computerApps.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  No app allowed yet — the desktop tool stays hidden from the Agent.
                 </p>
               )}
             </div>

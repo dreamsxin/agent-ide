@@ -29,6 +29,8 @@ pub const DELETE_FILE: &str = "workspace_delete_file";
 pub const MOVE_FILE: &str = "workspace_move_file";
 pub const BROWSER_OPEN: &str = "workspace_browser_open";
 pub const BROWSER_TABS: &str = "workspace_browser_tabs";
+/// 枚举桌面上可见的顶层窗口。只读，但会披露窗口标题，所以同样按应用授权并留痕。
+pub const COMPUTER_WINDOWS: &str = "workspace_computer_windows";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -110,6 +112,17 @@ pub struct WorkspaceToolPermissions {
     /// 空清单等于不许访问任何站点，`allow_browser` 也救不了 —— 两者是"能不能用浏览器"
     /// 和"能去哪些站点"两个问题，任何一个没给都不该放行。
     pub browser_origins: Vec<String>,
+    /// 是否允许观察桌面（目前只有窗口枚举，只读）。
+    ///
+    /// 和浏览器分开：浏览器权限的范围是"哪些站点"，这里的范围是"哪些应用"，两个问题
+    /// 没有蕴含关系 —— 放行本地开发服务器不等于同意让模型看见桌面上开着什么。
+    pub allow_computer: bool,
+    /// 允许被观察的应用清单（可执行文件名，`*` 表示不限）。
+    ///
+    /// 空清单等于不许观察任何应用。它过滤的是**结果**，不只是决定工具存不存在 ——
+    /// 浏览器 tabs 工具当初只做了后者，于是"只放行了本地开发服务器"的用户还是把所有
+    /// 标签页交出去了。窗口标题里有文档名、网页标题、聊天对象，同一类问题。
+    pub computer_apps: Vec<String>,
     /// 这批授权属于哪一次运行。
     ///
     /// 在拿到执行权之后由命令层写进来，而不是在登记记录时去读 orchestrator 的
@@ -178,6 +191,14 @@ impl WorkspaceToolPermissions {
         self
     }
 
+    /// 桌面观察授权，同理单独给。
+    pub fn with_computer(mut self, allow_computer: bool, computer_apps: Vec<String>) -> Self {
+        self.allow_computer = allow_computer;
+        self.computer_apps = computer_apps;
+        self
+    }
+
+
     /// 取出并清空外部动作记录。
     pub fn take_external_actions(&self) -> Vec<AgentExternalAction> {
         match self.external.lock() {
@@ -195,6 +216,14 @@ impl WorkspaceToolPermissions {
     /// 浏览器工具是否可用：开关和清单都要有。
     fn allows_browser(&self) -> bool {
         self.allow_browser && !self.browser_origins.is_empty()
+    }
+
+    /// 桌面观察是否可用：开关、非空应用清单，以及这个平台上真的有实现。
+    ///
+    /// 平台也算一道条件：在没有实现的平台上通告一个必然失败的工具，只会让模型
+    /// 反复调它、并把失败当成"桌面上没有窗口"。
+    fn allows_computer(&self) -> bool {
+        cfg!(windows) && self.allow_computer && !self.computer_apps.is_empty()
     }
 
     /// 接过这次运行的副作用开关。
@@ -418,6 +447,22 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         });
     }
 
+    if permissions.allows_computer() {
+        definitions.push(ToolDefinition {
+            name: COMPUTER_WINDOWS.to_string(),
+            description: format!(
+                "List the visible top-level desktop windows, with title, app, size and which one \
+                 is in the foreground. Read-only; nothing on the desktop is changed. Only windows \
+                 belonging to these apps are returned, and the count of hidden ones is reported: \
+                 {}. Use it to see what the user is actually looking at, for example which editor \
+                 or terminal window is in front.",
+                permissions.computer_apps.join(", ")
+            ),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        });
+    }
+
+
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
             name: RUN_COMMAND.to_string(),
@@ -495,6 +540,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             RUN_COMMAND => self.permissions.allows_commands(),
             WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
             BROWSER_OPEN | BROWSER_TABS => self.permissions.allows_browser(),
+            COMPUTER_WINDOWS => self.permissions.allows_computer(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -517,7 +563,13 @@ impl ToolInvoker for WorkspaceToolInvoker {
         if self.permissions.cancelled() {
             let side_effecting = matches!(
                 tool_name,
-                RUN_COMMAND | WRITE_FILE | DELETE_FILE | MOVE_FILE | BROWSER_OPEN | BROWSER_TABS
+                RUN_COMMAND
+                    | WRITE_FILE
+                    | DELETE_FILE
+                    | MOVE_FILE
+                    | BROWSER_OPEN
+                    | BROWSER_TABS
+                    | COMPUTER_WINDOWS
             );
             if side_effecting {
                 let detail = format!(
@@ -573,6 +625,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 &self.permissions,
             ),
             BROWSER_TABS => browser_tabs_tool(&self.permissions),
+            COMPUTER_WINDOWS => computer_windows_tool(&self.permissions),
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
@@ -1163,6 +1216,59 @@ fn browser_tabs_tool(permissions: &WorkspaceToolPermissions) -> Result<String, S
         .join("\n"))
 }
 
+/// 列出桌面上可见的顶层窗口。computer use 的第一片，只读。
+///
+/// 两道闸门和浏览器同构：开关 + 非空的**应用**清单。清单在这里过滤的是结果，不只是
+/// 决定工具存不存在 —— 窗口标题里有文档名、网页标题、聊天对象，"只放行了 VS Code"
+/// 的用户不该顺带交出银行页面的标题。
+///
+/// 拒绝和成功都记进外部动作日志。这个工具不改变任何东西，但它披露的东西撤不回，
+/// 记录的理由和导航一样。
+fn computer_windows_tool(permissions: &WorkspaceToolPermissions) -> Result<String, String> {
+    if !permissions.allows_computer() {
+        let detail = if cfg!(windows) {
+            "Desktop observation is not authorized for this run, or no app is allowed."
+        } else {
+            "Desktop observation is only implemented on Windows."
+        };
+        permissions.record_external(AgentExternalAction {
+            kind: "computer_windows_refused".to_string(),
+            target: "desktop".to_string(),
+            detail: detail.to_string(),
+        });
+        return Err(detail.to_string());
+    }
+    let windows = match crate::services::computer::list_windows() {
+        Ok(windows) => windows,
+        Err(error) => {
+            permissions.record_external(AgentExternalAction {
+                kind: "computer_windows_failed".to_string(),
+                target: "desktop".to_string(),
+                detail: error.clone(),
+            });
+            return Err(error);
+        }
+    };
+    let (allowed, hidden) =
+        crate::services::computer::filter_windows(windows, &permissions.computer_apps);
+    let apps = crate::services::computer::disclosed_apps(&allowed);
+    permissions.record_external(AgentExternalAction {
+        kind: "computer_windows".to_string(),
+        target: "desktop".to_string(),
+        detail: format!(
+            "Disclosed the title and geometry of {} window(s) to the model ({} hidden by the allow list). Apps: {}",
+            allowed.len(),
+            hidden,
+            if apps.is_empty() {
+                "(none)".to_string()
+            } else {
+                apps.join(", ")
+            }
+        ),
+    });
+    Ok(crate::services::computer::format_windows(&allowed, hidden))
+}
+
 
 /// 把多个执行器合成一个。
 ///
@@ -1664,6 +1770,46 @@ mod tests {
         assert!(names.contains(&BROWSER_TABS.to_string()));
         assert!(WorkspaceToolInvoker::without_logging(granted).handles(BROWSER_TABS));
     }
+
+    /// 桌面观察和浏览器同构：开关 + 非空应用清单，缺一不可，被拒也要留痕。
+    ///
+    /// 这个工具只读，但它披露窗口标题 —— 文档名、网页标题、聊天对象都在里面，所以
+    /// 授权和记录按同一套来。
+    #[test]
+    fn desktop_observation_needs_the_switch_and_a_non_empty_app_list() {
+        let switch_only =
+            WorkspaceToolPermissions::new(Vec::new(), false, false).with_computer(true, Vec::new());
+        let names: Vec<String> = tool_definitions(&switch_only)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(!names.contains(&COMPUTER_WINDOWS.to_string()), "{:?}", names);
+        assert!(
+            !WorkspaceToolInvoker::without_logging(switch_only.clone()).handles(COMPUTER_WINDOWS)
+        );
+        assert!(computer_windows_tool(&switch_only).is_err());
+        let refusals = switch_only.take_external_actions();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].kind, "computer_windows_refused");
+
+        // 通告里要写出允许的应用，否则模型看不到范围
+        let granted = WorkspaceToolPermissions::new(Vec::new(), false, false)
+            .with_computer(true, vec!["Code.exe".to_string()]);
+        let advertised = tool_definitions(&granted)
+            .into_iter()
+            .find(|definition| definition.name == COMPUTER_WINDOWS);
+        if cfg!(windows) {
+            let description = advertised.expect("tool is advertised on Windows").description;
+            assert!(description.contains("Code.exe"), "{}", description);
+            // 也要说清这是子集，否则模型会把过滤后的列表当成整个桌面
+            assert!(description.contains("hidden"), "{}", description);
+        } else {
+            // 没有实现的平台上不通告：一个必然失败的工具会被模型反复调用，
+            // 而它的失败看起来像"桌面上没有窗口"
+            assert!(advertised.is_none());
+        }
+    }
+
 
     /// 通告里要写出授权的站点：模型看不到范围时只会不断试探被拒的站点。
     #[test]
