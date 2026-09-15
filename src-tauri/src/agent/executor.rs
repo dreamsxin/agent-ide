@@ -93,6 +93,14 @@ async fn stream_with_tool_loop(
             .stream_chat_with_tools(messages.clone(), cancel_flag.clone(), tx.clone())
             .await?;
 
+        // 图片只发一次：它已经在上面那次请求里了。留着的代价是复利式的 —— 一张 4 MiB 的
+        // 图 base64 后约 5.3 MB，12 轮工具循环会把它重发 11 次（约 59 MB 出网），而
+        // transcript 修剪只按 `content` 的字符数算账，图片计 0，于是它既挤掉真正有用的
+        // 文本又永远不会被淘汰。模型在紧跟工具调用的那一轮看到图，之后靠文本继续。
+        for message in messages.iter_mut() {
+            message.images.clear();
+        }
+
         let external = select_external_calls(&output.tool_calls, invoker);
 
         let is_last_iteration = iteration == MAX_TOOL_ITERATIONS;
@@ -121,6 +129,10 @@ async fn stream_with_tool_loop(
         ));
 
         let invoker = invoker.expect("external calls only collected when invoker is present");
+        // 这一轮工具产出的图片。它们**不能**挂在 `role: "tool"` 消息上：OpenAI 的
+        // chat/completions 只在 user 消息里接受 image 块，tool 消息的 content 只能是文本，
+        // 挂上去会得到一个和图片无关的 400，而唯一启用了图片的模型族恰好就是这一家。
+        let mut round_images: Vec<crate::services::images::ImagePart> = Vec::new();
         for call in &external {
             if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("Agent task cancelled".to_string());
@@ -130,10 +142,21 @@ async fn stream_with_tool_loop(
                 Ok(result) => result,
                 Err(error) => format!("Tool call failed: {}", error),
             };
-            // 图片跟着这一条工具结果走。失败路径也要排空：不排的话，这次的图会挂到
-            // 下一次工具调用的结果上，模型看到的图和它问的问题就错位了。
-            let images = invoker.take_images();
-            messages.push(ChatMessage::tool_result(call.id.clone(), result).with_images(images));
+            // 失败路径也要排空：不排的话，这次的图会挂到下一次工具调用上，模型看到的图
+            // 和它问的问题就错位了 —— 那种错比没有图更难查。
+            round_images.extend(invoker.take_images());
+            messages.push(ChatMessage::tool_result(call.id.clone(), result));
+        }
+        if !round_images.is_empty() {
+            // 图片单独一条 user 消息跟在工具结果后面，这是 OpenAI 兼容端点唯一接受的位置。
+            let count = round_images.len();
+            messages.push(
+                ChatMessage::user(format!(
+                    "Attached {} image(s) from the tool call(s) above.",
+                    count
+                ))
+                .with_images(round_images),
+            );
         }
     }
 

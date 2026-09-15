@@ -1041,6 +1041,17 @@ impl LlmClient {
         if let Some(recorder) = &self.request_recorder {
             recorder.record(&messages);
         }
+        // 本地和 mock 路径把消息拍平成一个文本提示，图片没有位置可去。**在分叉之前**就
+        // 摘掉并写明原因：工具结果里那句"已附上 N 张图"会因此变成一句假话，而模型对着
+        // 一句"图里显示…"却什么都看不到，比直接失败更难查。
+        let text_only_endpoint = self.config.endpoint.starts_with("local://")
+            || self.config.provider == "local"
+            || self.config.endpoint.starts_with("mock://");
+        let messages = if text_only_endpoint {
+            drop_images_with_note(messages, "this endpoint takes a flattened text prompt")
+        } else {
+            messages
+        };
         // 检查是否为本地模型
         if self.config.endpoint.starts_with("local://") || self.config.provider == "local" {
             return self.stream_chat_local(messages, cancel_flag, tx).await;
@@ -1694,15 +1705,12 @@ pub fn model_supports_images(model: &str) -> bool {
     VISION_MARKERS.iter().any(|marker| model.contains(marker))
 }
 
-/// 模型看不了图时，把图片摘掉并在文本里说明。
+/// 摘掉图片并在文本里写清为什么。
 ///
-/// 为什么不直接报错：图片通常是补充信息（"照着这张图实现"里的图是主角，但"这是报错截图"
-/// 里的文本往往已经够用），一次运行不该因为换了个模型就整体失败。但**必须说出来** ——
-/// 静悄悄丢掉会让模型看着一句"如图所示"发挥想象，那比失败更糟。
-fn adapt_images_for_model(model: &str, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    if model_supports_images(model) {
-        return messages;
-    }
+/// 为什么不直接报错：图片通常是补充信息，一次运行不该因为换了个模型或换了个端点就整体
+/// 失败。但**必须说出来** —— 静悄悄丢掉会让模型对着"如图所示"发挥想象，而工具结果里
+/// 那句"已附上图片"还留着，等于让转录自己说了假话。
+fn drop_images_with_note(messages: Vec<ChatMessage>, reason: &str) -> Vec<ChatMessage> {
     messages
         .into_iter()
         .map(|mut message| {
@@ -1712,13 +1720,23 @@ fn adapt_images_for_model(model: &str, messages: Vec<ChatMessage>) -> Vec<ChatMe
             let dropped = message.images.len();
             message.images.clear();
             message.content = format!(
-                "{}\n\n[{} image(s) were not sent: the configured model ({}) does not accept image \
-                 input.]",
-                message.content, dropped, model
+                "{}\n\n[{} image(s) were not sent: {}.]",
+                message.content, dropped, reason
             );
             message
         })
         .collect()
+}
+
+/// 模型看不了图时的降级。
+fn adapt_images_for_model(model: &str, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    if model_supports_images(model) {
+        return messages;
+    }
+    drop_images_with_note(
+        messages,
+        &format!("the configured model ({}) does not accept image input", model),
+    )
 }
 
 fn build_chat_request(
@@ -2074,9 +2092,30 @@ mod image_wire_tests {
         assert!(body["messages"][0]["content"].is_array());
     }
 
+    /// 拍平成文本提示的端点（本地、mock）也必须说明图片没发出去。
+    ///
+    /// 这条比"模型看不了图"更要紧：工具结果里留着一句"已附上 N 张图"，如果这里静悄悄丢掉，
+    /// 转录自己就说了假话 —— 模型会认为附件成功了。
     #[test]
-    fn capability_detection_errs_towards_not_supported() {
-        assert!(model_supports_images("gpt-4o"));
+    fn a_text_only_endpoint_says_the_images_were_not_sent() {
+        let messages = vec![ChatMessage::user("Attached 1 image(s).").with_images(vec![png()])];
+        let adapted =
+            drop_images_with_note(messages, "this endpoint takes a flattened text prompt");
+        assert!(adapted[0].images.is_empty());
+        assert!(
+            adapted[0].content.contains("1 image(s) were not sent"),
+            "{}",
+            adapted[0].content
+        );
+        assert!(
+            adapted[0].content.contains("flattened text prompt"),
+            "{}",
+            adapted[0].content
+        );
+    }
+
+    #[test]
+    fn capability_detection_errs_towards_not_supported() {        assert!(model_supports_images("gpt-4o"));
         assert!(model_supports_images("claude-3-5-sonnet-20241022"));
         assert!(model_supports_images("Qwen2.5-VL-7B"));
         // 判不出来就是不支持：误判的代价是一次错误信息和图片无关的 400

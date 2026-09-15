@@ -724,6 +724,9 @@ fn reject_credential_path(path: &str) -> Result<(), String> {
 fn read_file_tool(path: &str) -> Result<String, String> {
     reject_credential_path(path)?;
     let resolved = workspace::resolve_existing(path)?;
+    // 解析后再判一次：`docs/notes.md -> ../.env` 这样的符号链接，名字过得了第一道，
+    // 而 `resolve_existing` 会跟随它。两道判定之间的差就是这条后门。
+    reject_credential_path(&resolved.to_string_lossy())?;
     let content =
         std::fs::read_to_string(&resolved).map_err(|error| format!("Read {}: {}", path, error))?;
     if content.len() <= MAX_READ_BYTES {
@@ -739,27 +742,42 @@ fn read_file_tool(path: &str) -> Result<String, String> {
 /// 让模型看工作区里的一张图片。
 ///
 /// 这是多模态这条线上的第一个生产者，选它的理由是代价：图片已经在工作区里，走的是和
-/// `workspace_read_file` 同一条解析和拒绝规则（凭据路径照样拒），不需要任何新的 OS 权限，
-/// 也不需要编码器。截屏才需要那些，而多模态真正要先验证的是**线格式和能力降级**。
+/// `workspace_read_file` 同一条解析和拒绝规则，不需要任何新的 OS 权限，也不需要编码器。
 ///
-/// 文本结果只说清读到了什么：图片本身通过 `record_image` 挂到这次工具结果上，由执行器
-/// 拼进 `role: "tool"` 消息。模型看不了图的时候由 `adapt_images_for_model` 摘掉并说明，
-/// 所以这里不需要判断模型能力 —— 判断在只有一处的地方做。
-fn read_image_tool(
-    path: &str,
-    permissions: &WorkspaceToolPermissions,
-) -> Result<String, String> {
+/// **拒绝判定落在解析后的目标上。** 只判调用方写的那个字符串是不够的：仓库里可以提交一个
+/// `docs/mockup.png -> ../.env` 的符号链接，名字看着是图片、`resolve_existing` 又会跟随
+/// 链接，于是 `.env` 的字节被 base64 送去了模型那边。这条工具的出口比 `read_file` 宽
+/// （4 MiB vs 64 KB），而且日志里只留一句"附了一张图"，所以这里必须判两次。
+///
+/// 大小在**读之前**用 metadata 判：先把两个 GB 的 PNG 读进内存再说"超限"，就是给一个
+/// 模型能反复调用的只读工具留了一条内存耗尽的路。
+fn read_image_tool(path: &str, permissions: &WorkspaceToolPermissions) -> Result<String, String> {
     reject_credential_path(path)?;
     let resolved = workspace::resolve_existing(path)?;
+    reject_credential_path(&resolved.to_string_lossy())?;
+    let size = std::fs::metadata(&resolved)
+        .map_err(|error| format!("Read {}: {}", path, error))?
+        .len();
+    if size > crate::services::images::MAX_IMAGE_BYTES as u64 {
+        return Err(format!(
+            "{} is {} bytes, over the {} byte limit for one image.",
+            path,
+            size,
+            crate::services::images::MAX_IMAGE_BYTES
+        ));
+    }
     let bytes = std::fs::read(&resolved).map_err(|error| format!("Read {}: {}", path, error))?;
     let image = crate::services::images::image_part_from_bytes(path, &bytes)?;
     let media_type = image.media_type.clone();
     permissions.record_image(image);
+    // 文本里写解析后的路径：事后复盘时"哪张图出去了"要对得上磁盘上的文件，
+    // 而不是模型当时写的那个可能是链接的名字
     Ok(format!(
-        "Attached {} ({}, {} bytes) to this tool result.",
+        "Attached {} ({}, {} bytes) to this turn. Resolved to {}.",
         path,
         media_type,
-        bytes.len()
+        bytes.len(),
+        resolved.display()
     ))
 }
 
