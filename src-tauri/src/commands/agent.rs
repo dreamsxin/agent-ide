@@ -294,9 +294,18 @@ pub async fn send_agent_prompt(
     let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let tool_policy =
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
-    let (llm, tool_invoker) =
-        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
-            .await;
+    // 这次运行的副作用开关先造出来，再装工具面：执行器拿的都是它的克隆，晚一步造就
+    // 换不到执行器手里那一份。三处共用同一个 `Arc` —— MCP 执行器、内置工具面、
+    // `try_begin_run`（进 `RunLease` 和 `CancelRegistry`）。
+    let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        tool_policy,
+        side_effect_switch.clone(),
+    )
+    .await;
     // 内置工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文。
     // 命令执行和写入按本次运行的权限决定是否暴露。
     //
@@ -313,9 +322,7 @@ pub async fn send_agent_prompt(
         request.allow_browser_use,
         request.browser_origins.clone().unwrap_or_default(),
     );
-    // 副作用开关要在工具面装起来**之前**定下来：执行器拿的是 permissions 的克隆，
-    // 两者共享同一个 `Arc`，晚一步换开关就换不到执行器手里那一份了。
-    let side_effect_switch = tool_permissions.fresh_cancel();
+    tool_permissions.adopt_cancel(side_effect_switch.clone());
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -745,9 +752,16 @@ pub async fn run_agent_step(
     let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
     let tool_policy =
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
-    let (llm, tool_invoker) =
-        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
-            .await;
+    // 开关先造，再装工具面 —— 和 `send_agent_prompt` 同一个理由
+    let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        tool_policy,
+        side_effect_switch.clone(),
+    )
+    .await;
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
     // 单步执行也走同一套授权：写权限只跟 Auto 模式挂钩
     let allow_write = {
@@ -761,9 +775,7 @@ pub async fn run_agent_step(
         request.allow_browser_use,
         request.browser_origins.clone().unwrap_or_default(),
     );
-    // 副作用开关要在工具面装起来**之前**定下来：执行器拿的是 permissions 的克隆，
-    // 两者共享同一个 `Arc`，晚一步换开关就换不到执行器手里那一份了。
-    let side_effect_switch = tool_permissions.fresh_cancel();
+    tool_permissions.adopt_cancel(side_effect_switch.clone());
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -931,6 +943,9 @@ pub async fn continue_agent_pipeline(
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
     let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
+    // 续跑是一次新的运行：新开关。沿用暂停前那个开关的话，如果当时是被 Stop 停下的，
+    // 续跑会一上来就被自己拦住。
+    let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // 一个临界区里完成"有暂停的运行吗 -> 抢执行权 -> 取走快照"。顺序不能反：
     // 先取走快照再发现抢不到执行权，那份快照就没了，续跑的唯一凭据被销毁。
@@ -941,10 +956,8 @@ pub async fn continue_agent_pipeline(
         }
         let run_id = orch.last_run_id.clone();
         let mut permissions = orch.tool_permissions.clone();
-        // 续跑是一次新的运行：新开关、新 id。沿用暂停前那个开关的话，如果当时是被
-        // Stop 停下的，续跑会一上来就被自己拦住。
-        let side_effect_switch = permissions.fresh_cancel();
-        let lease = orch.try_begin_run(run_id, side_effect_switch)?;
+        permissions.adopt_cancel(side_effect_switch.clone());
+        let lease = orch.try_begin_run(run_id, side_effect_switch.clone())?;
         let paused = orch
             .paused_run
             .take()
@@ -966,9 +979,14 @@ pub async fn continue_agent_pipeline(
     // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
     // 必须一起装：只装定义会让恢复后的 stage 看到工具，却由上次运行残留的执行器
     // 处理调用，或者根本没人处理。
-    let (llm, tool_invoker) =
-        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
-            .await;
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        tool_policy,
+        side_effect_switch.clone(),
+    )
+    .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
@@ -1278,6 +1296,8 @@ pub async fn repair_workspace(
     let (commands, _skipped) = crate::services::verification::prepare_commands(request.commands)?;
     let max_iterations = request.max_iterations.unwrap_or(1).clamp(1, 3);
     let (llm, usage_meter) = agent_state.get_llm_client(None)?;
+    // 修复也是一次新的运行：新开关，装工具面之前就造好
+    let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // 只在准备阶段持锁。循环本身由 `drive_repair` 按轮次短持锁 —— 整段持锁会连
     // `get_agent_state` 一起堵住，界面因此永远不知道后端在忙。
@@ -1296,8 +1316,8 @@ pub async fn repair_workspace(
         // 沿用它的开关，而那个开关可能被上一次 Stop 永久置成了 true，于是这一次
         // 全新的修复运行会把自己的每一次写盘都拒掉。
         let mut repair_permissions = orch.tool_permissions.clone();
-        let side_effect_switch = repair_permissions.fresh_cancel();
-        let lease = orch.try_begin_run(last_run_id, side_effect_switch)?;
+        repair_permissions.adopt_cancel(side_effect_switch.clone());
+        let lease = orch.try_begin_run(last_run_id, side_effect_switch.clone())?;
         repair_permissions.run_id = orch.current_run_id.clone();
         let tool_policy = orch.tool_policy;
         let original_prompt = resolve_original_prompt(
@@ -1311,9 +1331,14 @@ pub async fn repair_workspace(
     // 修复循环也要有自己的工具面。以前它直接沿用上一次运行留在 orchestrator 上的
     // `tool_invoker`：那份授权的副作用开关属于上一次运行，被 Stop 过就永久是 true，
     // 于是这一次修复的每一次写盘都会被拒 —— 一个新运行被上一个运行的 Stop 掐死。
-    let (llm, tool_invoker) =
-        crate::commands::mcp::attach_mcp_tools(&mcp_state.registry, &app_handle, llm, tool_policy)
-            .await;
+    let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
+        &mcp_state.registry,
+        &app_handle,
+        llm,
+        tool_policy,
+        side_effect_switch.clone(),
+    )
+    .await;
     let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
         llm,
         tool_invoker,
