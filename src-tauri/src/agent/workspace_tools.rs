@@ -315,8 +315,9 @@ impl WorkspaceToolPermissions {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 把开关交给需要在执行途中反复检查它的工具（目前只有命令执行：它要靠这个杀子进程）。
-    fn cancel_switch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    /// 把开关交给需要在执行途中反复检查它的工具（目前只有命令执行：它要靠这个杀子进程），
+    /// 也交给 `try_begin_run` —— 那边取的是**这一份**，而不是调用方再传一遍的另一个。
+    pub(crate) fn cancel_switch(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.cancel.clone()
     }
 

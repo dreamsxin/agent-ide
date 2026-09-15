@@ -89,8 +89,11 @@ npm test
   `try_begin_run` as a `RunLease`, one fresh pair per run — a shared flag let a new
   prompt un-cancel a still-draining old run. That flag is also the **side-effect gate**:
   the command layer mints it before any tool surface is built, then hands the same `Arc`
-  to the MCP invoker, to `WorkspaceToolPermissions::adopt_cancel`, and to
-  `try_begin_run`. So after Stop, `invoke()` refuses built-in and MCP calls that have not
+  to the MCP invoker and to `WorkspaceToolPermissions::adopt_cancel`. `try_begin_run` then
+  reads it back **out of the permissions** (`claim_run_for`), so the lease and the tool
+  surface cannot end up holding different switches — passing it twice was two adjacent
+  lines copied into four commands, and a mismatch means Stop leaves tools running.
+  So after Stop, `invoke()` refuses built-in and MCP calls that have not
   started, and `run_project_command_cancellable` kills the process tree of one that has.
   One flag, never reset — three copies of a bool would be the bug.
 - **Every change the Agent lands must be visible and undoable.** Diffs go through
