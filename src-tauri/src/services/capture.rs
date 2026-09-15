@@ -1,0 +1,389 @@
+//! 窗口截图：一次只截**一个**窗口，且这个窗口的应用必须在截图白名单里。
+//!
+//! 为什么不做全屏抓取：全屏没有任何"用户同意过的范围"能约束它 —— 白名单说的是
+//! "允许看这个应用"，而一张全屏图会把旁边所有窗口一起交出去。所以这里的入口只接受
+//! "哪个应用 / 标题含什么"，命中多个就拒绝，让模型自己缩小范围。
+
+use crate::services::computer::{app_allowed, DesktopWindow};
+
+/// 一次截图的像素上限（宽 × 高）。
+///
+/// 4 MiB 的单图上限是按**编码后**的字节算的，而 PNG 的压缩率取决于内容：一张纯色的
+/// 4K 截图只有几十 KB，一张满是文本和渐变的同尺寸截图能到十几 MB。先按像素拦一道，
+/// 编码之后再按字节拦一道 —— 只靠后者意味着先把一张 8000 万像素的位图搬进内存。
+/// 400 万像素装得下 2560×1440，超过就拒绝而不是自动缩放：缩放会让"图上写的字"
+/// 变成不可读的糊块，而模型不会告诉你它其实没看清。
+pub const MAX_CAPTURE_PIXELS: u64 = 4_000_000;
+
+/// 一次截图的结果：给用户看的元信息 + 已经编码好的 PNG。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCapture {
+    pub title: String,
+    pub app: String,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
+/// 这个窗口是不是模型要找的那个。
+///
+/// 两个筛选条件都可以省略，但**不能都省略**（那等于"随便截一个"）—— 这一条由
+/// `select_capture_target` 保证，因为"随便截一个"在多窗口桌面上就是抽奖。
+pub fn matches_target(
+    window: &DesktopWindow,
+    app_filter: Option<&str>,
+    title_contains: Option<&str>,
+) -> bool {
+    if let Some(app) = app_filter {
+        if crate::services::computer::normalize_app_name(app) != window.app {
+            return false;
+        }
+    }
+    if let Some(needle) = title_contains {
+        if !window
+            .title
+            .to_lowercase()
+            .contains(&needle.to_lowercase().trim().to_string())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// 从枚举结果里挑出唯一一个可截的窗口。
+///
+/// 三种拒绝都要说清下一步：没有筛选条件（先看窗口列表）、一个都没命中（换条件）、
+/// 命中多个（列出候选，让模型缩小）。含糊时**不猜**：截错窗口是不可撤回的披露。
+pub fn select_capture_target(
+    windows: &[DesktopWindow],
+    app_filter: Option<&str>,
+    title_contains: Option<&str>,
+    allowlist: &[String],
+) -> Result<DesktopWindow, String> {
+    if app_filter.is_none() && title_contains.map(|t| t.trim().is_empty()).unwrap_or(true) {
+        return Err(
+            "Name the window to capture: pass app and/or title_contains. List windows first if you do not know what is open."
+                .to_string(),
+        );
+    }
+    let allowed: Vec<&DesktopWindow> = windows
+        .iter()
+        .filter(|window| app_allowed(&window.app, allowlist))
+        .collect();
+    let matched: Vec<&DesktopWindow> = allowed
+        .iter()
+        .copied()
+        .filter(|window| matches_target(window, app_filter, title_contains))
+        .collect();
+
+    match matched.len() {
+        0 => Err(format!(
+            "No capturable window matched. {} window(s) are inside the capture allow list.",
+            allowed.len()
+        )),
+        1 => Ok(matched[0].clone()),
+        _ => {
+            let candidates = matched
+                .iter()
+                .map(|window| format!("{} ({})", window.title, window.app))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(format!(
+                "{} windows matched, so nothing was captured. Narrow it down: {}",
+                matched.len(),
+                candidates
+            ))
+        }
+    }
+}
+
+/// 像素数够不够小。溢出用饱和乘法：宽高来自 Win32，理论上不可能大到溢出，但
+/// "理论上不可能"在这一层不值得赌。
+pub fn check_capture_pixels(width: u32, height: u32) -> Result<(), String> {
+    let pixels = (width as u64).saturating_mul(height as u64);
+    if pixels == 0 {
+        return Err("The window has no visible area to capture.".to_string());
+    }
+    if pixels > MAX_CAPTURE_PIXELS {
+        return Err(format!(
+            "That window is {}x{} = {} pixels, past the {} pixel capture limit. Capture a smaller window.",
+            width, height, pixels, MAX_CAPTURE_PIXELS
+        ));
+    }
+    Ok(())
+}
+
+/// 把 RGBA 像素编码成 PNG。
+///
+/// 用 `png` crate 而不是手写：PNG 要 zlib、CRC32 和逐行过滤器，手写的量级和当初那个
+/// 二十行的 base64 完全不同。BMP 能手写，但它不在 provider 认的媒体类型交集里。
+pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4);
+    if rgba.len() != expected {
+        return Err(format!(
+            "Capture buffer is {} bytes but {}x{} RGBA needs {}.",
+            rgba.len(),
+            width,
+            height,
+            expected
+        ));
+    }
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| format!("PNG header: {}", error))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|error| format!("PNG data: {}", error))?;
+        writer
+            .finish()
+            .map_err(|error| format!("PNG finish: {}", error))?;
+    }
+    Ok(out)
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::{check_capture_pixels, encode_png, select_capture_target, WindowCapture};
+    use crate::services::computer::DesktopWindow;
+    use windows_sys::Win32::Foundation::{HWND, TRUE};
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetWindowDC,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC,
+        RGBQUAD,
+    };
+    // `PrintWindow` 在 windows-sys 里挂在 `Storage::Xps` 下（它和 XPS 打印共用一个
+    // 头文件区段），不在 `UI::WindowsAndMessaging`。
+    use windows_sys::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+
+    /// 连被别的窗口挡住的部分也一起渲染。
+    ///
+    /// 自己定义是因为 windows-sys 0.59 只导出了 `PW_CLIENTONLY`；值取自 Win32 头文件
+    /// （`PW_RENDERFULLCONTENT = 0x00000002`）。少了这一位，用 DWM 合成的窗口
+    /// （Chrome、Electron、终端）会截出一张全黑的图。
+    const PW_RENDERFULLCONTENT: PRINT_WINDOW_FLAGS = 2;
+
+    /// 截一个窗口。`hwnd` 必须来自本次枚举，白名单和唯一性由调用方先判。
+    pub fn capture_window(
+        app_filter: Option<&str>,
+        title_contains: Option<&str>,
+        allowlist: &[String],
+    ) -> Result<WindowCapture, String> {
+        let handles = crate::services::computer::list_windows_with_handles()?;
+        let windows: Vec<DesktopWindow> =
+            handles.iter().map(|(window, _)| window.clone()).collect();
+        let target = select_capture_target(&windows, app_filter, title_contains, allowlist)?;
+        let hwnd = handles
+            .iter()
+            .find(|(window, _)| window == &target)
+            .map(|(_, hwnd)| *hwnd)
+            .ok_or_else(|| "The window disappeared before it could be captured.".to_string())?;
+
+        let width = target.bounds.2.max(0) as u32;
+        let height = target.bounds.3.max(0) as u32;
+        check_capture_pixels(width, height)?;
+        let rgba = copy_window_pixels(hwnd, width, height)?;
+        let png = encode_png(width, height, &rgba)?;
+        Ok(WindowCapture {
+            title: target.title,
+            app: target.app,
+            width,
+            height,
+            png,
+        })
+    }
+
+    /// 把窗口内容画进一张离屏位图再读出来，返回 RGBA。
+    ///
+    /// 用 `PrintWindow(PW_RENDERFULLCONTENT)` 而不是 `BitBlt` 屏幕：后者会把压在上面的
+    /// 其他窗口一起抄下来 —— 那既是错的图，也是一次没被授权的披露。
+    fn copy_window_pixels(hwnd: HWND, width: u32, height: u32) -> Result<Vec<u8>, String> {
+        // SAFETY: 每个句柄都在同一个函数里创建并在所有返回路径上释放；宽高来自
+        // `GetWindowRect` 且已经过像素上限检查，所以缓冲区大小不会溢出。
+        unsafe {
+            let window_dc: HDC = GetWindowDC(hwnd);
+            if window_dc.is_null() {
+                return Err("GetWindowDC failed for that window.".to_string());
+            }
+            let memory_dc = CreateCompatibleDC(window_dc);
+            if memory_dc.is_null() {
+                ReleaseDC(hwnd, window_dc);
+                return Err("CreateCompatibleDC failed.".to_string());
+            }
+            let bitmap = CreateCompatibleBitmap(window_dc, width as i32, height as i32);
+            if bitmap.is_null() {
+                DeleteDC(memory_dc);
+                ReleaseDC(hwnd, window_dc);
+                return Err("CreateCompatibleBitmap failed.".to_string());
+            }
+            let previous = SelectObject(memory_dc, bitmap as _);
+
+            let printed = PrintWindow(hwnd, memory_dc, PW_RENDERFULLCONTENT);
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    // 负高度 = 自上而下的行序。正数会给出上下翻转的图，而"图是倒的"
+                    // 这种错模型不会报告，它只会看错。
+                    biHeight: -(height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [RGBQUAD {
+                    rgbBlue: 0,
+                    rgbGreen: 0,
+                    rgbRed: 0,
+                    rgbReserved: 0,
+                }],
+            };
+            let mut buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+            let rows = GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height,
+                buffer.as_mut_ptr() as *mut _,
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+
+            SelectObject(memory_dc, previous);
+            DeleteObject(bitmap as _);
+            DeleteDC(memory_dc);
+            ReleaseDC(hwnd, window_dc);
+
+            if printed != TRUE {
+                return Err(
+                    "PrintWindow refused to render that window (it may be protected).".to_string(),
+                );
+            }
+            if rows == 0 {
+                return Err("GetDIBits returned no scan lines.".to_string());
+            }
+            // GDI 给的是 BGRA，PNG 要 RGBA；同时把 alpha 拍成不透明 —— `PrintWindow`
+            // 对很多窗口不写 alpha，照抄会得到一张全透明的图。
+            for pixel in buffer.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+                pixel[3] = 0xFF;
+            }
+            Ok(buffer)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    use super::WindowCapture;
+
+    pub fn capture_window(
+        _app_filter: Option<&str>,
+        _title_contains: Option<&str>,
+        _allowlist: &[String],
+    ) -> Result<WindowCapture, String> {
+        Err("Window capture is only implemented on Windows.".to_string())
+    }
+}
+
+pub use platform::capture_window;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(title: &str, app: &str) -> DesktopWindow {
+        DesktopWindow {
+            title: title.to_string(),
+            app: app.to_string(),
+            bounds: (0, 0, 800, 600),
+            foreground: false,
+        }
+    }
+
+    /// 没有筛选条件时不截图：多窗口桌面上"随便截一个"就是抽奖，而抽错是不可撤回的披露。
+    #[test]
+    fn capturing_without_a_filter_is_refused() {
+        let windows = [window("Inbox", "chrome")];
+        let error =
+            select_capture_target(&windows, None, None, &["*".to_string()]).expect_err("refused");
+        assert!(error.contains("Name the window"), "{}", error);
+        // 空白标题等于没给条件
+        assert!(select_capture_target(&windows, None, Some("   "), &["*".to_string()]).is_err());
+    }
+
+    /// 白名单之外的窗口连"存在"都不该暴露：错误话术只说白名单里有几个。
+    #[test]
+    fn a_window_outside_the_allow_list_is_not_capturable_or_named() {
+        let windows = [window("Signal — Alice", "signal")];
+        let error = select_capture_target(&windows, Some("signal"), None, &["chrome".to_string()])
+            .expect_err("refused");
+        assert!(error.contains("No capturable window matched"), "{}", error);
+        assert!(!error.contains("Alice"), "{}", error);
+        assert!(!error.contains("signal"), "{}", error);
+    }
+
+    /// 命中多个时不猜：列出候选让模型自己缩小。
+    #[test]
+    fn an_ambiguous_match_captures_nothing_and_lists_the_candidates() {
+        let windows = [
+            window("Docs — pricing", "chrome"),
+            window("Docs — roadmap", "chrome"),
+        ];
+        let error =
+            select_capture_target(&windows, Some("chrome"), Some("docs"), &["*".to_string()])
+                .expect_err("refused");
+        assert!(error.contains("2 windows matched"), "{}", error);
+        assert!(error.contains("pricing"), "{}", error);
+        assert!(error.contains("roadmap"), "{}", error);
+
+        let one = select_capture_target(&windows, None, Some("pricing"), &["*".to_string()])
+            .expect("one match");
+        assert_eq!(one.title, "Docs — pricing");
+    }
+
+    /// 应用名比较和窗口枚举用同一套规则（去路径、去扩展名、大小写不敏感）。
+    #[test]
+    fn the_app_filter_is_compared_the_way_the_enumeration_normalizes() {
+        let windows = [window("Inbox", "chrome")];
+        assert!(matches_target(&windows[0], Some("C:\\x\\Chrome.EXE"), None));
+        assert!(!matches_target(&windows[0], Some("firefox"), None));
+    }
+
+    /// 像素上限在编码之前就拦：不然一张 8000 万像素的位图会先整个进内存。
+    #[test]
+    fn the_pixel_limit_is_checked_before_anything_is_copied() {
+        assert!(check_capture_pixels(2560, 1440).is_ok());
+        assert!(check_capture_pixels(0, 1080).is_err());
+        let error = check_capture_pixels(7680, 4320).expect_err("too many pixels");
+        assert!(error.contains("capture limit"), "{}", error);
+    }
+
+    /// 编码出来的必须是真的 PNG，而且尺寸不匹配要报错而不是写出一张坏图。
+    #[test]
+    fn the_encoder_writes_a_real_png_and_refuses_a_mismatched_buffer() {
+        let rgba = vec![0xAAu8; 2 * 2 * 4];
+        let png = encode_png(2, 2, &rgba).expect("encodes");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        // 解回来确认宽高和像素都对得上，而不是只看签名
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+        let mut reader = decoder.read_info().expect("valid png");
+        let mut out = vec![0u8; reader.output_buffer_size().expect("known size")];
+        let info = reader.next_frame(&mut out).expect("one frame");
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(&out[..info.buffer_size()], &rgba[..]);
+
+        assert!(encode_png(2, 2, &[0u8; 4]).is_err());
+    }
+}

@@ -37,8 +37,11 @@ pub struct DesktopWindow {
 pub fn normalize_app_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"');
     let file = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed).trim();
-    let stem = file.strip_suffix(".exe").unwrap_or(file);
-    stem.to_lowercase()
+    // 先转小写再去扩展名：反过来的话 `Chrome.EXE` 会留着 `.exe` 变成 `chrome.exe`，
+    // 而枚举出来的是 `chrome` —— 白名单里写大写扩展名的那一条永远不会命中，
+    // 也就是这个函数本来要避免的那种"配了却不生效"。
+    let lower = file.to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
 }
 
 /// 进程名读不出来时用的占位。
@@ -145,8 +148,11 @@ mod platform {
     };
 
     /// `EnumWindows` 的回调把结果攒进这里。
+    ///
+    /// 连 `HWND` 一起留着：截图要对着**这一次枚举里**的那个句柄画，不能事后再按标题
+    /// 找一遍 —— 中间窗口可能已经关了或换了标题，那时"按标题再找"会截到另一个窗口。
     struct Collector {
-        windows: Vec<DesktopWindow>,
+        windows: Vec<(DesktopWindow, HWND)>,
         foreground: HWND,
     }
 
@@ -155,6 +161,14 @@ mod platform {
     /// 跳过没有标题的窗口：Windows 上有大量不可见的消息窗口和零尺寸的辅助窗口，
     /// 它们对用户没有意义，混进列表只会淹没真正的窗口。
     pub fn list_windows() -> Result<Vec<DesktopWindow>, String> {
+        Ok(list_windows_with_handles()?
+            .into_iter()
+            .map(|(window, _)| window)
+            .collect())
+    }
+
+    /// 枚举可见的顶层窗口，连句柄一起返回。只给截图用。
+    pub fn list_windows_with_handles() -> Result<Vec<(DesktopWindow, HWND)>, String> {
         let mut collector = Collector {
             windows: Vec::new(),
             foreground: unsafe { GetForegroundWindow() },
@@ -193,17 +207,20 @@ mod platform {
         if GetWindowRect(hwnd, &mut rect) != TRUE {
             return TRUE;
         }
-        collector.windows.push(DesktopWindow {
-            title,
-            app: window_app(hwnd),
-            bounds: (
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-            ),
-            foreground: hwnd == collector.foreground,
-        });
+        collector.windows.push((
+            DesktopWindow {
+                title,
+                app: window_app(hwnd),
+                bounds: (
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                ),
+                foreground: hwnd == collector.foreground,
+            },
+            hwnd,
+        ));
         TRUE
     }
 
@@ -265,6 +282,8 @@ mod platform {
 }
 
 pub use platform::list_windows;
+#[cfg(windows)]
+pub use platform::list_windows_with_handles;
 
 #[cfg(test)]
 mod tests {
@@ -281,8 +300,15 @@ mod tests {
 
     #[test]
     fn app_names_are_compared_without_path_case_or_extension() {
-        // 用户会用这三种写法里的任意一种
-        for entry in ["Code.exe", "code", "C:\\Program Files\\Code.exe"] {
+        // 用户会用这几种写法里的任意一种。`Chrome.EXE` 这一条曾经不命中：归一化先去
+        // 扩展名再转小写，于是大写的 `.EXE` 留在了名字里 —— 白名单看着配了却从不生效。
+        for entry in [
+            "Code.exe",
+            "code",
+            "C:\\Program Files\\Code.exe",
+            "CODE.EXE",
+            "  \"code.Exe\"  ",
+        ] {
             assert!(
                 app_allowed("code.exe", &[entry.to_string()]),
                 "entry {} should match",

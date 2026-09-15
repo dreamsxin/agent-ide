@@ -33,6 +33,8 @@ pub const BROWSER_OPEN: &str = "workspace_browser_open";
 pub const BROWSER_TABS: &str = "workspace_browser_tabs";
 /// 枚举桌面上可见的顶层窗口。只读，但会披露窗口标题，所以同样按应用授权并留痕。
 pub const COMPUTER_WINDOWS: &str = "workspace_computer_windows";
+/// 截一个窗口。和窗口枚举分开授权：标题说"Signal 开着"，截图把消息内容也交出去了。
+pub const COMPUTER_CAPTURE: &str = "workspace_computer_capture";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -125,6 +127,13 @@ pub struct WorkspaceToolPermissions {
     /// 浏览器 tabs 工具当初只做了后者，于是"只放行了本地开发服务器"的用户还是把所有
     /// 标签页交出去了。窗口标题里有文档名、网页标题、聊天对象，同一类问题。
     pub computer_apps: Vec<String>,
+    /// 是否允许截窗口内容。
+    ///
+    /// 和 `allow_computer` 分开：标题是"Signal 开着"，截图是消息本身。共用一个开关等于
+    /// 把用户给过的观察授权偷偷升级成内容授权。
+    pub allow_capture: bool,
+    /// 允许被**截图**的应用清单。空清单等于不许截任何窗口。
+    pub capture_apps: Vec<String>,
     /// 这批授权属于哪一次运行。
     ///
     /// 在拿到执行权之后由命令层写进来，而不是在登记记录时去读 orchestrator 的
@@ -214,6 +223,13 @@ impl WorkspaceToolPermissions {
         self
     }
 
+    /// 截图授权：开关 + 单独的应用清单。
+    pub fn with_capture(mut self, allow_capture: bool, capture_apps: Vec<String>) -> Self {
+        self.allow_capture = allow_capture;
+        self.capture_apps = capture_apps;
+        self
+    }
+
     /// 取出并清空外部动作记录。
     pub fn take_external_actions(&self) -> Vec<AgentExternalAction> {
         match self.external.lock() {
@@ -297,6 +313,14 @@ impl WorkspaceToolPermissions {
     /// 反复调它、并把失败当成"桌面上没有窗口"。
     fn allows_computer(&self) -> bool {
         cfg!(windows) && self.allow_computer && !self.computer_apps.is_empty()
+    }
+
+    /// 截图是否被授权：开关 + 非空的**截图**白名单，且只在 Windows 上有实现。
+    ///
+    /// 故意不复用 `computer_apps`：观察到的是标题，截到的是内容。让"允许看窗口列表"
+    /// 顺带变成"允许看窗口内容"，等于替用户扩大了他已经给过的授权。
+    fn allows_capture(&self) -> bool {
+        cfg!(windows) && self.allow_capture && !self.capture_apps.is_empty()
     }
 
     /// 接过这次运行的副作用开关。
@@ -554,6 +578,28 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         });
     }
 
+    if permissions.allows_capture() {
+        definitions.push(ToolDefinition {
+            name: COMPUTER_CAPTURE.to_string(),
+            description: format!(
+                "Capture one window as a PNG image and attach it to this turn. Only windows \
+                 belonging to these apps can be captured: {}. Name the window with 'app' and/or \
+                 'title_contains'; if more than one window matches, nothing is captured and the \
+                 candidates are listed so you can narrow it down. This is a disclosure that \
+                 cannot be taken back — a window's contents are far more than its title, so use \
+                 it when you need to see what something looks like, not to browse the desktop.",
+                permissions.capture_apps.join(", ")
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "app": { "type": "string", "description": "Executable name, e.g. chrome" },
+                    "title_contains": { "type": "string", "description": "Substring of the window title" }
+                }
+            }),
+        });
+    }
+
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
             name: RUN_COMMAND.to_string(),
@@ -632,6 +678,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
             BROWSER_OPEN | BROWSER_TABS => self.permissions.allows_browser(),
             COMPUTER_WINDOWS => self.permissions.allows_computer(),
+            COMPUTER_CAPTURE => self.permissions.allows_capture(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -661,6 +708,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                     | BROWSER_OPEN
                     | BROWSER_TABS
                     | COMPUTER_WINDOWS
+                    | COMPUTER_CAPTURE
             );
             if side_effecting {
                 let detail = format!(
@@ -668,17 +716,22 @@ impl ToolInvoker for WorkspaceToolInvoker {
                     tool_name
                 );
                 // 浏览器和桌面观察的尝试仍然进外部动作日志：它没有发生，但"停了之后
-                // 模型还想出网 / 还想读窗口标题"是用户会想知道的事。上一版只记了浏览器，
-                // 桌面那条就悄悄只剩一行普通日志 —— 加了新工具没检查记录侧的老毛病。
-                if matches!(tool_name, BROWSER_OPEN | BROWSER_TABS | COMPUTER_WINDOWS) {
+                // 模型还想出网 / 还想读窗口标题 / 还想截图"是用户会想知道的事。上一版只记了
+                // 浏览器，桌面那条就悄悄只剩一行普通日志 —— 加了新工具没检查记录侧的老毛病。
+                if matches!(
+                    tool_name,
+                    BROWSER_OPEN | BROWSER_TABS | COMPUTER_WINDOWS | COMPUTER_CAPTURE
+                ) {
                     self.permissions.record_external(AgentExternalAction {
                         kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
                         target: string_arg(&args, "url")
-                            .unwrap_or(if tool_name == COMPUTER_WINDOWS {
-                                "desktop"
-                            } else {
-                                "chrome"
-                            })
+                            .unwrap_or(
+                                if matches!(tool_name, COMPUTER_WINDOWS | COMPUTER_CAPTURE) {
+                                    "desktop"
+                                } else {
+                                    "chrome"
+                                },
+                            )
                             .to_string(),
                         detail: detail.clone(),
                     });
@@ -732,6 +785,11 @@ impl ToolInvoker for WorkspaceToolInvoker {
             ),
             BROWSER_TABS => browser_tabs_tool(&self.permissions),
             COMPUTER_WINDOWS => computer_windows_tool(&self.permissions),
+            COMPUTER_CAPTURE => computer_capture_tool(
+                string_arg(&args, "app"),
+                string_arg(&args, "title_contains"),
+                &self.permissions,
+            ),
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
@@ -1429,6 +1487,89 @@ fn computer_windows_tool(permissions: &WorkspaceToolPermissions) -> Result<Strin
         ),
     });
     Ok(crate::services::computer::format_windows(&allowed, hidden))
+}
+
+/// 截一个窗口，把 PNG 挂到这一轮上。
+///
+/// 授权是**独立**的一对（开关 + 截图白名单），不搭窗口枚举的便车：标题是"Signal 开着"，
+/// 截图是消息本身。
+///
+/// 三层图片预算和 `workspace_read_image` 共用，顺序也一样：像素上限在拷贝之前问，
+/// 运行预算在编码之后按真实字节记 —— 一次被拒的截图不该吃掉别的图的额度。
+fn computer_capture_tool(
+    app_filter: Option<&str>,
+    title_contains: Option<&str>,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allows_capture() {
+        let detail = if cfg!(windows) {
+            "Window capture is not authorized for this run, or no app is allowed."
+        } else {
+            "Window capture is only implemented on Windows."
+        };
+        permissions.record_external(AgentExternalAction {
+            kind: "computer_capture_refused".to_string(),
+            target: "desktop".to_string(),
+            detail: detail.to_string(),
+        });
+        return Err(detail.to_string());
+    }
+    let capture = match crate::services::capture::capture_window(
+        app_filter,
+        title_contains,
+        &permissions.capture_apps,
+    ) {
+        Ok(capture) => capture,
+        Err(error) => {
+            // 失败也记：被拒的原因里包含"命中了几个窗口"这类信息，而用户有权知道
+            // 模型试过截图。目标只写 `desktop`，不写它想截哪个窗口 —— 那句话本身
+            // 就可能是一条未授权的披露。
+            permissions.record_external(AgentExternalAction {
+                kind: "computer_capture_failed".to_string(),
+                target: "desktop".to_string(),
+                detail: error.clone(),
+            });
+            return Err(error);
+        }
+    };
+
+    let bytes = capture.png.len();
+    if bytes > crate::services::images::MAX_IMAGE_BYTES {
+        let detail = format!(
+            "That window encodes to {} bytes of PNG, past the {} byte per-image limit. Capture a smaller window.",
+            bytes,
+            crate::services::images::MAX_IMAGE_BYTES
+        );
+        permissions.record_external(AgentExternalAction {
+            kind: "computer_capture_failed".to_string(),
+            target: "desktop".to_string(),
+            detail: detail.clone(),
+        });
+        return Err(detail);
+    }
+    if let Err(error) = permissions.charge_image_bytes(bytes) {
+        permissions.record_external(AgentExternalAction {
+            kind: "computer_capture_failed".to_string(),
+            target: "desktop".to_string(),
+            detail: error.clone(),
+        });
+        return Err(error);
+    }
+
+    let image = crate::services::images::image_part_from_bytes("capture.png", &capture.png)?;
+    permissions.record_image(image);
+    permissions.record_external(AgentExternalAction {
+        kind: "computer_capture".to_string(),
+        target: capture.app.clone(),
+        detail: format!(
+            "Captured the contents of \"{}\" ({}) at {}x{} and sent it to the model ({} bytes of PNG). A screenshot cannot be taken back.",
+            capture.title, capture.app, capture.width, capture.height, bytes
+        ),
+    });
+    Ok(format!(
+        "Captured \"{}\" ({}) at {}x{} and attached it to this turn ({} bytes of PNG).",
+        capture.title, capture.app, capture.width, capture.height, bytes
+    ))
 }
 
 /// 把多个执行器合成一个。

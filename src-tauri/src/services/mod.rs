@@ -1,5 +1,6 @@
 pub mod agent_runtime;
 pub mod browser;
+pub mod capture;
 pub mod computer;
 pub mod context;
 pub mod credentials;

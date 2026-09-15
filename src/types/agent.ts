@@ -176,6 +176,20 @@ export interface AgentPermission {
    * 被挡掉的数量。
    */
   computerApps: string[];
+  /**
+   * 是否允许 Agent 截取窗口内容。
+   *
+   * 和 `allowComputerUse` 分开，因为披露的东西不是一个量级：窗口标题说"Signal 开着"，
+   * 一张截图把里面的消息都交出去了。共用一个开关等于替用户把他给过的"能看列表"
+   * 悄悄升级成"能看内容"。同样只有 Windows 有实现。
+   */
+  allowComputerCapture: boolean;
+  /**
+   * 允许被截图的应用（可执行文件名，`*` 表示不限）。
+   *
+   * 独立于 `computerApps`：允许**看到** VS Code 窗口存在，不等于允许**看见**它里面的代码。
+   */
+  captureApps: string[];
 }
 
 /**
@@ -196,6 +210,8 @@ export const READ_ONLY_PERMISSIONS: AgentPermission = {
   browserOrigins: [],
   allowComputerUse: false,
   computerApps: [],
+  allowComputerCapture: false,
+  captureApps: [],
 };
 
 /** `create-files` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
@@ -206,6 +222,8 @@ export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   browserOrigins: [],
   allowComputerUse: false,
   computerApps: [],
+  allowComputerCapture: false,
+  captureApps: [],
 };
 
 /**
@@ -221,6 +239,8 @@ export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   browserOrigins: [],
   allowComputerUse: false,
   computerApps: [],
+  allowComputerCapture: false,
+  captureApps: [],
 };
 
 /** 根据预设获取权限 */

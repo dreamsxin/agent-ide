@@ -27,6 +27,8 @@ describe("permissionsForPreset", () => {
       browserOrigins: [],
       allowComputerUse: false,
       computerApps: [],
+      allowComputerCapture: false,
+      captureApps: [],
     });
     // create-files 放开新建文件，但不放开命令执行 —— MCP 工具策略依赖这一点
     expect(permissionsForPreset("create-files").allowFileCreate).toBe(true);
@@ -38,6 +40,10 @@ describe("permissionsForPreset", () => {
     // 桌面观察同理：它披露的是窗口标题，和"能跑项目命令"没有关系
     expect(permissionsForPreset("run-commands").allowComputerUse).toBe(false);
     expect(permissionsForPreset("run-commands").computerApps).toEqual([]);
+    // 截图更不在阶梯上：它交出去的是窗口**内容**，是这几档里最重的一次披露
+    expect(permissionsForPreset("run-commands").allowComputerCapture).toBe(false);
+    expect(permissionsForPreset("run-commands").captureApps).toEqual([]);
+    expect(permissionsForPreset("create-files").allowComputerCapture).toBe(false);
   });
 
   it("returns a fresh object so callers cannot mutate the shared presets", () => {
@@ -70,6 +76,8 @@ describe("mcpApprovalForPermissions", () => {
         browserOrigins: [],
         allowComputerUse: false,
         computerApps: [],
+        allowComputerCapture: false,
+        captureApps: [],
       })
     ).toBe("auto_approved_only");
 
@@ -81,6 +89,8 @@ describe("mcpApprovalForPermissions", () => {
         browserOrigins: [],
         allowComputerUse: false,
         computerApps: [],
+        allowComputerCapture: false,
+        captureApps: [],
       })
     ).toBe("allow_all");
   });

@@ -172,6 +172,12 @@ pub struct SendPromptRequest {
     /// 允许被观察的应用清单；空清单等于不许，开关也救不了。
     #[serde(default, rename = "computerApps")]
     pub computer_apps: Option<Vec<String>>,
+    /// 是否允许截窗口内容。和观察分开：标题是"Signal 开着"，截图是消息本身。
+    #[serde(default, rename = "allowComputerCapture")]
+    pub allow_computer_capture: bool,
+    /// 允许被截图的应用清单；空清单等于不许。
+    #[serde(default, rename = "captureApps")]
+    pub capture_apps: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +251,12 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::computer_apps`
     #[serde(default, rename = "computerApps")]
     pub computer_apps: Option<Vec<String>>,
+    /// 同 `SendPromptRequest::allow_computer_capture`
+    #[serde(default, rename = "allowComputerCapture")]
+    pub allow_computer_capture: bool,
+    /// 同 `SendPromptRequest::capture_apps`
+    #[serde(default, rename = "captureApps")]
+    pub capture_apps: Option<Vec<String>>,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -327,6 +339,8 @@ pub async fn send_agent_prompt(
         request.browser_origins.clone().unwrap_or_default(),
         request.allow_computer_use,
         request.computer_apps.clone().unwrap_or_default(),
+        request.allow_computer_capture,
+        request.capture_apps.clone().unwrap_or_default(),
     );
     // 移进去而不是克隆：局部变量之后就不能再交给别人，多一个消费者会编译不过
     tool_permissions.adopt_cancel(side_effect_switch);
@@ -504,6 +518,8 @@ fn agent_tool_permissions(
     browser_origins: Vec<String>,
     allow_computer: bool,
     computer_apps: Vec<String>,
+    allow_capture: bool,
+    capture_apps: Vec<String>,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
     // 未授权时连扫都不扫：`discover_project_tasks` 要读 package.json / Cargo.toml。
     // 下面 `allowed_agent_commands` 里那次判断不是重复 —— 那条是授权规则本身，
@@ -520,6 +536,7 @@ fn agent_tool_permissions(
     )
     .with_browser(allow_browser, browser_origins)
     .with_computer(allow_computer, computer_apps)
+    .with_capture(allow_capture, capture_apps)
 }
 
 /// 用这次授权自己带着的副作用开关去抢执行权，并把运行 id 记进授权。
@@ -843,6 +860,8 @@ pub async fn run_agent_step(
         request.browser_origins.clone().unwrap_or_default(),
         request.allow_computer_use,
         request.computer_apps.clone().unwrap_or_default(),
+        request.allow_computer_capture,
+        request.capture_apps.clone().unwrap_or_default(),
     );
     tool_permissions.adopt_cancel(side_effect_switch);
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
@@ -2029,19 +2048,37 @@ mod tests {
         );
     }
 
-    /// 三个 bool 全靠位置传，换一下顺序照样编译得过。这条把它们各自落到哪个字段
+    /// 每个 bool 全靠位置传，换一下顺序照样编译得过。这条把它们各自落到哪个字段
     /// 钉住：只允许写盘时，命令清单必须是空的，新建文件必须仍然不允许。
     #[test]
     fn each_flag_lands_on_its_own_permission() {
-        let write_only =
-            agent_tool_permissions(false, true, false, false, Vec::new(), false, Vec::new());
+        let write_only = agent_tool_permissions(
+            false,
+            true,
+            false,
+            false,
+            Vec::new(),
+            false,
+            Vec::new(),
+            false,
+            Vec::new(),
+        );
         assert!(write_only.allowed_commands.is_empty());
         assert!(write_only.allow_write);
         assert!(!write_only.allow_create);
         assert!(!write_only.allow_browser);
 
-        let create_only =
-            agent_tool_permissions(false, false, true, false, Vec::new(), false, Vec::new());
+        let create_only = agent_tool_permissions(
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            false,
+            Vec::new(),
+            false,
+            Vec::new(),
+        );
         assert!(!create_only.allow_write);
         assert!(create_only.allow_create);
 
@@ -2052,6 +2089,8 @@ mod tests {
             false,
             true,
             vec!["http://127.0.0.1:1420".to_string()],
+            false,
+            Vec::new(),
             false,
             Vec::new(),
         );
@@ -2069,11 +2108,34 @@ mod tests {
             Vec::new(),
             true,
             vec!["Code.exe".to_string()],
+            false,
+            Vec::new(),
         );
         assert!(computer_only.allow_computer);
         assert_eq!(computer_only.computer_apps.len(), 1);
         assert!(!computer_only.allow_browser);
         assert!(!computer_only.allow_write);
+        // 看得到窗口列表**不等于**能截窗口内容：截图是独立的一档授权，
+        // 而它是这两档里唯一会把窗口里的内容交出去的那个
+        assert!(!computer_only.allow_capture);
+        assert!(computer_only.capture_apps.is_empty());
+
+        let capture_only = agent_tool_permissions(
+            false,
+            false,
+            false,
+            false,
+            Vec::new(),
+            false,
+            Vec::new(),
+            true,
+            vec!["Code.exe".to_string()],
+        );
+        assert!(capture_only.allow_capture);
+        assert_eq!(capture_only.capture_apps.len(), 1);
+        // 反过来也成立：给了截图不等于顺带给了窗口枚举
+        assert!(!capture_only.allow_computer);
+        assert!(capture_only.computer_apps.is_empty());
     }
 
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。
