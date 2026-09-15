@@ -785,11 +785,14 @@ impl ToolInvoker for WorkspaceToolInvoker {
             ),
             BROWSER_TABS => browser_tabs_tool(&self.permissions),
             COMPUTER_WINDOWS => computer_windows_tool(&self.permissions),
-            COMPUTER_CAPTURE => computer_capture_tool(
-                string_arg(&args, "app"),
-                string_arg(&args, "title_contains"),
-                &self.permissions,
-            ),
+            COMPUTER_CAPTURE => {
+                computer_capture_tool(
+                    string_arg(&args, "app"),
+                    string_arg(&args, "title_contains"),
+                    &self.permissions,
+                )
+                .await
+            }
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
@@ -1495,8 +1498,12 @@ fn computer_windows_tool(permissions: &WorkspaceToolPermissions) -> Result<Strin
 /// 截图是消息本身。
 ///
 /// 三层图片预算和 `workspace_read_image` 共用，顺序也一样：像素上限在拷贝之前问，
-/// 运行预算在编码之后按真实字节记 —— 一次被拒的截图不该吃掉别的图的额度。
-fn computer_capture_tool(
+/// 运行预算在解析成功之后按真实字节记 —— 一次被拒的截图不该吃掉别的图的额度。
+///
+/// `PrintWindow` 加一次最大 400 万像素的 PNG 编码是同步阻塞的，量级在几百毫秒，所以扔进
+/// `spawn_blocking`：留在 worker 线程上会把同一个运行时上正在流式输出的 token 一起卡住，
+/// 用户看到的是"界面顿了一下"，而顿住的原因和截图毫无关系。
+async fn computer_capture_tool(
     app_filter: Option<&str>,
     title_contains: Option<&str>,
     permissions: &WorkspaceToolPermissions,
@@ -1514,11 +1521,20 @@ fn computer_capture_tool(
         });
         return Err(detail.to_string());
     }
-    let capture = match crate::services::capture::capture_window(
-        app_filter,
-        title_contains,
-        &permissions.capture_apps,
-    ) {
+    let app_owned = app_filter.map(|app| app.to_string());
+    let title_owned = title_contains.map(|title| title.to_string());
+    let allowlist = permissions.capture_apps.clone();
+    let captured = tokio::task::spawn_blocking(move || {
+        crate::services::capture::capture_window(
+            app_owned.as_deref(),
+            title_owned.as_deref(),
+            &allowlist,
+        )
+    })
+    .await
+    // 阻塞任务 panic 了就当截图失败：这里不该把整个运行拖下去
+    .map_err(|error| format!("The capture task did not finish: {}", error))?;
+    let capture = match captured {
         Ok(capture) => capture,
         Err(error) => {
             // 失败也记：被拒的原因里包含"命中了几个窗口"这类信息，而用户有权知道
@@ -2294,7 +2310,16 @@ mod tests {
             !WorkspaceToolInvoker::without_logging(observation_only.clone())
                 .handles(COMPUTER_CAPTURE)
         );
-        assert!(computer_capture_tool(Some("Code.exe"), None, &observation_only).is_err());
+        assert!(tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime is enough for a refusal")
+            .block_on(computer_capture_tool(
+                Some("Code.exe"),
+                None,
+                &observation_only
+            ))
+            .is_err());
         let refusals = observation_only.take_external_actions();
         assert_eq!(refusals.len(), 1);
         assert_eq!(refusals[0].kind, "computer_capture_refused");

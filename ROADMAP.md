@@ -1299,8 +1299,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **A partial `GetDIBits` produced a silently half-black screenshot (fixed).** Only `rows == 0` was an error; `rows < height` left zeroed rows that the alpha-forcing loop then stamped opaque, so the model would read a black band as content. Exactly the class the commit claimed to have handled for the flip and alpha cases. `rows != height` is an error now.
    - **The budget order did not match what 82 said** ("charged after a successful parse") — capture charged first, then parsed, the reverse of `read_image_tool`. Reordered so the two paths agree, which also removes the one exit that charged the budget without recording an action.
    - **The capture gate had no test**, on the most privacy-sensitive authority in the app: `allows_capture()` could have been edited to read `computer_apps` and the suite would have stayed green. There is now a test that observation does not advertise or accept capture, that the switch alone with an empty list does not either, that capture alone does not enable window enumeration, and that the refusal record names only `desktop`.
-   - Recorded rather than fixed: with `captureApps = ["*"]` a capture-only run can use `title_contains: "e"` to read back a titled window inventory — capability the observation grant exists to gate. It is arguably subsumed (it could screenshot them anyway) but SECURITY.md now says so instead of implying the two grants are fully independent. Also open: `capture_window` blocks the async worker for the `PrintWindow` plus PNG encode (no `spawn_blocking`).
+   - Recorded rather than fixed: with `captureApps = ["*"]` a capture-only run can use `title_contains: "e"` to read back a titled window inventory — capability the observation grant exists to gate. It is arguably subsumed (it could screenshot them anyway) but SECURITY.md now says so instead of implying the two grants are fully independent. **The `spawn_blocking` gap is closed in 84.**
    - Rust 367 → 368.
+
+84. **Capture no longer blocks the runtime it shares with the token stream (2026-09-15)**
+   - Left open by 83: `PrintWindow` plus a PNG encode of up to 4 M pixels ran synchronously inside `async fn invoke`, on a Tokio worker. The visible symptom would have been the whole UI stalling for a few hundred milliseconds — token streaming, `get_agent_state`, every other command — with nothing to connect the stall to a screenshot. It is now a `spawn_blocking`, and a panic inside it becomes a failed capture rather than a poisoned run.
+   - The tool function had to become `async`, which is why the gate test now drives it through a current-thread runtime. That is the honest cost: the seam between "authority decision" and "blocking work" is where the `async` boundary lands.
+   - Rust 368, unchanged.
+
 
 
 
