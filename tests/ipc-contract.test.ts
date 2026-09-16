@@ -38,17 +38,20 @@ function rustSources(): string[] {
 }
 
 /**
- * `pub const SOMETHING_EVENT: &str = "agent-something";` 形式的事件名常量。
+ * `pub const SOMETHING: &str = "…";` 形式的字符串常量。
  *
- * 存在的理由：批准机制的两个事件名被后端和它自己的测试同时引用，写成常量是对的 ——
- * 但那让扫字面量的解析器看不见它们，于是这条契约测试报出"前端监听了一个没人发的
- * 事件"。修解析器而不是把名字抄成两份字面量：抄两份正是这个文件要防的漂移。
+ * 存在的理由：批准机制的事件名被后端和它自己的测试同时引用，写成常量是对的 —— 但那让
+ * 扫字面量的解析器看不见它们，于是这个文件报出"前端监听了一个没人发的事件"。修解析器
+ * 而不是把名字抄成两份字面量：抄两份正是这个文件要防的漂移。
+ *
+ * 同一个映射也给下面的 `opType` 用：那条测试第一版只认字面量，等于把这里的教训重犯
+ * 一遍 —— 一个新动作把 op 类型写成常量就会从检查里消失。
  */
-function eventConstants(sources: string[]): Map<string, string> {
+function stringConstants(sources: string[]): Map<string, string> {
     const constants = new Map<string, string>();
     for (const source of sources) {
         for (const match of source.matchAll(
-            /const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([a-z0-9-]+)"/g
+            /const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([a-z0-9_-]+)"/g
         )) {
             constants.set(match[1], match[2]);
         }
@@ -65,7 +68,7 @@ function eventConstants(sources: string[]): Map<string, string> {
  */
 function emittedEvents(): Set<string> {
     const sources = rustSources();
-    const constants = eventConstants(sources);
+    const constants = stringConstants(sources);
     const names = new Set<string>();
     for (const source of sources) {
         for (const match of source.matchAll(/\bemit(?:_json|_all|_to)?\(\s*"([a-z0-9-]+)"/g)) {
@@ -223,10 +226,21 @@ describe("Tauri event contract", () => {
  */
 describe("approval op types", () => {
     function approvalOpTypes(): string[] {
+        const sources = rustSources();
+        const constants = stringConstants(sources);
         const names = new Set<string>();
-        for (const source of rustSources()) {
+        for (const source of sources) {
             for (const match of source.matchAll(/ApprovalRequest::new\(\s*"([a-z0-9_]+)"/g)) {
                 names.add(match[1]);
+            }
+            // 常量形式，和事件名同一个理由
+            for (const match of source.matchAll(
+                /ApprovalRequest::new\(\s*([A-Z][A-Z0-9_]*)\s*,/g
+            )) {
+                const resolved = constants.get(match[1]);
+                if (resolved) {
+                    names.add(resolved);
+                }
             }
         }
         return [...names];
@@ -238,6 +252,7 @@ describe("approval op types", () => {
         // 前提检查：解析失效时这条测试会以"全部通过"的方式静默死掉
         expect(ops.length).toBeGreaterThan(0);
         expect(ops).toContain("browser_open");
+        expect(ops).toContain("computer_capture");
 
         const unknown = ops.filter((op) => normalizeDestructiveOpType(op) === "unknown");
         expect(

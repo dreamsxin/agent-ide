@@ -1611,20 +1611,17 @@ async fn computer_capture_tool(
 
     // 先只**选**窗口，不截。批准框必须说得出具体是哪个窗口，而那句话只能来自选择的
     // 结果：模型写的是 `app: "chrome"`，命中的可能是任何一个 Chrome 窗口。
-    let resolve_app = app_owned.clone();
-    let resolve_title = title_owned.clone();
-    let resolve_list = allowlist.clone();
     let resolved = tokio::task::spawn_blocking(move || {
         crate::services::capture::resolve_capture_target(
-            resolve_app.as_deref(),
-            resolve_title.as_deref(),
-            &resolve_list,
+            app_owned.as_deref(),
+            title_owned.as_deref(),
+            &allowlist,
         )
     })
     .await
     .map_err(|error| format!("The capture task did not finish: {}", error))?;
-    let target = match resolved {
-        Ok(target) => target,
+    let approved = match resolved {
+        Ok(approved) => approved,
         Err(error) => {
             // 失败也记：被拒的原因里包含"命中了几个窗口"这类信息，而用户有权知道
             // 模型试过截图。目标只写 `desktop`，不写它想截哪个窗口 —— 那句话本身
@@ -1642,10 +1639,10 @@ async fn computer_capture_tool(
     let request = crate::agent::approval::ApprovalRequest::new(
         "computer_capture",
         "Capture a window",
-        format!("The agent wants to screenshot {}", target.title),
+        format!("The agent wants to screenshot {}", approved.target.title),
         format!(
             "{}. The image goes to the model and cannot be taken back.",
-            target.describe()
+            approved.target.describe()
         ),
     );
     let outcome = permissions.require_approval(&request).await;
@@ -1654,7 +1651,7 @@ async fn computer_capture_tool(
             kind: format!("computer_capture{}", outcome.record_suffix()),
             // 这条记录只给用户看，而他刚刚在框里读到过这个标题，所以记下来不是新的披露；
             // 返回给模型的错误里仍然不含标题。
-            target: target.title.clone(),
+            target: approved.target.title.clone(),
             detail: detail.to_string(),
         });
         return Err(detail.to_string());
@@ -1665,20 +1662,15 @@ async fn computer_capture_tool(
             "This run was stopped after the approval, so nothing was captured.".to_string();
         permissions.record_external(AgentExternalAction {
             kind: "computer_capture_cancelled".to_string(),
-            target: target.title.clone(),
+            target: approved.target.title.clone(),
             detail: detail.clone(),
         });
         return Err(detail);
     }
 
-    let approved = target.clone();
+    let approved_title = approved.target.title.clone();
     let captured = tokio::task::spawn_blocking(move || {
-        crate::services::capture::capture_approved_target(
-            app_owned.as_deref(),
-            title_owned.as_deref(),
-            &allowlist,
-            &approved,
-        )
+        crate::services::capture::capture_approved_window(&approved)
     })
     .await
     // 阻塞任务 panic 了就当截图失败：这里不该把整个运行拖下去
@@ -1735,12 +1727,20 @@ async fn computer_capture_tool(
     }
 
     permissions.record_image(image);
+    // 标题在等批准的这段时间里可能变了（切了标签页、未读数跳了）。窗口身份靠句柄认，
+    // 所以这不算截错了窗口 —— 但记录必须说的是**截到的**那个标题，两者不同就都写出来，
+    // 否则复盘的人会以为他批准的就是最后送出去的内容。
+    let title_note = if capture.title == approved_title {
+        String::new()
+    } else {
+        format!(" (approved as \"{}\")", approved_title)
+    };
     permissions.record_external(AgentExternalAction {
         kind: "computer_capture".to_string(),
         target: capture.app.clone(),
         detail: format!(
-            "Captured the contents of \"{}\" ({}) at {}x{} and sent it to the model ({} bytes of PNG). A screenshot cannot be taken back.",
-            capture.title, capture.app, capture.width, capture.height, bytes
+            "Captured the contents of \"{}\"{} ({}) at {}x{} and sent it to the model ({} bytes of PNG). A screenshot cannot be taken back.",
+            capture.title, title_note, capture.app, capture.width, capture.height, bytes
         ),
     });
     Ok(format!(
