@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { normalizeDestructiveOpType } from "../src/types/agent";
+
 /**
  * IPC 名字是字符串，两边都没有编译器把关。
  *
@@ -211,6 +213,37 @@ describe("Tauri event contract", () => {
     it("finds listeners whose type argument contains braces", () => {
         expect(listenedEvents().has("lsp-status")).toBe(true);
         expect(listenedEvents().has("terminal-output")).toBe(true);
+    });
+});
+
+/**
+ * 批准请求里的 `opType` 是第三种没人把关的字符串，而它的坏法最贵：前端不认识就把
+ * 整条请求丢掉，后端在那儿白等到超时被拒。界面看起来是"Agent 卡了两分钟"，日志里
+ * 只有一行 console.warn —— 而这个仓库最常犯的缺陷正是"加了个新名字却没检查它的消费者"。
+ */
+describe("approval op types", () => {
+    function approvalOpTypes(): string[] {
+        const names = new Set<string>();
+        for (const source of rustSources()) {
+            for (const match of source.matchAll(/ApprovalRequest::new\(\s*"([a-z0-9_]+)"/g)) {
+                names.add(match[1]);
+            }
+        }
+        return [...names];
+    }
+
+    it("the frontend understands every op type the backend asks approval for", () => {
+        const ops = approvalOpTypes();
+
+        // 前提检查：解析失效时这条测试会以"全部通过"的方式静默死掉
+        expect(ops.length).toBeGreaterThan(0);
+        expect(ops).toContain("browser_open");
+
+        const unknown = ops.filter((op) => normalizeDestructiveOpType(op) === "unknown");
+        expect(
+            unknown,
+            "the dialog would drop these requests and the run would stall until it times out"
+        ).toEqual([]);
     });
 });
 

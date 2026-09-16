@@ -1365,6 +1365,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **It is a security prompt, so it has to be answerable from the keyboard.** `role="dialog"`, `aria-modal`, focus starting on **Deny**, Escape denying. A stray Enter must not authorize, and "dismiss" must never mean "approve".
    - Rust 377 → 379, frontend 210 → 212.
 
+92. **The heavier disclosure now asks too (2026-09-16)**
+   90 put a navigation behind a prompt and left window capture — the biggest disclosure this product has — behind a session switch alone. That ordering was backwards, so `workspace_computer_capture` is now the second consumer of the approval gate.
+   - **The prompt names the window that was selected, not the filter the model sent.** `app: "chrome"` can match any Chrome window; a prompt echoing the request would be asking the user to approve something neither of them has identified. So capture is split in two: `resolve_capture_target` selects (and checks the pixel cap, so a window that would be refused anyway never produces a prompt), the user is asked with `CaptureTarget::describe()`, and only then are pixels copied.
+   - **The approved window is re-identified before it is read.** An `HWND` is a raw pointer and cannot cross an `await`, so the enumeration runs again after approval — which means "is this still the same window" had to become an explicit check. `capture_approved_target` refuses unless title and app both match; a resize is not a different window, and the pixel cap is re-checked against the new size. Without this, approving "Docs — pricing" and capturing "Signal — Alice" needed nothing more than a focus change between the two steps. This is the failure the whole prompt exists to prevent, and it would have been invisible in a test that only checked "capture happened".
+   - **A cross-language contract test for op types.** The `opType` string is the third name in this system with no compiler on either side, and its failure mode is the most expensive: the frontend normalizer drops an unknown value (correctly — a dialog must not mis-describe an action), the backend then waits out its full two minutes, and the user sees "the Agent is stuck". `tests/ipc-contract.test.ts` now extracts every `ApprovalRequest::new("…")` literal from the Rust sources and fails if `normalizeDestructiveOpType` does not accept it. The recurring defect in this repo is adding a name without checking its consumers; this is that check, for the one name that spans both languages.
+   - **Both tool descriptions now say a human decides.** A model that does not know a call can block for two minutes and come back refused will retry it in a loop. Saying so in the advertised description is cheaper than any backend guard against that.
+   - **`workspace_browser_tabs` and `workspace_computer_windows` deliberately stay unprompted**, recorded here rather than left as an inconsistency for the next audit to find: both disclose a *list* whose scope the allowlist already fixes, and both are called often enough that a prompt each time would train people to approve without reading — which would cost more than it buys.
+   - Rust 379 → 381, frontend 212 → 213.
+
+
 
 
 

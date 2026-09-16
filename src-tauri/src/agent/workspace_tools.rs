@@ -565,9 +565,11 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
             name: BROWSER_OPEN.to_string(),
             description: format!(
                 "Open a page in the user's Chrome (attached over the DevTools protocol) and \
-                 bring it to the front. Allowed origins for this run: {}. A navigation cannot be \
-                 undone — it is recorded in the run's action log instead. Use it to look at a \
-                 local preview or a documentation page, not to submit forms or log in.",
+                 bring it to the front. Allowed origins for this run: {}. The user is asked to \
+                 approve each navigation and may refuse; if nobody answers within two minutes the \
+                 call fails, so do not use it in a loop. A navigation cannot be undone — it is \
+                 recorded in the run's action log instead. Use it to look at a local preview or a \
+                 documentation page, not to submit forms or log in.",
                 permissions.browser_origins.join(", ")
             ),
             parameters: serde_json::json!({
@@ -612,9 +614,11 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                 "Capture one window as a PNG image and attach it to this turn. Only windows \
                  belonging to these apps can be captured: {}. Name the window with 'app' and/or \
                  'title_contains'; if more than one window matches, nothing is captured and the \
-                 candidates are listed so you can narrow it down. This is a disclosure that \
-                 cannot be taken back — a window's contents are far more than its title, so use \
-                 it when you need to see what something looks like, not to browse the desktop.",
+                 candidates are listed so you can narrow it down. The user is shown which window \
+                 matched and must approve that capture; they may refuse, and if nobody answers \
+                 within two minutes the call fails. This is a disclosure that cannot be taken \
+                 back — a window's contents are far more than its title, so use it when you need \
+                 to see what something looks like, not to browse the desktop.",
                 permissions.capture_apps.join(", ")
             ),
             parameters: serde_json::json!({
@@ -1573,6 +1577,10 @@ fn computer_windows_tool(permissions: &WorkspaceToolPermissions) -> Result<Strin
 /// 授权是**独立**的一对（开关 + 截图白名单），不搭窗口枚举的便车：标题是"Signal 开着"，
 /// 截图是消息本身。
 ///
+/// 静态授权之外还要**逐次问人**，而且问的是选出来的那一个窗口：模型给的是筛选条件，
+/// 命中哪个窗口它自己也未必清楚，所以框里写的必须是选择的结果。窗口内容是这个产品
+/// 披露面里最重的一样 —— 导航都要问，它没有理由不问。
+///
 /// 三层图片预算和 `workspace_read_image` 共用，顺序也一样：像素上限在拷贝之前问，
 /// 运行预算在解析成功之后按真实字节记 —— 一次被拒的截图不该吃掉别的图的额度。
 ///
@@ -1600,11 +1608,76 @@ async fn computer_capture_tool(
     let app_owned = app_filter.map(|app| app.to_string());
     let title_owned = title_contains.map(|title| title.to_string());
     let allowlist = permissions.capture_apps.clone();
+
+    // 先只**选**窗口，不截。批准框必须说得出具体是哪个窗口，而那句话只能来自选择的
+    // 结果：模型写的是 `app: "chrome"`，命中的可能是任何一个 Chrome 窗口。
+    let resolve_app = app_owned.clone();
+    let resolve_title = title_owned.clone();
+    let resolve_list = allowlist.clone();
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::services::capture::resolve_capture_target(
+            resolve_app.as_deref(),
+            resolve_title.as_deref(),
+            &resolve_list,
+        )
+    })
+    .await
+    .map_err(|error| format!("The capture task did not finish: {}", error))?;
+    let target = match resolved {
+        Ok(target) => target,
+        Err(error) => {
+            // 失败也记：被拒的原因里包含"命中了几个窗口"这类信息，而用户有权知道
+            // 模型试过截图。目标只写 `desktop`，不写它想截哪个窗口 —— 那句话本身
+            // 就可能是一条未授权的披露。
+            permissions.record_external(AgentExternalAction {
+                kind: "computer_capture_failed".to_string(),
+                target: "desktop".to_string(),
+                detail: error.clone(),
+            });
+            return Err(error);
+        }
+    };
+
+    // 问人。窗口内容是这个产品披露面里最重的一样，比一次导航重 —— 导航都要问，它更要问。
+    let request = crate::agent::approval::ApprovalRequest::new(
+        "computer_capture",
+        "Capture a window",
+        format!("The agent wants to screenshot {}", target.title),
+        format!(
+            "{}. The image goes to the model and cannot be taken back.",
+            target.describe()
+        ),
+    );
+    let outcome = permissions.require_approval(&request).await;
+    if let Some(detail) = outcome.refusal_detail() {
+        permissions.record_external(AgentExternalAction {
+            kind: format!("computer_capture{}", outcome.record_suffix()),
+            // 这条记录只给用户看，而他刚刚在框里读到过这个标题，所以记下来不是新的披露；
+            // 返回给模型的错误里仍然不含标题。
+            target: target.title.clone(),
+            detail: detail.to_string(),
+        });
+        return Err(detail.to_string());
+    }
+    // 批准之后再看一次 Stop：入口那道闸门是等待之前取的，理由同 `browser_open_tool`。
+    if permissions.cancelled() {
+        let detail =
+            "This run was stopped after the approval, so nothing was captured.".to_string();
+        permissions.record_external(AgentExternalAction {
+            kind: "computer_capture_cancelled".to_string(),
+            target: target.title.clone(),
+            detail: detail.clone(),
+        });
+        return Err(detail);
+    }
+
+    let approved = target.clone();
     let captured = tokio::task::spawn_blocking(move || {
-        crate::services::capture::capture_window(
+        crate::services::capture::capture_approved_target(
             app_owned.as_deref(),
             title_owned.as_deref(),
             &allowlist,
+            &approved,
         )
     })
     .await
