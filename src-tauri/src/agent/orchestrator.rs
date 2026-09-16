@@ -2048,6 +2048,33 @@ impl AgentOrchestrator {
         );
     }
 
+    /// 运行级别的一条记录：用量、降级、撤不回的外部动作。
+    ///
+    /// 和 `emit_review_action_log` 的区别只有 `stage`：这些事实不属于任何一个流水线阶段，
+    /// 尤其不属于"Diff Review"。挂错阶段的后果是它们在阶段视图里冒出来，而真正发生它们的
+    /// 那个阶段什么也不显示 —— 一条"图片没发出去"的警告出现在评审阶段下面，读的人只会
+    /// 更困惑。`diffSummary` 仍然带着：那是上下文，不是归属。
+    pub fn emit_run_action_log(
+        &self,
+        events: &dyn RunEvents,
+        level: &str,
+        phase: &str,
+        summary: &str,
+        details: &str,
+    ) {
+        self.emit_action_log(
+            events,
+            level,
+            phase,
+            None,
+            None,
+            summary,
+            details,
+            None,
+            Some(self.summarize_pending_diffs()),
+        );
+    }
+
     fn pending_diff_count(&self) -> usize {
         self.diffs
             .iter()
