@@ -266,13 +266,14 @@ export function mcpApprovalForPermissions(permissions: AgentPermission): McpTool
   return permissions.allowCommandRun ? "allow_all" : "auto_approved_only";
 }
 
-/** 需要人点一下才能发生的操作类型 */
-export type DestructiveOpType =
-  | "file_delete"
-  | "command_run"
-  | "git_push"
-  | "git_force"
-  | "browser_open";
+/**
+ * 需要人点一下才能发生的操作类型。
+ *
+ * 只列后端真的会发的那些。之前这里还有 `file_delete` / `command_run` / `git_push` /
+ * `git_force` 四种，没有任何后端路径产生它们 —— 连同对话框里对应的图标和标签，
+ * 那是四份看起来像"这些操作有确认"的假象。
+ */
+export type DestructiveOpType = "browser_open";
 
 export interface DestructiveOpConfirm {
   id: string;
@@ -286,20 +287,11 @@ export interface DestructiveOpConfirm {
  * 把后端事件里的 `opType` 收敛成已知取值。
  *
  * 不用 `as DestructiveOpType`：那只是让 tsc 闭嘴。后端加了一种新动作而前端还没认识
- * 它时，硬转会让界面按一个不存在的分支渲染；落到 `command_run` 这类具体值上更糟 ——
- * 对话框会说错将要发生什么，而这个对话框的全部意义就是说对。所以未知值单独一档。
+ * 它时，硬转会让界面按一个不存在的分支渲染；落到某个具体已知值上更糟 —— 对话框会说错
+ * 将要发生什么，而这个对话框的全部意义就是说对。所以未知值单独一档。
  */
 export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | "unknown" {
-  switch (value) {
-    case "file_delete":
-    case "command_run":
-    case "git_push":
-    case "git_force":
-    case "browser_open":
-      return value;
-    default:
-      return "unknown";
-  }
+  return value === "browser_open" ? "browser_open" : "unknown";
 }
 
 /**

@@ -73,12 +73,19 @@ impl ApprovalRequest {
     }
 }
 
-/// 等待的结果。四种，因为四种要写进记录的话不一样。
+/// 等待的结果。五种，因为五种要写进记录的话不一样。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
-    /// 人点了拒绝，或者 Stop 把挂起的请求全部拒掉
+    /// 人点了拒绝
     Denied,
+    /// Stop 把挂起的请求拒掉了。
+    ///
+    /// 和 `Denied` 分开是因为记录要说真话：Stop 不是一个人对这次动作说不。混在一起的话
+    /// 事后复盘看到的是"用户拒绝了这次导航"，而实际发生的是"用户停掉了整个运行"。
+    /// 记录的类别也跟着不同（`*_cancelled` 而不是 `*_refused`），和 Stop 在工具入口
+    /// 拦下调用时的写法一致。
+    Cancelled,
     /// 没人在规定时间内应答
     TimedOut,
     /// 这次运行没有批准通道（headless 入口）。仍然是拒绝，只是原因不同 ——
@@ -91,16 +98,33 @@ impl ApprovalOutcome {
         matches!(self, ApprovalOutcome::Approved)
     }
 
-    /// 写进外部动作记录和工具返回值的那句话。
-    pub fn refusal_detail(&self) -> &'static str {
+    /// 这次拒绝在记录里的类别后缀。
+    ///
+    /// Stop 拦下的动作用 `_cancelled`，其余用 `_refused` —— 沿用工具入口那道 Stop 闸门
+    /// 已经在用的分类，否则同一件事在记录里有两种名字。
+    pub fn record_suffix(&self) -> &'static str {
         match self {
-            ApprovalOutcome::Approved => "Approved by the user.",
-            ApprovalOutcome::Denied => "The user denied this action.",
+            ApprovalOutcome::Cancelled => "_cancelled",
+            _ => "_refused",
+        }
+    }
+
+    /// 写进外部动作记录和工具返回值的那句话。`None` = 没被拒绝。
+    ///
+    /// 返回 `Option` 而不是给 `Approved` 也编一句话：一个"批准了"的字符串放在名字叫
+    /// refusal 的函数里，早晚会被某个调用方写进一条拒绝记录。
+    pub fn refusal_detail(&self) -> Option<&'static str> {
+        match self {
+            ApprovalOutcome::Approved => None,
+            ApprovalOutcome::Denied => Some("The user denied this action."),
+            ApprovalOutcome::Cancelled => {
+                Some("This run was stopped, so the action was refused before it could take effect.")
+            }
             ApprovalOutcome::TimedOut => {
-                "Nobody approved this action in time, so it was not performed."
+                Some("Nobody approved this action in time, so it was not performed.")
             }
             ApprovalOutcome::Unattended => {
-                "This run has no approval prompt attached, so the action was refused."
+                Some("This run has no approval prompt attached, so the action was refused.")
             }
         }
     }
@@ -109,6 +133,8 @@ impl ApprovalOutcome {
 enum Decision {
     Approved,
     Denied,
+    /// Stop。不是人做的决定，所以不能走 `Denied`。
+    Cancelled,
 }
 
 /// 挂起的批准请求。
@@ -168,7 +194,7 @@ impl ApprovalRegistry {
         };
         let mut refused = 0;
         for (_, sender) in senders {
-            if sender.send(Decision::Denied).is_ok() {
+            if sender.send(Decision::Cancelled).is_ok() {
                 refused += 1;
             }
         }
@@ -219,8 +245,10 @@ impl ApprovalGate {
         let outcome = match tokio::time::timeout(self.timeout, receiver).await {
             Ok(Ok(Decision::Approved)) => ApprovalOutcome::Approved,
             Ok(Ok(Decision::Denied)) => ApprovalOutcome::Denied,
-            // 发送端被丢弃而没有发送：登记表被清掉了。当拒绝处理，不当"继续"。
-            Ok(Err(_)) => ApprovalOutcome::Denied,
+            Ok(Ok(Decision::Cancelled)) => ApprovalOutcome::Cancelled,
+            // 发送端被丢弃而没有发送：登记表被清掉了。归到 `Cancelled` 而不是 `Denied` ——
+            // 那同样不是某个人对这次动作说的不。
+            Ok(Err(_)) => ApprovalOutcome::Cancelled,
             Err(_) => {
                 self.registry.forget(&request.id);
                 ApprovalOutcome::TimedOut
@@ -309,10 +337,16 @@ mod tests {
         let (one, two) = tokio::join!(gate.ask(&first), gate.ask(&second));
 
         assert_eq!(stop.await.unwrap(), 2, "两条挂起的请求都该被 Stop 拒掉");
-        assert_eq!(one, ApprovalOutcome::Denied);
-        assert_eq!(two, ApprovalOutcome::Denied);
-        // 拒绝要在超时之前到：否则这个测试测的是超时，不是 Stop
-        assert_eq!(registry.refuse_all(), 0);
+        // `Cancelled` 而不是 `Denied`：这条同时钉住"Stop 不是超时"和"Stop 不是人的拒绝"。
+        // 断言 `Denied` 的话，把 `refuse_all` 写成发 `Denied` 也照样绿，而记录里就会说
+        // 用户拒绝了一次他其实只是停掉了的动作。
+        assert_eq!(one, ApprovalOutcome::Cancelled);
+        assert_eq!(two, ApprovalOutcome::Cancelled);
+        assert_eq!(one.record_suffix(), "_cancelled");
+        assert_ne!(
+            one.refusal_detail(),
+            ApprovalOutcome::Denied.refusal_detail()
+        );
     }
 
     #[tokio::test]

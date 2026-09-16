@@ -240,7 +240,9 @@ describe("normalizeApprovalRequest", () => {
   it("drops an operation type it does not know", () => {
     expect(normalizeApprovalRequest({ ...valid, opType: "computer_input" })).toBeNull();
     expect(normalizeDestructiveOpType("computer_input")).toBe("unknown");
-    expect(normalizeDestructiveOpType("git_force")).toBe("git_force");
+    // 以前这里还有 file_delete / command_run / git_push / git_force 四种，后端从来不发
+    expect(normalizeDestructiveOpType("git_force")).toBe("unknown");
+    expect(normalizeDestructiveOpType("browser_open")).toBe("browser_open");
   });
 });
 

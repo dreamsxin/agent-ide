@@ -106,6 +106,33 @@ describe("ConfirmDialog", () => {
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
   });
+
+  /**
+   * 键盘可达是安全要求：只能用鼠标回答的授权关卡对键盘用户等于不存在。Esc 必须走
+   * 拒绝 —— "随手关掉"绝不能等于同意。
+   */
+  it("Esc 走拒绝，而不是关掉窗口了事", async () => {
+    useAgentStore.setState({ pendingConfirm: request() });
+
+    render(<ConfirmDialog />);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("resolve_agent_approval", {
+        requestId: "req-1",
+        approved: false,
+      })
+    );
+  });
+
+  /** 焦点默认落在 Deny：连按回车不该变成一次授权 */
+  it("默认焦点在 Deny 上", () => {
+    useAgentStore.setState({ pendingConfirm: request() });
+
+    render(<ConfirmDialog />);
+
+    expect(document.activeElement?.textContent).toBe("Deny");
+  });
 });
 
 describe("closeConfirm", () => {

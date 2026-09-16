@@ -147,6 +147,10 @@ export function useAgentBridge() {
             const request = normalizeApprovalRequest(e.payload);
             if (request) {
               requestConfirm(request);
+            } else {
+              // 丢掉一条请求 = 后端在那儿白等到超时。至少要留一句：否则界面看起来是
+              // "Agent 卡了两分钟"，而真正的原因是这个前端还不认识那种动作。
+              console.warn("[useAgentBridge] unreadable approval request, ignoring:", e.payload);
             }
           }),
 
