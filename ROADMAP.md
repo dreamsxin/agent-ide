@@ -1336,6 +1336,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Pinned by reading the emitted payload rather than the summary text: the `image_input_degraded` entry's `stage` must be JSON `null`. Asserting on the wording would have passed with the wrong stage still attached, which is exactly how this survived two write-ups.
    - Rust 369, unchanged: a field value and its assertion, no new cases.
 
+89. **The approval prompt already exists and has never been able to appear (2026-09-15)**
+   - Looking for what per-action approval would cost, I found most of it already written and inert. `ConfirmDialog.tsx` is mounted in `App.tsx`, renders from `pendingConfirm`, has a "type to confirm" path and a *remember this* checkbox — and **nothing can ever open it**: `requestConfirm` has no caller outside the store, `pendingConfirm` has no producer, and the `agent-confirm-approved` / `agent-confirm-denied` events it dispatches have no listener anywhere in the tree.
+   - That is the "control that does nothing" rule violated in the most expensive direction: a reader of `App.tsx` reasonably concludes destructive operations are confirmed. They are not. Marked at the mount site rather than left silent, because the misleading part is the mount, not the component.
+   - **Not deleted, on purpose** — this is the one case where the delete-unused-code rule and the no-inert-control rule point in opposite directions, and the tiebreaker is that the dialog is ~80% of the UI that ROADMAP 86 named as the prerequisite for input injection. Deleting it this cycle to rebuild it next cycle would be churn; leaving it undocumented would be a lie. So: documented, and it is now the first step of the approval work rather than a discovery waiting to be re-made.
+   - **What the wiring still needs** (revised estimate, lower than 86 assumed): a backend `ApprovalRegistry` (request → `oneshot`, resolve, refuse-all, timeout defaulting to refusal), one Tauri command to resolve a decision, an event → `requestConfirm` bridge, the dialog's two window events routed to that command, and Stop refusing everything pending. The first consumer should be `workspace_browser_open` — an action that already exists and has been audited five times — so the mechanism proves itself before input injection inherits it.
+
+
 
 
 
