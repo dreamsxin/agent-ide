@@ -231,7 +231,6 @@ interface AgentStore {
   setComputerApps: (apps: string[]) => void;
   setCaptureApps: (apps: string[]) => void;
   requestConfirm: (confirm: DestructiveOpConfirm) => void;
-  clearConfirm: () => void;
   /**
    * 把决定送回后端，收掉对话框。
    *
@@ -637,7 +636,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       permissions: { ...s.permissions, captureApps: apps },
     })),
   requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
-  clearConfirm: () => set({ pendingConfirm: null }),
   resolveConfirm: async (approved) => {
     const pending = get().pendingConfirm;
     if (!pending) return false;
@@ -646,10 +644,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set({ pendingConfirm: null });
     if (!isTauriRuntime()) return false;
     try {
-      return await invoke<boolean>("resolve_agent_approval", {
+      const heard = await invoke<boolean>("resolve_agent_approval", {
         requestId: pending.id,
         approved,
       });
+      if (!heard) {
+        // 后端已经不等这条请求了（超时，或 Stop 拒过了）。这一次点击什么都没授权，
+        // 而对话框已经关掉 —— 至少要在日志里留一句，别让"点了批准"和"批准生效"看起来一样。
+        console.warn(
+          "[AgentStore] approval decision arrived too late; nothing was waiting for",
+          pending.id
+        );
+      }
+      return heard;
     } catch (err) {
       console.warn("[AgentStore] resolve_agent_approval failed:", err);
       return false;

@@ -1326,11 +1326,14 @@ fn move_file_tool(
     ))
 }
 
-/// 在同步的工具接口里跑一次异步请求。
+/// 在同步的工具函数里跑一次异步 CDP 请求。
 ///
-/// `ToolInvoker::invoke` 是同步的（其他工具都是文件和进程操作），而浏览器走 HTTP。
-/// `block_in_place` 把当前工作线程让出去，所以不会把整个多线程 runtime 堵死；没有
-/// runtime 时（单元测试直接调用）如实说明，而不是 panic。
+/// `ToolInvoker::invoke` 是 async 的，但 `browser_tabs_tool` 本身是同步函数（它没有
+/// 需要等人的那一步）。`block_in_place` 把当前工作线程让出去，所以不会把整个多线程
+/// runtime 堵死；没有 runtime 时（单元测试直接调用）如实说明，而不是 panic。
+///
+/// `browser_open_tool` 不走这里：它要等人批准，本来就是 async 的，直接 `.await` 就好 ——
+/// 在那条路径上 `block_in_place` 只会白占一个运行时线程。
 fn block_on_browser<T>(
     future: impl std::future::Future<Output = Result<T, String>>,
 ) -> Result<T, String> {
@@ -1408,10 +1411,24 @@ async fn browser_open_tool(
         ),
     );
     let outcome = permissions.require_approval(&request).await;
-    if !outcome.approved() {
-        let detail = outcome.refusal_detail().to_string();
+    if let Some(detail) = outcome.refusal_detail() {
         permissions.record_external(AgentExternalAction {
-            kind: "browser_open_refused".to_string(),
+            // Stop 拦下的用 `_cancelled`，其余用 `_refused`：工具入口那道 Stop 闸门
+            // 已经在用这套分类，同一件事在记录里不该有两个名字。
+            kind: format!("browser_open{}", outcome.record_suffix()),
+            target: url.to_string(),
+            detail: detail.to_string(),
+        });
+        return Err(detail.to_string());
+    }
+    // 批准之后再看一次开关。入口那道闸门是**等待之前**取的，最长已经过期两分钟：
+    // Stop 恰好落在"决定送到"和"真的导航"之间时，`refuse_all` 找不到挂起的请求，
+    // 而界面已经回到空闲 —— 少这一次复查，那次导航照样发生。
+    if permissions.cancelled() {
+        let detail =
+            "This run was stopped after the approval, so the page was not opened.".to_string();
+        permissions.record_external(AgentExternalAction {
+            kind: "browser_open_cancelled".to_string(),
             target: url.to_string(),
             detail: detail.clone(),
         });
@@ -2493,7 +2510,9 @@ mod tests {
 
         assert_eq!(
             error,
-            crate::agent::approval::ApprovalOutcome::Unattended.refusal_detail()
+            crate::agent::approval::ApprovalOutcome::Unattended
+                .refusal_detail()
+                .expect("拒绝一定有说法")
         );
         let actions = granted.take_external_actions();
         assert_eq!(actions.len(), 1);
@@ -2501,35 +2520,65 @@ mod tests {
         assert_eq!(actions[0].target, "http://127.0.0.1:1420/index.html");
     }
 
+    /// 等到请求真的发出来，再按 id 回答它。
+    ///
+    /// id 是后端生成的，测试只能从事件里读 —— 这恰好和前端走同一条路。
+    async fn answer_when_asked(
+        events: std::sync::Arc<crate::agent::events::RecordingEvents>,
+        registry: crate::agent::approval::ApprovalRegistry,
+        approved: bool,
+        before_answering: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> bool {
+        for _ in 0..200 {
+            let asked = events.payloads_for(crate::agent::approval::APPROVAL_REQUESTED_EVENT);
+            if let Some(id) = asked.first().and_then(|payload| payload["id"].as_str()) {
+                if let Some(flag) = &before_answering {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                if registry.resolve(id, approved) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    fn approving_permissions(
+        events: &std::sync::Arc<crate::agent::events::RecordingEvents>,
+        registry: &crate::agent::approval::ApprovalRegistry,
+    ) -> WorkspaceToolPermissions {
+        WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()])
+            .with_approval(crate::agent::approval::ApprovalGate::new(
+                registry.clone(),
+                events.clone(),
+            ))
+    }
+
     /// 人点了拒绝 = 不导航，而且记录里写的是人的决定。
     #[tokio::test]
     async fn a_denied_navigation_does_not_happen() {
         let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
         let registry = crate::agent::approval::ApprovalRegistry::new();
-        let granted = WorkspaceToolPermissions::default()
-            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()])
-            .with_approval(crate::agent::approval::ApprovalGate::new(
-                registry.clone(),
-                events.clone(),
-            ));
+        let granted = approving_permissions(&events, &registry);
 
-        let denier = tokio::spawn(async move {
-            for _ in 0..100 {
-                if registry.refuse_all() == 1 {
-                    return true;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            false
-        });
+        let answer = tokio::spawn(answer_when_asked(
+            events.clone(),
+            registry.clone(),
+            false,
+            None,
+        ));
         let error = browser_open_tool("http://127.0.0.1:1420/index.html", &granted)
             .await
             .unwrap_err();
-        assert!(denier.await.unwrap(), "应该有一条挂起的请求可以拒");
+        assert!(answer.await.unwrap(), "应该有一条挂起的请求可以回答");
 
         assert_eq!(
             error,
-            crate::agent::approval::ApprovalOutcome::Denied.refusal_detail()
+            crate::agent::approval::ApprovalOutcome::Denied
+                .refusal_detail()
+                .expect("拒绝一定有说法")
         );
         // 请求里必须带上完整 URL：清单批的是 origin，人要看的是这一个页面
         let asked = events.payloads_for(crate::agent::approval::APPROVAL_REQUESTED_EVENT);
@@ -2542,6 +2591,78 @@ mod tests {
         let actions = granted.take_external_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "browser_open_refused");
+    }
+
+    /// Stop 拦下的动作不能记成"用户拒绝了"。
+    ///
+    /// 记录是这个能力唯一能承诺的东西，所以它必须说真话：用户按的是 Stop，不是对这一次
+    /// 导航说不。类别也要和工具入口那道 Stop 闸门一致（`_cancelled`），否则同一件事在
+    /// 记录里有两个名字。
+    #[tokio::test]
+    async fn stop_during_an_approval_is_recorded_as_stopped_not_denied() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let registry = crate::agent::approval::ApprovalRegistry::new();
+        let granted = approving_permissions(&events, &registry);
+
+        let stopper = registry.clone();
+        let stop = tokio::spawn(async move {
+            for _ in 0..200 {
+                if stopper.refuse_all() == 1 {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            false
+        });
+        let error = browser_open_tool("http://127.0.0.1:1420/index.html", &granted)
+            .await
+            .unwrap_err();
+        assert!(stop.await.unwrap(), "应该有一条挂起的请求被 Stop 拒掉");
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_cancelled");
+        assert_eq!(
+            error,
+            crate::agent::approval::ApprovalOutcome::Cancelled
+                .refusal_detail()
+                .expect("拒绝一定有说法")
+        );
+        assert!(
+            !actions[0].detail.contains("user denied"),
+            "{}",
+            actions[0].detail
+        );
+    }
+
+    /// 批准之后、导航之前按下 Stop，导航仍然不能发生。
+    ///
+    /// 入口那道闸门是等待之前取的，等待最长两分钟 —— 只靠它的话，这个窗口里的 Stop
+    /// 会让界面回到空闲而页面照样被打开。
+    #[tokio::test]
+    async fn a_stop_between_the_approval_and_the_navigation_still_prevents_it() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let registry = crate::agent::approval::ApprovalRegistry::new();
+        let mut granted = approving_permissions(&events, &registry);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        granted.adopt_cancel(cancel.clone());
+
+        // 先拉开关、再送批准：这样"批准之后才被停"是确定的，不是靠调度碰巧
+        let answer = tokio::spawn(answer_when_asked(
+            events.clone(),
+            registry.clone(),
+            true,
+            Some(cancel),
+        ));
+        let error = browser_open_tool("http://127.0.0.1:1420/index.html", &granted)
+            .await
+            .unwrap_err();
+        assert!(answer.await.unwrap(), "批准应该送到了");
+
+        assert!(error.contains("stopped"), "{}", error);
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_cancelled");
     }
 
     /// 静态授权没过的动作**不弹框**。

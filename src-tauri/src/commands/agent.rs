@@ -756,15 +756,32 @@ fn emit_usage_action_log(
 
 /// Stop the current Agent task.
 #[tauri::command]
-pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<String, String> {
+pub async fn stop_agent(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<String, String> {
     // 先拉开关，再抢锁 —— 顺序不能反。`repair_workspace` 会跨 await 持着
     // orchestrator 锁，先抢锁就得干等到修复自己结束，而那时它已经把开关交回去了，
     // Stop 会拉空，退化成一个只重置界面的空动作。
     agent_state.cancel_registry.cancel_active_run();
     // 挂起的批准请求一并拒掉。少这一句，Stop 之后一个还开着的对话框仍然能放行一次
     // 撤不回的动作 —— 界面已经回到空闲，而导航还是发生了。
-    agent_state.approval_registry.refuse_all();
+    let refused_approvals = agent_state.approval_registry.refuse_all();
     let mut orch = agent_state.orchestrator.lock().await;
+    // 报出来而不是只返回一个数：Stop 拒掉的那次动作在工具侧会留一条 `*_cancelled`
+    // 记录，但"Stop 替我回答了一个还开着的问题"这件事只有这里知道。
+    if refused_approvals > 0 {
+        orch.emit_run_action_log(
+            &app_handle,
+            "warn",
+            "external_action",
+            &format!(
+                "Stop refused {} pending approval request(s)",
+                refused_approvals
+            ),
+            "The action was not performed. Nobody approved it — Stop answered for you.",
+        );
+    }
     orch.abandon_run();
     orch.state_mgr.set(AgentState::Idle);
     orch.ide_mode = IdeMode::Code;
