@@ -593,7 +593,7 @@ fn publish_external_actions(
         .map(|action| format!("{}: {} — {}", action.kind, action.target, action.detail))
         .collect::<Vec<_>>()
         .join("\n");
-    orch.emit_review_action_log(
+    orch.emit_run_action_log(
         events,
         if refused > 0 { "warn" } else { "info" },
         "external_action",
@@ -685,7 +685,7 @@ fn emit_tool_degradation_log(
     if !llm.tools_were_rejected() {
         return;
     }
-    orch.emit_review_action_log(
+    orch.emit_run_action_log(
         events,
         "warn",
         "tool_capability_degraded",
@@ -710,7 +710,7 @@ fn emit_image_degradation_log(
     else {
         return;
     };
-    orch.emit_review_action_log(events, "warn", "image_input_degraded", &summary, &details);
+    orch.emit_run_action_log(events, "warn", "image_input_degraded", &summary, &details);
 }
 
 /// 把本次运行的 token 用量写进 action log。措辞和分支判断在
@@ -725,7 +725,7 @@ fn emit_usage_action_log(
     if snapshot.calls == 0 {
         return;
     }
-    orch.emit_review_action_log(
+    orch.emit_run_action_log(
         events,
         "info",
         "run_token_usage",
@@ -1927,6 +1927,15 @@ mod tests {
             "{:?}",
             phases
         );
+        // 运行级别的事实不能挂在某个阶段上：挂成 "Diff Review" 的话，一条"图片没发出去"
+        // 会出现在评审阶段下面，而真正丢图的那个阶段什么都不显示。
+        let stages: Vec<serde_json::Value> = events
+            .payloads_for("agent-action-log")
+            .into_iter()
+            .filter(|payload| payload["phase"] == "image_input_degraded")
+            .map(|payload| payload["stage"].clone())
+            .collect();
+        assert_eq!(stages, vec![serde_json::Value::Null], "{:?}", stages);
 
         // 没有降级的运行不能写这条：一条永远出现的警告等于没有警告。这里要真的走一遍
         // 同一个降级路径（同一个 mock 端点，只是消息里没有图），否则断言就只是在说
