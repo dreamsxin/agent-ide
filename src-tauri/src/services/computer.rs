@@ -144,7 +144,7 @@ mod platform {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible,
+        GetWindowThreadProcessId, IsWindow, IsWindowVisible,
     };
 
     /// `EnumWindows` 的回调把结果攒进这里。
@@ -224,6 +224,43 @@ mod platform {
         TRUE
     }
 
+    /// 重新读一个句柄现在的样子。窗口已经关掉（或句柄不再有效）时返回 `None`。
+    ///
+    /// 存在的理由：截图要"先问人、再动手"，而 `HWND` 是裸指针、不是 `Send`，过不了
+    /// `await`。过得去的是它的**值**（`isize`），所以批准之后拿值换回句柄，再用这个
+    /// 函数确认它还活着、还属于同一个应用 —— 而不是按标题重新找一遍。按标题找会
+    /// 截到另一个同名窗口，而标题是被披露方自己就能改的东西（网页标题即窗口标题）。
+    pub fn describe_window(handle: isize) -> Option<DesktopWindow> {
+        let hwnd = handle as HWND;
+        // SAFETY: 只读 API，且 `IsWindow` 先确认句柄有效；无效句柄会被这里挡住，
+        // 而不是传给后面的 Get* 调用。
+        unsafe {
+            if IsWindow(hwnd) != TRUE {
+                return None;
+            }
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if GetWindowRect(hwnd, &mut rect) != TRUE {
+                return None;
+            }
+            Some(DesktopWindow {
+                title: window_title(hwnd),
+                app: window_app(hwnd),
+                bounds: (
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                ),
+                foreground: hwnd == GetForegroundWindow(),
+            })
+        }
+    }
+
     unsafe fn window_title(hwnd: HWND) -> String {
         let length = GetWindowTextLengthW(hwnd);
         if length <= 0 {
@@ -279,11 +316,16 @@ mod platform {
     pub fn list_windows() -> Result<Vec<DesktopWindow>, String> {
         Err("Listing desktop windows is only implemented on Windows.".to_string())
     }
+
+    /// 非 Windows 上没有句柄可言。
+    pub fn describe_window(_handle: isize) -> Option<DesktopWindow> {
+        None
+    }
 }
 
-pub use platform::list_windows;
 #[cfg(windows)]
 pub use platform::list_windows_with_handles;
+pub use platform::{describe_window, list_windows};
 
 #[cfg(test)]
 mod tests {
