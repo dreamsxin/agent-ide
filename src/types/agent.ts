@@ -273,7 +273,7 @@ export function mcpApprovalForPermissions(permissions: AgentPermission): McpTool
  * `git_force` 四种，没有任何后端路径产生它们 —— 连同对话框里对应的图标和标签，
  * 那是四份看起来像"这些操作有确认"的假象。
  */
-export type DestructiveOpType = "browser_open";
+export type DestructiveOpType = "browser_open" | "computer_capture";
 
 export interface DestructiveOpConfirm {
   id: string;
@@ -291,7 +291,13 @@ export interface DestructiveOpConfirm {
  * 将要发生什么，而这个对话框的全部意义就是说对。所以未知值单独一档。
  */
 export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | "unknown" {
-  return value === "browser_open" ? "browser_open" : "unknown";
+  switch (value) {
+    case "browser_open":
+    case "computer_capture":
+      return value;
+    default:
+      return "unknown";
+  }
 }
 
 /**

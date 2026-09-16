@@ -243,6 +243,7 @@ describe("normalizeApprovalRequest", () => {
     // 以前这里还有 file_delete / command_run / git_push / git_force 四种，后端从来不发
     expect(normalizeDestructiveOpType("git_force")).toBe("unknown");
     expect(normalizeDestructiveOpType("browser_open")).toBe("browser_open");
+    expect(normalizeDestructiveOpType("computer_capture")).toBe("computer_capture");
   });
 });
 

@@ -154,9 +154,51 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
     Ok(out)
 }
 
+/// 已经选定、但还没有截下来的目标。
+///
+/// 单独一个类型是因为"截哪个窗口"和"把它截下来"之间现在插着一次人工批准：批准框要
+/// 说得出**具体哪个窗口**，而那句话必须来自选择的结果，不能来自模型给的筛选条件 ——
+/// 模型写 `app: "chrome"`，命中的可能是任何一个 Chrome 窗口。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureTarget {
+    pub title: String,
+    pub app: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CaptureTarget {
+    pub fn from_window(window: &DesktopWindow) -> Self {
+        Self {
+            title: window.title.clone(),
+            app: window.app.clone(),
+            width: window.bounds.2.max(0) as u32,
+            height: window.bounds.3.max(0) as u32,
+        }
+    }
+
+    /// 是不是用户批准的那一个。
+    ///
+    /// 只比标题和应用，不比尺寸：批准之后窗口被拖大是正常的，而标题变了就是另一个
+    /// 内容了。批准 "Docs — pricing" 之后截到 "Signal — Alice" 是这道闸门最坏的失败。
+    pub fn same_window(&self, other: &Self) -> bool {
+        self.title == other.title && self.app == other.app
+    }
+
+    /// 给批准框看的一行。
+    pub fn describe(&self) -> String {
+        format!(
+            "{} ({}), {}x{} pixels",
+            self.title, self.app, self.width, self.height
+        )
+    }
+}
+
 #[cfg(windows)]
 mod platform {
-    use super::{check_capture_pixels, encode_png, select_capture_target, WindowCapture};
+    use super::{
+        check_capture_pixels, encode_png, select_capture_target, CaptureTarget, WindowCapture,
+    };
     use crate::services::computer::DesktopWindow;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Graphics::Gdi::{
@@ -175,12 +217,55 @@ mod platform {
     /// （Chrome、Electron、终端）会截出一张全黑的图。
     const PW_RENDERFULLCONTENT: PRINT_WINDOW_FLAGS = 2;
 
-    /// 截一个窗口。`hwnd` 必须来自本次枚举，白名单和唯一性由调用方先判。
-    pub fn capture_window(
+    /// 选出要截的窗口，但**不截**。
+    ///
+    /// 像素上限在这里就检查：一个反正会被拒的窗口不该先去问人。
+    pub fn resolve_capture_target(
         app_filter: Option<&str>,
         title_contains: Option<&str>,
         allowlist: &[String],
+    ) -> Result<CaptureTarget, String> {
+        let resolved = resolve(app_filter, title_contains, allowlist)?.0;
+        check_capture_pixels(resolved.width, resolved.height)?;
+        Ok(resolved)
+    }
+
+    /// 截下用户批准的那个窗口。
+    ///
+    /// 重新枚举一次，因为 `HWND` 是裸指针、过不了 `await`。重新枚举意味着要重新确认
+    /// 命中的还是同一个窗口 —— 不确认的话，批准和截图之间换了前台窗口就会截到一个
+    /// 用户从没同意过的东西。
+    pub fn capture_approved_target(
+        app_filter: Option<&str>,
+        title_contains: Option<&str>,
+        allowlist: &[String],
+        approved: &CaptureTarget,
     ) -> Result<WindowCapture, String> {
+        let (resolved, hwnd) = resolve(app_filter, title_contains, allowlist)?;
+        if !resolved.same_window(approved) {
+            return Err(
+                "The window that matched is no longer the one that was approved, so nothing was captured."
+                    .to_string(),
+            );
+        }
+        // 尺寸可能在批准之后变了，所以上限要按现在的尺寸重新算
+        check_capture_pixels(resolved.width, resolved.height)?;
+        let rgba = copy_window_pixels(hwnd, resolved.width, resolved.height)?;
+        let png = encode_png(resolved.width, resolved.height, &rgba)?;
+        Ok(WindowCapture {
+            title: resolved.title,
+            app: resolved.app,
+            width: resolved.width,
+            height: resolved.height,
+            png,
+        })
+    }
+
+    fn resolve(
+        app_filter: Option<&str>,
+        title_contains: Option<&str>,
+        allowlist: &[String],
+    ) -> Result<(CaptureTarget, HWND), String> {
         let handles = crate::services::computer::list_windows_with_handles()?;
         let windows: Vec<DesktopWindow> =
             handles.iter().map(|(window, _)| window.clone()).collect();
@@ -190,19 +275,7 @@ mod platform {
             .find(|(window, _)| window == &target)
             .map(|(_, hwnd)| *hwnd)
             .ok_or_else(|| "The window disappeared before it could be captured.".to_string())?;
-
-        let width = target.bounds.2.max(0) as u32;
-        let height = target.bounds.3.max(0) as u32;
-        check_capture_pixels(width, height)?;
-        let rgba = copy_window_pixels(hwnd, width, height)?;
-        let png = encode_png(width, height, &rgba)?;
-        Ok(WindowCapture {
-            title: target.title,
-            app: target.app,
-            width,
-            height,
-            png,
-        })
+        Ok((CaptureTarget::from_window(&target), hwnd))
     }
 
     /// 把窗口内容画进一张离屏位图再读出来，返回 RGBA。
@@ -299,18 +372,29 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use super::WindowCapture;
+    use super::{CaptureTarget, WindowCapture};
 
-    pub fn capture_window(
+    const UNSUPPORTED: &str = "Window capture is only implemented on Windows.";
+
+    pub fn resolve_capture_target(
         _app_filter: Option<&str>,
         _title_contains: Option<&str>,
         _allowlist: &[String],
+    ) -> Result<CaptureTarget, String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    pub fn capture_approved_target(
+        _app_filter: Option<&str>,
+        _title_contains: Option<&str>,
+        _allowlist: &[String],
+        _approved: &CaptureTarget,
     ) -> Result<WindowCapture, String> {
-        Err("Window capture is only implemented on Windows.".to_string())
+        Err(UNSUPPORTED.to_string())
     }
 }
 
-pub use platform::capture_window;
+pub use platform::{capture_approved_target, resolve_capture_target};
 
 #[cfg(test)]
 mod tests {
@@ -393,13 +477,54 @@ mod tests {
         assert_eq!(picked.app, "chrome.exe");
     }
 
-    /// 像素上限本身的边界。它在拷贝之前被调用（见 `capture_window`），这条只钉数值。
+    /// 像素上限本身的边界。它在拷贝之前被调用（见 `resolve_capture_target`），这条只钉数值。
     #[test]
     fn the_pixel_limit_refuses_more_than_it_allows() {
         assert!(check_capture_pixels(2560, 1440).is_ok());
         assert!(check_capture_pixels(0, 1080).is_err());
         let error = check_capture_pixels(7680, 4320).expect_err("too many pixels");
         assert!(error.contains("capture limit"), "{}", error);
+    }
+
+    /// 批准的是**那一个**窗口，不是那条筛选条件。
+    ///
+    /// `HWND` 是裸指针、过不了 `await`，所以批准之后必须重新枚举 —— 于是"重新命中的
+    /// 还是不是同一个窗口"成了这道闸门最坏的失败方式：批准 "Docs — pricing"，截到
+    /// "Signal — Alice"。尺寸变了不算换窗口（拖大很正常），标题或应用变了就算。
+    #[test]
+    fn an_approved_target_is_one_window_not_a_filter() {
+        let approved = CaptureTarget::from_window(&window("Docs — pricing", "chrome.exe"));
+
+        assert!(approved.same_window(&CaptureTarget::from_window(&window(
+            "Docs — pricing",
+            "chrome.exe"
+        ))));
+        let mut resized = approved.clone();
+        resized.width = 1920;
+        assert!(approved.same_window(&resized));
+
+        // 同一个筛选条件（app: chrome）能命中的另一个窗口
+        assert!(!approved.same_window(&CaptureTarget::from_window(&window(
+            "Docs — roadmap",
+            "chrome.exe"
+        ))));
+        assert!(!approved.same_window(&CaptureTarget::from_window(&window(
+            "Docs — pricing",
+            "signal.exe"
+        ))));
+    }
+
+    /// 批准框里那一行必须说得出是哪个窗口、多大。
+    ///
+    /// 一句"要截个图吗"等于请用户为看不见的东西签字，而这是本产品最重的一次披露。
+    #[test]
+    fn the_prompt_line_names_the_window_and_its_size() {
+        let described =
+            CaptureTarget::from_window(&window("Signal — Alice", "signal.exe")).describe();
+
+        assert!(described.contains("Signal — Alice"), "{}", described);
+        assert!(described.contains("signal.exe"), "{}", described);
+        assert!(described.contains("800x600"), "{}", described);
     }
 
     /// 编码出来的必须是真的 PNG，而且尺寸不匹配要报错而不是写出一张坏图。

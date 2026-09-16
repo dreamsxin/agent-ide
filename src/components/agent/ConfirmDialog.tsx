@@ -3,10 +3,12 @@ import { useAgentStore } from "../../stores/useAgentStore";
 
 const OP_LABELS: Record<string, string> = {
   browser_open: "Browser Navigation",
+  computer_capture: "Window Capture",
 };
 
 const OP_ICONS: Record<string, string> = {
   browser_open: "\u{1F310}",
+  computer_capture: "\u{1F4F8}",
 };
 
 /**
