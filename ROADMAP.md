@@ -1307,6 +1307,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The tool function had to become `async`, which is why the gate test now drives it through a current-thread runtime. That is the honest cost: the seam between "authority decision" and "blocking work" is where the `async` boundary lands.
    - Rust 368, unchanged.
 
+85. **The cross-round image carry is covered end to end (2026-09-15)**
+   - Open since 76: the deferral was pinned only at the pure-function level, because the mock provider "looked like" it could emit tool calls for one round. It can do more than that, and the reason is a consequence of the deferral design itself: `mock_tool_call` decides "did this turn already call a tool" by looking only at messages **after the last `user` message**, and the image attachment *is* a new `user` message. So attaching an image re-opens the loop, and a genuine multi-round run is reachable in a test.
+   - The test drives `stream_with_tool_loop` with an invoker that hands out two images too large to share one request, and reads the actual wire messages through `RequestRecorder`. Images per request come out `[0, 1, 1, 0]` — nothing in the initial prompt, one per following request, none in the last, which is also the "each image is sent exactly once" invariant from 68. The markers prove the *tail* image is the one that rode the second request, and the note in that request says "first 1 of 2 … do not read them again".
+   - **The test corrected me on its final assertion.** I wrote "everything arrived, so there should be no degradation records" — but `mock://` is a text-only endpoint, so each image that reaches a request is honestly reported as not-sent. Two records, one per image, is the *stronger* statement: a dropped tail image would leave only one. The first version of the assertion would have passed for the wrong reason if the carry were broken and the loop had simply run twice for other reasons.
+   - Left in place, worth knowing: because each attachment re-opens the mock's one-round guard, a mock-driven run whose tool returns an image every round will loop to `MAX_TOOL_ITERATIONS`. That is the mock's behaviour, not the product's — a real provider decides for itself — but a CLI smoke test that wires an image tool will see 12 rounds, not 1.
+   - Rust 368 → 369.
+
+
 
 
 

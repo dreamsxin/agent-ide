@@ -1425,6 +1425,127 @@ mod tests {
         }
     }
 
+    /// 一个请求装不下的图片要**留到下一轮**，而不是丢掉，而且每张只发一次。
+    ///
+    /// ROADMAP 76 把这条记为"只有纯函数覆盖"。端到端能跑通的关键是 mock provider 判
+    /// "这一轮调过工具没有"只看最后一条 `user` 消息之后 —— 附图本身就是一条新的 `user`
+    /// 消息，所以下一轮它会再发一次工具调用，真实的多轮循环就出现了。
+    #[test]
+    fn an_image_that_does_not_fit_one_request_rides_the_next_one() {
+        struct ImageInvoker {
+            handed_out: std::sync::Mutex<bool>,
+            images: std::sync::Mutex<Vec<crate::services::images::ImagePart>>,
+        }
+
+        #[async_trait]
+        impl ToolInvoker for ImageInvoker {
+            fn handles(&self, tool_name: &str) -> bool {
+                tool_name == "stub_capture"
+            }
+
+            async fn invoke(&self, _tool_name: &str, _arguments: &str) -> Result<String, String> {
+                Ok("captured".to_string())
+            }
+
+            fn take_images(&self) -> Vec<crate::services::images::ImagePart> {
+                let mut handed_out = self.handed_out.lock().unwrap();
+                if *handed_out {
+                    return Vec::new();
+                }
+                *handed_out = true;
+                std::mem::take(&mut self.images.lock().unwrap())
+            }
+        }
+
+        // 两张各占一多半的图：第一张留下，第二张必须推到下一轮
+        let half = crate::services::images::MAX_REQUEST_IMAGE_BASE64_BYTES / 2 + 1;
+        let image = |marker: char| crate::services::images::ImagePart {
+            media_type: "image/png".to_string(),
+            base64_data: std::iter::repeat_n(marker, half).collect::<String>(),
+        };
+        let invoker = ImageInvoker {
+            handed_out: std::sync::Mutex::new(false),
+            images: std::sync::Mutex::new(vec![image('A'), image('B')]),
+        };
+
+        let _guard = crate::services::workspace::env_test_guard();
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "stub_capture");
+        let recorder = std::sync::Arc::new(crate::services::llm_client::RequestRecorder::new());
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "mock://images".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "gpt-4o".to_string(),
+                provider: "openai".to_string(),
+                max_output_tokens: None,
+                tool_call_mode: "native".to_string(),
+                model_type: crate::services::llm_client::ModelType::OpenAI,
+                local_model_config: None,
+            })
+            .with_extra_tools(vec![crate::services::llm_client::ToolDefinition {
+                name: "stub_capture".to_string(),
+                description: "capture stub".to_string(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            }])
+            .with_request_recorder(recorder.clone());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(64);
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(stream_with_tool_loop(
+                &llm,
+                vec![ChatMessage::user("look at both")],
+                Some(&invoker),
+                std::sync::Arc::new(AtomicBool::new(false)),
+                tx,
+            ));
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        assert!(outcome.is_ok(), "{:?}", outcome);
+
+        let requests = recorder.requests();
+        let images_per_request: Vec<usize> = requests
+            .iter()
+            .map(|messages| messages.iter().map(|message| message.images.len()).sum())
+            .collect();
+        // 第一次请求还没有图；之后两次各带一张；最后一次已经清空 —— 每张只发一次
+        assert_eq!(images_per_request, vec![0, 1, 1, 0], "{:?}", requests);
+
+        let marker_of = |index: usize| {
+            requests[index]
+                .iter()
+                .flat_map(|message| message.images.iter())
+                .map(|image| image.base64_data.chars().next().unwrap_or('?'))
+                .collect::<Vec<char>>()
+        };
+        assert_eq!(marker_of(1), vec!['A']);
+        // 顺序不能乱：推迟的是尾部那张，下一轮补的还是它
+        assert_eq!(marker_of(2), vec!['B']);
+
+        let note = requests[1]
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        assert!(note.contains("first 1 of 2"), "{}", note);
+        assert!(note.contains("do not read them again"), "{}", note);
+
+        // 两张图各自进了一次请求，所以 mock 端点（拍平成文本、看不了图）会各报一次降级。
+        // 这条断言比"没有降级"更强：它证明推迟的那张**真的**搭上了后一次请求 —— 如果
+        // 它被丢掉了，这里只会有一条记录。
+        let drops = llm.image_drops();
+        assert_eq!(drops.len(), 2, "{:?}", drops);
+        assert!(
+            drops
+                .iter()
+                .all(|drop| drop.count == 1 && drop.reason.contains("flattened text prompt")),
+            "{:?}",
+            drops
+        );
+    }
+
     #[test]
     fn external_calls_exclude_builtin_output_protocol_tools() {
         let invoker = RecordingInvoker::new("mcp__");
