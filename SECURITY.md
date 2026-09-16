@@ -123,7 +123,7 @@ What it enforces:
 
 One consequence worth stating plainly: capture is not *fully* independent of observation in what it reveals. With `captureApps` set to `*`, a run holding only the capture grant can probe `title_contains` and learn window titles plus a count of allowed windows from the refusal messages — the same class of information Desktop Observation gates. It is arguably subsumed (such a run could screenshot those windows anyway), but "capture without observation" should not be read as "cannot learn what is open".
 
-Not implemented, deliberately: **input injection**. Clicking and typing are irreversible and can dismiss any confirmation dialog; that needs an authority model narrower than "allow the desktop" and a record that can be replayed, so the shape is being proven on the read-only and capture surfaces first.
+Not implemented, deliberately: **input injection**. Clicking and typing are irreversible and can dismiss any confirmation dialog — including one the user is reading. The design is recorded in ROADMAP 86: window-relative coordinates only, a foreground check immediately before every send, the Stop gate checked per action rather than per call, a third grant separate from capture, and a first slice that is one click and one typed string behind a **per-action approval prompt** rather than a broad input API behind a session toggle. A session switch is the right floor for this and the wrong ceiling, so the switch is not shipping on its own.
 
 ## Browser Use
 

@@ -1314,6 +1314,19 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Left in place, worth knowing: because each attachment re-opens the mock's one-round guard, a mock-driven run whose tool returns an image every round will loop to `MAX_TOOL_ITERATIONS`. That is the mock's behaviour, not the product's — a real provider decides for itself — but a CLI smoke test that wires an image tool will see 12 rounds, not 1.
    - Rust 368 → 369.
 
+86. **Input injection: the design, and the parts I am refusing to build (2026-09-15)**
+   Recorded before any code, the way 79 was for capture, because the authority question here is the whole problem and the FFI is the easy part.
+   - **Why it is not "capture with a different API call".** Observation and capture disclose; input *acts*, on software that is not ours, with no undo and no diff. Worse, it can dismiss the very confirmations that make everything else in this product safe — including a dialog the user is reading right now. A session-wide switch is the right *floor* for it and the wrong *ceiling*.
+   - **Three constraints I will implement, all of them refusals:**
+     - **Window-relative coordinates only.** A click is `(window, x, y)` clamped to that window's rect, never a screen point. A screen-absolute click cannot be scoped by any allowlist the user agreed to — it is the input equivalent of the full-screen grab that 82 refused.
+     - **Verified foreground, immediately before each send.** `SendInput` goes wherever focus is, so the tool must name a window (same selector as capture), focus it, and then re-read the foreground window and confirm it is still the intended one. If it is not — the user alt-tabbed, a dialog stole focus — abort and record the abort. The alternative, `PostMessage` to a specific `HWND`, does not steal focus but is silently ignored by most modern apps, so it would produce a tool that reports success and does nothing.
+     - **The Stop gate is checked per action, not per call.** A typed string is a loop of key events; a run cancelled mid-string must stop mid-string, and the record must say how far it got.
+   - **A third grant** (`allowComputerInput` + `inputApps`), separate again — being allowed to *read* a window is not being allowed to *drive* it — plus a per-run action cap in the shape of `MAX_EXTERNAL_ACTIONS`.
+   - **The open question, stated rather than guessed:** a session switch is weaker than this deserves; the right shape is per-action human approval. And checking before writing it down: **nothing in the backend waits for a human today.** A grep for a pending/awaiting-approval state finds nothing — the MCP "approval policy" is a static choice made before the run (`auto_approved_only` / `allow_all`), and the review area gates *diffs after they exist*, not a tool call in flight. So per-action approval is not a matter of reusing parts; it is a new mechanism — a pending-approval state a tool call can await, a UI affordance that names the exact action, a timeout, and a defined interaction with Stop (a pending prompt must be cancellable, and cancelling must count as refusal, not as approval). That mechanism is the prerequisite, and it is most of the work.
+   - Therefore the first slice is deliberately **the smallest useful action** (one click, one typed string, into one named window) *behind* that approval prompt — not a broad input API behind a toggle. Shipping the toggle first would deliver the dangerous half with the reassuring half missing, which is the one sequencing this project should never choose.
+   - **What I will not build:** typing into "whatever has focus", screen-absolute clicks, key combinations sent while the target is not verifiably foreground, and any attempt to guess whether a window is a credential prompt — a heuristic that fails silently is worse than a refusal, and the honest boundary is that the user names the apps.
+
+
 
 
 
