@@ -232,6 +232,14 @@ interface AgentStore {
   setCaptureApps: (apps: string[]) => void;
   requestConfirm: (confirm: DestructiveOpConfirm) => void;
   clearConfirm: () => void;
+  /**
+   * 把决定送回后端，收掉对话框。
+   *
+   * 返回后端是否真的还有人在等：超时之后才点到的话是 false，界面不该显示"已批准"。
+   */
+  resolveConfirm: (approved: boolean) => Promise<boolean>;
+  /** 后端已经不等这条请求了（超时 / Stop）。只在 id 对得上时收掉对话框。 */
+  closeConfirm: (requestId: string) => void;
 
   // ====== 连通性测试 ======
   testLlmConnection: () => Promise<string>;
@@ -630,6 +638,28 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     })),
   requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
   clearConfirm: () => set({ pendingConfirm: null }),
+  resolveConfirm: async (approved) => {
+    const pending = get().pendingConfirm;
+    if (!pending) return false;
+    // 先收对话框再等后端：等待期间它还开着的话，第二次点击会送第二个决定，
+    // 而后端那条请求已经被第一次点击取走了
+    set({ pendingConfirm: null });
+    if (!isTauriRuntime()) return false;
+    try {
+      return await invoke<boolean>("resolve_agent_approval", {
+        requestId: pending.id,
+        approved,
+      });
+    } catch (err) {
+      console.warn("[AgentStore] resolve_agent_approval failed:", err);
+      return false;
+    }
+  },
+  closeConfirm: (requestId) =>
+    set((s) =>
+      // id 要对上：后端关掉的是**那一条**请求，而这时挂着的可能已经是下一条了
+      s.pendingConfirm && s.pendingConfirm.id === requestId ? { pendingConfirm: null } : s
+    ),
 
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {

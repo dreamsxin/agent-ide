@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod diff_apply;
 pub mod diff_gen;
 pub mod events;

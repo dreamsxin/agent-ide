@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 
 const OP_LABELS: Record<string, string> = {
@@ -6,6 +5,7 @@ const OP_LABELS: Record<string, string> = {
   command_run: "Command Execution",
   git_push: "Git Push",
   git_force: "Git Force Operation",
+  browser_open: "Browser Navigation",
 };
 
 const OP_ICONS: Record<string, string> = {
@@ -13,37 +13,24 @@ const OP_ICONS: Record<string, string> = {
   command_run: "\u{2699}",
   git_push: "\u{1F4E4}",
   git_force: "\u{26A0}",
+  browser_open: "\u{1F310}",
 };
 
-/** Show destructive operation confirmation dialog. */
+/**
+ * 逐动作批准的提示框。
+ *
+ * 后端有一次撤不回的动作正**挂在这里等**：`agent-approval-requested` 把它放进
+ * `pendingConfirm`，两个按钮各送一个决定回去。所以这个组件不是装饰 —— 不点，动作
+ * 就在超时之后被拒掉。
+ */
 export default function ConfirmDialog() {
   const pendingConfirm = useAgentStore((s) => s.pendingConfirm);
-  const clearConfirm = useAgentStore((s) => s.clearConfirm);
-  const [remember, setRemember] = useState(false);
+  const resolveConfirm = useAgentStore((s) => s.resolveConfirm);
 
   if (!pendingConfirm) return null;
 
   const icon = OP_ICONS[pendingConfirm.opType] ?? "\u{26A0}";
   const label = OP_LABELS[pendingConfirm.opType] ?? pendingConfirm.opType;
-
-  const handleApprove = () => {
-    // dispatch custom event so callers can listen
-    window.dispatchEvent(
-      new CustomEvent("agent-confirm-approved", {
-        detail: { id: pendingConfirm.id, opType: pendingConfirm.opType, remember },
-      })
-    );
-    clearConfirm();
-  };
-
-  const handleDeny = () => {
-    window.dispatchEvent(
-      new CustomEvent("agent-confirm-denied", {
-        detail: { id: pendingConfirm.id, opType: pendingConfirm.opType },
-      })
-    );
-    clearConfirm();
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -69,30 +56,18 @@ export default function ConfirmDialog() {
               {pendingConfirm.detail}
             </p>
           )}
-
-          {pendingConfirm.requireExplicitConfirm && (
-            <label className="mt-3 flex items-center gap-2 text-[11px] text-surface-muted cursor-pointer">
-              <input
-                type="checkbox"
-                checked={remember}
-                onChange={(e) => setRemember(e.target.checked)}
-                className="rounded border-surface-border"
-              />
-              Remember this choice for this session
-            </label>
-          )}
         </div>
 
         {/* Actions */}
         <div className="flex justify-end gap-2 border-t border-surface-border px-4 py-3">
           <button
-            onClick={handleDeny}
+            onClick={() => void resolveConfirm(false)}
             className="rounded border border-surface-border px-4 py-1.5 text-xs text-surface-muted hover:bg-surface-border/30 transition-colors"
           >
             Deny
           </button>
           <button
-            onClick={handleApprove}
+            onClick={() => void resolveConfirm(true)}
             className="rounded bg-accent-blue px-4 py-1.5 text-xs text-white font-medium hover:bg-accent-blue/80 transition-colors"
           >
             Approve

@@ -4,7 +4,7 @@ import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
-import { normalizeAgentMode, normalizeRunUsage } from "../types/agent";
+import { normalizeAgentMode, normalizeApprovalRequest, normalizeRunUsage } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
@@ -32,6 +32,8 @@ export function useAgentBridge() {
   const setPipeline = useAgentStore((s) => s.setPipeline);
   const appendStreamContent = useAgentStore((s) => s.appendStreamContent);
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
+  const requestConfirm = useAgentStore((s) => s.requestConfirm);
+  const closeConfirm = useAgentStore((s) => s.closeConfirm);
   const addLog = useLogStore((s) => s.addLog);
   const upsertProblems = useProblemStore((s) => s.upsertProblems);
 
@@ -138,6 +140,24 @@ export function useAgentBridge() {
           listen<string>("agent-stream-token", (e) => {
             appendStreamContent(e.payload);
           }),
+
+          // 一次撤不回的动作正挂在后端等人点。载荷走 normalize：说不清"将要发生
+          // 什么"的请求宁可不显示，也不能补个默认值让用户为看不见的事签字。
+          listen<unknown>("agent-approval-requested", (e) => {
+            const request = normalizeApprovalRequest(e.payload);
+            if (request) {
+              requestConfirm(request);
+            }
+          }),
+
+          // 后端已经不等了（超时或 Stop）。少了这条，超时之后对话框还开着，用户点
+          // "批准"却没有任何东西在等他 —— 界面会让他以为自己授权了一次导航。
+          listen<{ id?: string }>("agent-approval-closed", (e) => {
+            const id = e.payload?.id;
+            if (typeof id === "string") {
+              closeConfirm(id);
+            }
+          }),
         ]);
         if (!stopped) {
           unlisteners.push(...fns);
@@ -154,7 +174,7 @@ export function useAgentBridge() {
       stopped = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, [addLog, appendStreamContent, clearStreamContent, setDiffs, setPipeline, setSddArtifact, setState, setSteps, updateStep, upsertProblems]);
+  }, [addLog, appendStreamContent, clearStreamContent, closeConfirm, requestConfirm, setDiffs, setPipeline, setSddArtifact, setState, setSteps, updateStep, upsertProblems]);
 }
 
 function formatLogTime(timestamp: string) {
