@@ -5,6 +5,8 @@ import {
   RUN_COMMANDS_PERMISSIONS,
   describeRunUsage,
   mcpApprovalForPermissions,
+  normalizeApprovalRequest,
+  normalizeDestructiveOpType,
   normalizeRunUsage,
   permissionsForPreset,
   type AgentPermissionPreset,
@@ -195,6 +197,50 @@ describe("normalizeRunUsage", () => {
     expect(normalized?.totalTokens).toBe(0);
     expect(normalized?.spendMicros).toBeNull();
     expect(normalized?.maxSpendMicros).toBe(0);
+  });
+});
+
+/**
+ * 这个载荷决定用户看到什么并为什么签字，所以它的失败方向必须是"不显示"，
+ * 而不是"显示一个补过默认值的版本"。
+ */
+describe("normalizeApprovalRequest", () => {
+  const valid = {
+    id: "req-1",
+    opType: "browser_open",
+    title: "Open a page in Chrome",
+    description: "The agent wants to open http://127.0.0.1:1420/",
+    detail: "Origin http://127.0.0.1:1420 is allowed for this run.",
+  };
+
+  it("keeps a complete request", () => {
+    expect(normalizeApprovalRequest(valid)).toEqual(valid);
+  });
+
+  /** detail 可以为空：不是每个动作都有第二行要说的 */
+  it("tolerates a missing detail", () => {
+    expect(normalizeApprovalRequest({ ...valid, detail: undefined })?.detail).toBe("");
+  });
+
+  /**
+   * 缺 id 的请求最危险：它能显示出来，但点了之后没有任何后端请求会被 resolve ——
+   * 用户以为自己批准了，而那次动作其实在超时后被拒。
+   */
+  it("drops a request that cannot be answered or read", () => {
+    expect(normalizeApprovalRequest({ ...valid, id: "" })).toBeNull();
+    expect(normalizeApprovalRequest({ ...valid, title: undefined })).toBeNull();
+    expect(normalizeApprovalRequest({ ...valid, description: 42 })).toBeNull();
+    expect(normalizeApprovalRequest(null)).toBeNull();
+  });
+
+  /**
+   * 后端加了一种新动作、前端还不认识它时，宁可不显示 —— 显示成已知的某一档会让
+   * 对话框说错将要发生什么，而它的全部意义就是说对。
+   */
+  it("drops an operation type it does not know", () => {
+    expect(normalizeApprovalRequest({ ...valid, opType: "computer_input" })).toBeNull();
+    expect(normalizeDestructiveOpType("computer_input")).toBe("unknown");
+    expect(normalizeDestructiveOpType("git_force")).toBe("git_force");
   });
 });
 

@@ -266,8 +266,13 @@ export function mcpApprovalForPermissions(permissions: AgentPermission): McpTool
   return permissions.allowCommandRun ? "allow_all" : "auto_approved_only";
 }
 
-/** 破坏性操作类型 */
-export type DestructiveOpType = "file_delete" | "command_run" | "git_push" | "git_force";
+/** 需要人点一下才能发生的操作类型 */
+export type DestructiveOpType =
+  | "file_delete"
+  | "command_run"
+  | "git_push"
+  | "git_force"
+  | "browser_open";
 
 export interface DestructiveOpConfirm {
   id: string;
@@ -275,7 +280,50 @@ export interface DestructiveOpConfirm {
   title: string;
   description: string;
   detail: string;
-  requireExplicitConfirm: boolean;
+}
+
+/**
+ * 把后端事件里的 `opType` 收敛成已知取值。
+ *
+ * 不用 `as DestructiveOpType`：那只是让 tsc 闭嘴。后端加了一种新动作而前端还没认识
+ * 它时，硬转会让界面按一个不存在的分支渲染；落到 `command_run` 这类具体值上更糟 ——
+ * 对话框会说错将要发生什么，而这个对话框的全部意义就是说对。所以未知值单独一档。
+ */
+export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | "unknown" {
+  switch (value) {
+    case "file_delete":
+    case "command_run":
+    case "git_push":
+    case "git_force":
+    case "browser_open":
+      return value;
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * 把后端 `agent-approval-requested` 的载荷收成一条待批准记录。
+ *
+ * 缺字段就返回 null 而不是补默认值：一条说不清"将要发生什么"的批准请求不该被显示，
+ * 显示它等于请用户为一件他看不见的事签字。
+ */
+export function normalizeApprovalRequest(value: unknown): DestructiveOpConfirm | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === "string" ? raw.id : "";
+  const title = typeof raw.title === "string" ? raw.title : "";
+  const description = typeof raw.description === "string" ? raw.description : "";
+  if (!id || !title || !description) return null;
+  const opType = normalizeDestructiveOpType(raw.opType);
+  if (opType === "unknown") return null;
+  return {
+    id,
+    opType,
+    title,
+    description,
+    detail: typeof raw.detail === "string" ? raw.detail : "",
+  };
 }
 
 export type ContextCompressionMode = "full" | "focused" | "compact" | "budgeted";

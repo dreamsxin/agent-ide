@@ -132,6 +132,7 @@ Two further tools — `workspace_browser_open` and `workspace_browser_tabs` — 
 What the backend enforces:
 
 - **Two independent gates.** `WorkspaceToolPermissions::allows_browser()` requires *both* the `allowBrowserUse` grant and a non-empty origin allowlist. An empty list is not read as "unconfigured, so allow everything" — that reading is exactly what looks like user approval after an incident. Neither gate alone advertises the tools, and `handles()` returns false, so a model that names the tool anyway gets "unknown tool" rather than a tool that always fails.
+- **Plus a third gate that is not static: the run must ask a human, per navigation.** After the two grants pass, `workspace_browser_open` suspends on `ApprovalGate::ask` and does nothing until someone answers. The order matters and is tested: a URL outside the allowlist is refused *without* prompting, so every prompt the user sees is one that would otherwise proceed. Four outcomes, three of them refusals — approved, denied, timed out (120 s default), and "no approval channel attached to this run" — and each writes its own wording into the record, so "the user said no" and "nobody was there to ask" stay distinguishable. See *Per-Action Approval* below.
 - **The gate is re-checked inside the tool**, but that particular branch is defence in depth for a direct caller only: `handles()` already drops a call to an unadvertised tool before dispatch (`select_external_calls` and `CompositeToolInvoker::invoke` both filter on it), so "browser use was off entirely" produces no external-action record. The *reachable* refusals are the ones decided inside an advertised tool — a rejected scheme or an origin outside the allowlist — and those are recorded.
 - **Origin-scoped, not URL-scoped.** `services::browser::origin_of` reduces a URL to `scheme://host[:port]` with the authority lowercased, and `origin_allowed` compares case-insensitively against the list — exact match, or `*` for any. The list is captured when the run starts (`browserOrigins` in the request); see the limitations below for what that means for a continued pipeline.
 - **Scheme allowlist before any network call.** `normalize_target_url` accepts only `http` and `https`, and rejects control characters, a missing host, and `user:pass@` credentials. `javascript:` would run script in the *current* page's origin, `file:` reads local files outside the workspace boundary, and `chrome:` reaches the browser's own settings — all three are refused before a request is made.
@@ -213,6 +214,19 @@ Not covered: a credential file passed explicitly as a context file, or read by a
 - The tool loop is bounded at 12 rounds per stage (`MAX_TOOL_ITERATIONS`, `agent/executor.rs`).
 
 
+
+## Per-Action Approval
+
+Everything above is authority decided **before** a run starts. Per-action approval is the other axis: a tool call that is already authorized still suspends and waits for a human, once per action. `agent/approval.rs` holds it.
+
+- **A pending request is a `oneshot` channel, keyed by a backend-generated id.** The id is minted by the backend, not accepted from the frontend: it is the key the waiting call is identified by, and letting the caller of `resolve_agent_approval` choose it would let the UI decide which question it is answering.
+- **Every way of not answering is a refusal.** Timeout (`DEFAULT_APPROVAL_TIMEOUT`, 120 s), a dropped channel, and "this run has no approval channel" all resolve to *not approved*. Approval has to be something a person did, never the absence of an objection. The timeout is finite on purpose — an unanswered call would otherwise hold the run's execution lease, and the user would see "the Agent is stuck" rather than "the Agent is waiting for me".
+- **Stop refuses everything pending.** `stop_agent` calls `ApprovalRegistry::refuse_all()` *before* taking the orchestrator lock, for the same reason `CancelRegistry` exists: Stop must not queue behind the work it is cancelling. Without it, a dialog still on screen after Stop could authorize a navigation while the UI reads idle.
+- **When the backend stops waiting it says so.** `agent-approval-closed` carries the request id, and the frontend closes the dialog only if the id matches the one on screen. A dialog left open after a timeout would invite a click that authorizes nothing while looking like it authorized something.
+- **`resolve_agent_approval` returns whether anyone was still waiting.** A click that arrives after the timeout returns `false` rather than silently succeeding.
+- **The channel is installed by the command layer, as a required argument.** `agent_tool_permissions(...)` takes the `ApprovalGate` positionally, so a new run command cannot forget it and silently get the "nobody to ask" behaviour for every irreversible action.
+
+Scope today: `workspace_browser_open` is the only consumer. Headless entry points (the CLI) install no channel, so an irreversible action there is refused rather than performed unattended — which is currently moot, since the CLI grants neither browser nor desktop authority.
 
 ## Agent Approval Model
 

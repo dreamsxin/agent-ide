@@ -30,6 +30,9 @@ pub struct AgentGlobalState {
     /// 当前运行取消开关的句柄。见 `CancelRegistry` —— Stop 必须能在不持有
     /// orchestrator 锁的情况下拉开关。
     pub cancel_registry: crate::agent::orchestrator::CancelRegistry,
+    /// 挂起的逐动作批准请求。和 `cancel_registry` 同理由：`resolve_agent_approval`
+    /// 和 Stop 都不能排在它们要放行/拒掉的那次工具调用后面。
+    pub approval_registry: crate::agent::approval::ApprovalRegistry,
 }
 
 impl AgentGlobalState {
@@ -47,11 +50,22 @@ impl AgentGlobalState {
             pipeline_stages: Arc::new(std::sync::Mutex::new(default_pipeline())),
             context_compression: Arc::new(std::sync::Mutex::new(context_compression)),
             cancel_registry,
+            approval_registry: crate::agent::approval::ApprovalRegistry::new(),
         }
     }
 
-    /// Get a cloned LLM client plus a fresh per-run usage meter.
+    /// 这次运行的逐动作批准通道。
     ///
+    /// 事件出口是 `AppHandle`：桌面端是唯一有人能应答的入口。headless 入口不装通道，
+    /// 于是撤不回的动作在那里一律被拒 —— 那是刻意的默认方向，不是缺失。
+    fn approval_gate(&self, app_handle: &AppHandle) -> crate::agent::approval::ApprovalGate {
+        crate::agent::approval::ApprovalGate::new(
+            self.approval_registry.clone(),
+            Arc::new(app_handle.clone()),
+        )
+    }
+
+    /// Get a cloned LLM client plus a fresh per-run usage meter.    ///
     /// 每次取客户端都新建一个 meter，等价于"每次运行一个记账周期"。上限在
     /// `send_chat_request` 里强制，所以只要客户端是从这里拿的，就一定被记账、
     /// 也一定受上限约束。已知取舍：`continue_agent_pipeline` 恢复暂停的运行时
@@ -341,6 +355,7 @@ pub async fn send_agent_prompt(
         request.computer_apps.clone().unwrap_or_default(),
         request.allow_computer_capture,
         request.capture_apps.clone().unwrap_or_default(),
+        agent_state.approval_gate(&app_handle),
     );
     // 移进去而不是克隆：局部变量之后就不能再交给别人，多一个消费者会编译不过
     tool_permissions.adopt_cancel(side_effect_switch);
@@ -520,6 +535,7 @@ fn agent_tool_permissions(
     computer_apps: Vec<String>,
     allow_capture: bool,
     capture_apps: Vec<String>,
+    approval: crate::agent::approval::ApprovalGate,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
     // 未授权时连扫都不扫：`discover_project_tasks` 要读 package.json / Cargo.toml。
     // 下面 `allowed_agent_commands` 里那次判断不是重复 —— 那条是授权规则本身，
@@ -537,6 +553,10 @@ fn agent_tool_permissions(
     .with_browser(allow_browser, browser_origins)
     .with_computer(allow_computer, computer_apps)
     .with_capture(allow_capture, capture_apps)
+    // 批准通道是必填参数而不是可选的 `.with_approval()` 调用：漏掉它的运行会把每一次
+    // 撤不回的动作都拒掉（`Unattended`），而那种"功能整体消失"的故障恰恰是本项目
+    // 反复出现的一类 —— 加了个新东西却没接上它的消费者。让编译器管这件事。
+    .with_approval(approval)
 }
 
 /// 用这次授权自己带着的副作用开关去抢执行权，并把运行 id 记进授权。
@@ -741,6 +761,9 @@ pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<Stri
     // orchestrator 锁，先抢锁就得干等到修复自己结束，而那时它已经把开关交回去了，
     // Stop 会拉空，退化成一个只重置界面的空动作。
     agent_state.cancel_registry.cancel_active_run();
+    // 挂起的批准请求一并拒掉。少这一句，Stop 之后一个还开着的对话框仍然能放行一次
+    // 撤不回的动作 —— 界面已经回到空闲，而导航还是发生了。
+    agent_state.approval_registry.refuse_all();
     let mut orch = agent_state.orchestrator.lock().await;
     orch.abandon_run();
     orch.state_mgr.set(AgentState::Idle);
@@ -749,6 +772,19 @@ pub async fn stop_agent(agent_state: State<'_, AgentGlobalState>) -> Result<Stri
     orch.diffs.clear();
     orch.sdd_artifacts.clear();
     Ok("Agent stopped".to_string())
+}
+
+/// 把一次批准决定送回给正在等它的工具调用。
+///
+/// 返回是否真的有人在等：超时之后前端才点到的情况必须能被区分出来，否则界面会显示
+/// "已批准"而后端早就把这次动作拒掉了 —— 在这个产品唯一承诺可信的地方说一件没发生的事。
+#[tauri::command]
+pub async fn resolve_agent_approval(
+    request_id: String,
+    approved: bool,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<bool, String> {
+    Ok(agent_state.approval_registry.resolve(&request_id, approved))
 }
 
 #[tauri::command]
@@ -862,6 +898,7 @@ pub async fn run_agent_step(
         request.computer_apps.clone().unwrap_or_default(),
         request.allow_computer_capture,
         request.capture_apps.clone().unwrap_or_default(),
+        agent_state.approval_gate(&app_handle),
     );
     tool_permissions.adopt_cancel(side_effect_switch);
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
@@ -1757,6 +1794,18 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    /// 测试里的批准通道：没人应答，所以每次请求都会走到超时。
+    ///
+    /// 超时设得很短是为了让"忘了应答"的测试不至于挂两分钟；不给 `None` 是因为生产
+    /// 路径上一定有通道，测试要走的是同一条路。
+    fn test_approval_gate() -> crate::agent::approval::ApprovalGate {
+        crate::agent::approval::ApprovalGate::new(
+            crate::agent::approval::ApprovalRegistry::new(),
+            Arc::new(RecordingEvents::new()),
+        )
+        .with_timeout(std::time::Duration::from_millis(50))
+    }
+
     /// action log 条目里 `summary` 那一段。断言措辞是有意的：这一层的缺陷全都是措辞
     /// 缺陷 —— "0 个动作" 曾经被报成 "1 browser action(s) … cannot be undone"。
     fn action_log_summaries(events: &RecordingEvents) -> Vec<(String, String, String)> {
@@ -2071,6 +2120,7 @@ mod tests {
             Vec::new(),
             false,
             Vec::new(),
+            test_approval_gate(),
         );
         assert!(write_only.allowed_commands.is_empty());
         assert!(write_only.allow_write);
@@ -2087,6 +2137,7 @@ mod tests {
             Vec::new(),
             false,
             Vec::new(),
+            test_approval_gate(),
         );
         assert!(!create_only.allow_write);
         assert!(create_only.allow_create);
@@ -2102,6 +2153,7 @@ mod tests {
             Vec::new(),
             false,
             Vec::new(),
+            test_approval_gate(),
         );
         assert!(!browser_only.allow_write);
         assert!(browser_only.allow_browser);
@@ -2119,6 +2171,7 @@ mod tests {
             vec!["Code.exe".to_string()],
             false,
             Vec::new(),
+            test_approval_gate(),
         );
         assert!(computer_only.allow_computer);
         assert_eq!(computer_only.computer_apps.len(), 1);
@@ -2139,6 +2192,7 @@ mod tests {
             Vec::new(),
             true,
             vec!["Code.exe".to_string()],
+            test_approval_gate(),
         );
         assert!(capture_only.allow_capture);
         assert_eq!(capture_only.capture_apps.len(), 1);

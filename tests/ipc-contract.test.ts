@@ -36,6 +36,25 @@ function rustSources(): string[] {
 }
 
 /**
+ * `pub const SOMETHING_EVENT: &str = "agent-something";` 形式的事件名常量。
+ *
+ * 存在的理由：批准机制的两个事件名被后端和它自己的测试同时引用，写成常量是对的 ——
+ * 但那让扫字面量的解析器看不见它们，于是这条契约测试报出"前端监听了一个没人发的
+ * 事件"。修解析器而不是把名字抄成两份字面量：抄两份正是这个文件要防的漂移。
+ */
+function eventConstants(sources: string[]): Map<string, string> {
+    const constants = new Map<string, string>();
+    for (const source of sources) {
+        for (const match of source.matchAll(
+            /const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([a-z0-9-]+)"/g
+        )) {
+            constants.set(match[1], match[2]);
+        }
+    }
+    return constants;
+}
+
+/**
  * 后端发出的事件名。
  *
  * 必须按整个文件文本匹配而不是逐行：一多半的 `emit` 调用是
@@ -43,10 +62,21 @@ function rustSources(): string[] {
  * 这个坑本身就说明为什么这道接缝值得测 —— 名字是字符串，谁都不会替你检查。
  */
 function emittedEvents(): Set<string> {
+    const sources = rustSources();
+    const constants = eventConstants(sources);
     const names = new Set<string>();
-    for (const source of rustSources()) {
+    for (const source of sources) {
         for (const match of source.matchAll(/\bemit(?:_json|_all|_to)?\(\s*"([a-z0-9-]+)"/g)) {
             names.add(match[1]);
+        }
+        // 常量形式：`emit_json(APPROVAL_REQUESTED_EVENT, ...)`
+        for (const match of source.matchAll(
+            /\bemit(?:_json|_all|_to)?\(\s*([A-Z][A-Z0-9_]*)\s*,/g
+        )) {
+            const resolved = constants.get(match[1]);
+            if (resolved) {
+                names.add(resolved);
+            }
         }
     }
     return names;
@@ -162,6 +192,15 @@ describe("Tauri event contract", () => {
      */
     it("finds emit calls whose name is on the next line", () => {
         expect(emittedEvents().has("agent-pipeline-update")).toBe(true);
+    });
+
+    /**
+     * 常量形式的发送点同样要被看见。没有这条的话，把某个事件名从字面量改成常量
+     * 会让它悄悄从"已发出"集合里消失，而第一条测试报出来的原因会指向前端。
+     */
+    it("resolves event names that are declared as constants", () => {
+        expect(emittedEvents().has("agent-approval-requested")).toBe(true);
+        expect(emittedEvents().has("agent-approval-closed")).toBe(true);
     });
 
     /**

@@ -176,10 +176,9 @@ export default function App() {
         onClose={() => setCommandPaletteVisible(false)}
       />
       {/*
-        目前它永远不会出现：`pendingConfirm` 没有任何生产者，`requestConfirm` 也没有
-        调用方，它派发的 `agent-confirm-approved` / `agent-confirm-denied` 两个事件
-        没人监听。留着是因为它正好是逐动作审批要的那块界面（见 ROADMAP 89），但读
-        `App.tsx` 的人不该以为破坏性操作现在有确认 —— 现在没有。
+        它现在真的会出现：后端一次撤不回的动作（先是 `workspace_browser_open`）会挂起
+        并等一个决定，`agent-approval-requested` 把请求放进 `pendingConfirm`，两个按钮
+        各送一个决定回去。没人点就在超时后按拒绝处理。
       */}
       <ConfirmDialog />
 

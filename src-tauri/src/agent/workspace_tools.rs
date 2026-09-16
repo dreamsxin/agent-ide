@@ -170,6 +170,12 @@ pub struct WorkspaceToolPermissions {
     /// 拿它做预算等于每轮重新开始，而钱是按整次运行付的。跟着 `Clone` 共享同一个
     /// `Arc`，每次运行一份新的（授权对象本身就是每次运行新建的）。
     image_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// 逐动作人工批准的通道。`None` = 这次运行没人可问。
+    ///
+    /// 和 `allow_browser` 这类开关是两个不同的问题：开关问"这次运行能不能做这类事"，
+    /// 它问"此刻这一次要不要做"。撤不回的动作两个都要过 —— 运行开始时同意访问某个
+    /// origin，不等于同意此刻打开这一个页面。
+    approval: Option<crate::agent::approval::ApprovalGate>,
 }
 
 type AgentImageLog = std::sync::Arc<std::sync::Mutex<Vec<crate::services::images::ImagePart>>>;
@@ -228,6 +234,27 @@ impl WorkspaceToolPermissions {
         self.allow_capture = allow_capture;
         self.capture_apps = capture_apps;
         self
+    }
+
+    /// 装上逐动作批准通道。桌面端装，headless 入口不装。
+    pub fn with_approval(mut self, gate: crate::agent::approval::ApprovalGate) -> Self {
+        self.approval = Some(gate);
+        self
+    }
+
+    /// 就这一次动作问一次人。没有通道就是 `Unattended` —— 仍然是拒绝。
+    ///
+    /// 顺序有意义：调用方必须先过完静态授权（开关 + 清单）再问人。反过来的话，一个
+    /// 本来就会被拒的动作也会弹一次框，用户被训练成无脑点批准，而这个机制的全部价值
+    /// 就在于每一次弹框都值得读。
+    async fn require_approval(
+        &self,
+        request: &crate::agent::approval::ApprovalRequest,
+    ) -> crate::agent::approval::ApprovalOutcome {
+        match &self.approval {
+            Some(gate) => gate.ask(request).await,
+            None => crate::agent::approval::ApprovalOutcome::Unattended,
+        }
     }
 
     /// 取出并清空外部动作记录。
@@ -779,10 +806,13 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 string_arg(&args, "to").ok_or("Missing 'to'")?,
                 &self.permissions,
             ),
-            BROWSER_OPEN => browser_open_tool(
-                string_arg(&args, "url").ok_or("Missing 'url'")?,
-                &self.permissions,
-            ),
+            BROWSER_OPEN => {
+                browser_open_tool(
+                    string_arg(&args, "url").ok_or("Missing 'url'")?,
+                    &self.permissions,
+                )
+                .await
+            }
             BROWSER_TABS => browser_tabs_tool(&self.permissions),
             COMPUTER_WINDOWS => computer_windows_tool(&self.permissions),
             COMPUTER_CAPTURE => {
@@ -1329,10 +1359,16 @@ fn refuse_browser(
 
 /// 打开一个页面。
 ///
-/// 两道闸门，缺一不可：`allow_browser`（能不能用浏览器）和 origin 清单（能去哪儿）。
+/// 三道闸门，缺一不可：`allow_browser`（能不能用浏览器）、origin 清单（能去哪儿），
+/// 以及此刻的人工批准（要不要打开这一个）。前两道是运行开始时给的静态授权，第三道
+/// 是这次动作本身 —— 导航撤不回，而"允许访问 localhost"不该等于"随便开几个页面"。
+///
 /// 拒绝也要记进外部动作日志 —— "模型试图打开某个没授权的站点"正是用户事后最想知道的
 /// 事情之一，只在返回值里说一句会随着这一轮对话消失。
-fn browser_open_tool(url: &str, permissions: &WorkspaceToolPermissions) -> Result<String, String> {
+async fn browser_open_tool(
+    url: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
     if !permissions.allows_browser() {
         return refuse_browser("browser_open_refused", url, permissions);
     }
@@ -1361,8 +1397,31 @@ fn browser_open_tool(url: &str, permissions: &WorkspaceToolPermissions) -> Resul
         return Err(detail);
     }
 
+    // 问人。请求里写全 URL 而不只写 origin：清单批的是 origin，人要看的是这一个页面。
+    let request = crate::agent::approval::ApprovalRequest::new(
+        "browser_open",
+        "Open a page in Chrome",
+        format!("The agent wants to open {}", url),
+        format!(
+            "Origin {} is allowed for this run. Opening a page cannot be undone.",
+            origin
+        ),
+    );
+    let outcome = permissions.require_approval(&request).await;
+    if !outcome.approved() {
+        let detail = outcome.refusal_detail().to_string();
+        permissions.record_external(AgentExternalAction {
+            kind: "browser_open_refused".to_string(),
+            target: url.to_string(),
+            detail: detail.clone(),
+        });
+        return Err(detail);
+    }
+
     let port = crate::services::browser::configured_port();
-    match block_on_browser(crate::services::browser::open_url(port, url)) {
+    // 这里直接 `.await` 而不是走 `block_on_browser`：这个函数已经是 async 的，
+    // `block_in_place` 会白占一个运行时线程（正是 84 给截图修掉的那件事）。
+    match crate::services::browser::open_url(port, url).await {
         Ok(tab) => {
             permissions.record_external(AgentExternalAction {
                 kind: "browser_open".to_string(),
@@ -2099,8 +2158,8 @@ mod tests {
     /// 浏览器工具需要**两样**：开关，以及一份非空的 origin 清单。
     ///
     /// 空清单不当成"没配置就全放"：默认放开的清单在出事那天读起来像是用户批准过。
-    #[test]
-    fn browser_tools_need_the_switch_and_a_non_empty_allowlist() {
+    #[tokio::test]
+    async fn browser_tools_need_the_switch_and_a_non_empty_allowlist() {
         let switch_only =
             WorkspaceToolPermissions::new(Vec::new(), false, false).with_browser(true, Vec::new());
         let names: Vec<String> = tool_definitions(&switch_only)
@@ -2110,7 +2169,9 @@ mod tests {
         assert!(!names.contains(&BROWSER_OPEN.to_string()), "{:?}", names);
         assert!(!WorkspaceToolInvoker::without_logging(switch_only.clone()).handles(BROWSER_OPEN));
         // 即使被直接调用也要拒绝，不能只靠"没通告出去"
-        assert!(browser_open_tool("https://example.com/", &switch_only).is_err());
+        assert!(browser_open_tool("https://example.com/", &switch_only)
+            .await
+            .is_err());
         assert!(browser_tabs_tool(&switch_only).is_err());
         // 权限关着时的调用也要留痕：它和"站点不在清单里"是同一类信息 —— 模型想出网
         let refusals = switch_only.take_external_actions();
@@ -2376,12 +2437,14 @@ mod tests {
     }
 
     /// 被拒绝的调用也要留痕：'模型试图打开一个没授权的站点'正是用户事后最想知道的事。
-    #[test]
-    fn a_refused_origin_is_recorded_not_just_returned() {
+    #[tokio::test]
+    async fn a_refused_origin_is_recorded_not_just_returned() {
         let granted = WorkspaceToolPermissions::default()
             .with_browser(true, vec!["http://127.0.0.1:1420".to_string()]);
 
-        let error = browser_open_tool("https://evil.example/steal", &granted).unwrap_err();
+        let error = browser_open_tool("https://evil.example/steal", &granted)
+            .await
+            .unwrap_err();
         assert!(error.contains("not in the allowed origins"), "{}", error);
 
         let actions = granted.take_external_actions();
@@ -2391,8 +2454,8 @@ mod tests {
     }
 
     /// scheme 不对时同样记录，而且在任何网络请求之前就拒掉。
-    #[test]
-    fn a_hostile_scheme_never_reaches_the_browser() {
+    #[tokio::test]
+    async fn a_hostile_scheme_never_reaches_the_browser() {
         let granted = WorkspaceToolPermissions::default().with_browser(true, vec!["*".to_string()]);
 
         for hostile in [
@@ -2400,7 +2463,11 @@ mod tests {
             "file:///c:/Windows/System32/drivers/etc/hosts",
             "chrome://settings",
         ] {
-            assert!(browser_open_tool(hostile, &granted).is_err(), "{}", hostile);
+            assert!(
+                browser_open_tool(hostile, &granted).await.is_err(),
+                "{}",
+                hostile
+            );
         }
 
         let actions = granted.take_external_actions();
@@ -2408,6 +2475,97 @@ mod tests {
         assert!(actions
             .iter()
             .all(|action| action.kind == "browser_open_refused"));
+    }
+
+    /// 没有批准通道的运行不能拿静态授权当批准。
+    ///
+    /// 这条钉的是默认方向：`allow_browser` + 清单都给了，只是没人可问 —— 结果必须是
+    /// 拒绝，而且记录要说明是"没人可问"，不能和"用户拒绝"混在一起。把 `Unattended`
+    /// 写成放行会让所有 headless 入口悄悄绕过整个机制。
+    #[tokio::test]
+    async fn a_run_with_nobody_to_ask_refuses_instead_of_proceeding() {
+        let granted = WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()]);
+
+        let error = browser_open_tool("http://127.0.0.1:1420/index.html", &granted)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            crate::agent::approval::ApprovalOutcome::Unattended.refusal_detail()
+        );
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_refused");
+        assert_eq!(actions[0].target, "http://127.0.0.1:1420/index.html");
+    }
+
+    /// 人点了拒绝 = 不导航，而且记录里写的是人的决定。
+    #[tokio::test]
+    async fn a_denied_navigation_does_not_happen() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let registry = crate::agent::approval::ApprovalRegistry::new();
+        let granted = WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()])
+            .with_approval(crate::agent::approval::ApprovalGate::new(
+                registry.clone(),
+                events.clone(),
+            ));
+
+        let denier = tokio::spawn(async move {
+            for _ in 0..100 {
+                if registry.refuse_all() == 1 {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            false
+        });
+        let error = browser_open_tool("http://127.0.0.1:1420/index.html", &granted)
+            .await
+            .unwrap_err();
+        assert!(denier.await.unwrap(), "应该有一条挂起的请求可以拒");
+
+        assert_eq!(
+            error,
+            crate::agent::approval::ApprovalOutcome::Denied.refusal_detail()
+        );
+        // 请求里必须带上完整 URL：清单批的是 origin，人要看的是这一个页面
+        let asked = events.payloads_for(crate::agent::approval::APPROVAL_REQUESTED_EVENT);
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0]["detail"].as_str().unwrap().contains("127.0.0.1"));
+        assert!(asked[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("/index.html"));
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_refused");
+    }
+
+    /// 静态授权没过的动作**不弹框**。
+    ///
+    /// 顺序本身是一条安全属性：一个反正会被拒的站点也弹一次框，用户会被训练成无脑点
+    /// 批准，而这个机制的全部价值在于每次弹框都值得读。
+    #[tokio::test]
+    async fn an_unauthorized_origin_never_bothers_the_user() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let granted = WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["http://127.0.0.1:1420".to_string()])
+            .with_approval(crate::agent::approval::ApprovalGate::new(
+                crate::agent::approval::ApprovalRegistry::new(),
+                events.clone(),
+            ));
+
+        assert!(browser_open_tool("https://evil.example/steal", &granted)
+            .await
+            .is_err());
+
+        assert_eq!(
+            events.count(crate::agent::approval::APPROVAL_REQUESTED_EVENT),
+            0
+        );
     }
 
     /// 两个授权位都要有，而且缺哪个都不通告、也不认领。

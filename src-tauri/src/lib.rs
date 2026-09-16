@@ -61,6 +61,7 @@ pub fn run() {
             commands::agent::estimate_agent_context,
             commands::agent::send_agent_prompt,
             commands::agent::stop_agent,
+            commands::agent::resolve_agent_approval,
             commands::agent::update_agent_step,
             commands::agent::update_agent_steps,
             commands::agent::skip_agent_step,
