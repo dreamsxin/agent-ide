@@ -269,3 +269,45 @@ describe("approval op types", () => {
     });
 });
 
+/**
+ * 第四种没人把关的名字：**内置工具**。
+ *
+ * `SECURITY.md` 是"后端实际强制了什么"的那份文档，而 AGENTS.md 把"文档必须对着代码核过"
+ * 写成了规则 —— 靠的是每次有人记得去核。这个会话里我自己就把那条规则破了好几次（数错了
+ * 结果的条数、写出代码产生不出的后果）。加一个新工具却忘了写进 SECURITY.md 是同一类漂移，
+ * 而且最贵：那份文档正是用来回答"它到底被允许做什么"的。
+ *
+ * 只查一个方向（每个工具都出现在文档里）。反方向（文档提到一个已经不存在的工具）需要一份
+ * 非工具 `workspace_*` 标识符的白名单（`workspace_tool_call`、`<workspace_root>`），那份
+ * 白名单本身又会腐烂；而改名会被这个方向抓住 —— 新名字不在文档里。
+ */
+describe("built-in tool documentation", () => {
+    function workspaceToolNames(): string[] {
+        const names = new Set<string>();
+        for (const source of rustSources()) {
+            for (const match of source.matchAll(
+                /pub const [A-Z0-9_]+: &str = "(workspace_[a-z_]+)"/g
+            )) {
+                names.add(match[1]);
+            }
+        }
+        return [...names].sort();
+    }
+
+    it("SECURITY.md names every built-in tool the backend can advertise", () => {
+        const tools = workspaceToolNames();
+
+        // 前提检查：解析失效时这条测试会以"全部通过"的方式静默死掉
+        expect(tools.length, "the scanner found no workspace_* tool constants").toBeGreaterThan(10);
+        expect(tools).toContain("workspace_computer_click");
+
+        const security = readFileSync("SECURITY.md", "utf8");
+        const undocumented = tools.filter((name) => !security.includes(name));
+        expect(
+            undocumented,
+            "these tools exist but SECURITY.md does not name them — the document that answers 'what is it allowed to do' would be wrong"
+        ).toEqual([]);
+    });
+});
+
+

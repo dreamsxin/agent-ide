@@ -1527,6 +1527,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Worth naming the pattern: the mechanism was well tested and the *instance* was not. Same shape as 98's "deleting the append call left all tests green" and 103's "the e2e never reached `SendInput` here" — a guard that works, protecting something nobody checked.
    - Rust 431 → 432.
 
+109. **Turning "documentation claims must be verified against the code" into a test (2026-09-21)**
+   108 named the pattern — a well-tested mechanism guarding an unchecked instance — so this applies it one level up, to the convention AGENTS.md states and nothing enforces. I broke that convention repeatedly this session: two wrong counts in SECURITY.md (96), a claim the code could not produce (103), a "no such branch" assertion the test itself contradicted (103).
+   - **`SECURITY.md names every built-in tool the backend can advertise.`** The scanner already existed for command and event names in `tests/ipc-contract.test.ts`; built-in tool names are the fourth string nobody type-checks. Adding a tool and forgetting the document is the same drift as adding an event with no listener, and it is the most expensive kind here: SECURITY.md is the document that answers "what is it allowed to do".
+   - **One direction only, deliberately.** Checking the reverse (a document naming a tool that no longer exists) needs an allowlist of non-tool `workspace_*` identifiers — `workspace_tool_call`, `<workspace_root>` — and that allowlist would rot in exactly the way the test exists to prevent. A rename is still caught: the new name is not in the document.
+   - **Two premise assertions** (more than ten tools found, and `workspace_computer_click` among them), because a regex that silently matches nothing makes this test pass forever. Same guard the op-type test already carries.
+   - It passes on the current tree, which is the point of writing it now rather than after the next omission.
+   - Frontend 222 → 223.
+
 
 
 
