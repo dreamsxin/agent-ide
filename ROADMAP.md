@@ -1498,6 +1498,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **One of my new tests was itself racy and I fixed it rather than keeping it green by luck.** "Bind an ephemeral port then drop it" gives a port number that a *parallel* test's fake server can immediately claim — the connection then succeeds. Port 1 needs administrator rights to bind, so nothing takes it.
    - Rust 426 → 430.
 
+105. **Sweeping the rest of the HTTP surface after 104 (2026-09-21)**
+   The proxy bug in 104 was a *class* of defect (a client built without saying what it should not do), so I checked every other HTTP client in the backend. There are exactly two, and the other one is `LlmClient`.
+   - **No proxy change there, deliberately.** The LLM endpoint is remote; a user behind a corporate proxy *needs* it. The CDP client is the opposite case — 127.0.0.1 must never leave the machine. Same builder, opposite requirement, which is why this is a per-client decision rather than a project-wide default.
+   - **What it did lack was a connect timeout.** `Client::new()` and the DeepSeek `http1_only()` branch had none, so a dead route or broken DNS left the OS retrying for as long as it felt like — with nothing on screen distinguishing "connecting" from "thinking". Now 15 s, shared by both branches (which differ only in `http1_only`, so the duplication was also removable).
+   - **Total and read timeouts stay absent, and that is the interesting half.** A reasoning model can go minutes before the first token, so any "no data for N seconds" rule kills legitimate long generations. A hung response is covered by Stop instead — the `tokio::select!` in `send_with_retry` — which is a button the user holds rather than a number I guessed. The CDP client's 10 s total timeout is right for the same reason reversed: `/json/list` either answers immediately or is not there.
+   - Rust 430 (no new tests: the change is a builder option, and a test that asserts "we set a 15 s connect timeout" would only restate the line).
+
 
 
 

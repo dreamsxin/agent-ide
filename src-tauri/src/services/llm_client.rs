@@ -958,16 +958,25 @@ pub struct LlmClient {
     request_recorder: Option<Arc<RequestRecorder>>,
 }
 
+/// 建立连接的上限。
+///
+/// 只限**建连**，不限响应。总超时和读超时都故意不设：推理模型在吐出第一个 token 之前可以
+/// 想好几分钟，任何"多久没数据就断"的规则都会把正常的长生成杀掉。挂住的请求由 Stop 兜着
+/// （`send_with_retry` 里那个 `tokio::select!`），那是用户手里的按钮，比一个猜出来的秒数
+/// 可靠。而建连是另一回事：路由不通、DNS 坏掉的时候，操作系统自己的重试可以拖很久，
+/// 而那段时间里连"正在连"都没人看得出来。
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
-        let client = if config.provider.eq_ignore_ascii_case("deepseek") {
-            Client::builder()
-                .http1_only()
-                .build()
-                .unwrap_or_else(|_| Client::new())
+        // DeepSeek 的网关在 HTTP/2 上会出现半开连接，所以那一路强制 HTTP/1.1
+        let builder = Client::builder().connect_timeout(CONNECT_TIMEOUT);
+        let builder = if config.provider.eq_ignore_ascii_case("deepseek") {
+            builder.http1_only()
         } else {
-            Client::new()
+            builder
         };
+        let client = builder.build().unwrap_or_else(|_| Client::new());
         Self {
             config,
             client,
