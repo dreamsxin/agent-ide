@@ -40,8 +40,13 @@ impl AgentGlobalState {
         let profiles_config = llm_profiles::load_or_default_config();
         let context_compression = profiles_config.context_compression.clone();
 
-        let orchestrator = AgentOrchestrator::new();
+        let mut orchestrator = AgentOrchestrator::new();
         let cancel_registry = orchestrator.cancel_registry();
+        // 把上一次会话留下的、撤不回的动作接回来。这是这些动作唯一的补偿，而在此之前
+        // 它只活在内存里 —— 关掉应用，"它做过什么"就再没人知道。这里是唯一合适的位置：
+        // 状态在任何命令之前构造，而工作区路径已经在磁盘上。
+        orchestrator
+            .restore_external_actions(crate::agent::external_log::load_for_current_workspace());
 
         Self {
             orchestrator: Arc::new(Mutex::new(orchestrator)),
@@ -628,6 +633,9 @@ fn publish_external_actions(
         return;
     }
     let recorded = orch.record_external_actions(actions, permissions.run_id.clone());
+    // 落盘。内存里那份会跟着进程一起消失，而这些动作撤不回 —— 一份只活到关窗为止的
+    // 审计记录，在用户真正需要它的那一天（"昨天它到底开了什么页面"）正好是空的。
+    crate::agent::external_log::append_for_current_workspace(&recorded);
     // `_cancelled` 也算没发生：漏掉它的话，一次被 Stop 拦下的导航会被算进
     // "Agent performed N browser action(s) … cannot be undone" —— 在这个产品唯一
     // 承诺可信的地方说一件没发生的事，比记漏还糟。

@@ -14,7 +14,7 @@ use crate::services::context::{
     ContextCompressionMode, ContextSourceOptions,
 };
 use crate::services::llm_client::LlmClient;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -43,8 +43,9 @@ pub struct ActionLogEntry {
 ///
 /// 为什么不只发一条 action log：那条日志是 fire-and-forget 的，窗口关了、前端在重载、
 /// 日志条数滚过上限，记录就没了 —— 而对一个撤不回的能力，记录是唯一的补偿。这份列表
-/// 和 `diffs` 站在同一层：后端留着，前端可以重新读回来。
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// 和 `diffs` 站在同一层：后端留着，前端可以重新读回来，而且**落盘**（见
+/// `agent::external_log`），所以它也活过一次重启。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalActionRecord {
     pub id: String,
     pub timestamp: String,
@@ -52,9 +53,18 @@ pub struct ExternalActionRecord {
     pub kind: String,
     pub target: String,
     pub detail: String,
-    /// 哪一次运行做的；重启后前端拿它和恢复出来的会话对账
-    #[serde(rename = "runId")]
+    /// 哪一次运行做的；重启后前端拿它和恢复出来的会话对账。
+    ///
+    /// `default`：这个字段是后来加的，而磁盘上的记录要能被新版本读回来 —— 整份 parse
+    /// 失败等于把历史记录全丢掉。
+    #[serde(default, rename = "runId")]
     pub run_id: Option<String>,
+    /// 这条是从磁盘恢复出来的，不是这次会话里发生的。
+    ///
+    /// 界面要能说出这句话："刚刚打开了这个页面"和"上一次会话打开过这个页面"对用户的
+    /// 意义完全不同，而只给一个时间戳等于让他自己去算。
+    #[serde(default)]
+    pub restored: bool,
 }
 
 /// 外部动作记录的上限。一次长跑里模型可能反复试探被拒的站点，无界列表会把内存
@@ -659,6 +669,7 @@ impl AgentOrchestrator {
                 target: action.target,
                 detail: action.detail,
                 run_id: run_id.clone(),
+                restored: false,
             })
             .collect();
         self.external_actions.extend(recorded.clone());
@@ -667,6 +678,27 @@ impl AgentOrchestrator {
             self.external_actions.drain(..excess);
         }
         recorded
+    }
+
+    /// 把上一次会话留下的外部动作记录接回来。
+    ///
+    /// **不变量**：只在构造时调用一次，而且放在这一次会话的记录**之前** —— 它们更旧，
+    /// 而这份列表是按时间顺序读的。重复调用会让同一件撤不回的事在界面上出现两次，
+    /// 那会让"发生过几次"这个唯一可信的数字变成假的，所以这里不合并、直接前插。
+    ///
+    /// 超过上限时丢**恢复出来的**那些：内存里这份的作用是让用户看见手上这次会话做了
+    /// 什么，磁盘上那份（`external_log`）才是长期记录。
+    pub fn restore_external_actions(&mut self, restored: Vec<ExternalActionRecord>) {
+        if restored.is_empty() {
+            return;
+        }
+        let mut merged = restored;
+        merged.append(&mut self.external_actions);
+        if merged.len() > MAX_EXTERNAL_ACTIONS {
+            let excess = merged.len() - MAX_EXTERNAL_ACTIONS;
+            merged.drain(..excess);
+        }
+        self.external_actions = merged;
     }
 
     /// 回到中间某一步。
@@ -2999,6 +3031,80 @@ mod tests {
             .external_actions
             .iter()
             .all(|action| action.target != "https://example.com/docs"));
+    }
+
+    /// 上一次会话的记录接回来时排在前面，而且不和这次会话的记录混成一团。
+    ///
+    /// 顺序是这条的重点：列表是按时间读的，把恢复出来的旧记录接在后面会让界面把"上周
+    /// 那次导航"显示成刚刚发生的。
+    #[test]
+    fn restored_actions_come_before_this_sessions_own() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_external_actions(
+            vec![crate::agent::workspace_tools::AgentExternalAction {
+                kind: "browser_open".to_string(),
+                target: "https://now.example".to_string(),
+                detail: "this session".to_string(),
+            }],
+            Some("run-2".to_string()),
+        );
+
+        orchestrator.restore_external_actions(vec![ExternalActionRecord {
+            id: "old".to_string(),
+            timestamp: "2026-09-01T00:00:00Z".to_string(),
+            kind: "browser_open".to_string(),
+            target: "https://back-then.example".to_string(),
+            detail: "previous session".to_string(),
+            run_id: Some("run-1".to_string()),
+            restored: true,
+        }]);
+
+        let targets: Vec<&str> = orchestrator
+            .external_actions
+            .iter()
+            .map(|action| action.target.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["https://back-then.example", "https://now.example"]
+        );
+        // 这次会话那条不能被标成"恢复出来的"，否则界面会把刚发生的事说成历史
+        assert!(!orchestrator.external_actions[1].restored);
+    }
+
+    /// 接回来的记录超过上限时，丢掉的是**恢复出来的**那些。
+    ///
+    /// 内存里这份是给"手上这次会话做了什么"用的；长期记录在磁盘上那份里。
+    #[test]
+    fn restoring_more_than_the_bound_keeps_this_sessions_actions() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_external_actions(
+            vec![crate::agent::workspace_tools::AgentExternalAction {
+                kind: "browser_open".to_string(),
+                target: "https://now.example".to_string(),
+                detail: "this session".to_string(),
+            }],
+            Some("run-2".to_string()),
+        );
+
+        let restored: Vec<ExternalActionRecord> = (0..MAX_EXTERNAL_ACTIONS + 10)
+            .map(|index| ExternalActionRecord {
+                id: format!("old-{}", index),
+                timestamp: "2026-09-01T00:00:00Z".to_string(),
+                kind: "browser_open".to_string(),
+                target: format!("https://old-{}.example", index),
+                detail: "previous session".to_string(),
+                run_id: None,
+                restored: true,
+            })
+            .collect();
+        orchestrator.restore_external_actions(restored);
+
+        assert_eq!(orchestrator.external_actions.len(), MAX_EXTERNAL_ACTIONS);
+        assert_eq!(
+            orchestrator.external_actions.last().unwrap().target,
+            "https://now.example"
+        );
     }
 
     /// 测试里这次运行的授权。开关只有一个来源：真实路径上命令层铸造它、

@@ -14,6 +14,14 @@ export interface ExternalActionRecord {
   target: string;
   detail: string;
   runId: string | null;
+  /**
+   * 这条是上一次会话留下的，从磁盘恢复出来的。
+   *
+   * 后端给这个标，而不是让界面拿时间戳去算：`runId` 只能区分"哪一次运行"，区分不了
+   * "哪一次会话"—— 重启之后 `runId` 仍然是个陌生 id，而"这是刚刚发生的"和"这是上周
+   * 那次留下的"对用户完全不是一回事。
+   */
+  restored: boolean;
 }
 
 function stringField(source: Record<string, unknown>, key: string): string {
@@ -45,6 +53,9 @@ export function normalizeExternalActions(value: unknown): ExternalActionRecord[]
       target,
       detail: stringField(source, "detail"),
       runId: typeof runId === "string" && runId.length > 0 ? runId : null,
+      // 只有后端明确说 true 才是 true：缺字段（旧后端）当成"这次会话的"，因为那是
+      // 两者里更不容易误导人的一边 —— 把刚刚发生的事标成历史，用户会以为它没发生
+      restored: source.restored === true,
     });
   });
   return records;

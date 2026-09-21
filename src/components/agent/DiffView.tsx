@@ -352,10 +352,19 @@ export default function DiffView() {
                   >
                     {action.kind}
                   </span>
-                  {isFromOtherRun(action, agentRunId) && (
+                  {/* 上一次会话留下的先说出来，再说是哪一次运行：用户第一眼要判断的是
+                      "这是刚刚发生的吗"。两个标同时出现没有意义 —— 恢复出来的记录必然
+                      属于别的运行。 */}
+                  {action.restored ? (
                     <span className="rounded bg-surface-muted/20 px-1 text-[10px] text-surface-muted">
-                      earlier run
+                      previous session
                     </span>
+                  ) : (
+                    isFromOtherRun(action, agentRunId) && (
+                      <span className="rounded bg-surface-muted/20 px-1 text-[10px] text-surface-muted">
+                        earlier run
+                      </span>
+                    )
                   )}
                 </div>
                 <div className="mt-0.5 break-words text-[11px] text-surface-muted">

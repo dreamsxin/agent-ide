@@ -28,6 +28,7 @@ describe("normalizeExternalActions", () => {
         target: "https://example.com/docs",
         detail: 'Opened "Docs" (tab 1)',
         runId: "run-7",
+        restored: false,
       },
     ]);
   });
@@ -90,5 +91,38 @@ describe("isFromOtherRun", () => {
     // 标错来源比不标更糟
     expect(isFromOtherRun(action, null)).toBe(false);
     expect(isFromOtherRun({ ...action, runId: null }, "run-2")).toBe(false);
+  });
+});
+
+describe("restored records", () => {
+  it("only trusts an explicit true, so an older backend's records read as this session's", () => {
+    // 后端不给这个字段时当成"这次会话的"：把刚刚发生的事标成历史，用户会以为它没发生
+    const [current] = normalizeExternalActions([
+      { id: "1", kind: "browser_open", target: "https://a.example" },
+    ]);
+    expect(current.restored).toBe(false);
+
+    const [truthy] = normalizeExternalActions([
+      { id: "2", kind: "browser_open", target: "https://a.example", restored: "yes" },
+    ]);
+    expect(truthy.restored).toBe(false);
+
+    const [restored] = normalizeExternalActions([
+      { id: "3", kind: "browser_open", target: "https://a.example", restored: true },
+    ]);
+    expect(restored.restored).toBe(true);
+  });
+
+  /**
+   * 恢复出来的记录照旧算进"发生过几次"。它们真的发生了，而且撤不回 —— 这正是把它们
+   * 落盘的理由，把它们从计数里排除等于又一次把它们藏起来。
+   */
+  it("still counts towards what actually happened", () => {
+    const actions = normalizeExternalActions([
+      { id: "1", kind: "browser_open", target: "https://a.example", restored: true },
+      { id: "2", kind: "browser_open_refused", target: "https://b.example", restored: true },
+    ]);
+
+    expect(summarizeExternalActions(actions)).toEqual({ performed: 1, refused: 1 });
   });
 });
