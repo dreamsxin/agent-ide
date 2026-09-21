@@ -194,33 +194,14 @@ mod platform {
         if IsWindowVisible(hwnd) != TRUE {
             return TRUE;
         }
-        let title = window_title(hwnd);
-        if title.trim().is_empty() {
+        let Some(window) = window_from_handle(hwnd, collector.foreground) else {
             return TRUE;
-        }
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
         };
-        if GetWindowRect(hwnd, &mut rect) != TRUE {
+        // 跳过没有标题的窗口：Windows 上有大量不可见的消息窗口和零尺寸的辅助窗口
+        if window.title.trim().is_empty() {
             return TRUE;
         }
-        collector.windows.push((
-            DesktopWindow {
-                title,
-                app: window_app(hwnd),
-                bounds: (
-                    rect.left,
-                    rect.top,
-                    rect.right - rect.left,
-                    rect.bottom - rect.top,
-                ),
-                foreground: hwnd == collector.foreground,
-            },
-            hwnd,
-        ));
+        collector.windows.push((window, hwnd));
         TRUE
     }
 
@@ -238,27 +219,53 @@ mod platform {
             if IsWindow(hwnd) != TRUE {
                 return None;
             }
-            let mut rect = RECT {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            if GetWindowRect(hwnd, &mut rect) != TRUE {
+            window_from_handle(hwnd, GetForegroundWindow())
+        }
+    }
+
+    /// 这个句柄现在属于哪个进程。`None` = 句柄已经无效。
+    ///
+    /// 和 `describe_window` 分开：应用名会重名（同一个 Chrome 的两个窗口），pid 才是
+    /// "还是不是那一个窗口"里唯一不会被标题或应用名糊弄过去的一半 —— Win32 在窗口销毁
+    /// 之后会把句柄回收给新窗口，回收给**同一应用**时只比应用名是看不出来的。
+    pub fn window_pid(handle: isize) -> Option<u32> {
+        let hwnd = handle as HWND;
+        // SAFETY: 同 `describe_window`，先确认句柄有效再问它的进程。
+        unsafe {
+            if IsWindow(hwnd) != TRUE {
                 return None;
             }
-            Some(DesktopWindow {
-                title: window_title(hwnd),
-                app: window_app(hwnd),
-                bounds: (
-                    rect.left,
-                    rect.top,
-                    rect.right - rect.left,
-                    rect.bottom - rect.top,
-                ),
-                foreground: hwnd == GetForegroundWindow(),
-            })
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            (pid != 0).then_some(pid)
         }
+    }
+
+    /// 读一个句柄的标题、应用、位置。标题为空或取不到矩形时返回 `None`。
+    ///
+    /// 枚举回调和 `describe_window` 共用这一处：`bounds` 的算法和前台判定各写两份的话，
+    /// 将来改一处必然漏另一处。
+    unsafe fn window_from_handle(hwnd: HWND, foreground: HWND) -> Option<DesktopWindow> {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(hwnd, &mut rect) != TRUE {
+            return None;
+        }
+        Some(DesktopWindow {
+            title: window_title(hwnd),
+            app: window_app(hwnd),
+            bounds: (
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            ),
+            foreground: hwnd == foreground,
+        })
     }
 
     unsafe fn window_title(hwnd: HWND) -> String {
@@ -321,11 +328,15 @@ mod platform {
     pub fn describe_window(_handle: isize) -> Option<DesktopWindow> {
         None
     }
+
+    pub fn window_pid(_handle: isize) -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(windows)]
 pub use platform::list_windows_with_handles;
-pub use platform::{describe_window, list_windows};
+pub use platform::{describe_window, list_windows, window_pid};
 
 #[cfg(test)]
 mod tests {

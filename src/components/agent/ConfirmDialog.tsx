@@ -26,7 +26,9 @@ export default function ConfirmDialog() {
   const resolveConfirm = useAgentStore((s) => s.resolveConfirm);
 
   useEffect(() => {
-    if (!pendingConfirm) return;
+    if (!pendingConfirm) {
+      return;
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -37,7 +39,9 @@ export default function ConfirmDialog() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [pendingConfirm, resolveConfirm]);
 
-  if (!pendingConfirm) return null;
+  if (!pendingConfirm) {
+    return null;
+  }
 
   const icon = OP_ICONS[pendingConfirm.opType] ?? "\u{26A0}";
   const label = OP_LABELS[pendingConfirm.opType] ?? pendingConfirm.opType;

@@ -23,7 +23,7 @@ beforeEach(() => {
   invokeMock.mockResolvedValue(true);
   // store 里 `resolveConfirm` 先看运行时：没有这个标记它连 invoke 都不会发
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
-  useAgentStore.setState({ pendingConfirm: null });
+  useAgentStore.setState({ pendingConfirm: null, error: null });
 });
 
 function request(overrides: Partial<DestructiveOpConfirm> = {}): DestructiveOpConfirm {
@@ -148,5 +148,47 @@ describe("closeConfirm", () => {
 
     useAgentStore.getState().closeConfirm("req-2");
     expect(useAgentStore.getState().pendingConfirm).toBeNull();
+  });
+});
+
+describe("resolveConfirm 的送达结果", () => {
+  /**
+   * 后端说"没人在等了"（超时或 Stop 已经拒过）时，这一次点击什么都没授权。
+   * 只写 console 的话，"点了批准"和"批准生效"在界面上完全一样 —— 而这个对话框的
+   * 全部意义就是让用户知道他授权了什么。
+   */
+  it("迟到的决定要在界面上说出来，不能只进 console", async () => {
+    invokeMock.mockResolvedValue(false);
+    useAgentStore.setState({ pendingConfirm: request(), error: null });
+
+    const heard = await useAgentStore.getState().resolveConfirm(true);
+
+    expect(heard).toBe(false);
+    expect(useAgentStore.getState().error).toContain("too late");
+  });
+
+  it("送不出去也要说", async () => {
+    invokeMock.mockRejectedValue(new Error("bridge is gone"));
+    useAgentStore.setState({ pendingConfirm: request(), error: null });
+
+    const heard = await useAgentStore.getState().resolveConfirm(false);
+
+    expect(heard).toBe(false);
+    expect(useAgentStore.getState().error).toContain("bridge is gone");
+  });
+
+  /**
+   * 后端同时可以挂多条（registry 是 map），前端只有一个槽。被顶掉的那条在后端还挂着，
+   * 用户却再也看不到它 —— 至少要留一句，否则"运行卡了两分钟"查不出原因。
+   */
+  it("顶掉一条没人回答的请求时要留话", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    useAgentStore.setState({ pendingConfirm: request({ id: "req-1" }) });
+
+    useAgentStore.getState().requestConfirm(request({ id: "req-2" }));
+
+    expect(warn).toHaveBeenCalled();
+    expect(useAgentStore.getState().pendingConfirm?.id).toBe("req-2");
+    warn.mockRestore();
   });
 });

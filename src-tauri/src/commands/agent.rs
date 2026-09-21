@@ -65,7 +65,8 @@ impl AgentGlobalState {
         )
     }
 
-    /// Get a cloned LLM client plus a fresh per-run usage meter.    ///
+    /// Get a cloned LLM client plus a fresh per-run usage meter.
+    ///
     /// 每次取客户端都新建一个 meter，等价于"每次运行一个记账周期"。上限在
     /// `send_chat_request` 里强制，所以只要客户端是从这里拿的，就一定被记账、
     /// 也一定受上限约束。已知取舍：`continue_agent_pipeline` 恢复暂停的运行时

@@ -635,14 +635,30 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => ({
       permissions: { ...s.permissions, captureApps: apps },
     })),
-  requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
+  requestConfirm: (confirm) =>
+    set((s) => {
+      if (s.pendingConfirm && s.pendingConfirm.id !== confirm.id) {
+        // 后端可以同时挂多条（registry 是 map），而这里只有一个槽。被顶掉的那条请求
+        // 在后端还挂着、用户却再也看不到它，只能白等到超时 —— 至少要留一句，别让
+        // "运行卡住了"查不出原因。
+        console.warn(
+          "[AgentStore] replacing a pending approval request that was never answered:",
+          s.pendingConfirm.id
+        );
+      }
+      return { pendingConfirm: confirm };
+    }),
   resolveConfirm: async (approved) => {
     const pending = get().pendingConfirm;
-    if (!pending) return false;
+    if (!pending) {
+      return false;
+    }
     // 先收对话框再等后端：等待期间它还开着的话，第二次点击会送第二个决定，
     // 而后端那条请求已经被第一次点击取走了
     set({ pendingConfirm: null });
-    if (!isTauriRuntime()) return false;
+    if (!isTauriRuntime()) {
+      return false;
+    }
     try {
       const heard = await invoke<boolean>("resolve_agent_approval", {
         requestId: pending.id,
@@ -650,15 +666,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       });
       if (!heard) {
         // 后端已经不等这条请求了（超时，或 Stop 拒过了）。这一次点击什么都没授权，
-        // 而对话框已经关掉 —— 至少要在日志里留一句，别让"点了批准"和"批准生效"看起来一样。
-        console.warn(
-          "[AgentStore] approval decision arrived too late; nothing was waiting for",
-          pending.id
-        );
+        // 而对话框已经关掉：只写 console 的话，"点了批准"和"批准生效"在界面上完全
+        // 一样，而这个对话框的全部意义就是让用户知道他授权了什么。
+        set({
+          error: `That approval arrived too late — the action was already refused (${pending.title}).`,
+        });
       }
       return heard;
     } catch (err) {
       console.warn("[AgentStore] resolve_agent_approval failed:", err);
+      set({ error: `Could not send that approval decision: ${String(err)}` });
       return false;
     }
   },

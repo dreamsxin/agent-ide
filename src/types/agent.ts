@@ -307,14 +307,20 @@ export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | 
  * 显示它等于请用户为一件他看不见的事签字。
  */
 export function normalizeApprovalRequest(value: unknown): DestructiveOpConfirm | null {
-  if (!value || typeof value !== "object") return null;
+  if (!value || typeof value !== "object") {
+    return null;
+  }
   const raw = value as Record<string, unknown>;
   const id = typeof raw.id === "string" ? raw.id : "";
   const title = typeof raw.title === "string" ? raw.title : "";
   const description = typeof raw.description === "string" ? raw.description : "";
-  if (!id || !title || !description) return null;
+  if (!id || !title || !description) {
+    return null;
+  }
   const opType = normalizeDestructiveOpType(raw.opType);
-  if (opType === "unknown") return null;
+  if (opType === "unknown") {
+    return null;
+  }
   return {
     id,
     opType,

@@ -15,13 +15,13 @@ use crate::services::computer::{app_allowed, DesktopWindow};
 /// 变成不可读的糊块，而模型不会告诉你它其实没看清。
 pub const MAX_CAPTURE_PIXELS: u64 = 4_000_000;
 
-/// 一次截图的结果：给用户看的元信息 + 已经编码好的 PNG。
+/// 一次截图的结果：截到的那个窗口 + 已经编码好的 PNG。
+///
+/// 元信息复用 `CaptureTarget` 而不是再抄一遍四个字段：抄两份的话，将来给身份加一样
+/// 东西就要改两处，而漏掉的那一处不会报错。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowCapture {
-    pub title: String,
-    pub app: String,
-    pub width: u32,
-    pub height: u32,
+    pub target: CaptureTarget,
     pub png: Vec<u8>,
 }
 
@@ -186,7 +186,7 @@ impl CaptureTarget {
     }
 }
 
-/// 用户批准过的那个窗口：选中时的样子 + 它的句柄值。
+/// 用户批准过的那个窗口：选中时的样子 + 认得出它的两样证据。
 ///
 /// 带着句柄值（`isize`）而不是只带筛选条件，是这套流程的关键。`HWND` 是裸指针、不是
 /// `Send`，过不了 `await`；但它的**值**过得去，而窗口的身份就是这个值。批准之后按
@@ -196,47 +196,63 @@ impl CaptureTarget {
 pub struct ApprovedWindow {
     pub target: CaptureTarget,
     handle: isize,
+    /// 批准那一刻这个窗口属于哪个进程。取不到时是 `None`（降级为只比应用名）。
+    pid: Option<u32>,
 }
 
 impl ApprovedWindow {
     pub fn handle(&self) -> isize {
         self.handle
     }
-}
 
-/// 批准之后、动手之前，确认那个句柄指的还是同一个窗口。
-///
-/// 两件事：窗口还活着，而且还属于同一个应用 —— Win32 句柄在窗口销毁之后会被系统
-/// 回收，所以"`IsWindow` 说有效"不等于"还是那一个"。应用对不上就拒绝。
-///
-/// 标题**允许**变：它会跟着未读数、播放进度、脏标记不停跳，把标题相等当成条件会让
-/// 用户批准过的截图被频繁拒掉，而模型的合理反应是再问一次 —— 那正是审批疲劳。
-/// 代价说清楚：同一个窗口在这段时间里换了内容（切了标签页）时，截到的是新内容，
-/// 所以记录里写的是**截图时**的标题，与批准时不同则两个都写。
-pub fn verify_approved_window(
-    approved: &CaptureTarget,
-    current: Option<&DesktopWindow>,
-) -> Result<CaptureTarget, String> {
-    let Some(current) = current else {
-        return Err("The approved window has closed, so nothing was captured.".to_string());
-    };
-    let resolved = CaptureTarget::from_window(current);
-    if crate::services::computer::normalize_app_name(&resolved.app)
-        != crate::services::computer::normalize_app_name(&approved.app)
-    {
-        return Err(
-            "The approved window is gone and its handle now belongs to another app, so nothing was captured."
-                .to_string(),
-        );
+    /// 批准之后、动手之前，确认那个句柄指的还是同一个窗口。
+    ///
+    /// 三件事，缺一不可：
+    /// - 窗口还活着；
+    /// - 还属于同一个应用 —— Win32 在窗口销毁后会把句柄回收，"`IsWindow` 说有效"
+    ///   不等于"还是那一个"；
+    /// - pid 还是同一个 —— 这是上一条看不出来的那一半：句柄被**同一应用**的新窗口
+    ///   回收时应用名照样对得上，而那是最容易发生的一种（Chrome 关一个窗口开一个）。
+    ///   批准时取不到 pid 就只能退回到比应用名，这一点在 SECURITY.md 里写明了。
+    ///
+    /// 标题**允许**变：它会跟着未读数、播放进度、脏标记不停跳，把标题相等当成条件会让
+    /// 用户批准过的截图被频繁拒掉，而模型的合理反应是再问一次 —— 那正是审批疲劳。
+    /// 代价说清楚：同一个窗口在这段时间里换了内容（切了标签页）时，截到的是新内容，
+    /// 所以记录里写的是**截图时**的标题，与批准时不同则两个都写。
+    pub fn verify(
+        &self,
+        current: Option<&DesktopWindow>,
+        current_pid: Option<u32>,
+    ) -> Result<CaptureTarget, String> {
+        let Some(current) = current else {
+            return Err("The approved window has closed, so nothing was captured.".to_string());
+        };
+        let resolved = CaptureTarget::from_window(current);
+        if crate::services::computer::normalize_app_name(&resolved.app)
+            != crate::services::computer::normalize_app_name(&self.target.app)
+        {
+            return Err(
+                "The approved window is gone and its handle now belongs to another app, so nothing was captured."
+                    .to_string(),
+            );
+        }
+        if let (Some(approved), Some(now)) = (self.pid, current_pid) {
+            if approved != now {
+                return Err(
+                    "The approved window is gone and its handle now belongs to another window of the same app, so nothing was captured."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(resolved)
     }
-    Ok(resolved)
 }
 
 #[cfg(windows)]
 mod platform {
     use super::{
-        check_capture_pixels, encode_png, select_capture_target, verify_approved_window,
-        ApprovedWindow, CaptureTarget, WindowCapture,
+        check_capture_pixels, encode_png, select_capture_target, ApprovedWindow, CaptureTarget,
+        WindowCapture,
     };
     use crate::services::computer::DesktopWindow;
     use windows_sys::Win32::Foundation::HWND;
@@ -266,29 +282,29 @@ mod platform {
     ) -> Result<ApprovedWindow, String> {
         let (target, hwnd) = resolve(app_filter, title_contains, allowlist)?;
         check_capture_pixels(target.width, target.height)?;
+        let handle = hwnd as isize;
         Ok(ApprovedWindow {
             target,
-            handle: hwnd as isize,
+            handle,
+            pid: crate::services::computer::window_pid(handle),
         })
     }
 
     /// 截下用户批准的那个窗口。
     ///
-    /// 拿句柄值换回 `HWND`，先确认它还活着、还属于同一个应用（见
-    /// `verify_approved_window`），再画。**不**按标题重新找一遍：那会截到另一个同名
+    /// 拿句柄值换回 `HWND`，先确认它还活着、还是同一个进程的同一个窗口（见
+    /// `ApprovedWindow::verify`），再画。**不**按标题重新找一遍：那会截到另一个同名
     /// 窗口，而标题是被披露方自己就能改的。
     pub fn capture_approved_window(approved: &ApprovedWindow) -> Result<WindowCapture, String> {
         let current = crate::services::computer::describe_window(approved.handle);
-        let resolved = verify_approved_window(&approved.target, current.as_ref())?;
+        let current_pid = crate::services::computer::window_pid(approved.handle);
+        let resolved = approved.verify(current.as_ref(), current_pid)?;
         // 尺寸可能在批准之后变了，所以上限要按现在的尺寸重新算
         check_capture_pixels(resolved.width, resolved.height)?;
         let rgba = copy_window_pixels(approved.handle as HWND, resolved.width, resolved.height)?;
         let png = encode_png(resolved.width, resolved.height, &rgba)?;
         Ok(WindowCapture {
-            title: resolved.title,
-            app: resolved.app,
-            width: resolved.width,
-            height: resolved.height,
+            target: resolved,
             png,
         })
     }
@@ -515,33 +531,68 @@ mod tests {
 
     /// 批准的是**那一个**窗口，靠句柄认，不靠标题重新找。
     ///
-    /// 这条钉的是身份判断本身：窗口关了要拒；句柄被系统回收给另一个应用的窗口要拒；
+    /// 这条钉的是身份判断本身：窗口关了要拒；句柄被回收给另一个应用要拒；句柄被回收给
+    /// **同一应用的另一个窗口**也要拒（只有 pid 看得出来，而这是最容易发生的一种）；
     /// 标题变了不拒（未读数、播放进度、脏标记都会让标题跳，拒掉等于把用户刚批准的
     /// 截图退回去，而模型的合理反应是再问一次 —— 那正是审批疲劳）。
     ///
-    /// 上一版按 `title == title && app == app` 重新找窗口，于是"批准 A、截到 B"只需要
+    /// 92 那一版按 `title == title && app == app` 重新找窗口，于是"批准 A、截到 B"只需要
     /// A 关掉而另一个同名窗口存在 —— 而网页标题就是窗口标题，模型自己就能安排。
     #[test]
-    fn the_approved_window_is_identified_by_handle_not_by_title() {
-        let approved = CaptureTarget::from_window(&window("Docs — pricing", "chrome.exe"));
+    fn the_approved_window_is_identified_by_handle_and_pid_not_by_title() {
+        let approved = ApprovedWindow {
+            target: CaptureTarget::from_window(&window("Docs — pricing", "chrome.exe")),
+            handle: 0x1234,
+            pid: Some(4242),
+        };
 
         // 关掉了
-        let error = verify_approved_window(&approved, None).expect_err("closed");
+        let error = approved.verify(None, None).expect_err("closed");
         assert!(error.contains("closed"), "{}", error);
 
         // 句柄被回收给了另一个应用的窗口
         let recycled = window("Docs — pricing", "signal.exe");
-        let error = verify_approved_window(&approved, Some(&recycled)).expect_err("another app");
+        let error = approved
+            .verify(Some(&recycled), Some(4242))
+            .expect_err("another app");
         assert!(error.contains("another app"), "{}", error);
+
+        // 句柄被回收给了同一个应用的另一个窗口：应用名一样、标题一样，只有 pid 不同
+        let sibling = window("Docs — pricing", "chrome.exe");
+        let error = approved
+            .verify(Some(&sibling), Some(99))
+            .expect_err("same app, another window");
+        assert!(
+            error.contains("another window of the same app"),
+            "{}",
+            error
+        );
 
         // 同一个窗口，标题跳了：放行，而且返回的是**现在**的标题，记录才说得对
         let ticked = window("(3) Docs — pricing", "chrome.exe");
-        let resolved = verify_approved_window(&approved, Some(&ticked)).expect("same window");
+        let resolved = approved
+            .verify(Some(&ticked), Some(4242))
+            .expect("same window");
         assert_eq!(resolved.title, "(3) Docs — pricing");
 
         // 应用名的写法差异不算换应用
         let respelled = window("Docs — pricing", "CHROME.EXE");
-        assert!(verify_approved_window(&approved, Some(&respelled)).is_ok());
+        assert!(approved.verify(Some(&respelled), Some(4242)).is_ok());
+    }
+
+    /// 批准时读不到 pid 就只能退回到比应用名 —— 这一档降级要明说，不能假装它不存在。
+    #[test]
+    fn a_target_without_a_pid_falls_back_to_the_app_name() {
+        let approved = ApprovedWindow {
+            target: CaptureTarget::from_window(&window("Docs — pricing", "chrome.exe")),
+            handle: 0x1234,
+            pid: None,
+        };
+
+        let sibling = window("Docs — pricing", "chrome.exe");
+        assert!(approved.verify(Some(&sibling), Some(99)).is_ok());
+        let other_app = window("Docs — pricing", "signal.exe");
+        assert!(approved.verify(Some(&other_app), Some(99)).is_err());
     }
 
     /// 批准框里那一行必须说得出是哪个窗口、多大。

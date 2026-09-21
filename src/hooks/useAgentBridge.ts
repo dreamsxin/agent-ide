@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
@@ -147,10 +148,16 @@ export function useAgentBridge() {
             const request = normalizeApprovalRequest(e.payload);
             if (request) {
               requestConfirm(request);
-            } else {
-              // 丢掉一条请求 = 后端在那儿白等到超时。至少要留一句：否则界面看起来是
-              // "Agent 卡了两分钟"，而真正的原因是这个前端还不认识那种动作。
-              console.warn("[useAgentBridge] unreadable approval request, ignoring:", e.payload);
+              return;
+            }
+            // 读不懂就**立刻回拒**，而不是丢掉了事：丢掉的话后端要白等满两分钟，
+            // 界面表现成"Agent 卡住了"，而真正的原因是这个前端还不认识那种动作。
+            console.warn("[useAgentBridge] unreadable approval request, refusing:", e.payload);
+            const id = (e.payload as { id?: unknown } | null)?.id;
+            if (typeof id === "string" && id) {
+              void invoke("resolve_agent_approval", { requestId: id, approved: false }).catch(
+                (err) => console.warn("[useAgentBridge] could not refuse it either:", err)
+              );
             }
           }),
 
@@ -178,7 +185,20 @@ export function useAgentBridge() {
       stopped = true;
       unlisteners.forEach((fn) => fn());
     };
-  }, [addLog, appendStreamContent, clearStreamContent, closeConfirm, requestConfirm, setDiffs, setPipeline, setSddArtifact, setState, setSteps, updateStep, upsertProblems]);
+  }, [
+    addLog,
+    appendStreamContent,
+    clearStreamContent,
+    closeConfirm,
+    requestConfirm,
+    setDiffs,
+    setPipeline,
+    setSddArtifact,
+    setState,
+    setSteps,
+    updateStep,
+    upsertProblems,
+  ]);
 }
 
 function formatLogTime(timestamp: string) {

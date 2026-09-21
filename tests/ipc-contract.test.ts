@@ -60,6 +60,33 @@ function stringConstants(sources: string[]): Map<string, string> {
 }
 
 /**
+ * 从 Rust 源码里收集一类名字：字面量形式 + 常量形式。
+ *
+ * 两处调用（事件名、批准的 opType）共用这一处：只认字面量的扫描器会在名字被提成常量的
+ * 那天静默失效，而失效的表现是"少了一个名字"，第一个报错的测试会把原因指向前端。
+ */
+function namesFrom(
+    sources: string[],
+    constants: Map<string, string>,
+    literal: RegExp,
+    named: RegExp
+): Set<string> {
+    const names = new Set<string>();
+    for (const source of sources) {
+        for (const match of source.matchAll(literal)) {
+            names.add(match[1]);
+        }
+        for (const match of source.matchAll(named)) {
+            const resolved = constants.get(match[1]);
+            if (resolved) {
+                names.add(resolved);
+            }
+        }
+    }
+    return names;
+}
+
+/**
  * 后端发出的事件名。
  *
  * 必须按整个文件文本匹配而不是逐行：一多半的 `emit` 调用是
@@ -68,23 +95,12 @@ function stringConstants(sources: string[]): Map<string, string> {
  */
 function emittedEvents(): Set<string> {
     const sources = rustSources();
-    const constants = stringConstants(sources);
-    const names = new Set<string>();
-    for (const source of sources) {
-        for (const match of source.matchAll(/\bemit(?:_json|_all|_to)?\(\s*"([a-z0-9-]+)"/g)) {
-            names.add(match[1]);
-        }
-        // 常量形式：`emit_json(APPROVAL_REQUESTED_EVENT, ...)`
-        for (const match of source.matchAll(
-            /\bemit(?:_json|_all|_to)?\(\s*([A-Z][A-Z0-9_]*)\s*,/g
-        )) {
-            const resolved = constants.get(match[1]);
-            if (resolved) {
-                names.add(resolved);
-            }
-        }
-    }
-    return names;
+    return namesFrom(
+        sources,
+        stringConstants(sources),
+        /\bemit(?:_json|_all|_to)?\(\s*"([a-z0-9-]+)"/g,
+        /\bemit(?:_json|_all|_to)?\(\s*([A-Z][A-Z0-9_]*)\s*,/g
+    );
 }
 
 /** 前端监听的事件名 -> 第一个监听它的文件 */
@@ -227,23 +243,14 @@ describe("Tauri event contract", () => {
 describe("approval op types", () => {
     function approvalOpTypes(): string[] {
         const sources = rustSources();
-        const constants = stringConstants(sources);
-        const names = new Set<string>();
-        for (const source of sources) {
-            for (const match of source.matchAll(/ApprovalRequest::new\(\s*"([a-z0-9_]+)"/g)) {
-                names.add(match[1]);
-            }
-            // 常量形式，和事件名同一个理由
-            for (const match of source.matchAll(
+        return [
+            ...namesFrom(
+                sources,
+                stringConstants(sources),
+                /ApprovalRequest::new\(\s*"([a-z0-9_]+)"/g,
                 /ApprovalRequest::new\(\s*([A-Z][A-Z0-9_]*)\s*,/g
-            )) {
-                const resolved = constants.get(match[1]);
-                if (resolved) {
-                    names.add(resolved);
-                }
-            }
-        }
-        return [...names];
+            ),
+        ];
     }
 
     it("the frontend understands every op type the backend asks approval for", () => {
@@ -254,7 +261,7 @@ describe("approval op types", () => {
         expect(ops).toContain("browser_open");
         expect(ops).toContain("computer_capture");
 
-        const unknown = ops.filter((op) => normalizeDestructiveOpType(op) === "unknown");
+        const unknown = ops.filter((op) => (normalizeDestructiveOpType(op) === "unknown"));
         expect(
             unknown,
             "the dialog would drop these requests and the run would stall until it times out"

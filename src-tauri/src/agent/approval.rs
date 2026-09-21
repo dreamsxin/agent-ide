@@ -94,10 +94,6 @@ pub enum ApprovalOutcome {
 }
 
 impl ApprovalOutcome {
-    pub fn approved(&self) -> bool {
-        matches!(self, ApprovalOutcome::Approved)
-    }
-
     /// 这次拒绝在记录里的类别后缀。
     ///
     /// Stop 拦下的动作用 `_cancelled`，其余用 `_refused` —— 沿用工具入口那道 Stop 闸门
@@ -151,26 +147,31 @@ impl ApprovalRegistry {
         Self::default()
     }
 
+    /// 拿锁，中毒了也照用。
+    ///
+    /// `unwrap()` 会让一次 panic 变成整个进程的批准通道永久报废；`if let Ok` 更糟 ——
+    /// 它会静默：此后每一次撤不回的动作都被拒，而用户看到的只是动作反复失败，没有一句
+    /// 话说明批准通道已经坏了。临界区里只有 HashMap 的增删，本身不会 panic，所以恢复
+    /// 使用是安全的。
+    fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<Decision>>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
     fn register(&self, id: &str) -> oneshot::Receiver<Decision> {
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(id.to_string(), tx);
-        }
+        self.pending().insert(id.to_string(), tx);
         rx
     }
 
     fn forget(&self, id: &str) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(id);
-        }
+        self.pending().remove(id);
     }
 
     /// 送回一个决定。返回是否真的有人在等这条请求 —— 前端可能在超时之后才点。
     pub fn resolve(&self, id: &str, approved: bool) -> bool {
-        let sender = match self.pending.lock() {
-            Ok(mut pending) => pending.remove(id),
-            Err(_) => None,
-        };
+        let sender = self.pending().remove(id);
         match sender {
             Some(sender) => sender
                 .send(if approved {
@@ -188,10 +189,7 @@ impl ApprovalRegistry {
     /// 不需要 orchestrator 锁，理由和 `CancelRegistry` 一样：Stop 不能排在它要取消的
     /// 工作后面。
     pub fn refuse_all(&self) -> usize {
-        let senders = match self.pending.lock() {
-            Ok(mut pending) => std::mem::take(&mut *pending),
-            Err(_) => HashMap::new(),
-        };
+        let senders = std::mem::take(&mut *self.pending());
         let mut refused = 0;
         for (_, sender) in senders {
             if sender.send(Decision::Cancelled).is_ok() {
@@ -199,6 +197,22 @@ impl ApprovalRegistry {
             }
         }
         refused
+    }
+}
+
+/// 让"登记了就一定会被清掉"成为结构保证。
+///
+/// 结束方式不止 resolve / refuse_all / 超时三条：`ask` 的 future 被丢弃（任务被弃、
+/// 运行时关停）时不会走到任何一个显式清理点，sender 就留在登记表里。而登记表是 app 级
+/// 的、不按运行重建，于是它只增不减，直到下一次 Stop 把它清空。
+struct Registered<'a> {
+    registry: &'a ApprovalRegistry,
+    id: &'a str,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.registry.forget(self.id);
     }
 }
 
@@ -237,8 +251,26 @@ impl ApprovalGate {
     }
 
     /// 问一次，等一个决定。
-    pub async fn ask(&self, request: &ApprovalRequest) -> ApprovalOutcome {
+    ///
+    /// `cancel` 是这次运行的副作用开关，登记**之后**必须再看一次：Stop 是"拉开关 + 拒掉
+    /// 所有挂起请求"两步，一条恰好在两步之间登记上的请求没有人会拒 —— 界面已经回到空闲，
+    /// 而这次工具调用还挂着，一直挂到两分钟超时。调用方在问之前查一次挡不住这个缝，
+    /// 因为缝就在"查完"和"登记上"之间。
+    pub async fn ask(
+        &self,
+        request: &ApprovalRequest,
+        cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> ApprovalOutcome {
         let receiver = self.registry.register(&request.id);
+        // 登记了就一定会被清掉：超时、被拒、乃至整个 future 被丢弃，都走 Drop
+        let _registered = Registered {
+            registry: &self.registry,
+            id: &request.id,
+        };
+        if is_cancelled(cancel) {
+            // 还没发过请求，所以也不用发关闭事件 —— 没有对话框被打开过
+            return ApprovalOutcome::Cancelled;
+        }
         self.events
             .emit_json(APPROVAL_REQUESTED_EVENT, request.payload());
 
@@ -249,10 +281,7 @@ impl ApprovalGate {
             // 发送端被丢弃而没有发送：登记表被清掉了。归到 `Cancelled` 而不是 `Denied` ——
             // 那同样不是某个人对这次动作说的不。
             Ok(Err(_)) => ApprovalOutcome::Cancelled,
-            Err(_) => {
-                self.registry.forget(&request.id);
-                ApprovalOutcome::TimedOut
-            }
+            Err(_) => ApprovalOutcome::TimedOut,
         };
 
         self.events.emit_json(
@@ -261,6 +290,10 @@ impl ApprovalGate {
         );
         outcome
     }
+}
+
+fn is_cancelled(cancel: Option<&Arc<std::sync::atomic::AtomicBool>>) -> bool {
+    cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 #[cfg(test)]
@@ -281,6 +314,7 @@ mod tests {
         let (registry, gate) = gate(&events);
         let request = ApprovalRequest::new("browser_open", "Open a page", "example.com", "detail");
         let id = request.id.clone();
+        let registry_probe = registry.clone();
 
         let resolver = tokio::spawn(async move {
             // 等到请求真的登记上再回答：直接 resolve 可能在 `ask` 登记之前跑完
@@ -293,26 +327,73 @@ mod tests {
             false
         });
 
-        let outcome = gate.ask(&request).await;
+        let outcome = gate.ask(&request, None).await;
         assert!(resolver.await.unwrap(), "resolve 应该找到等待方");
         assert_eq!(outcome, ApprovalOutcome::Approved);
+        // 批准也要清登记表，否则同一个 id 会留在里面
+        assert_eq!(registry_probe.refuse_all(), 0);
     }
 
     #[tokio::test]
     async fn nobody_answering_is_a_refusal_and_the_dialog_is_closed() {
         let events = Arc::new(RecordingEvents::new());
-        let (_registry, gate) = gate(&events);
+        let (registry, gate) = gate(&events);
         let request = ApprovalRequest::new("browser_open", "Open a page", "example.com", "detail");
 
-        let outcome = gate.ask(&request).await;
+        let outcome = gate.ask(&request, None).await;
 
         assert_eq!(outcome, ApprovalOutcome::TimedOut);
-        assert!(!outcome.approved());
+        assert!(outcome.refusal_detail().is_some());
         // 关闭事件是这条不变量里最容易漏的一半：只发请求不发关闭，超时之后对话框
         // 还开着，用户点"批准"却没有任何东西在等他。
         let closed = events.payloads_for(APPROVAL_CLOSED_EVENT);
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0]["id"], serde_json::json!(request.id));
+        // 超时之后登记表里不该还留着这条
+        assert_eq!(registry.refuse_all(), 0);
+    }
+
+    /// Stop 落在"拉开关"和"拒挂起请求"之间时，这条请求也必须立刻被拒。
+    ///
+    /// 这是调用方在问人之前查一次开关**挡不住**的那个缝：缝就在"查完"和"登记上"之间。
+    /// 少了这一条，界面已经回到空闲，而这次工具调用要挂满两分钟才被拒，而且不会有
+    /// 任何对话框被关掉的痕迹。
+    #[tokio::test]
+    async fn a_run_cancelled_before_the_prompt_never_asks() {
+        let events = Arc::new(RecordingEvents::new());
+        let (registry, gate) = gate(&events);
+        let request = ApprovalRequest::new("browser_open", "Open a page", "example.com", "detail");
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let outcome = gate.ask(&request, Some(&cancel)).await;
+
+        assert_eq!(outcome, ApprovalOutcome::Cancelled);
+        // 没问就不该有框：弹一个没人在等的框比不弹更糟
+        assert_eq!(events.count(APPROVAL_REQUESTED_EVENT), 0);
+        assert_eq!(events.count(APPROVAL_CLOSED_EVENT), 0);
+        assert_eq!(registry.refuse_all(), 0);
+    }
+
+    /// 等待方被整体丢弃（任务被弃、运行时关停）时，登记表也要干净。
+    ///
+    /// 这是第四条结束路径，`resolve` / `refuse_all` / 超时都碰不到它；登记表是 app 级的、
+    /// 不按运行重建，漏了就只增不减。
+    #[tokio::test]
+    async fn a_dropped_waiter_does_not_leak_its_slot() {
+        let events = Arc::new(RecordingEvents::new());
+        let (registry, gate) = gate(&events);
+        let request = ApprovalRequest::new("browser_open", "Open a page", "example.com", "detail");
+
+        {
+            let pending = gate.ask(&request, None);
+            // 推一次让它登记上，然后连 future 一起丢掉
+            tokio::select! {
+                _ = pending => unreachable!("200ms 的超时不该在这里到期"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+
+        assert_eq!(registry.refuse_all(), 0, "丢弃的等待方不该留下条目");
     }
 
     #[tokio::test]
@@ -334,7 +415,7 @@ mod tests {
             0
         });
 
-        let (one, two) = tokio::join!(gate.ask(&first), gate.ask(&second));
+        let (one, two) = tokio::join!(gate.ask(&first, None), gate.ask(&second, None));
 
         assert_eq!(stop.await.unwrap(), 2, "两条挂起的请求都该被 Stop 拒掉");
         // `Cancelled` 而不是 `Denied`：这条同时钉住"Stop 不是超时"和"Stop 不是人的拒绝"。
@@ -366,7 +447,7 @@ mod tests {
             false
         });
 
-        let outcome = gate.ask(&request).await;
+        let outcome = gate.ask(&request, None).await;
         assert!(resolver.await.unwrap());
         assert_eq!(outcome, ApprovalOutcome::Denied);
         // 两种拒绝要给出不同的说法，记录才复盘得出来是谁拒的

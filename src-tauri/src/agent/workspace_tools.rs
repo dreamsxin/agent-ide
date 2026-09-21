@@ -247,12 +247,16 @@ impl WorkspaceToolPermissions {
     /// 顺序有意义：调用方必须先过完静态授权（开关 + 清单）再问人。反过来的话，一个
     /// 本来就会被拒的动作也会弹一次框，用户被训练成无脑点批准，而这个机制的全部价值
     /// 就在于每一次弹框都值得读。
+    ///
+    /// 取消开关一并交给 `ask`：Stop 是"拉开关 + 拒掉挂起请求"两步，一条恰好在两步之间
+    /// 登记上的请求没有人会拒。在这里查一次挡不住那个缝 —— 缝就在"查完"和"登记上"之间，
+    /// 所以真正的复查必须发生在登记之后，由 `ask` 做。
     async fn require_approval(
         &self,
         request: &crate::agent::approval::ApprovalRequest,
     ) -> crate::agent::approval::ApprovalOutcome {
         match &self.approval {
-            Some(gate) => gate.ask(request).await,
+            Some(gate) => gate.ask(request, Some(&self.cancel)).await,
             None => crate::agent::approval::ApprovalOutcome::Unattended,
         }
     }
@@ -1355,13 +1359,42 @@ fn refuse_browser(
     target: &str,
     permissions: &WorkspaceToolPermissions,
 ) -> Result<String, String> {
-    let detail = "Browser use is not authorized for this run, or no origin is allowed.".to_string();
+    refuse_external(
+        kind,
+        target,
+        "Browser use is not authorized for this run, or no origin is allowed.".to_string(),
+        permissions,
+    )
+}
+
+/// 记一条没做成的外部动作，并把同一句话返回给模型。
+///
+/// 这两件事必须成对发生：只返回错误不记录，"模型试图做一件撤不回的事"就随着这一轮
+/// 对话消失了 —— 而那正是用户事后最想知道的。抽成一处是为了让"漏掉记录"不再是
+/// 一种可能，而不是为了少写几行。
+fn refuse_external(
+    kind: &str,
+    target: &str,
+    detail: String,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
     permissions.record_external(AgentExternalAction {
         kind: kind.to_string(),
         target: target.to_string(),
         detail: detail.clone(),
     });
     Err(detail)
+}
+
+/// 截图没成的统一记录。
+///
+/// 三处都只写 `desktop`：选窗口那步的失败原因里含"命中了几个窗口"，截图那步含窗口
+/// 状态，而一次没截成的调用不该顺带把窗口名留在记录里。
+fn record_capture_failure(
+    error: String,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    refuse_external("computer_capture_failed", "desktop", error, permissions)
 }
 
 /// 打开一个页面。
@@ -1381,14 +1414,7 @@ async fn browser_open_tool(
     }
     let origin = match crate::services::browser::origin_of(url) {
         Ok(origin) => origin,
-        Err(error) => {
-            permissions.record_external(AgentExternalAction {
-                kind: "browser_open_refused".to_string(),
-                target: url.to_string(),
-                detail: error.clone(),
-            });
-            return Err(error);
-        }
+        Err(error) => return refuse_external("browser_open_refused", url, error, permissions),
     };
     if !crate::services::browser::origin_allowed(&origin, &permissions.browser_origins) {
         let detail = format!(
@@ -1396,12 +1422,7 @@ async fn browser_open_tool(
             origin,
             permissions.browser_origins.join(", ")
         );
-        permissions.record_external(AgentExternalAction {
-            kind: "browser_open_refused".to_string(),
-            target: origin,
-            detail: detail.clone(),
-        });
-        return Err(detail);
+        return refuse_external("browser_open_refused", &origin, detail, permissions);
     }
 
     // 问人。请求里写全 URL 而不只写 origin：清单批的是 origin，人要看的是这一个页面。
@@ -1416,27 +1437,25 @@ async fn browser_open_tool(
     );
     let outcome = permissions.require_approval(&request).await;
     if let Some(detail) = outcome.refusal_detail() {
-        permissions.record_external(AgentExternalAction {
-            // Stop 拦下的用 `_cancelled`，其余用 `_refused`：工具入口那道 Stop 闸门
-            // 已经在用这套分类，同一件事在记录里不该有两个名字。
-            kind: format!("browser_open{}", outcome.record_suffix()),
-            target: url.to_string(),
-            detail: detail.to_string(),
-        });
-        return Err(detail.to_string());
+        // Stop 拦下的用 `_cancelled`，其余用 `_refused`：工具入口那道 Stop 闸门
+        // 已经在用这套分类，同一件事在记录里不该有两个名字。
+        return refuse_external(
+            &format!("browser_open{}", outcome.record_suffix()),
+            url,
+            detail.to_string(),
+            permissions,
+        );
     }
     // 批准之后再看一次开关。入口那道闸门是**等待之前**取的，最长已经过期两分钟：
     // Stop 恰好落在"决定送到"和"真的导航"之间时，`refuse_all` 找不到挂起的请求，
     // 而界面已经回到空闲 —— 少这一次复查，那次导航照样发生。
     if permissions.cancelled() {
-        let detail =
-            "This run was stopped after the approval, so the page was not opened.".to_string();
-        permissions.record_external(AgentExternalAction {
-            kind: "browser_open_cancelled".to_string(),
-            target: url.to_string(),
-            detail: detail.clone(),
-        });
-        return Err(detail);
+        return refuse_external(
+            "browser_open_cancelled",
+            url,
+            "This run was stopped after the approval, so the page was not opened.".to_string(),
+            permissions,
+        );
     }
 
     let port = crate::services::browser::configured_port();
@@ -1611,7 +1630,7 @@ async fn computer_capture_tool(
 
     // 先只**选**窗口，不截。批准框必须说得出具体是哪个窗口，而那句话只能来自选择的
     // 结果：模型写的是 `app: "chrome"`，命中的可能是任何一个 Chrome 窗口。
-    let resolved = tokio::task::spawn_blocking(move || {
+    let resolved = match tokio::task::spawn_blocking(move || {
         crate::services::capture::resolve_capture_target(
             app_owned.as_deref(),
             title_owned.as_deref(),
@@ -1619,20 +1638,22 @@ async fn computer_capture_tool(
         )
     })
     .await
-    .map_err(|error| format!("The capture task did not finish: {}", error))?;
+    {
+        Ok(resolved) => resolved,
+        // 阻塞任务 panic 了就当截图失败：这里不该把整个运行拖下去。也要记一条 ——
+        // 少了它，"模型试过截图"这件事在外部动作日志里完全不存在。
+        Err(error) => {
+            return record_capture_failure(
+                format!("The capture task did not finish: {}", error),
+                permissions,
+            )
+        }
+    };
     let approved = match resolved {
         Ok(approved) => approved,
-        Err(error) => {
-            // 失败也记：被拒的原因里包含"命中了几个窗口"这类信息，而用户有权知道
-            // 模型试过截图。目标只写 `desktop`，不写它想截哪个窗口 —— 那句话本身
-            // 就可能是一条未授权的披露。
-            permissions.record_external(AgentExternalAction {
-                kind: "computer_capture_failed".to_string(),
-                target: "desktop".to_string(),
-                detail: error.clone(),
-            });
-            return Err(error);
-        }
+        // 目标只写 `desktop`，不写它想截哪个窗口 —— 这一步的失败原因里含"命中了几个
+        // 窗口"这类信息，把窗口名写进记录等于替一次被拒的调用做了披露。
+        Err(error) => return record_capture_failure(error, permissions),
     };
 
     // 问人。窗口内容是这个产品披露面里最重的一样，比一次导航重 —— 导航都要问，它更要问。
@@ -1647,105 +1668,96 @@ async fn computer_capture_tool(
     );
     let outcome = permissions.require_approval(&request).await;
     if let Some(detail) = outcome.refusal_detail() {
-        permissions.record_external(AgentExternalAction {
-            kind: format!("computer_capture{}", outcome.record_suffix()),
-            // 这条记录只给用户看，而他刚刚在框里读到过这个标题，所以记下来不是新的披露；
-            // 返回给模型的错误里仍然不含标题。
-            target: approved.target.title.clone(),
-            detail: detail.to_string(),
-        });
-        return Err(detail.to_string());
+        // 这条记录只给用户看，而他刚刚在框里读到过这个标题，所以记下来不是新的披露；
+        // 返回给模型的错误里仍然不含标题。
+        return refuse_external(
+            &format!("computer_capture{}", outcome.record_suffix()),
+            &approved.target.title,
+            detail.to_string(),
+            permissions,
+        );
     }
     // 批准之后再看一次 Stop：入口那道闸门是等待之前取的，理由同 `browser_open_tool`。
     if permissions.cancelled() {
-        let detail =
-            "This run was stopped after the approval, so nothing was captured.".to_string();
-        permissions.record_external(AgentExternalAction {
-            kind: "computer_capture_cancelled".to_string(),
-            target: approved.target.title.clone(),
-            detail: detail.clone(),
-        });
-        return Err(detail);
+        return refuse_external(
+            "computer_capture_cancelled",
+            &approved.target.title,
+            "This run was stopped after the approval, so nothing was captured.".to_string(),
+            permissions,
+        );
     }
 
     let approved_title = approved.target.title.clone();
-    let captured = tokio::task::spawn_blocking(move || {
+    let captured = match tokio::task::spawn_blocking(move || {
         crate::services::capture::capture_approved_window(&approved)
     })
     .await
-    // 阻塞任务 panic 了就当截图失败：这里不该把整个运行拖下去
-    .map_err(|error| format!("The capture task did not finish: {}", error))?;
+    {
+        Ok(captured) => captured,
+        Err(error) => {
+            return record_capture_failure(
+                format!("The capture task did not finish: {}", error),
+                permissions,
+            )
+        }
+    };
     let capture = match captured {
         Ok(capture) => capture,
-        Err(error) => {
-            // 失败也记：被拒的原因里包含"命中了几个窗口"这类信息，而用户有权知道
-            // 模型试过截图。目标只写 `desktop`，不写它想截哪个窗口 —— 那句话本身
-            // 就可能是一条未授权的披露。
-            permissions.record_external(AgentExternalAction {
-                kind: "computer_capture_failed".to_string(),
-                target: "desktop".to_string(),
-                detail: error.clone(),
-            });
-            return Err(error);
-        }
+        // 这一步的失败是窗口已关、句柄换了应用、或者 PrintWindow / GetDIBits 本身失败。
+        // 目标仍然只写 `desktop`：一次没截成的调用不该把窗口名留在记录里。
+        Err(error) => return record_capture_failure(error, permissions),
     };
 
     let bytes = capture.png.len();
     if bytes > crate::services::images::MAX_IMAGE_BYTES {
-        let detail = format!(
-            "That window encodes to {} bytes of PNG, past the {} byte per-image limit. Capture a smaller window.",
-            bytes,
-            crate::services::images::MAX_IMAGE_BYTES
+        return record_capture_failure(
+            format!(
+                "That window encodes to {} bytes of PNG, past the {} byte per-image limit. Capture a smaller window.",
+                bytes,
+                crate::services::images::MAX_IMAGE_BYTES
+            ),
+            permissions,
         );
-        permissions.record_external(AgentExternalAction {
-            kind: "computer_capture_failed".to_string(),
-            target: "desktop".to_string(),
-            detail: detail.clone(),
-        });
-        return Err(detail);
     }
     // 顺序和 `read_image_tool` 一致：先解析、再记账。解析失败就还没花额度 —— 反过来
     // 会让一次失败的截图吃掉别的图的预算，而这一条要么两处都对，要么就是两套规则。
     let image = match crate::services::images::image_part_from_bytes("capture.png", &capture.png) {
         Ok(image) => image,
-        Err(error) => {
-            permissions.record_external(AgentExternalAction {
-                kind: "computer_capture_failed".to_string(),
-                target: "desktop".to_string(),
-                detail: error.clone(),
-            });
-            return Err(error);
-        }
+        Err(error) => return record_capture_failure(error, permissions),
     };
     if let Err(error) = permissions.charge_image_bytes(bytes) {
-        permissions.record_external(AgentExternalAction {
-            kind: "computer_capture_failed".to_string(),
-            target: "desktop".to_string(),
-            detail: error.clone(),
-        });
-        return Err(error);
+        return record_capture_failure(error, permissions);
     }
 
     permissions.record_image(image);
-    // 标题在等批准的这段时间里可能变了（切了标签页、未读数跳了）。窗口身份靠句柄认，
-    // 所以这不算截错了窗口 —— 但记录必须说的是**截到的**那个标题，两者不同就都写出来，
-    // 否则复盘的人会以为他批准的就是最后送出去的内容。
-    let title_note = if capture.title == approved_title {
+    // 标题在等批准的这段时间里可能变了（切了标签页、未读数跳了）。窗口身份靠句柄和 pid
+    // 认，所以这不算截错了窗口 —— 但记录必须说的是**截到的**那个标题，两者不同就都写
+    // 出来，否则复盘的人会以为他批准的就是最后送出去的内容。
+    let title_note = if capture.target.title == approved_title {
         String::new()
     } else {
         format!(" (approved as \"{}\")", approved_title)
     };
     permissions.record_external(AgentExternalAction {
         kind: "computer_capture".to_string(),
-        target: capture.app.clone(),
+        target: capture.target.app.clone(),
         detail: format!(
             "Captured the contents of \"{}\"{} ({}) at {}x{} and sent it to the model ({} bytes of PNG). A screenshot cannot be taken back.",
-            capture.title, title_note, capture.app, capture.width, capture.height, bytes
+            capture.target.title,
+            title_note,
+            capture.target.app,
+            capture.target.width,
+            capture.target.height,
+            bytes
         ),
     });
     Ok(format!(
         "Captured \"{}\" ({}) at {}x{} and attached it to this turn ({} bytes of PNG).",
-        capture.title, capture.app, capture.width, capture.height, bytes
+        capture.target.title,
+        capture.target.app,
+        capture.target.width,
+        capture.target.height,
+        bytes
     ))
 }
 
@@ -2733,6 +2745,39 @@ mod tests {
         assert!(answer.await.unwrap(), "批准应该送到了");
 
         assert!(error.contains("stopped"), "{}", error);
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_open_cancelled");
+    }
+
+    /// Stop 落在入口闸门之后、批准请求登记之前时，不能弹框、也不能挂到超时。
+    ///
+    /// 这个缝是 Stop 的两步（拉开关 + 拒掉挂起请求）之间的空档：`refuse_all` 已经跑完，
+    /// 这条刚登记上的请求没有人会拒。少了 `ask` 里登记之后那次复查，界面已经回到空闲，
+    /// 而这次工具调用要挂满两分钟，记录里也不会有任何痕迹。
+    #[tokio::test]
+    async fn a_stop_before_the_prompt_neither_asks_nor_waits() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let registry = crate::agent::approval::ApprovalRegistry::new();
+        let mut granted = approving_permissions(&events, &registry);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        granted.adopt_cancel(cancel);
+
+        let error = browser_open_tool("http://127.0.0.1:1420/index.html", &granted)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            crate::agent::approval::ApprovalOutcome::Cancelled
+                .refusal_detail()
+                .expect("拒绝一定有说法")
+        );
+        // 没问就不该有框
+        assert_eq!(
+            events.count(crate::agent::approval::APPROVAL_REQUESTED_EVENT),
+            0
+        );
         let actions = granted.take_external_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "browser_open_cancelled");
