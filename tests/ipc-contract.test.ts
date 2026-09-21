@@ -250,7 +250,29 @@ describe("approval op types", () => {
                 /ApprovalRequest::new\(\s*"([a-z0-9_]+)"/g,
                 /ApprovalRequest::new\(\s*([A-Z][A-Z0-9_]*)\s*,/g
             ),
+            ...pointerOpTypes(),
         ];
+    }
+
+    /**
+     * 指针输入那条路径的 opType 不是字面量：点击、双击、右键、滚轮共用一个函数，动作类型
+     * 由 `Gesture::record_kind` 给出，所以上面两条正则一个都匹配不到它。
+     *
+     * 多一条规则跟着这个间接层走，而不是为了好扫描把代码改回四份复制 —— 但下面的前提断言
+     * 才是真正的保险：这条规则失效时，`toContain` 会红，而不是安静地少扫两个名字。
+     */
+    function pointerOpTypes(): string[] {
+        const names = new Set<string>();
+        for (const source of rustSources()) {
+            const body = source.match(/fn record_kind\(&self\)[\s\S]*?\n    \}/);
+            if (!body) {
+                continue;
+            }
+            for (const match of body[0].matchAll(/"([a-z0-9_]+)"/g)) {
+                names.add(match[1]);
+            }
+        }
+        return [...names];
     }
 
     it("the frontend understands every op type the backend asks approval for", () => {
@@ -260,6 +282,8 @@ describe("approval op types", () => {
         expect(ops.length).toBeGreaterThan(0);
         expect(ops).toContain("browser_open");
         expect(ops).toContain("computer_capture");
+        expect(ops).toContain("computer_click");
+        expect(ops).toContain("computer_scroll");
 
         const unknown = ops.filter((op) => (normalizeDestructiveOpType(op) === "unknown"));
         expect(
@@ -268,6 +292,7 @@ describe("approval op types", () => {
         ).toEqual([]);
     });
 });
+
 
 /**
  * 第四种没人把关的名字：**内置工具**。
@@ -300,6 +325,8 @@ describe("built-in tool documentation", () => {
         // 前提检查：解析失效时这条测试会以"全部通过"的方式静默死掉
         expect(tools.length, "the scanner found no workspace_* tool constants").toBeGreaterThan(10);
         expect(tools).toContain("workspace_computer_click");
+        expect(tools).toContain("workspace_computer_scroll");
+
 
         const security = readFileSync("SECURITY.md", "utf8");
         const undocumented = tools.filter((name) => !security.includes(name));

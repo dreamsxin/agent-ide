@@ -6,6 +6,7 @@ const OP_LABELS: Record<string, string> = {
   browser_read_page: "Page Reading",
   computer_capture: "Window Capture",
   computer_click: "Window Click",
+  computer_scroll: "Window Scroll",
 };
 
 const OP_ICONS: Record<string, string> = {
@@ -13,7 +14,9 @@ const OP_ICONS: Record<string, string> = {
   browser_read_page: "\u{1F4C4}",
   computer_capture: "\u{1F4F8}",
   computer_click: "\u{1F5B1}",
+  computer_scroll: "\u{1F503}",
 };
+
 
 /**
  * 逐动作批准的提示框。

@@ -40,6 +40,9 @@ pub const COMPUTER_WINDOWS: &str = "workspace_computer_windows";
 pub const COMPUTER_CAPTURE: &str = "workspace_computer_capture";
 /// 往批准过的窗口里点一下。坐标只能对着一张已经截过的图给，见 `CaptureFrame`。
 pub const COMPUTER_CLICK: &str = "workspace_computer_click";
+/// 在批准过的窗口里滚一下轮。和点击同一档授权（都是撤不回的指针输入），单独一个工具只是
+/// 因为参数不同 —— 滚动要格数，点击要动作名。
+pub const COMPUTER_SCROLL: &str = "workspace_computer_scroll";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -800,15 +803,17 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         definitions.push(ToolDefinition {
             name: COMPUTER_CLICK.to_string(),
             description: format!(
-                "Click once, with the left mouse button, inside a window you have already \
-                 captured. Only windows of these apps can be clicked: {}. You must pass the \
-                 'frame' id printed by {}, plus 'x' and 'y' in pixels of that captured image, \
-                 measured from its top-left corner — there is no way to click a window you have \
-                 not looked at. The window is brought to the front and the click is refused if it \
-                 cannot be, if the window has been resized since the capture, or if its handle now \
-                 belongs to a different window. The user is shown the window and the coordinates \
-                 and must approve each click; a click cannot be undone — it can submit a form, \
-                 accept a dialog, or delete something.",
+                "Click inside a window you have already captured. Only windows of these apps can \
+                 be clicked: {}. You must pass the 'frame' id printed by {}, plus 'x' and 'y' in \
+                 pixels of that captured image, measured from its top-left corner — there is no \
+                 way to click a window you have not looked at. 'action' selects the gesture: \
+                 \"click\" (default, left button), \"double_click\", or \"right_click\" which opens \
+                 the context menu. The window is brought to the front and the call is refused if \
+                 it cannot be, if the window has been resized since the capture, if something is \
+                 covering that point, or if its handle now belongs to a different window. The user \
+                 is shown the window, the gesture and the coordinates and must approve each call; \
+                 this cannot be undone — it can submit a form, accept a dialog, or delete \
+                 something.",
                 permissions.input_apps.join(", "),
                 COMPUTER_CAPTURE
             ),
@@ -826,9 +831,50 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                     "y": {
                         "type": "integer",
                         "description": "Pixels from the top edge of that captured image"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["click", "double_click", "right_click"],
+                        "description": "Which gesture to send; defaults to a single left click"
                     }
                 },
                 "required": ["frame", "x", "y"]
+            }),
+        });
+        definitions.push(ToolDefinition {
+            name: COMPUTER_SCROLL.to_string(),
+            description: format!(
+                "Scroll the mouse wheel over a point inside a window you have already captured, \
+                 the same way {} works: pass the 'frame' id, 'x' and 'y' in pixels of that image, \
+                 plus 'notches' — positive scrolls up (away from you), negative scrolls down. At \
+                 most 10 notches per call, so ask again for the rest; every call needs its own \
+                 approval. Only windows of these apps can be scrolled: {}. Capture the window \
+                 again afterwards to see what is now on screen — this tool does not report the \
+                 result.",
+                COMPUTER_CLICK,
+                permissions.input_apps.join(", ")
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "frame": {
+                        "type": "string",
+                        "description": "Frame id from a previous workspace_computer_capture"
+                    },
+                    "x": {
+                        "type": "integer",
+                        "description": "Pixels from the left edge of that captured image"
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Pixels from the top edge of that captured image"
+                    },
+                    "notches": {
+                        "type": "integer",
+                        "description": "Wheel notches: positive scrolls up, negative scrolls down, 1..10"
+                    }
+                },
+                "required": ["frame", "x", "y", "notches"]
             }),
         });
     }
@@ -913,7 +959,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             BROWSER_READ_PAGE => self.permissions.allows_page_read(),
             COMPUTER_WINDOWS => self.permissions.allows_computer(),
             COMPUTER_CAPTURE => self.permissions.allows_capture(),
-            COMPUTER_CLICK => self.permissions.allows_input(),
+            COMPUTER_CLICK | COMPUTER_SCROLL => self.permissions.allows_input(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -946,6 +992,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                     | COMPUTER_WINDOWS
                     | COMPUTER_CAPTURE
                     | COMPUTER_CLICK
+                    | COMPUTER_SCROLL
             );
             if side_effecting {
                 let detail = format!(
@@ -963,12 +1010,19 @@ impl ToolInvoker for WorkspaceToolInvoker {
                         | COMPUTER_WINDOWS
                         | COMPUTER_CAPTURE
                         | COMPUTER_CLICK
+                        | COMPUTER_SCROLL
                 ) {
                     self.permissions.record_external(AgentExternalAction {
                         kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
                         target: string_arg(&args, "url")
                             .unwrap_or(
-                                if matches!(tool_name, COMPUTER_WINDOWS | COMPUTER_CAPTURE) {
+                                if matches!(
+                                    tool_name,
+                                    COMPUTER_WINDOWS
+                                        | COMPUTER_CAPTURE
+                                        | COMPUTER_CLICK
+                                        | COMPUTER_SCROLL
+                                ) {
                                     "desktop"
                                 } else {
                                     "chrome"
@@ -1047,13 +1101,45 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 .await
             }
             COMPUTER_CLICK => {
-                computer_click_tool(
-                    string_arg(&args, "frame"),
-                    u32_arg(&args, "x"),
-                    u32_arg(&args, "y"),
-                    &self.permissions,
-                )
-                .await
+                // 动作名先解析：不认识的名字要在任何授权检查之前就拒掉，而且**不能**退回
+                // 左键 —— 模型想开右键菜单而我们真点了一下，是一次谁也没批准过的动作。
+                match crate::services::input::Gesture::from_click_action(string_arg(
+                    &args, "action",
+                )) {
+                    Ok(gesture) => {
+                        computer_pointer_tool(
+                            string_arg(&args, "frame"),
+                            u32_arg(&args, "x"),
+                            u32_arg(&args, "y"),
+                            gesture,
+                            &self.permissions,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            COMPUTER_SCROLL => {
+                match i32_arg(&args, "notches")
+                    .ok_or_else(|| {
+                        "A scroll needs 'notches' as a whole number: positive scrolls up, \
+                         negative scrolls down."
+                            .to_string()
+                    })
+                    .and_then(crate::services::input::check_scroll_notches)
+                {
+                    Ok(notches) => {
+                        computer_pointer_tool(
+                            string_arg(&args, "frame"),
+                            u32_arg(&args, "x"),
+                            u32_arg(&args, "y"),
+                            crate::services::input::Gesture::Scroll { notches },
+                            &self.permissions,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
@@ -1095,6 +1181,21 @@ fn u32_arg(args: &serde_json::Value, key: &str) -> Option<u32> {
         .as_str()
         .map(str::trim)
         .and_then(|text| text.parse::<u32>().ok())
+}
+
+/// 取一个可正可负的整数参数。
+///
+/// 滚轮的方向就藏在符号里，所以这个参数不能像坐标那样只收非负数。同样接受数字字符串，
+/// 理由同 `u32_arg`。
+fn i32_arg(args: &serde_json::Value, key: &str) -> Option<i32> {
+    let value = args.get(key)?;
+    if let Some(number) = value.as_i64() {
+        return i32::try_from(number).ok();
+    }
+    value
+        .as_str()
+        .map(str::trim)
+        .and_then(|text| text.parse::<i32>().ok())
 }
 
 /// 凭据文件对 Agent 一律不可读。
@@ -2187,53 +2288,60 @@ async fn computer_capture_tool(
     ))
 }
 
-/// 往一帧截图上点一下。
+/// 往一帧截图上做一次鼠标动作：点击、双击、右键，或者滚轮。
 ///
 /// 授权是**第五对**（开关 + 点击清单），不复用截图那一对：看见窗口存在、读到窗口内容、
 /// 往窗口里动手，是三件不同性质的事，而这一件撤不回。
 ///
+/// 四种手势共用这一条路，而不是各写一份：授权、帧绑定、身份复核、批准、Stop 这五道关卡
+/// 对右键和滚轮和左键一样重要，复制一份的代价是其中某一道在某一支上被漏掉 —— 而漏掉的
+/// 那一支照样能把东西点掉。
+///
 /// 坐标只能对着一帧已经截过的图给，窗口由那一帧决定 —— 不接受筛选条件。这条是整套设计
 /// 的核心：`browser_read_page` 那边"按条件再找一遍"的教训在点击上代价更大（点错窗口的
 /// 那一下会落在别人的确认框上），而帧把"你看到的"和"你点的"绑成了同一个东西。
-async fn computer_click_tool(
+async fn computer_pointer_tool(
     frame_id: Option<&str>,
     x: Option<u32>,
     y: Option<u32>,
+    gesture: crate::services::input::Gesture,
     permissions: &WorkspaceToolPermissions,
 ) -> Result<String, String> {
+    // 记录类型、批准框里的动作名、返回给模型的那句话，全部从这一个手势推出来。
+    let kind = gesture.record_kind();
+    let refused = format!("{}_refused", kind);
+    let what = gesture.describe();
     if !permissions.allows_input() {
         return refuse_external(
-            "computer_click_refused",
+            &refused,
             "desktop",
-            "Clicking a desktop window is not authorized for this run, or no app is allowed."
+            "Sending mouse input to a desktop window is not authorized for this run, or no app is \
+             allowed."
                 .to_string(),
             permissions,
         );
     }
     let (Some(frame_id), Some(x), Some(y)) = (frame_id, x, y) else {
         return refuse_external(
-            "computer_click_refused",
+            &refused,
             "desktop",
-            "A click needs a frame id plus x and y as whole numbers of pixels in that captured \
-             image."
+            "This needs a frame id plus x and y as whole numbers of pixels in that captured image."
                 .to_string(),
             permissions,
         );
     };
     let frame = match permissions.frame(frame_id) {
         Ok(frame) => frame,
-        Err(error) => {
-            return refuse_external("computer_click_refused", "desktop", error, permissions)
-        }
+        Err(error) => return refuse_external(&refused, "desktop", error, permissions),
     };
     // 清单对**这一帧的应用**再查一遍。帧是截图那一档授权造出来的，两份清单可以不一样 ——
     // 不查的话，"允许截 Signal"就顺带变成了"允许点 Signal"。
     if !crate::services::computer::app_allowed(&frame.app, &permissions.input_apps) {
         return refuse_external(
-            "computer_click_refused",
+            &refused,
             "desktop",
             format!(
-                "\"{}\" is not in this run's list of clickable apps, so nothing was clicked.",
+                "\"{}\" is not in this run's list of clickable apps, so nothing was sent.",
                 frame.app
             ),
             permissions,
@@ -2241,48 +2349,44 @@ async fn computer_click_tool(
     }
     if let Err(error) = crate::services::input::check_click_inside(frame.width, frame.height, x, y)
     {
-        return refuse_external("computer_click_refused", "desktop", error, permissions);
+        return refuse_external(&refused, "desktop", error, permissions);
     }
 
     let request = crate::agent::approval::ApprovalRequest::new(
-        "computer_click",
-        "Click inside a window",
+        kind,
+        "Send mouse input to a window",
         format!(
-            "The agent wants to click at ({}, {}) in \"{}\"",
-            x, y, frame.title
+            "The agent wants to send {} at ({}, {}) in \"{}\"",
+            what, x, y, frame.title
         ),
         format!(
-            "{} — the window will be brought to the front and a single left click will be sent to \
-             that point. A click cannot be undone: it can submit a form, accept a dialog, or \
-             delete something.",
-            frame.app
+            "{} — the window will be brought to the front and {} will be sent to that point. This \
+             cannot be undone: it can submit a form, accept a dialog, or delete something.",
+            frame.app, what
         ),
     );
     let outcome = permissions.require_approval(&request).await;
+    // 每一条**没成功**的记录也要带上瞄的是哪里和想做什么。只写应用名的话，事后从记录里根本
+    // 重建不出这次尝试 —— 而"它当时想干什么"恰好是用户唯一想知道的事。
+    let aimed_at = format!(
+        "Aimed {} at ({}, {}) in \"{}\" on the {}x{} frame captured earlier.",
+        what, x, y, frame.title, frame.width, frame.height
+    );
     if let Some(detail) = outcome.refusal_detail() {
         return refuse_external(
-            &format!("computer_click{}", outcome.record_suffix()),
+            &format!("{}{}", kind, outcome.record_suffix()),
             &frame.app,
-            format!(
-                "{} Aimed at ({}, {}) in \"{}\" on the {}x{} frame captured earlier.",
-                detail, x, y, frame.title, frame.width, frame.height
-            ),
+            format!("{} {}", detail, aimed_at),
             permissions,
         );
     }
-    // 每一条**没成功**的记录也要带上瞄的是哪里。只写应用名的话，事后从记录里根本重建不出
-    // 这次尝试 —— 而"它当时想点哪"恰好是用户唯一想知道的事。
-    let aimed_at = format!(
-        "Aimed at ({}, {}) in \"{}\" on the {}x{} frame captured earlier.",
-        x, y, frame.title, frame.width, frame.height
-    );
     // 批准之后再看一次 Stop，理由同 `browser_open_tool`：入口那道闸门是等待之前取的。
     if permissions.cancelled() {
         return refuse_external(
-            "computer_click_cancelled",
+            &format!("{}_cancelled", kind),
             &frame.app,
             format!(
-                "This run was stopped after the approval, so nothing was clicked. {}",
+                "This run was stopped after the approval, so nothing was sent. {}",
                 aimed_at
             ),
             permissions,
@@ -2309,12 +2413,12 @@ async fn computer_click_tool(
         current.as_ref(),
         current_pid,
         current_class.as_deref(),
-        "nothing was clicked",
+        "nothing was sent",
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
             return refuse_external(
-                "computer_click_failed",
+                &format!("{}_failed", kind),
                 &frame.app,
                 format!("{} {}", error, aimed_at),
                 permissions,
@@ -2326,24 +2430,24 @@ async fn computer_click_tool(
     let (frame_width, frame_height) = (frame.width, frame.height);
     // 阻塞任务：`SetForegroundWindow` 和 `SendInput` 都是同步的 Win32 调用，而这里在
     // 异步执行器上 —— 和截图那条路径同一个理由。
-    let clicked = match tokio::task::spawn_blocking(move || {
-        crate::services::input::click_in_window(handle, frame_width, frame_height, x, y)
+    let sent = match tokio::task::spawn_blocking(move || {
+        crate::services::input::send_gesture(handle, frame_width, frame_height, x, y, gesture)
     })
     .await
     {
-        Ok(clicked) => clicked,
+        Ok(sent) => sent,
         Err(error) => {
             return refuse_external(
-                "computer_click_failed",
+                &format!("{}_failed", kind),
                 &frame.app,
-                format!("The click task did not finish: {}. {}", error, aimed_at),
+                format!("The input task did not finish: {}. {}", error, aimed_at),
                 permissions,
             )
         }
     };
-    if let Err(error) = clicked {
+    if let Err(error) = sent {
         return refuse_external(
-            "computer_click_failed",
+            &format!("{}_failed", kind),
             &frame.app,
             format!("{} {}", error, aimed_at),
             permissions,
@@ -2359,18 +2463,18 @@ async fn computer_click_tool(
         format!(" (approved as \"{}\")", frame.title)
     };
     permissions.record_external(AgentExternalAction {
-        kind: "computer_click".to_string(),
+        kind: kind.to_string(),
         target: frame.app.clone(),
         detail: format!(
-            "Clicked at ({}, {}) in \"{}\"{} ({}), on the {}x{} frame captured earlier. A click \
+            "Sent {} at ({}, {}) in \"{}\"{} ({}), on the {}x{} frame captured earlier. This \
              cannot be undone.",
-            x, y, resolved.title, retitled, frame.app, frame.width, frame.height
+            what, x, y, resolved.title, retitled, frame.app, frame.width, frame.height
         ),
     });
     Ok(format!(
-        "Clicked at ({}, {}) in \"{}\"{}. Capture the window again to see what changed — this \
-         tool does not report the result of the click.",
-        x, y, resolved.title, retitled
+        "Sent {} at ({}, {}) in \"{}\"{}. Capture the window again to see what changed — this tool \
+         does not report the result.",
+        what, x, y, resolved.title, retitled
     ))
 }
 
@@ -2451,6 +2555,9 @@ pub fn attach_workspace_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 只有 Windows 上才有指针输入那条路径的测试
+    #[cfg(windows)]
+    use crate::services::input::Gesture;
     use uuid::Uuid;
 
     /// 测试里"没有被取消"的开关。
@@ -3501,25 +3608,32 @@ mod tests {
     /// 的事，而后者撤不回。
     #[test]
     fn clicking_needs_its_own_switch_and_its_own_allowlist() {
-        let advertises = |permissions: &WorkspaceToolPermissions| {
+        let advertises = |permissions: &WorkspaceToolPermissions, tool: &str| {
             tool_definitions(permissions)
                 .into_iter()
-                .any(|definition| definition.name == COMPUTER_CLICK)
+                .any(|definition| definition.name == tool)
         };
 
         let capture_only =
             WorkspaceToolPermissions::default().with_capture(true, vec!["chrome.exe".to_string()]);
-        assert!(!advertises(&capture_only));
-        assert!(!WorkspaceToolInvoker::without_logging(capture_only).handles(COMPUTER_CLICK));
+        assert!(!advertises(&capture_only, COMPUTER_CLICK));
+        assert!(!advertises(&capture_only, COMPUTER_SCROLL));
+        let capture_only = WorkspaceToolInvoker::without_logging(capture_only);
+        assert!(!capture_only.handles(COMPUTER_CLICK));
+        // 滚轮走的是同一档授权，所以同一条闸门也要挡住它 —— 加工具忘了加闸门是这条链上
+        // 已经出过的错
+        assert!(!capture_only.handles(COMPUTER_SCROLL));
 
         // 开关给了但清单空着，仍然不放行
         let switch_only = WorkspaceToolPermissions::default().with_input(true, Vec::new());
-        assert!(!advertises(&switch_only));
+        assert!(!advertises(&switch_only, COMPUTER_CLICK));
+        assert!(!advertises(&switch_only, COMPUTER_SCROLL));
 
         let granted =
             WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
         // 只有 Windows 上有实现，别的平台连通告都不该有 —— 一个永远失败的工具比没有更糟
-        assert_eq!(advertises(&granted), cfg!(windows));
+        assert_eq!(advertises(&granted, COMPUTER_CLICK), cfg!(windows));
+        assert_eq!(advertises(&granted, COMPUTER_SCROLL), cfg!(windows));
     }
 
     /// 一帧记下来的坐标系，用来喂点击那条路径上的测试。
@@ -3548,14 +3662,20 @@ mod tests {
         let granted =
             WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
 
-        let error = computer_click_tool(None, Some(10), Some(10), &granted)
+        let error = computer_pointer_tool(None, Some(10), Some(10), Gesture::Click, &granted)
             .await
             .unwrap_err();
         assert!(error.contains("frame id"), "{}", error);
 
-        let unknown = computer_click_tool(Some("frame-nope"), Some(10), Some(10), &granted)
-            .await
-            .unwrap_err();
+        let unknown = computer_pointer_tool(
+            Some("frame-nope"),
+            Some(10),
+            Some(10),
+            Gesture::Click,
+            &granted,
+        )
+        .await
+        .unwrap_err();
         assert!(unknown.contains("Capture the window first"), "{}", unknown);
 
         let actions = granted.take_external_actions();
@@ -3573,9 +3693,10 @@ mod tests {
             WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
         let frame = frame_of(&granted, "signal.exe");
 
-        let error = computer_click_tool(Some(&frame), Some(10), Some(10), &granted)
-            .await
-            .unwrap_err();
+        let error =
+            computer_pointer_tool(Some(&frame), Some(10), Some(10), Gesture::Click, &granted)
+                .await
+                .unwrap_err();
 
         assert!(error.contains("signal.exe"), "{}", error);
         assert!(error.contains("clickable"), "{}", error);
@@ -3590,18 +3711,110 @@ mod tests {
             WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
         let frame = frame_of(&granted, "chrome.exe");
 
-        let error = computer_click_tool(Some(&frame), Some(800), Some(10), &granted)
-            .await
-            .unwrap_err();
+        let error =
+            computer_pointer_tool(Some(&frame), Some(800), Some(10), Gesture::Click, &granted)
+                .await
+                .unwrap_err();
 
         assert!(error.contains("800x600"), "{}", error);
         assert_eq!(granted.take_external_actions().len(), 1);
     }
 
-    /// Stop 之后的点击在入口就被拒，记成 `_cancelled`。
+    /// 滚轮和点击共用同一条路，所以帧绑定这一条对它也要成立。
+    ///
+    /// 单独钉一条是因为它是**另一个工具名**：同一条代码路径上多挂一个入口，最容易漏的就是
+    /// 新入口没有走到那些检查 —— 而记录类型也必须是 `computer_scroll`，否则事后从记录里
+    /// 读不出当时到底做了什么。
     #[cfg(windows)]
     #[tokio::test]
-    async fn a_click_after_stop_is_refused_at_the_door() {
+    async fn a_scroll_without_a_frame_is_refused_and_recorded_as_a_scroll() {
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+
+        let error = computer_pointer_tool(
+            None,
+            Some(10),
+            Some(10),
+            Gesture::Scroll { notches: 3 },
+            &granted,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("frame id"), "{}", error);
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "computer_scroll_refused");
+    }
+
+    /// 越界的格数在**动手之前**就被拒，而且不是悄悄夹到上限。
+    ///
+    /// 走的是 `invoke` 而不是那个纯函数：这条钉的是"参数校验真的接在这个工具名上"。
+    /// 夹到 10 会让一次"滚 500 格"变成一次没人批准过的滚动；而 0 格报成功会让模型
+    /// 以为页面已经到底了。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_scroll_of_zero_or_too_many_notches_never_reaches_the_window() {
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+        let frame = frame_of(&granted, "chrome.exe");
+        let invoker = WorkspaceToolInvoker::without_logging(granted.clone());
+
+        for notches in ["0", "500", "-500"] {
+            let error = invoker
+                .invoke(
+                    COMPUTER_SCROLL,
+                    &format!(
+                        "{{\"frame\":\"{}\",\"x\":10,\"y\":10,\"notches\":{}}}",
+                        frame, notches
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("notches") || error.contains("nothing"),
+                "{}",
+                error
+            );
+        }
+        // 连批准框都没弹过，所以一条外部动作记录都不该有：这些都不是"尝试过"的动作
+        assert!(granted.take_external_actions().is_empty());
+    }
+
+    /// 不认识的动作名要拒绝，而不是退回左键。
+    ///
+    /// 走 `invoke`：解析发生在分派那一层，而"猜错的那一下"和"拒绝"在这里差的是一次
+    /// 撤不回的动作。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_unknown_click_action_never_becomes_a_left_click() {
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+        let frame = frame_of(&granted, "chrome.exe");
+        let invoker = WorkspaceToolInvoker::without_logging(granted.clone());
+
+        let error = invoker
+            .invoke(
+                COMPUTER_CLICK,
+                &format!(
+                    "{{\"frame\":\"{}\",\"x\":10,\"y\":10,\"action\":\"middle_click\"}}",
+                    frame
+                ),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("middle_click"), "{}", error);
+        assert!(granted.take_external_actions().is_empty());
+    }
+
+    /// Stop 之后的点击和滚动都在入口就被拒，记成 `_cancelled`，而且记在 `desktop` 名下。
+    ///
+    /// 目标那一栏原来落到了 `chrome`（默认分支给的是浏览器），也就是说事后翻记录会看到
+    /// 一条"对 chrome 的点击"，而那次点击瞄的可能是别的应用。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn pointer_input_after_stop_is_refused_at_the_door() {
         let mut granted =
             WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -3609,10 +3822,13 @@ mod tests {
         let invoker = WorkspaceToolInvoker::without_logging(granted.clone());
 
         assert!(invoker.invoke(COMPUTER_CLICK, "{}").await.is_err());
+        assert!(invoker.invoke(COMPUTER_SCROLL, "{}").await.is_err());
 
         let actions = granted.take_external_actions();
-        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].kind, "computer_click_cancelled");
+        assert_eq!(actions[1].kind, "computer_scroll_cancelled");
+        assert!(actions.iter().all(|action| action.target == "desktop"));
     }
 
     /// 参数是数字还是数字字符串都收，但负数和小数当缺失。

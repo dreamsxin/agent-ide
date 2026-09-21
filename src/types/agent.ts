@@ -309,7 +309,9 @@ export type DestructiveOpType =
   | "browser_open"
   | "browser_read_page"
   | "computer_capture"
-  | "computer_click";
+  | "computer_click"
+  | "computer_scroll";
+
 
 export interface DestructiveOpConfirm {
   id: string;
@@ -332,7 +334,9 @@ export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | 
     case "browser_read_page":
     case "computer_capture":
     case "computer_click":
+    case "computer_scroll":
       return value;
+
     default:
       return "unknown";
   }

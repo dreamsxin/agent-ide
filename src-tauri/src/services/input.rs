@@ -17,6 +17,88 @@
 //! capture、IME），发消息经常什么都不发生，而"点了但没反应"在这条链上是最坏的结果：
 //! 模型会重试。
 
+/// 往窗口里注入的那一下具体是什么。
+///
+/// 一个枚举而不是几个布尔参数（`right: bool, double: bool`）：那四种组合里"右键双击"在任何
+/// 界面里都没有意义，而用类型把它排除掉比在运行时判断它可靠。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gesture {
+    Click,
+    DoubleClick,
+    RightClick,
+    /// 滚轮。正数是向上（远离用户），和 Win32 `WHEEL_DELTA` 同向。
+    Scroll {
+        notches: i32,
+    },
+}
+
+impl Gesture {
+    /// 给批准框、记录和返回值用的人话。
+    ///
+    /// 三处共用一句：用户在框里看到的和事后在记录里读到的必须是同一件事，分开写迟早会分叉。
+    pub fn describe(&self) -> String {
+        match self {
+            Gesture::Click => "a left click".to_string(),
+            Gesture::DoubleClick => "a double left click".to_string(),
+            Gesture::RightClick => "a right click (opens the context menu)".to_string(),
+            Gesture::Scroll { notches } if *notches > 0 => {
+                format!("a scroll up by {} notch(es)", notches)
+            }
+            Gesture::Scroll { notches } => {
+                format!("a scroll down by {} notch(es)", notches.unsigned_abs())
+            }
+        }
+    }
+
+    /// 记录和批准框里用的动作类型名。
+    ///
+    /// 和 `describe()` 放在一起，是为了让"用户批准的那句话"和"事后记录里的那个类型"从同一
+    /// 个地方长出来：两边分开写的时候，滚动被记成 `computer_click` 这种事没人会发现。
+    pub fn record_kind(&self) -> &'static str {
+        match self {
+            Gesture::Click | Gesture::DoubleClick | Gesture::RightClick => "computer_click",
+            Gesture::Scroll { .. } => "computer_scroll",
+        }
+    }
+
+    /// 解析点击类动作的参数。
+    ///
+    /// 不认识的值要**拒绝**，不能退回左键：模型想右键而我们点了左键，在一个撤不回的动作上
+    /// 是最坏的一种猜。
+    pub fn from_click_action(action: Option<&str>) -> Result<Self, String> {
+        match action.unwrap_or("click") {
+            "click" => Ok(Gesture::Click),
+            "double_click" => Ok(Gesture::DoubleClick),
+            "right_click" => Ok(Gesture::RightClick),
+            other => Err(format!(
+                "\"{}\" is not a click action; use \"click\", \"double_click\" or \"right_click\".",
+                other
+            )),
+        }
+    }
+}
+
+/// 一次滚动能滚多少格。
+///
+/// 上限 10 格（约 30 行）：更多就该拆成几次调用，因为**每一次**都要人批准 —— 一个参数里
+/// 藏着"滚 500 格"等于把一次批准变成了无限授权。0 格拒绝而不是当成成功：什么都没发生却
+/// 报成功，模型会以为页面已经到底了。
+pub fn check_scroll_notches(notches: i32) -> Result<i32, String> {
+    if notches == 0 {
+        return Err("A scroll of 0 notches would do nothing.".to_string());
+    }
+    // `unsigned_abs` 而不是 `abs`：`i32::MIN.abs()` 在 debug 下直接 panic，而这个数是模型
+    // 从 JSON 里给进来的，一个越界参数不该把进程带走。
+    if notches.unsigned_abs() > 10 {
+        return Err(format!(
+            "{} notches is more than one approved scroll should move; 10 is the limit, so ask \
+             again for the rest.",
+            notches
+        ));
+    }
+    Ok(notches)
+}
+
 /// 一次点击的坐标是否落在那一帧里面。
 ///
 /// 上界是排他的：宽 800 的图上 x=800 是外面第一列。差一个像素在这里不是小事 ——
@@ -84,12 +166,14 @@ pub fn normalized_absolute(
 
 #[cfg(windows)]
 mod platform {
-    use super::{check_same_size, normalized_absolute};
+    use super::{check_same_size, normalized_absolute, Gesture};
     use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::WHEEL_DELTA;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
         SetCursorPos, SetForegroundWindow, WindowFromPoint, GA_ROOT, SM_CXVIRTUALSCREEN,
@@ -105,33 +189,37 @@ mod platform {
     const FOREGROUND_ATTEMPTS: u32 = 20;
     const FOREGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
-    /// 点一下用户批准过的那个窗口里的 (x, y)。
+    /// 在用户批准过的那个窗口里的 (x, y) 上做一次 `gesture`。
     ///
     /// 调用方**必须**先确认窗口身份（`ApprovedWindow::verify`）并检查坐标在帧内；这里只
     /// 负责置前、尺寸复核和真正那一下，因为这三件事只有在 Win32 这一侧才做得到。
     ///
     /// 顺序是：先置前 → 确认真的到了前台 → **再**量尺寸。反过来（先量再置前）会漏掉激活
     /// 本身带来的变化 —— 一个从最小化被激活的窗口，尺寸正是在那一刻才变回来的。
-    pub fn click_in_window(
+    ///
+    /// 所有手势走同一条路：置前、遮挡、归一化、指针复位这四件事对右键和滚轮和左键一样
+    /// 重要，分成几个函数只会让其中某一条在某一支上被漏掉。
+    pub fn send_gesture(
         handle: isize,
         frame_width: u32,
         frame_height: u32,
         x: u32,
         y: u32,
+        gesture: Gesture,
     ) -> Result<(), String> {
         let hwnd = handle as HWND;
         // SAFETY: `hwnd` 来自这次运行里刚刚 verify 过的窗口。
         // Win32 只在调用方拥有前台权限时才允许置前，所以这条在真实使用里会遇到。
         if unsafe { SetForegroundWindow(hwnd) } == 0 {
             return Err(
-                "Could not bring that window to the front, so the click was not sent — it would \
+                "Could not bring that window to the front, so nothing was sent — the input would \
                  have landed on whatever is on top of it."
                     .to_string(),
             );
         }
         if !wait_for_foreground(hwnd) {
             return Err(
-                "That window did not come to the front in time, so the click was not sent — it \
+                "That window did not come to the front in time, so nothing was sent — the input \
                  would have landed on whatever is still on top of it."
                     .to_string(),
             );
@@ -145,7 +233,7 @@ mod platform {
         };
         // SAFETY: `rect` 是本地变量，`hwnd` 同上。
         if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
-            return Err("Could not measure that window, so nothing was clicked.".to_string());
+            return Err("Could not measure that window, so nothing was sent.".to_string());
         }
         check_same_size(
             (
@@ -173,9 +261,9 @@ mod platform {
         };
         if root_under_point != hwnd {
             return Err(format!(
-                "Something is covering ({}, {}) in that window, so the click was not sent — it \
-                 would have gone to whatever is on top. Bring the window fully into view and \
-                 capture it again.",
+                "Something is covering ({}, {}) in that window, so nothing was sent — it would \
+                 have gone to whatever is on top. Bring the window fully into view and capture \
+                 it again.",
                 x, y
             ));
         }
@@ -196,34 +284,34 @@ mod platform {
         // SAFETY: `cursor_before` 是本地变量。
         let cursor_known = unsafe { GetCursorPos(&mut cursor_before) } != 0;
 
-        // 三个事件一次发：移动、按下、抬起。分三次 `SendInput` 的话，用户在中间那一刻
-        // 动一下真鼠标，按下和抬起就会发生在两个不同的位置 —— 那是一次拖拽，不是点击。
-        let mouse = |flags: u32, dx: i32, dy: i32| INPUT {
+        // 一个手势的所有事件一次发：分几次 `SendInput` 的话，用户在中间那一刻动一下真鼠标，
+        // 按下和抬起就会发生在两个不同的位置 —— 那是一次拖拽，不是点击；双击的两下也会
+        // 因为中间插进来的真实移动被系统当成两次单击。
+        let mouse = |flags: u32, data: i32, dx: i32, dy: i32| INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                 mi: MOUSEINPUT {
                     dx,
                     dy,
-                    mouseData: 0,
+                    // 滚轮的格数走这里；按键事件必须是 0，非 0 在按键事件上是"第几个 X 键"。
+                    mouseData: data as u32,
                     dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },
             },
         };
-        let mut events = [
-            mouse(absolute_flags(MOUSEEVENTF_MOVE), normalized_x, normalized_y),
-            mouse(
-                absolute_flags(MOUSEEVENTF_LEFTDOWN),
+        let mut events: Vec<INPUT> =
+            std::iter::once(mouse(
+                absolute_flags(MOUSEEVENTF_MOVE),
+                0,
                 normalized_x,
                 normalized_y,
-            ),
-            mouse(
-                absolute_flags(MOUSEEVENTF_LEFTUP),
-                normalized_x,
-                normalized_y,
-            ),
-        ];
+            ))
+            .chain(gesture_events(gesture).into_iter().map(|(flags, data)| {
+                mouse(absolute_flags(flags), data, normalized_x, normalized_y)
+            }))
+            .collect();
         // SAFETY: `events` 是本地数组，长度和 `INPUT` 的大小都按 Win32 要求传。
         let sent = unsafe {
             SendInput(
@@ -233,22 +321,29 @@ mod platform {
             )
         };
         if sent as usize != events.len() {
-            // 只送出去一部分的时候，左键可能正按着 —— 桌面会停在"拖拽中"。补一个抬起，
-            // 别把这个状态留给用户去猜。补得成不成都照样报失败。
-            let mut release = [mouse(absolute_flags(MOUSEEVENTF_LEFTUP), 0, 0)];
-            // SAFETY: 同上。
-            unsafe {
-                SendInput(
-                    release.len() as u32,
-                    release.as_mut_ptr(),
-                    std::mem::size_of::<INPUT>() as i32,
-                )
-            };
+            // 只送出去一部分的时候，这个手势按下的键可能正按着 —— 桌面会停在"拖拽中"。
+            // 补一个抬起，别把这个状态留给用户去猜。只补这个手势真的按过的键：给没按过的
+            // 键补一个抬起，本身就是一个凭空多出来的输入事件。补得成不成都照样报失败。
+            let mut release: Vec<INPUT> = buttons_to_release(gesture)
+                .into_iter()
+                .map(|flags| mouse(absolute_flags(flags), 0, normalized_x, normalized_y))
+                .collect();
+            if !release.is_empty() {
+                // SAFETY: 同上。
+                unsafe {
+                    SendInput(
+                        release.len() as u32,
+                        release.as_mut_ptr(),
+                        std::mem::size_of::<INPUT>() as i32,
+                    )
+                };
+            }
             return Err(format!(
-                "Only {} of {} input events were accepted; the click may be incomplete, and a \
-                 mouse-up was sent to make sure the button is not left held down.",
+                "Only {} of {} input events were accepted; {} may be incomplete, and any button \
+                 it pressed was released so it is not left held down.",
                 sent,
-                events.len()
+                events.len(),
+                gesture.describe()
             ));
         }
         if cursor_known {
@@ -267,6 +362,39 @@ mod platform {
     /// 自己的批准框。
     fn absolute_flags(base: u32) -> u32 {
         base | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    }
+
+    /// 一个手势展开成的 `(事件标志, mouseData)` 序列，移动那一下不算在内。
+    ///
+    /// 抽成纯函数是为了能断言它：模型要右键而我们发了左键，或者双击只发出去一下，在真实
+    /// 注入里只能靠人盯着屏幕才发现，而那时动作已经做了。
+    fn gesture_events(gesture: Gesture) -> Vec<(u32, i32)> {
+        match gesture {
+            Gesture::Click => vec![(MOUSEEVENTF_LEFTDOWN, 0), (MOUSEEVENTF_LEFTUP, 0)],
+            // 双击就是两次按下抬起。Win32 没有"双击事件"——是窗口自己按系统的双击间隔
+            // 把两下并起来的，所以这四个必须在同一个批次里，中间不能插进真实输入。
+            Gesture::DoubleClick => vec![
+                (MOUSEEVENTF_LEFTDOWN, 0),
+                (MOUSEEVENTF_LEFTUP, 0),
+                (MOUSEEVENTF_LEFTDOWN, 0),
+                (MOUSEEVENTF_LEFTUP, 0),
+            ],
+            Gesture::RightClick => vec![(MOUSEEVENTF_RIGHTDOWN, 0), (MOUSEEVENTF_RIGHTUP, 0)],
+            // 一格是 `WHEEL_DELTA`。直接传格数的话滚动量会小到几乎看不出来，模型会重试。
+            Gesture::Scroll { notches } => {
+                vec![(MOUSEEVENTF_WHEEL, notches * WHEEL_DELTA as i32)]
+            }
+        }
+    }
+
+    /// 这个手势按下过哪些键 —— 发送只完成一半时要补的抬起。
+    fn buttons_to_release(gesture: Gesture) -> Vec<u32> {
+        match gesture {
+            Gesture::Click | Gesture::DoubleClick => vec![MOUSEEVENTF_LEFTUP],
+            Gesture::RightClick => vec![MOUSEEVENTF_RIGHTUP],
+            // 滚轮不按任何键，补一个抬起等于凭空多发一个输入事件。
+            Gesture::Scroll { .. } => Vec::new(),
+        }
     }
 
     /// 轮询到那个窗口真的成为前台，或者等够了。
@@ -300,11 +428,70 @@ mod platform {
             // 基础事件不能被覆盖掉
             assert_ne!(flags & MOUSEEVENTF_LEFTDOWN, 0, "0x{:x}", flags);
         }
+
+        /// 每个手势发的键必须是它自己那一套。
+        ///
+        /// 右键发成左键、双击只发一下，都是"做了一件别的、撤不回的事"；而这条链上唯一
+        /// 会发现它的人是事后看屏幕的用户。
+        #[test]
+        fn each_gesture_sends_its_own_buttons() {
+            assert_eq!(
+                gesture_events(Gesture::Click),
+                vec![(MOUSEEVENTF_LEFTDOWN, 0), (MOUSEEVENTF_LEFTUP, 0)]
+            );
+            assert_eq!(
+                gesture_events(Gesture::RightClick),
+                vec![(MOUSEEVENTF_RIGHTDOWN, 0), (MOUSEEVENTF_RIGHTUP, 0)]
+            );
+            // 双击是两下，不是一下
+            assert_eq!(gesture_events(Gesture::DoubleClick).len(), 4);
+            assert!(gesture_events(Gesture::DoubleClick)
+                .iter()
+                .all(|(flags, _)| *flags == MOUSEEVENTF_LEFTDOWN || *flags == MOUSEEVENTF_LEFTUP));
+            // 右键绝不能出现在左键手势里
+            for gesture in [Gesture::Click, Gesture::DoubleClick] {
+                assert!(gesture_events(gesture)
+                    .iter()
+                    .all(|(flags, _)| *flags != MOUSEEVENTF_RIGHTDOWN));
+            }
+        }
+
+        /// 滚轮要按 `WHEEL_DELTA` 换算，方向不能反。
+        ///
+        /// 直接把格数填进 `mouseData` 的话滚动量是 1/120，几乎看不出动，模型会反复重试；
+        /// 方向反了则是往相反的方向翻页。
+        #[test]
+        fn scrolling_is_measured_in_wheel_deltas() {
+            assert_eq!(
+                gesture_events(Gesture::Scroll { notches: 3 }),
+                vec![(MOUSEEVENTF_WHEEL, 3 * WHEEL_DELTA as i32)]
+            );
+            let (_, down) = gesture_events(Gesture::Scroll { notches: -2 })[0];
+            assert!(down < 0, "{}", down);
+        }
+
+        /// 只发出去一半时补的抬起，只能是这个手势真按过的键。
+        ///
+        /// 给没按过的键补抬起，本身就是一个凭空多出来的输入事件 —— 它可能刚好完成用户
+        /// 自己按着的那一下。
+        #[test]
+        fn only_the_buttons_a_gesture_pressed_are_released() {
+            assert_eq!(buttons_to_release(Gesture::Click), vec![MOUSEEVENTF_LEFTUP]);
+            assert_eq!(
+                buttons_to_release(Gesture::DoubleClick),
+                vec![MOUSEEVENTF_LEFTUP]
+            );
+            assert_eq!(
+                buttons_to_release(Gesture::RightClick),
+                vec![MOUSEEVENTF_RIGHTUP]
+            );
+            assert!(buttons_to_release(Gesture::Scroll { notches: 1 }).is_empty());
+        }
     }
 }
 
 #[cfg(windows)]
-pub use platform::click_in_window;
+pub use platform::send_gesture;
 
 /// 非 Windows 上没有实现。
 ///
@@ -312,14 +499,15 @@ pub use platform::click_in_window;
 /// 连通告都没有。留着它是为了让这个模块在所有平台上都能编译，而不是靠 `cfg` 把整块
 /// 代码从视野里藏起来。
 #[cfg(not(windows))]
-pub fn click_in_window(
+pub fn send_gesture(
     _handle: isize,
     _frame_width: u32,
     _frame_height: u32,
     _x: u32,
     _y: u32,
+    _gesture: Gesture,
 ) -> Result<(), String> {
-    Err("Clicking a desktop window is only implemented on Windows.".to_string())
+    Err("Sending mouse input to a desktop window is only implemented on Windows.".to_string())
 }
 
 #[cfg(test)]
@@ -377,6 +565,58 @@ mod tests {
         assert!(error.contains("800x600"), "{}", error);
         assert!(error.contains("capture it again"), "{}", error);
     }
+
+    /// 不认识的动作名要拒绝，不能退回左键。
+    ///
+    /// 退回左键意味着模型想打开右键菜单而我们真的点了一下那个位置上的东西 —— 在一个撤不回
+    /// 的动作上，猜错比拒绝贵得多。
+    #[test]
+    fn an_unknown_click_action_is_refused_instead_of_falling_back() {
+        assert_eq!(Gesture::from_click_action(None).unwrap(), Gesture::Click);
+        assert_eq!(
+            Gesture::from_click_action(Some("click")).unwrap(),
+            Gesture::Click
+        );
+        assert_eq!(
+            Gesture::from_click_action(Some("double_click")).unwrap(),
+            Gesture::DoubleClick
+        );
+        assert_eq!(
+            Gesture::from_click_action(Some("right_click")).unwrap(),
+            Gesture::RightClick
+        );
+
+        let error = Gesture::from_click_action(Some("middle_click")).unwrap_err();
+        assert!(error.contains("middle_click"), "{}", error);
+        // 错误里要列出可用的名字，否则模型只能继续猜
+        assert!(error.contains("double_click"), "{}", error);
+    }
+
+    /// 批准框里那句话和记录里那句话是同一句，而且认得出方向。
+    #[test]
+    fn every_gesture_describes_itself_in_words_a_person_can_approve() {
+        assert!(Gesture::RightClick.describe().contains("right"));
+        assert!(Gesture::DoubleClick.describe().contains("double"));
+        assert!(Gesture::Scroll { notches: 3 }.describe().contains("up"));
+        let down = Gesture::Scroll { notches: -3 }.describe();
+        assert!(down.contains("down"), "{}", down);
+        // 方向是词而不是负号：批准框里"-3"读不出是往哪边
+        assert!(!down.contains("-3"), "{}", down);
+    }
+
+    /// 一次批准只能换一次有界的滚动。
+    ///
+    /// 0 格报成功会让模型以为已经滚到底；上限则是因为**每一次调用**才要人批准一次，
+    /// 一个参数里藏着"滚 500 格"等于把一次批准变成了无限授权。
+    #[test]
+    fn a_scroll_is_bounded_and_a_zero_scroll_is_refused() {
+        assert_eq!(check_scroll_notches(1).unwrap(), 1);
+        assert_eq!(check_scroll_notches(-10).unwrap(), -10);
+        assert!(check_scroll_notches(0).is_err());
+        assert!(check_scroll_notches(11).is_err());
+        assert!(check_scroll_notches(-11).is_err());
+        assert!(check_scroll_notches(i32::MIN).is_err());
+    }
 }
 
 /// 真的造一个窗口，真的点它，看它有没有收到。
@@ -387,10 +627,10 @@ mod tests {
 /// `SendInput`，测试会把走的是哪一支打出来 —— 覆盖率的真相要看得见，不能靠一句"有 e2e"。
 ///
 /// - 允许置前时：断言那个窗口确实收到了一次左键按下，落点在它的客户区里；
-/// - 拒绝置前时：断言 `click_in_window` **拒绝**了而不是硬发，且一下都没发出去。
+/// - 拒绝置前时：断言 `send_gesture` **拒绝**了而不是硬发，且一下都没发出去。
 #[cfg(all(test, windows))]
 mod injection_tests {
-    use super::click_in_window;
+    use super::{send_gesture, Gesture};
     use crate::services::computer::test_support::TestWindow;
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -401,7 +641,7 @@ mod injection_tests {
 
         // 点客户区中间偏上的一个点。坐标是**窗口矩形**相对的，和 `CaptureFrame` 一致。
         let (x, y) = (200_u32, 180_u32);
-        let outcome = click_in_window(window.handle, 480, 360, x, y);
+        let outcome = send_gesture(window.handle, 480, 360, x, y, Gesture::Click);
         // 留点时间让那一下走完消息队列
         std::thread::sleep(std::time::Duration::from_millis(300));
 

@@ -905,15 +905,17 @@ export default function SettingsPanel() {
             </div>
           )}
           <PermissionToggle
-            label="Window Click"
-            desc="Allow Agent to send one left click into a window it has captured (cannot be undone; each click needs your approval; needs an allowed app below, Windows only)"
+            label="Window Input"
+            desc="Allow Agent to click (left, double, right) and scroll inside a window it has captured (cannot be undone; every action needs your approval; needs an allowed app below, Windows only)"
             checked={permissions.allowComputerInput}
             onChange={() => togglePermission("allowComputerInput")}
           />
+
           {permissions.allowComputerInput && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="input-apps">
-                Clickable apps (one per line, `*` for any)
+                Clickable / scrollable apps (one per line, `*` for any)
+
               </label>
               <textarea
                 id="input-apps"
