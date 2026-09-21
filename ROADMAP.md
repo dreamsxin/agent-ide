@@ -1472,6 +1472,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Written down instead of fixed**: mixed-DPI multi-monitor is unverified. `GetWindowRect` and the `SM_*VIRTUALSCREEN` metrics share whatever DPI view the process has, so they should agree, but this has not been exercised on a scaled secondary monitor; the frame size check is what would catch a mismatch rather than a silent mis-click. Also unchanged: the foreground wait adds up to 500 ms before a click, which Stop cannot interrupt.
    - Rust 422 → 424.
 
+102. **The click is now tested by actually clicking something (2026-09-21)**
+   Both 100 and 101 listed the same gap: every click test was a pure function, so the suite could prove the coordinates were computed correctly and prove nothing about whether anything was ever sent. `a_click_reaches_the_window_it_was_aimed_at` closes it — it registers a window class whose `WndProc` records `WM_LBUTTONDOWN`, creates a real visible top-level window on a pump thread, and calls the production `click_in_window` from another thread (which is also the production shape: the clicked window belongs to someone else).
+   - **Both branches assert**, which is the point. If the session allows the foreground switch, it asserts the window received exactly one click and that the recorded client point is inside the client rect, with the horizontal offset within 32 px of the requested window-rect coordinate — that is the coordinate mapping, end to end, through `SendInput`. If the session refuses to let the window come forward, it asserts that `click_in_window` **refused** and that nothing was sent. A test that quietly passes when the environment is missing is the failure mode this repo keeps finding; this one has no such branch.
+   - **The assertion is "it landed in that window", not an exact pixel.** Border and caption thickness come from the system theme; pinning them would pin this machine. The 32 px horizontal tolerance is about the widest a left border gets.
+   - **It prints which path it took** (`injection path exercised` / `not exercised here`), so a future reader can tell from CI output whether the injection was really covered on that machine. On this machine it was: the window was clicked for real.
+   - Cost worth stating: the test briefly steals focus, and it needs `Win32_System_LibraryLoader` for `GetModuleHandleW`. It is the only test in the repo that touches the real desktop.
+   - Rust 424 → 425.
+
 
 
 

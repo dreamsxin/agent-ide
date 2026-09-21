@@ -211,6 +211,7 @@ What the backend enforces:
 - **Out-of-bounds coordinates are refused, not clamped**, and off-desktop screen points too — clamping turns a miscalculated click into a click in a corner, and corners have things in them.
 - **Move, down and up go in a single `SendInput` call**, so a user moving the real mouse mid-sequence cannot turn the click into a drag.
 - **Every attempt is recorded** as `computer_click` / `_refused` / `_cancelled` / `_failed`, with the coordinates, the window title at click time, and the frame size.
+- **The injection itself has a test that really clicks.** `a_click_reaches_the_window_it_was_aimed_at` creates a real window, calls the production path, and asserts the window received the click inside its client area — or, where the session refuses the foreground switch, asserts that the click was refused and nothing was sent. Everything else about this capability is covered by pure functions.
 
 What it does **not** do: no typing, no key presses, no right-click or double-click, no drag, no scrolling, and no reading of the result — after a click the model must capture the window again to see what happened. There is no full-screen coordinate space: every click is relative to one approved window.
 
