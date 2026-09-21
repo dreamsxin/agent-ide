@@ -2259,16 +2259,28 @@ async fn computer_click_tool(
         return refuse_external(
             &format!("computer_click{}", outcome.record_suffix()),
             &frame.app,
-            detail.to_string(),
+            format!(
+                "{} Aimed at ({}, {}) in \"{}\" on the {}x{} frame captured earlier.",
+                detail, x, y, frame.title, frame.width, frame.height
+            ),
             permissions,
         );
     }
+    // 每一条**没成功**的记录也要带上瞄的是哪里。只写应用名的话，事后从记录里根本重建不出
+    // 这次尝试 —— 而"它当时想点哪"恰好是用户唯一想知道的事。
+    let aimed_at = format!(
+        "Aimed at ({}, {}) in \"{}\" on the {}x{} frame captured earlier.",
+        x, y, frame.title, frame.width, frame.height
+    );
     // 批准之后再看一次 Stop，理由同 `browser_open_tool`：入口那道闸门是等待之前取的。
     if permissions.cancelled() {
         return refuse_external(
             "computer_click_cancelled",
             &frame.app,
-            "This run was stopped after the approval, so nothing was clicked.".to_string(),
+            format!(
+                "This run was stopped after the approval, so nothing was clicked. {}",
+                aimed_at
+            ),
             permissions,
         );
     }
@@ -2290,7 +2302,12 @@ async fn computer_click_tool(
     let resolved = match remembered.verify(current.as_ref(), current_pid, "nothing was clicked") {
         Ok(resolved) => resolved,
         Err(error) => {
-            return refuse_external("computer_click_failed", &frame.app, error, permissions)
+            return refuse_external(
+                "computer_click_failed",
+                &frame.app,
+                format!("{} {}", error, aimed_at),
+                permissions,
+            )
         }
     };
 
@@ -2308,28 +2325,41 @@ async fn computer_click_tool(
             return refuse_external(
                 "computer_click_failed",
                 &frame.app,
-                format!("The click task did not finish: {}", error),
+                format!("The click task did not finish: {}. {}", error, aimed_at),
                 permissions,
             )
         }
     };
     if let Err(error) = clicked {
-        return refuse_external("computer_click_failed", &frame.app, error, permissions);
+        return refuse_external(
+            "computer_click_failed",
+            &frame.app,
+            format!("{} {}", error, aimed_at),
+            permissions,
+        );
     }
 
+    // 标题在截图和点击之间可能变了（切了标签页、改了未读数）。批准框里写的是**截图时**的
+    // 标题，所以两者不同的时候两个都写出来 —— 否则记录和用户看过的那句话对不上，而它们说的
+    // 其实是同一个窗口。和截图那条路径一样的处理。
+    let retitled = if resolved.title == frame.title {
+        String::new()
+    } else {
+        format!(" (approved as \"{}\")", frame.title)
+    };
     permissions.record_external(AgentExternalAction {
         kind: "computer_click".to_string(),
         target: frame.app.clone(),
         detail: format!(
-            "Clicked at ({}, {}) in \"{}\" ({}), on the {}x{} frame captured earlier. A click \
+            "Clicked at ({}, {}) in \"{}\"{} ({}), on the {}x{} frame captured earlier. A click \
              cannot be undone.",
-            x, y, resolved.title, frame.app, frame.width, frame.height
+            x, y, resolved.title, retitled, frame.app, frame.width, frame.height
         ),
     });
     Ok(format!(
-        "Clicked at ({}, {}) in \"{}\". Capture the window again to see what changed — this tool \
-         does not report the result of the click.",
-        x, y, resolved.title
+        "Clicked at ({}, {}) in \"{}\"{}. Capture the window again to see what changed — this \
+         tool does not report the result of the click.",
+        x, y, resolved.title, retitled
     ))
 }
 

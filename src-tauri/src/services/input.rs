@@ -85,14 +85,15 @@ pub fn normalized_absolute(
 #[cfg(windows)]
 mod platform {
     use super::{check_same_size, normalized_absolute};
-    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetSystemMetrics, GetWindowRect, SetForegroundWindow,
-        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+        SetCursorPos, SetForegroundWindow, WindowFromPoint, GA_ROOT, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
     /// 等窗口真的到前台的时长上限，以及查一次的间隔。
@@ -153,15 +154,47 @@ mod platform {
             ),
             (frame_width, frame_height),
         )?;
+        let point_x = rect.left + x as i32;
+        let point_y = rect.top + y as i32;
+        // 前台 ≠ 没被挡住。置顶窗口（通知气泡、always-on-top 小工具）可以盖在一个"是前台"
+        // 的窗口上面，而 `SendInput` 打的是屏幕坐标 —— 那一下会进盖住它的那个窗口。所以在
+        // 发之前问一次"这个点现在属于谁"，这也顺带把置前确认和发送之间那点时间差压到最小。
+        // SAFETY: `WindowFromPoint` / `GetAncestor` 只读窗口管理器状态，没有出参。
+        let under_point = unsafe {
+            WindowFromPoint(POINT {
+                x: point_x,
+                y: point_y,
+            })
+        };
+        let root_under_point = if under_point.is_null() {
+            std::ptr::null_mut()
+        } else {
+            unsafe { GetAncestor(under_point, GA_ROOT) }
+        };
+        if root_under_point != hwnd {
+            return Err(format!(
+                "Something is covering ({}, {}) in that window, so the click was not sent — it \
+                 would have gone to whatever is on top. Bring the window fully into view and \
+                 capture it again.",
+                x, y
+            ));
+        }
+
         let (normalized_x, normalized_y) = normalized_absolute(
-            rect.left + x as i32,
-            rect.top + y as i32,
+            point_x,
+            point_y,
             // SAFETY: `GetSystemMetrics` 只读系统配置，没有出参。
             unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) },
             unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) },
             unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) },
             unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) },
         )?;
+
+        // 点完把指针放回去：不放回去的话，指针会停在 Agent 瞄的那个位置上，改变 hover
+        // 状态，也改变用户下一次真实点击的起点。
+        let mut cursor_before = POINT { x: 0, y: 0 };
+        // SAFETY: `cursor_before` 是本地变量。
+        let cursor_known = unsafe { GetCursorPos(&mut cursor_before) } != 0;
 
         // 三个事件一次发：移动、按下、抬起。分三次 `SendInput` 的话，用户在中间那一刻
         // 动一下真鼠标，按下和抬起就会发生在两个不同的位置 —— 那是一次拖拽，不是点击。
@@ -179,18 +212,14 @@ mod platform {
             },
         };
         let mut events = [
+            mouse(absolute_flags(MOUSEEVENTF_MOVE), normalized_x, normalized_y),
             mouse(
-                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                absolute_flags(MOUSEEVENTF_LEFTDOWN),
                 normalized_x,
                 normalized_y,
             ),
             mouse(
-                MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE,
-                normalized_x,
-                normalized_y,
-            ),
-            mouse(
-                MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE,
+                absolute_flags(MOUSEEVENTF_LEFTUP),
                 normalized_x,
                 normalized_y,
             ),
@@ -204,14 +233,40 @@ mod platform {
             )
         };
         if sent as usize != events.len() {
-            // 部分送达也算失败，但要说清：按下了没抬起会把桌面留在按住鼠标的状态
+            // 只送出去一部分的时候，左键可能正按着 —— 桌面会停在"拖拽中"。补一个抬起，
+            // 别把这个状态留给用户去猜。补得成不成都照样报失败。
+            let mut release = [mouse(absolute_flags(MOUSEEVENTF_LEFTUP), 0, 0)];
+            // SAFETY: 同上。
+            unsafe {
+                SendInput(
+                    release.len() as u32,
+                    release.as_mut_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            };
             return Err(format!(
-                "Only {} of {} input events were accepted; the click may be incomplete.",
+                "Only {} of {} input events were accepted; the click may be incomplete, and a \
+                 mouse-up was sent to make sure the button is not left held down.",
                 sent,
                 events.len()
             ));
         }
+        if cursor_known {
+            // SAFETY: 只写光标位置，参数是本地变量里的坐标。
+            unsafe { SetCursorPos(cursor_before.x, cursor_before.y) };
+        }
         Ok(())
+    }
+
+    /// 绝对坐标事件必须带的两个标志。
+    ///
+    /// `MOUSEEVENTF_VIRTUALDESK` 是这里最容易漏、漏了最贵的一个：**没有**它的时候，绝对
+    /// 坐标按 Win32 文档是映射到**主显示器**，而我们归一化用的是整个虚拟桌面的范围。单屏时
+    /// 两者恰好相等，所以漏掉毫无症状；一接上第二块屏，落点就被压缩到主屏上的某个位置 ——
+    /// 目标窗口在副屏上被确认成了前台，而那一下点在主屏中央，运行期间那里很可能正是本应用
+    /// 自己的批准框。
+    fn absolute_flags(base: u32) -> u32 {
+        base | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     }
 
     /// 轮询到那个窗口真的成为前台，或者等够了。
@@ -224,6 +279,27 @@ mod platform {
             std::thread::sleep(FOREGROUND_POLL);
         }
         false
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 绝对坐标必须按**整个虚拟桌面**解释。
+        ///
+        /// 漏掉 `MOUSEEVENTF_VIRTUALDESK` 在单屏上完全没有症状（虚拟桌面就等于主屏），
+        /// 一接上第二块屏，落点就被压缩到主屏上的某个位置 —— 目标窗口在副屏上被确认成了
+        /// 前台，而那一下点在主屏中央，运行期间那里很可能正是本应用自己的批准框。这条
+        /// 测试就是为了让那个漏掉在单屏机器上也能被发现。
+        #[test]
+        fn absolute_events_are_mapped_to_the_whole_virtual_desktop() {
+            let flags = absolute_flags(MOUSEEVENTF_LEFTDOWN);
+
+            assert_ne!(flags & MOUSEEVENTF_VIRTUALDESK, 0, "0x{:x}", flags);
+            assert_ne!(flags & MOUSEEVENTF_ABSOLUTE, 0, "0x{:x}", flags);
+            // 基础事件不能被覆盖掉
+            assert_ne!(flags & MOUSEEVENTF_LEFTDOWN, 0, "0x{:x}", flags);
+        }
     }
 }
 
@@ -305,14 +381,13 @@ mod tests {
 
 /// 真的造一个窗口，真的点它，看它有没有收到。
 ///
-/// 这是 `SendInput` 那一行唯一的覆盖。上面那些测试全是纯函数：闸门、边界、坐标换算 ——
-/// 它们能证明"算得对"，证明不了"发出去了、而且落在那个窗口里"。ROADMAP 100 和 101 都把
-/// 这条列为缺口。
+/// 这是 `SendInput` 那一行唯一的覆盖 —— **但只在这个会话肯把前台交出来的时候**。
+/// `SetForegroundWindow` 只在调用方当前拥有前台权限时才成功，所以从一个不在前台的终端里
+/// 跑 `cargo test`（以及不少 CI 会话）会走到"拒绝"那一支。两支都断言，但只有一支碰得到
+/// `SendInput`，测试会把走的是哪一支打出来 —— 覆盖率的真相要看得见，不能靠一句"有 e2e"。
 ///
-/// 两个分支都断言，所以它不会变成一个"环境不对就默默通过"的测试：
-/// - 系统允许这次前台切换时，断言那个窗口确实收到了一次左键按下，落点在它的客户区里；
-/// - 系统拒绝置前时（无人交互的桌面、别的进程占着前台），断言 `click_in_window`
-///   **拒绝**了而不是硬发 —— 那正是它该做的事。
+/// - 允许置前时：断言那个窗口确实收到了一次左键按下，落点在它的客户区里；
+/// - 拒绝置前时：断言 `click_in_window` **拒绝**了而不是硬发，且一下都没发出去。
 #[cfg(all(test, windows))]
 mod injection_tests {
     use super::click_in_window;
@@ -468,7 +543,9 @@ mod injection_tests {
             }
             Err(error) => {
                 println!("injection path not exercised here: {}", error);
-                // 这台机器/这个会话不让置前：那就必须是**拒绝**，而不是硬发出去
+                // 这台机器/这个会话不让置前：那就必须是**拒绝**，而不是硬发出去。
+                // 认的是"置前"这一类拒绝，不是任意错误 —— 尺寸不符、被遮挡都有自己的话术，
+                // 混在一起会让这条测试对任何失败都点头。
                 assert!(
                     error.contains("front"),
                     "置前失败时唯一可接受的结果是拒绝，实际是：{}",
