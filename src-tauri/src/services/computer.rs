@@ -379,25 +379,57 @@ pub(crate) mod test_support {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-        RegisterClassW, TranslateMessage, MSG, PM_REMOVE, WM_LBUTTONDOWN, WNDCLASSW,
-        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        RegisterClassW, TranslateMessage, CS_DBLCLKS, MSG, PM_REMOVE, WM_LBUTTONDBLCLK,
+        WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     static CLICKS: AtomicU32 = AtomicU32::new(0);
+    static RIGHT_CLICKS: AtomicU32 = AtomicU32::new(0);
+    static DOUBLE_CLICKS: AtomicU32 = AtomicU32::new(0);
+    static WHEEL_EVENTS: AtomicU32 = AtomicU32::new(0);
+    static WHEEL_DELTA: AtomicI32 = AtomicI32::new(0);
     static CLIENT_X: AtomicI32 = AtomicI32::new(-1);
     static CLIENT_Y: AtomicI32 = AtomicI32::new(-1);
 
-    /// 记下落点的客户区坐标。`lParam` 低 16 位是 x、高 16 位是 y，都是**有符号**的。
+    /// 同一时刻只准有一个测试窗口。
+    ///
+    /// 上面那几个计数器是进程级的，而 `cargo test` 默认并行：两条测试各开一个窗口时，一条
+    /// 读到的"收到几次点击"里混着另一条发出去的那几下。这类失败是间歇性的，而间歇性失败
+    /// 最后都会被当成噪声忽略掉。
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 记下收到的是哪一种输入，以及左键落点的客户区坐标。
+    ///
+    /// 四种消息各记一个计数器而不是合成一个"收到过输入"：右键被发成左键、双击只到了一下、
+    /// 滚轮方向反了，都只有分开数才看得出来，而它们在真实使用里唯一的发现方式是人盯着屏幕。
+    ///
+    /// `lParam` 低 16 位是 x、高 16 位是 y，都是**有符号**的；滚轮的格数在 `wParam` 高 16 位，
+    /// 同样有符号。
     unsafe extern "system" fn record_clicks(
         hwnd: HWND,
         message: u32,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if message == WM_LBUTTONDOWN {
-            CLICKS.fetch_add(1, Ordering::SeqCst);
-            CLIENT_X.store((lparam & 0xFFFF) as i16 as i32, Ordering::SeqCst);
-            CLIENT_Y.store(((lparam >> 16) & 0xFFFF) as i16 as i32, Ordering::SeqCst);
+        match message {
+            WM_LBUTTONDOWN => {
+                CLICKS.fetch_add(1, Ordering::SeqCst);
+                CLIENT_X.store((lparam & 0xFFFF) as i16 as i32, Ordering::SeqCst);
+                CLIENT_Y.store(((lparam >> 16) & 0xFFFF) as i16 as i32, Ordering::SeqCst);
+            }
+            WM_RBUTTONDOWN => {
+                RIGHT_CLICKS.fetch_add(1, Ordering::SeqCst);
+            }
+            // 只有窗口类带了 `CS_DBLCLKS` 才会收到这条：Win32 不会把两下按键"合成"成双击
+            // 事件，是窗口类自己要求的。这正是双击能不能成立的真实条件。
+            WM_LBUTTONDBLCLK => {
+                DOUBLE_CLICKS.fetch_add(1, Ordering::SeqCst);
+            }
+            WM_MOUSEWHEEL => {
+                WHEEL_EVENTS.fetch_add(1, Ordering::SeqCst);
+                WHEEL_DELTA.store(((wparam >> 16) & 0xFFFF) as i16 as i32, Ordering::SeqCst);
+            }
+            _ => {}
         }
         DefWindowProcW(hwnd, message, wparam, lparam)
     }
@@ -414,12 +446,22 @@ pub(crate) mod test_support {
         pub handle: isize,
         stop: Arc<AtomicBool>,
         pump: Option<std::thread::JoinHandle<()>>,
+        /// 活着就占着那把锁，`Drop` 时还回去
+        _one_at_a_time: std::sync::MutexGuard<'static, ()>,
     }
 
     impl TestWindow {
         /// 开一个可见窗口。创建失败就 panic：没有被测对象的时候，这些测试不该悄悄变绿。
         pub fn open(title: &str, width: i32, height: i32) -> Self {
+            // 中毒也继续：上一条测试的断言 panic 不该让后面每一条都变成"窗口开不出来"
+            let guard = ONE_AT_A_TIME
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             CLICKS.store(0, Ordering::SeqCst);
+            RIGHT_CLICKS.store(0, Ordering::SeqCst);
+            DOUBLE_CLICKS.store(0, Ordering::SeqCst);
+            WHEEL_EVENTS.store(0, Ordering::SeqCst);
+            WHEEL_DELTA.store(0, Ordering::SeqCst);
             CLIENT_X.store(-1, Ordering::SeqCst);
             CLIENT_Y.store(-1, Ordering::SeqCst);
             let class_name = wide("AgentIdeTestWindow");
@@ -431,7 +473,10 @@ pub(crate) mod test_support {
                 // SAFETY: 类名和标题是本地的、以 0 结尾的宽字符串；回调是本模块里的函数。
                 let hwnd = unsafe {
                     let class = WNDCLASSW {
-                        style: 0,
+                        // `CS_DBLCLKS`：没有它，窗口永远收不到 `WM_LBUTTONDBLCLK`，双击
+                        // 那条测试就会变成"两次单击也算过"。这也是真实应用里双击成不成立
+                        // 的条件，所以测试窗口要和它们一样。
+                        style: CS_DBLCLKS,
                         lpfnWndProc: Some(record_clicks),
                         cbClsExtra: 0,
                         cbWndExtra: 0,
@@ -496,11 +541,29 @@ pub(crate) mod test_support {
                 handle,
                 stop,
                 pump: Some(pump),
+                _one_at_a_time: guard,
             }
         }
 
         pub fn clicks() -> u32 {
             CLICKS.load(Ordering::SeqCst)
+        }
+
+        pub fn right_clicks() -> u32 {
+            RIGHT_CLICKS.load(Ordering::SeqCst)
+        }
+
+        pub fn double_clicks() -> u32 {
+            DOUBLE_CLICKS.load(Ordering::SeqCst)
+        }
+
+        pub fn wheel_events() -> u32 {
+            WHEEL_EVENTS.load(Ordering::SeqCst)
+        }
+
+        /// 最后一条滚轮消息带的格数（`WHEEL_DELTA` 的倍数，正数向上）。
+        pub fn wheel_delta() -> i32 {
+            WHEEL_DELTA.load(Ordering::SeqCst)
         }
 
         pub fn last_click() -> (i32, i32) {
@@ -625,5 +688,43 @@ mod tests {
             window("c", "Code.exe", false),
         ];
         assert_eq!(disclosed_apps(&windows), vec!["Code.exe", "chrome.exe"]);
+    }
+
+    /// 测试窗口自己得先数得对。
+    ///
+    /// `TestWindow` 的那几个计数器是注入测试唯一的证据来源，而注入测试**只在这个会话肯把
+    /// 前台交出来的时候**才会走到"收到了"那一支（从后台终端跑 `cargo test` 走的是"拒绝"）。
+    /// 也就是说：如果滚轮的格数解错了一位、或者双击记到了左键那个计数器上，注入测试会一直
+    /// 绿着，永远发现不了。所以这里直接把消息发给窗口，不经过 `SendInput` —— 这一条在任何
+    /// 会话里都跑得到，它保证的是"那几个计数器可信"，而注入测试保证的是"输入真的到得了"。
+    #[cfg(windows)]
+    #[test]
+    fn the_test_window_counts_each_kind_of_mouse_input_separately() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SendMessageW, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+        };
+        let window = test_support::TestWindow::open("Agent IDE message test", 320, 240);
+        let hwnd = window.handle as windows_sys::Win32::Foundation::HWND;
+        // 客户区 (40, 30)：低 16 位是 x、高 16 位是 y
+        let point = (30_isize << 16) | 40;
+
+        // SAFETY: 句柄来自上面那个还活着的窗口；`SendMessageW` 会等到消息被处理完才返回，
+        // 所以下面的断言看到的一定是处理之后的状态。
+        unsafe {
+            SendMessageW(hwnd, WM_LBUTTONDOWN, 0, point);
+            SendMessageW(hwnd, WM_RBUTTONDOWN, 0, point);
+            SendMessageW(hwnd, WM_LBUTTONDBLCLK, 0, point);
+            // 向下两格：格数在 wParam 高 16 位，负数
+            let wheel = ((-240_i16) as u16 as usize) << 16;
+            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel, point);
+        }
+
+        assert_eq!(test_support::TestWindow::clicks(), 1);
+        assert_eq!(test_support::TestWindow::right_clicks(), 1);
+        assert_eq!(test_support::TestWindow::double_clicks(), 1);
+        assert_eq!(test_support::TestWindow::wheel_events(), 1);
+        // 符号必须还原成负数：按无符号读会得到 65296，方向也就反了
+        assert_eq!(test_support::TestWindow::wheel_delta(), -240);
+        assert_eq!(test_support::TestWindow::last_click(), (40, 30));
     }
 }

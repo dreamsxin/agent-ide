@@ -1564,6 +1564,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Not fixed, recorded instead:** the op-type scanner reads quoted literals inside `record_kind` and does not consult `stringConstants()`, so a future `Gesture::Middle => MIDDLE_CLICK_KIND` would drop out of the scanned set while the premise assertions still pass. Building constant resolution into that scanner is more machinery than the risk warrants today; the next person to extract those strings into constants needs to extend it.
    - Rust 441 (one test replaced by one). Frontend stays 223.
 
+112. **The three new gestures had no evidence they arrive as themselves (2026-09-21)**
+   110 shipped right click, double click and scroll with pure-function tests over the event batches and one real-window test that only ever sent a left click. So "we filled in the right flag bits" was tested and "the system delivers it as a right click" was not — and that second half is the one a person can only check by watching the screen, after the irreversible thing has happened.
+   - **A real-window test per gesture**, all four through one `sending` helper. The assertions are specific on purpose: the right click asserts *no left click* arrived, the double click asserts one `WM_LBUTTONDBLCLK` rather than two singles, the scroll asserts the delta is `-2 × 120` so a reversed sign fails. "Some input arrived" would pass for three of the four defects worth catching.
+   - **The test window now carries `CS_DBLCLKS`** — the condition SECURITY.md names for a double click working at all. Without it the double-click test would be asserting a version of the claim that has been relaxed to make the test pass.
+   - **`TestWindow` is now one-at-a-time.** Its counters are process-wide statics and `cargo test` is parallel; four tests each opening a window would have read each other's clicks. That is an intermittent failure, and intermittent failures end up ignored. A `Mutex` guard held for the window's lifetime, poison-tolerant so one panicking assertion does not turn every later test into "the window would not open".
+   - **The counters are tested without `SendInput`.** This is the part that matters: the arrival branch runs *only* when the session grants the foreground switch, and on a background-shell `cargo test` all four take the refusal branch — verified by the printed lines in this session's run. So a wheel delta decoded with the wrong shift, or a double click counted as a left click, would leave all four tests green forever. `the_test_window_counts_each_kind_of_mouse_input_separately` posts the four messages directly and checks each counter plus the signed delta; it runs in every session. Without it the three new tests would be the 108 pattern again — a mechanism tested, the instance not.
+   - **Not attempted: forcing the foreground branch.** The tricks that would do it (`AttachThreadInput`, injecting an input event first to break the foreground lock) change the very behaviour under test — the test would pass through a route production does not take. The honest position is that this half of the coverage is conditional, it prints which branch it took, and the evidence it rests on is independently verified.
+   - Rust 441 → 445.
+
+
 
 
 

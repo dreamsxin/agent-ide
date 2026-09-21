@@ -667,15 +667,18 @@ mod tests {
     }
 }
 
-/// 真的造一个窗口，真的点它，看它有没有收到。
+/// 真的造一个窗口，真的对它动手，看它收到的是什么。
 ///
 /// 这是 `SendInput` 那一行唯一的覆盖 —— **但只在这个会话肯把前台交出来的时候**。
 /// `SetForegroundWindow` 只在调用方当前拥有前台权限时才成功，所以从一个不在前台的终端里
 /// 跑 `cargo test`（以及不少 CI 会话）会走到"拒绝"那一支。两支都断言，但只有一支碰得到
 /// `SendInput`，测试会把走的是哪一支打出来 —— 覆盖率的真相要看得见，不能靠一句"有 e2e"。
 ///
-/// - 允许置前时：断言那个窗口确实收到了一次左键按下，落点在它的客户区里；
-/// - 拒绝置前时：断言 `send_gesture` **拒绝**了而不是硬发，且一下都没发出去。
+/// - 允许置前时：断言那个窗口收到的正是这个手势，而不是"收到了某种输入"；
+/// - 拒绝置前时：断言 `send_gesture` **拒绝**了而不是硬发，且一条输入都没到。
+///
+/// 四个手势共用 `sending`：那个"拒绝"分支抄四遍的结局，是其中一份忘了断言"拒绝之后一下
+/// 都没发出去"，而那正是它唯一要守住的东西。
 #[cfg(all(test, windows))]
 mod injection_tests {
     use super::{send_gesture, Gesture};
@@ -683,49 +686,29 @@ mod injection_tests {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-    #[test]
-    fn a_click_reaches_the_window_it_was_aimed_at() {
-        let window = TestWindow::open("Agent IDE click test", 480, 360);
+    /// 窗口收到的输入总条数 —— 拒绝之后这个数必须是 0。
+    ///
+    /// 加起来数而不是只数左键：右键或者滚轮在"已经拒绝"之后溜出去，只看左键计数是发现不了的。
+    fn inputs_seen() -> u32 {
+        TestWindow::clicks() + TestWindow::right_clicks() + TestWindow::wheel_events()
+    }
 
-        // 点客户区中间偏上的一个点。坐标是**窗口矩形**相对的，和 `CaptureFrame` 一致。
-        let (x, y) = (200_u32, 180_u32);
-        let outcome = send_gesture(window.handle, 480, 360, x, y, Gesture::Click);
+    /// 造窗口 → 发一次手势 → 等消息走完 → 把结果交给 `arrived` 断言。
+    fn sending(title: &str, gesture: Gesture, arrived: impl Fn(isize)) {
+        let window = TestWindow::open(title, 480, 360);
+
+        // 瞄客户区中间偏上的一个点。坐标是**窗口矩形**相对的，和 `CaptureFrame` 一致。
+        let outcome = send_gesture(window.handle, 480, 360, 200, 180, gesture);
         // 留点时间让那一下走完消息队列
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         match outcome {
             Ok(()) => {
-                println!("injection path exercised: the window was clicked for real");
-                assert_eq!(
-                    TestWindow::clicks(),
-                    1,
-                    "置前成功却没收到点击：说明那一下落在了别的地方"
+                println!(
+                    "injection path exercised: the window really got {}",
+                    gesture.describe()
                 );
-                // 落点要在客户区里。断言的是"落进了这个窗口"，不是某个精确像素 ——
-                // 窗口边框和标题栏的厚度是系统主题决定的，钉死它只会钉住这台机器。
-                let mut client = RECT {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                };
-                // SAFETY: `client` 是本地变量；句柄来自上面那个还活着的窗口。
-                unsafe { GetClientRect(window.handle as _, &mut client) };
-                let (px, py) = TestWindow::last_click();
-                assert!(
-                    px >= 0 && px < client.right && py >= 0 && py < client.bottom,
-                    "落点 ({}, {}) 不在客户区 {}x{} 里",
-                    px,
-                    py,
-                    client.right,
-                    client.bottom
-                );
-                // 窗口矩形相对的 x 和客户区 x 只差左边框，所以横向不该偏太多
-                assert!(
-                    (px - x as i32).abs() <= 32,
-                    "横向偏了 {} 像素，坐标映射错了",
-                    (px - x as i32).abs()
-                );
+                arrived(window.handle);
             }
             Err(error) => {
                 println!("injection path not exercised here: {}", error);
@@ -737,12 +720,102 @@ mod injection_tests {
                     "置前失败时唯一可接受的结果是拒绝，实际是：{}",
                     error
                 );
-                assert_eq!(
-                    TestWindow::clicks(),
-                    0,
-                    "既然拒绝了，就不该有任何一下被发出去"
-                );
+                assert_eq!(inputs_seen(), 0, "既然拒绝了，就不该有任何一下被发出去");
             }
         }
+    }
+
+    #[test]
+    fn a_click_reaches_the_window_it_was_aimed_at() {
+        sending("Agent IDE click test", Gesture::Click, |handle| {
+            assert_eq!(
+                TestWindow::clicks(),
+                1,
+                "置前成功却没收到点击：说明那一下落在了别的地方"
+            );
+            // 落点要在客户区里。断言的是"落进了这个窗口"，不是某个精确像素 ——
+            // 窗口边框和标题栏的厚度是系统主题决定的，钉死它只会钉住这台机器。
+            let mut client = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            // SAFETY: `client` 是本地变量；句柄来自那个还活着的窗口。
+            unsafe { GetClientRect(handle as _, &mut client) };
+            let (px, py) = TestWindow::last_click();
+            assert!(
+                px >= 0 && px < client.right && py >= 0 && py < client.bottom,
+                "落点 ({}, {}) 不在客户区 {}x{} 里",
+                px,
+                py,
+                client.right,
+                client.bottom
+            );
+            // 窗口矩形相对的 x 和客户区 x 只差左边框，所以横向不该偏太多
+            assert!(
+                (px - 200).abs() <= 32,
+                "横向偏了 {} 像素，坐标映射错了",
+                (px - 200).abs()
+            );
+            // 左键手势不该顺带发出右键或者滚轮
+            assert_eq!(TestWindow::right_clicks(), 0);
+            assert_eq!(TestWindow::wheel_events(), 0);
+        });
+    }
+
+    /// 右键要真的到达窗口的**右键**，而不是到达左键。
+    ///
+    /// 纯函数已经钉了事件序列，但那只证明我们填对了标志位。这一条证明系统把它当右键派送了 ——
+    /// 而"模型想开右键菜单、结果点下去了"在真实使用里只有人盯着屏幕才发现，那时动作已经做了。
+    #[test]
+    fn a_right_click_arrives_as_a_right_click() {
+        sending("Agent IDE right click test", Gesture::RightClick, |_| {
+            assert_eq!(TestWindow::right_clicks(), 1, "右键没到");
+            assert_eq!(TestWindow::clicks(), 0, "右键被当成左键发出去了");
+        });
+    }
+
+    /// 双击要被窗口读成**一次双击**，不是两次单击。
+    ///
+    /// 这条同时钉住了 SECURITY.md 里那句话的条件：窗口类带 `CS_DBLCLKS` 时，一个批次里的
+    /// 四个事件（时间戳都是 0）会合成 `WM_LBUTTONDBLCLK`。测试窗口和真实应用一样带这个样式，
+    /// 所以它验的是那句话本身，而不是一个特意为测试放宽的版本。
+    #[test]
+    fn a_double_click_arrives_as_one_double_click() {
+        sending("Agent IDE double click test", Gesture::DoubleClick, |_| {
+            assert_eq!(
+                TestWindow::double_clicks(),
+                1,
+                "四个事件一个批次发出去却没合成双击"
+            );
+            // 第一下仍然是一次普通的 WM_LBUTTONDOWN，第二下被换成了双击消息
+            assert_eq!(TestWindow::clicks(), 1);
+        });
+    }
+
+    /// 滚轮要到达窗口，而且格数和方向要对得上。
+    ///
+    /// 这条能成立说明滚轮确实进了这个窗口，但**不能**推广成"滚轮按坐标派送"：这个窗口没有
+    /// 子控件，焦点就是它自己。真实应用里 `WM_MOUSEWHEEL` 去的是焦点（或悬停）控件，那条
+    /// 限制写在 SECURITY.md 和批准框里，这条测试覆盖不到它。
+    #[test]
+    fn a_scroll_arrives_with_the_notches_it_asked_for() {
+        sending(
+            "Agent IDE scroll test",
+            Gesture::Scroll { notches: -2 },
+            |_| {
+                assert_eq!(TestWindow::wheel_events(), 1, "滚轮没到");
+                // 负数是向下。方向反了就是往相反的方向翻页，而模型看不到自己滚错了。
+                assert_eq!(
+                    TestWindow::wheel_delta(),
+                    -2 * 120,
+                    "格数或方向不对：Win32 的一格是 120"
+                );
+                // 滚轮不该按下任何键
+                assert_eq!(TestWindow::clicks(), 0);
+                assert_eq!(TestWindow::right_clicks(), 0);
+            },
+        );
     }
 }
