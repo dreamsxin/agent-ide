@@ -357,7 +357,10 @@ export default function DiffView() {
                       属于别的运行。 */}
                   {action.restored ? (
                     <span className="rounded bg-surface-muted/20 px-1 text-[10px] text-surface-muted">
+                      {/* 带上日期：光说"上一次会话"分不出昨天和三个月前，而这条记录存在
+                          的目的就是回答"它那天到底做了什么" */}
                       previous session
+                      {action.timestamp ? ` · ${action.timestamp.slice(0, 10)}` : ""}
                     </span>
                   ) : (
                     isFromOtherRun(action, agentRunId) && (

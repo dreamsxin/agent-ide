@@ -34,6 +34,39 @@ pub struct PersistedAction {
     pub action: ExternalActionRecord,
 }
 
+/// 一次落盘的结果。
+///
+/// 不用 `Result<(), String>`：这里有三种结局，而"记录写进去了，但之前那份坏了、已经挪
+/// 到一边"既不是成功也不是失败 —— 它是用户**必须知道**的一件事。静默失败在这条路上等于
+/// 把补偿控制关掉而没人知道。
+#[derive(Debug, PartialEq, Eq)]
+pub enum PersistOutcome {
+    Persisted,
+    /// 之前那份读不出来，已经挪到这个路径，新记录进了一份新文件
+    PersistedAfterQuarantine(String),
+    /// 没写进去，原因在里面
+    Failed(String),
+}
+
+impl PersistOutcome {
+    /// 要让用户看见的那句话。`Persisted` 没有。
+    pub fn warning(&self) -> Option<String> {
+        match self {
+            PersistOutcome::Persisted => None,
+            PersistOutcome::PersistedAfterQuarantine(path) => Some(format!(
+                "The external action log could not be read and was moved to {}. A new log was \
+                 started, so recording continues; the earlier history is in that file.",
+                path
+            )),
+            PersistOutcome::Failed(reason) => Some(format!(
+                "This run's external actions could not be written to the durable log: {}. They \
+                 are in this session's list, but they will be gone after a restart.",
+                reason
+            )),
+        }
+    }
+}
+
 fn log_path() -> PathBuf {
     workspace::config_dir().join(LOG_FILE)
 }
@@ -50,25 +83,27 @@ fn current_workspace() -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
-/// 读整个文件。读不出来或解析不了就当空。
+/// 读整个文件。文件不存在是 `Ok(vec![])`，读不出来是 `Err`。
 ///
-/// 不返回错误：一份坏掉的审计文件不该让应用起不来，而在界面上"这里没有记录"和"文件坏
-/// 了"能给用户的下一步是同一个。真正要防的是**静默写坏**，那靠下面的追加语义 ——
-/// 解析失败时不覆盖，见 `append_for_current_workspace`。
-fn read_all() -> Result<Vec<PersistedAction>, ()> {
+/// 这两件事必须分开：不存在可以直接写，读不出来不能当成"空的"然后覆盖 —— 覆盖会把之前
+/// 所有撤不回动作的记录一起抹掉，正是这份文件存在意义的反面。
+fn read_all() -> Result<Vec<PersistedAction>, String> {
     let content = match std::fs::read_to_string(log_path()) {
         Ok(content) => content,
-        // 文件还不存在是正常的第一次运行，和"读坏了"要分开：前者可以写，后者不能覆盖
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(()),
+        Err(error) => return Err(format!("read: {}", error)),
     };
-    serde_json::from_str(&content).map_err(|_| ())
+    serde_json::from_str(&content).map_err(|error| format!("parse: {}", error))
 }
 
 /// 当前工作区在**之前的会话**里留下的记录，最旧在前 —— 和内存里那份顺序一致。
 ///
 /// 每一条都标上 `restored`：用户看到的是一件撤不回的事，而"这是刚刚发生的"和"这是上
 /// 周那次留下的"对他的意义完全不同。界面据此打标，不靠他自己去算时间戳。
+///
+/// 读不出来时这里只返回空，**报警留给写入那一侧**：构造 `AgentGlobalState` 的时候还没有
+/// 任何事件出口，而第一次落盘必然发生在 Agent 真的做了件撤不回的事之后 —— 那正是这句
+/// 警告最该出现的时刻。
 pub fn load_for_current_workspace() -> Vec<ExternalActionRecord> {
     let Some(workspace) = current_workspace() else {
         return Vec::new();
@@ -88,29 +123,57 @@ pub fn load_for_current_workspace() -> Vec<ExternalActionRecord> {
 ///
 /// 只收新记录，不收 orchestrator 上那整份列表：传整份的话，每次发布都会把已经落盘的
 /// 记录再写一遍，文件每轮翻倍。调用点拿到的正是 `record_external_actions` 的返回值。
-pub fn append_for_current_workspace(newly_recorded: &[ExternalActionRecord]) {
+///
+/// 读不出来时**挪走再重开一份**，而不是放弃这次写入。放弃是上一版的做法，后果是：一次
+/// 崩在写入中间留下的半截文件会让此后**每一次**落盘都静默跳过 —— 补偿控制从此永久关掉，
+/// 而界面一切正常。挪走既保住了那份人还能看的历史，也让记录继续留得下来。
+pub fn append_for_current_workspace(newly_recorded: &[ExternalActionRecord]) -> PersistOutcome {
     if newly_recorded.is_empty() {
-        return;
+        return PersistOutcome::Persisted;
     }
     let Some(workspace) = current_workspace() else {
-        // 没有保存过工作区就不落盘：这条记录没有可靠的归属，写进去之后在任何工作区
-        // 下都读不回来，只会是一份谁也看不见的垃圾。
-        return;
+        return PersistOutcome::Failed("no workspace has been saved yet".to_string());
     };
-    // 解析失败**不覆盖**：宁可这一批记录只留在内存里，也不能用一份新文件把之前所有
-    // 撤不回动作的记录抹掉 —— 那正是这份文件存在的意义的反面。
-    let Ok(existing) = read_all() else {
-        return;
+    let (existing, quarantined) = match read_all() {
+        Ok(existing) => (existing, None),
+        Err(reason) => match quarantine_unreadable_log(&reason) {
+            Ok(moved) => (Vec::new(), Some(moved)),
+            Err(failure) => return PersistOutcome::Failed(failure),
+        },
     };
     let merged = merge(existing, &workspace, newly_recorded, MAX_PERSISTED_ACTIONS);
-    let Ok(content) = serde_json::to_string_pretty(&merged) else {
-        return;
+    let content = match serde_json::to_string_pretty(&merged) {
+        Ok(content) => content,
+        Err(error) => return PersistOutcome::Failed(format!("serialize: {}", error)),
     };
     let path = log_path();
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            return PersistOutcome::Failed(format!("create config dir: {}", error));
+        }
     }
-    let _ = std::fs::write(path, content);
+    if let Err(error) = std::fs::write(&path, content) {
+        return PersistOutcome::Failed(format!("write: {}", error));
+    }
+    match quarantined {
+        Some(moved) => PersistOutcome::PersistedAfterQuarantine(moved),
+        None => PersistOutcome::Persisted,
+    }
+}
+
+/// 把读不出来的日志挪到一边，返回它的新路径。
+///
+/// 名字带上时间：连着坏两次时，第二次不该把第一次挪出去的那份覆盖掉 —— 那又是一次
+/// "为了干净而删证据"。
+fn quarantine_unreadable_log(reason: &str) -> Result<String, String> {
+    let path = log_path();
+    let moved = path.with_file_name(format!(
+        "external-actions.unreadable-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%3f")
+    ));
+    std::fs::rename(&path, &moved)
+        .map_err(|error| format!("could not move the unreadable log ({}): {}", reason, error))?;
+    Ok(moved.to_string_lossy().to_string())
 }
 
 /// 追加并压回上限，丢**最旧**的。
@@ -220,44 +283,80 @@ mod tests {
     }
 
     /// 写满了丢最旧的：留下的必须是最近那些，因为最近的才是用户在追的那件事。
+    ///
+    /// 用真正的上限跑一遍，不是随便传个 2：SECURITY.md 把 500 写成了既成事实，而一个只
+    /// 验证 `merge(..., 2)` 的测试对那句话没有任何约束力。
     #[test]
     fn a_full_log_drops_the_oldest_not_the_newest() {
-        let existing = vec![
-            PersistedAction {
+        let existing: Vec<PersistedAction> = (0..MAX_PERSISTED_ACTIONS)
+            .map(|index| PersistedAction {
                 workspace: "w".to_string(),
-                action: record("old", "browser_open"),
-            },
-            PersistedAction {
-                workspace: "w".to_string(),
-                action: record("mid", "browser_open"),
-            },
-        ];
-
-        let merged = merge(existing, "w", &[record("new", "browser_open")], 2);
-
-        let ids: Vec<&str> = merged
-            .iter()
-            .map(|entry| entry.action.id.as_str())
+                action: record(&format!("old-{}", index), "browser_open"),
+            })
             .collect();
-        assert_eq!(ids, vec!["mid", "new"]);
+
+        let merged = merge(
+            existing,
+            "w",
+            &[record("new", "browser_open")],
+            MAX_PERSISTED_ACTIONS,
+        );
+
+        assert_eq!(merged.len(), MAX_PERSISTED_ACTIONS);
+        assert_eq!(merged.last().unwrap().action.id, "new");
+        // 挤掉的是第一条，而不是刚写进去的那条
+        assert_eq!(merged.first().unwrap().action.id, "old-1");
     }
 
-    /// 坏掉的文件读成空，但**不覆盖**它。
+    /// 读不出来的文件要**挪走**，然后继续记 —— 而且要说出来。
     ///
-    /// 覆盖是这里最贵的一种错：一份读不出来的文件也许还能人工看，而写一份新的会把之前
-    /// 所有撤不回动作的记录一起抹掉。
+    /// 上一版在这里直接放弃写入。后果是：一次崩在写入中间留下的半截文件，会让此后每一
+    /// 次落盘都静默跳过，补偿控制永久关掉而界面完全正常。挪走保住了那份人还能看的历史。
     #[test]
-    fn a_corrupt_log_is_read_as_empty_and_never_overwritten() {
+    fn an_unreadable_log_is_moved_aside_so_recording_continues() {
         let _env = LogEnv::new("D:/work/project");
         std::fs::write(log_path(), "not json at all").expect("写坏文件");
 
+        // 读的一侧仍然只当空：构造状态的时候没有任何事件出口可以报警
         assert!(load_for_current_workspace().is_empty());
 
-        append_for_current_workspace(&[record("a", "browser_open")]);
-        assert_eq!(
-            std::fs::read_to_string(log_path()).unwrap(),
-            "not json at all"
-        );
+        let outcome = append_for_current_workspace(&[record("a", "browser_open")]);
+
+        let moved = match &outcome {
+            PersistOutcome::PersistedAfterQuarantine(path) => path.clone(),
+            other => panic!("应该挪走再重开一份，实际是 {:?}", other),
+        };
+        // 那份坏文件还在，只是换了名字 —— 人还能去看
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "not json at all");
+        // 新记录留下来了，而且下一次启动读得回来
+        let restored = load_for_current_workspace();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, "a");
+        // 用户必须被告知：静默"挪走了你的历史"比不挪更糟
+        assert!(outcome.warning().unwrap().contains("moved to"));
+    }
+
+    /// 写不进去也要说出来，不能静默。
+    ///
+    /// "Agent 什么都没做"和"记录写不进去"在界面上必须是两句不同的话：后者的下一步是去
+    /// 看那个目录，前者没有下一步。
+    #[test]
+    fn a_failed_write_says_so() {
+        let guard = workspace::env_test_guard();
+        let dir =
+            std::env::temp_dir().join(format!("agent-ide-external-log-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("建测试配置目录");
+        std::env::set_var("AGENT_IDE_CONFIG_DIR", &dir);
+
+        // 没保存工作区：这条记录没有归属，落盘无从谈起 —— 但必须报出来
+        let outcome = append_for_current_workspace(&[record("a", "browser_open")]);
+
+        assert!(matches!(outcome, PersistOutcome::Failed(_)));
+        assert!(outcome.warning().unwrap().contains("after a restart"));
+        assert!(!log_path().exists());
+        std::env::remove_var("AGENT_IDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        drop(guard);
     }
 
     /// 老版本写的文件（没有 `runId` / `restored`）仍然读得回来。
@@ -278,22 +377,5 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].run_id, None);
         assert!(restored[0].restored);
-    }
-
-    /// 没保存过工作区就不写：那条记录没有归属，写进去也读不回来。
-    #[test]
-    fn without_a_saved_workspace_nothing_is_written() {
-        let guard = workspace::env_test_guard();
-        let dir =
-            std::env::temp_dir().join(format!("agent-ide-external-log-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("建测试配置目录");
-        std::env::set_var("AGENT_IDE_CONFIG_DIR", &dir);
-
-        append_for_current_workspace(&[record("a", "browser_open")]);
-
-        assert!(!log_path().exists());
-        std::env::remove_var("AGENT_IDE_CONFIG_DIR");
-        let _ = std::fs::remove_dir_all(&dir);
-        drop(guard);
     }
 }

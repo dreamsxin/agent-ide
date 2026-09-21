@@ -635,7 +635,19 @@ fn publish_external_actions(
     let recorded = orch.record_external_actions(actions, permissions.run_id.clone());
     // 落盘。内存里那份会跟着进程一起消失，而这些动作撤不回 —— 一份只活到关窗为止的
     // 审计记录，在用户真正需要它的那一天（"昨天它到底开了什么页面"）正好是空的。
-    crate::agent::external_log::append_for_current_workspace(&recorded);
+    //
+    // 落盘失败、或者旧日志读不出来被挪走，都要作为警告说出来：静默失败在这里等于把
+    // 补偿控制关掉而没人知道，而"Agent 什么都没做"和"记录写不进去"的下一步完全不同。
+    let persisted = crate::agent::external_log::append_for_current_workspace(&recorded);
+    if let Some(warning) = persisted.warning() {
+        orch.emit_run_action_log(
+            events,
+            "warn",
+            "external_action",
+            "The external action log could not be updated",
+            &warning,
+        );
+    }
     // `_cancelled` 也算没发生：漏掉它的话，一次被 Stop 拦下的导航会被算进
     // "Agent performed N browser action(s) … cannot be undone" —— 在这个产品唯一
     // 承诺可信的地方说一件没发生的事，比记漏还糟。
@@ -1932,8 +1944,22 @@ mod tests {
     /// 这条走的是真实路径：授权齐备 + 开关已拉，`invoke` 自己写下
     /// `browser_open_cancelled`，然后由命令层来数。以前这一层把 `_cancelled` 算作
     /// performed，于是一次被拦下的导航会在唯一可信的那块地方被写成"已经做了，撤不回"。
+    ///
+    /// 它同时是落盘那条线唯一的端到端覆盖：`publish_external_actions` 现在还要把记录写
+    /// 进磁盘，而删掉那一行时所有单元测试都还是绿的 —— "持久化其实从没发生过"正是这个
+    /// 模块的注释里写着要防的事。所以这里自己准备一个配置目录，并在最后去看那个文件。
     #[test]
     fn a_stopped_browser_call_is_recorded_but_not_counted_as_performed() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let config_dir = std::env::temp_dir().join(format!(
+            "agent-ide-publish-external-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&config_dir).expect("建测试配置目录");
+        std::env::set_var("AGENT_IDE_CONFIG_DIR", &config_dir);
+        crate::services::workspace::save_workspace_path("D:/work/publish-external")
+            .expect("保存工作区");
+
         let mut permissions =
             crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false)
                 .with_browser(true, vec!["https://example.com".to_string()]);
@@ -1974,6 +2000,22 @@ mod tests {
         // 记录本身要留在 orchestrator 上，否则前端刷新后这次尝试就查不到了
         assert_eq!(orch.external_actions.len(), 1);
         assert_eq!(orch.external_actions[0].kind, "browser_open_cancelled");
+        // 而且要落到盘上：只活到关窗为止的审计记录，在用户真正需要它那天正好是空的
+        let persisted = std::fs::read_to_string(config_dir.join("external-actions.json"))
+            .expect("落盘那一行被删掉时这里就读不到文件");
+        assert!(
+            persisted.contains("browser_open_cancelled"),
+            "{}",
+            persisted
+        );
+        assert!(
+            persisted.contains("D:/work/publish-external"),
+            "{}",
+            persisted
+        );
+
+        std::env::remove_var("AGENT_IDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&config_dir);
     }
 
     /// 图片降级必须跟着运行收尾一起送出去，没有降级时则一个字都不说。
@@ -2563,15 +2605,29 @@ pub async fn set_context_compression(
 }
 
 /// Save the workspace path to disk.
+///
+/// 顺带把外部动作记录换成新工作区那一份：磁盘上是按工作区归档的，而内存里这份此前只在
+/// 启动时填过一次 —— 切过工作区之后屏幕上（和 Changes 角标上）还是上一个项目的动作，
+/// 而新记录已经归到新项目名下了。
 #[tauri::command]
-pub fn save_workspace_path(path: String) -> Result<(), String> {
+pub async fn save_workspace_path(
+    path: String,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<(), String> {
     let resolved = std::path::PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("Workspace does not exist or is not accessible: {}", e))?;
     if !resolved.is_dir() {
         return Err(format!("Workspace is not a directory: {}", path));
     }
-    workspace::save_workspace_path(&resolved.to_string_lossy())
+    workspace::save_workspace_path(&resolved.to_string_lossy())?;
+    let restored = crate::agent::external_log::load_for_current_workspace();
+    agent_state
+        .orchestrator
+        .lock()
+        .await
+        .rescope_external_actions(restored);
+    Ok(())
 }
 
 /// Load the last saved workspace path from disk.

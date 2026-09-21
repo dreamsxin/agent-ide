@@ -701,6 +701,20 @@ impl AgentOrchestrator {
         self.external_actions = merged;
     }
 
+    /// 换工作区之后，把这份列表换成新工作区的记录。
+    ///
+    /// **不变量**：这份列表必须只含**当前**工作区的记录。落盘那侧是按工作区归档的，而
+    /// 内存这份此前只在构造时填过一次 —— 于是切过工作区之后，屏幕上（和 Changes 角标上）
+    /// 还是上一个项目的动作，而新记录被归到了新项目名下。记录说错归属比记不到更糟：
+    /// 复盘时它看起来是在另一个项目里发生的。
+    pub fn rescope_external_actions(&mut self, restored: Vec<ExternalActionRecord>) {
+        self.external_actions = restored;
+        if self.external_actions.len() > MAX_EXTERNAL_ACTIONS {
+            let excess = self.external_actions.len() - MAX_EXTERNAL_ACTIONS;
+            self.external_actions.drain(..excess);
+        }
+    }
+
     /// 回到中间某一步。
     ///
     /// **锁不变量**：压回滚点（293）、挂 diff（294）、重刷 baseHash（297）必须在

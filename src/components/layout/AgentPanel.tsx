@@ -42,7 +42,12 @@ export default function AgentPanel() {
   const diffs = useAgentStore((store) => store.diffs);
   const externalActions = useAgentStore((store) => store.externalActions);
   const summary = summarizeAgentRun(steps, diffs);
-  const externalSummary = summarizeExternalActions(externalActions);
+  const externalSummary = summarizeExternalActions(
+    // 角标只数**这一次会话**的：恢复出来的历史一直在，没有任何操作能让它归零，而一个
+    // 永远亮着又点不掉的角标会把这个提示训练成噪声。历史仍然在审查区里列着，带着
+    // "previous session" 的标 —— 藏起来的是提醒，不是记录。
+    externalActions.filter((action) => !action.restored)
+  );
   const changes = changesBadge(summary.pendingChanges, externalSummary.performed);
 
   const badgeFor = (view: PrimaryViewId) => {
