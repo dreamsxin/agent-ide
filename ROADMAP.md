@@ -1462,6 +1462,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Deliberately absent: typing, key presses, right/double click, drag, scroll, and any reading of the result. After a click the model must capture again — a tool that reported "what happened" would be guessing.
    - Rust 412 → 422, frontend 222. The Win32 call itself still has no automated coverage: the tests cover the gates, the frame binding, the bounds and the coordinate maths, and stop where `SendInput` begins.
 
+101. **Audit of 100: "must come to the front" did not prove the window was in front (2026-09-21)**
+   Self-audit of `4e422c1`. The Explore subagent could not be dispatched (DNS), so this was read by hand; the findings are narrower than a full audit would produce and that is worth saying.
+   - **The real defect: `SetForegroundWindow` is asynchronous.** A non-zero return means the request was *accepted*, not that the switch has happened. The click was sent immediately after, so it could still land on the window that was on top — the exact failure the check exists to prevent, with the check appearing to prevent it. SECURITY.md's "the window must come to the front" was therefore a claim the code could not produce, which is the same class of defect as 94's and 96's. Now `GetForegroundWindow()` must confirm the window, polled up to 500 ms, and the click is refused otherwise.
+   - **The rect is read after activation, not before.** Activating a minimized window restores it at that moment, so measuring first compared the frame against a size that was about to change. Reordering also makes the size check mean what it says.
+   - **What the audit confirmed rather than found**, and it was worth checking: the frame's `width`/`height` come from `DesktopWindow.bounds`, which is `GetWindowRect` (`services/computer.rs:249`), and the PNG is encoded at exactly those dimensions (`capture.rs:326`) — so a pixel the model reads off the image maps to the same window-rect offset the click uses. If those two had disagreed (client rect vs window rect), every coordinate would have been quietly wrong.
+   - **A test for the click path's identity re-verification.** The click tests used `handle: 0` and never reached `ApprovedWindow::verify`, so the reuse claimed in 100 was untested for clicking. `a_remembered_window_is_verified_for_clicking_too` now pins both the same-app handle recycle and that the refusal says "nothing was clicked" rather than "nothing was captured" — the parameter that made the reuse possible.
+   - **The size comparison became a pure `check_same_size`**, so the message that tells the model to capture again is testable without Win32. Previously it lived inside the `unsafe` block where no test could see it.
+   - **Written down instead of fixed**: mixed-DPI multi-monitor is unverified. `GetWindowRect` and the `SM_*VIRTUALSCREEN` metrics share whatever DPI view the process has, so they should agree, but this has not been exercised on a scaled secondary monitor; the frame size check is what would catch a mismatch rather than a silent mis-click. Also unchanged: the foreground wait adds up to 500 ms before a click, which Stop cannot interrupt.
+   - Rust 422 → 424.
+
 
 
 

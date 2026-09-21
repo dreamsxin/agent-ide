@@ -638,6 +638,48 @@ mod tests {
         assert!(described.contains("800x600"), "{}", described);
     }
 
+    /// 从一帧记下来的身份重建之后，同一套检查要服务点击，而且话术要说对是哪个动作。
+    ///
+    /// 点击那条路径最容易出的错就是"身份检查只覆盖了截图"：句柄被同一应用的另一个窗口
+    /// 回收时，那一下会落在一个谁也没批准过的窗口上。这条测试就是钉住它复用的是同一套。
+    #[test]
+    fn a_remembered_window_is_verified_for_clicking_too() {
+        let approved = ApprovedWindow::remembered(
+            CaptureTarget {
+                title: "Docs — pricing".to_string(),
+                app: "chrome.exe".to_string(),
+                width: 800,
+                height: 600,
+            },
+            0x1234,
+            Some(4242),
+        );
+
+        // 句柄被同一应用的另一个窗口回收：应用名对得上，pid 不同
+        let sibling = window("Docs — pricing", "chrome.exe");
+        let error = approved
+            .verify(Some(&sibling), Some(99), "nothing was clicked")
+            .expect_err("same app, another window");
+        assert!(
+            error.contains("another window of the same app"),
+            "{}",
+            error
+        );
+        // 尾巴必须说的是点击，而不是截图 —— 用户看到的是"因此什么都没发生"
+        assert!(error.contains("nothing was clicked"), "{}", error);
+
+        // 关掉了同样按点击的话术报
+        let closed = approved
+            .verify(None, None, "nothing was clicked")
+            .expect_err("closed");
+        assert!(closed.contains("nothing was clicked"), "{}", closed);
+
+        // 还是同一个窗口就放行，返回的是现在的标题
+        assert!(approved
+            .verify(Some(&sibling), Some(4242), "nothing was clicked")
+            .is_ok());
+    }
+
     /// 编码出来的必须是真的 PNG，而且尺寸不匹配要报错而不是写出一张坏图。
     #[test]
     fn the_encoder_writes_a_real_png_and_refuses_a_mismatched_buffer() {

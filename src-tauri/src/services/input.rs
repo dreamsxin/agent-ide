@@ -35,6 +35,21 @@ pub fn check_click_inside(width: u32, height: u32, x: u32, y: u32) -> Result<(),
     Ok(())
 }
 
+/// 现在这个窗口还是不是截图时那个尺寸。
+///
+/// 纯函数，因为"差不多对"在这里等于随机点一下，而这条判断只在窗口被缩放过之后才会触发 ——
+/// 那种时候没人在看日志。
+pub fn check_same_size(now: (u32, u32), frame: (u32, u32)) -> Result<(), String> {
+    if now == frame {
+        return Ok(());
+    }
+    Err(format!(
+        "That window is now {}x{} but the frame you captured was {}x{}; capture it again before \
+         clicking, because the coordinates no longer point at the same thing.",
+        now.0, now.1, frame.0, frame.1
+    ))
+}
+
 /// 把图上的坐标换成 `SendInput` 要的"归一化绝对坐标"。
 ///
 /// `MOUSEEVENTF_ABSOLUTE` 的坐标不是像素，而是 0..=65535 映射到**整个虚拟桌面**。多屏、
@@ -69,21 +84,33 @@ pub fn normalized_absolute(
 
 #[cfg(windows)]
 mod platform {
-    use super::normalized_absolute;
+    use super::{check_same_size, normalized_absolute};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
         MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, GetWindowRect, SetForegroundWindow, SM_CXVIRTUALSCREEN,
-        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetForegroundWindow, GetSystemMetrics, GetWindowRect, SetForegroundWindow,
+        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
+
+    /// 等窗口真的到前台的时长上限，以及查一次的间隔。
+    ///
+    /// `SetForegroundWindow` 是**异步**的：它返回非零只说明请求被接受了，切换还没完成。
+    /// 不等就发的话，那一下会落在此刻仍然盖在上面的那个窗口上 —— 而"必须能置前"这条保证
+    /// 的全部意义就是防这件事。500 ms 是个上限而不是固定等待：正常情况下第一次查就通过，
+    /// 而一直不通过说明系统拒绝了这次前台切换（Win32 只在调用方拥有前台权限时才允许）。
+    const FOREGROUND_ATTEMPTS: u32 = 20;
+    const FOREGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
     /// 点一下用户批准过的那个窗口里的 (x, y)。
     ///
     /// 调用方**必须**先确认窗口身份（`ApprovedWindow::verify`）并检查坐标在帧内；这里只
-    /// 负责"尺寸还对不对"和真正那一下，因为尺寸只有在 Win32 这一侧才拿得到。
+    /// 负责置前、尺寸复核和真正那一下，因为这三件事只有在 Win32 这一侧才做得到。
+    ///
+    /// 顺序是：先置前 → 确认真的到了前台 → **再**量尺寸。反过来（先量再置前）会漏掉激活
+    /// 本身带来的变化 —— 一个从最小化被激活的窗口，尺寸正是在那一刻才变回来的。
     pub fn click_in_window(
         handle: isize,
         frame_width: u32,
@@ -92,30 +119,8 @@ mod platform {
         y: u32,
     ) -> Result<(), String> {
         let hwnd = handle as HWND;
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        // SAFETY: `hwnd` 来自这次运行里刚刚 verify 过的窗口；`rect` 是本地变量。
-        if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
-            return Err("Could not measure that window, so nothing was clicked.".to_string());
-        }
-        let now = (
-            (rect.right - rect.left).max(0) as u32,
-            (rect.bottom - rect.top).max(0) as u32,
-        );
-        if now != (frame_width, frame_height) {
-            return Err(format!(
-                "That window is now {}x{} but the frame you captured was {}x{}; capture it again \
-                 before clicking, because the coordinates no longer point at the same thing.",
-                now.0, now.1, frame_width, frame_height
-            ));
-        }
-        // 置前失败就拒绝：`SendInput` 打的是屏幕坐标，被盖住时那一下会落在上面那个窗口上。
+        // SAFETY: `hwnd` 来自这次运行里刚刚 verify 过的窗口。
         // Win32 只在调用方拥有前台权限时才允许置前，所以这条在真实使用里会遇到。
-        // SAFETY: 同上。
         if unsafe { SetForegroundWindow(hwnd) } == 0 {
             return Err(
                 "Could not bring that window to the front, so the click was not sent — it would \
@@ -123,6 +128,31 @@ mod platform {
                     .to_string(),
             );
         }
+        if !wait_for_foreground(hwnd) {
+            return Err(
+                "That window did not come to the front in time, so the click was not sent — it \
+                 would have landed on whatever is still on top of it."
+                    .to_string(),
+            );
+        }
+
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: `rect` 是本地变量，`hwnd` 同上。
+        if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+            return Err("Could not measure that window, so nothing was clicked.".to_string());
+        }
+        check_same_size(
+            (
+                (rect.right - rect.left).max(0) as u32,
+                (rect.bottom - rect.top).max(0) as u32,
+            ),
+            (frame_width, frame_height),
+        )?;
         let (normalized_x, normalized_y) = normalized_absolute(
             rect.left + x as i32,
             rect.top + y as i32,
@@ -182,6 +212,18 @@ mod platform {
             ));
         }
         Ok(())
+    }
+
+    /// 轮询到那个窗口真的成为前台，或者等够了。
+    fn wait_for_foreground(hwnd: HWND) -> bool {
+        for _ in 0..FOREGROUND_ATTEMPTS {
+            // SAFETY: `GetForegroundWindow` 没有参数也没有出参。
+            if unsafe { GetForegroundWindow() } == hwnd {
+                return true;
+            }
+            std::thread::sleep(FOREGROUND_POLL);
+        }
+        false
     }
 }
 
@@ -247,5 +289,16 @@ mod tests {
         assert!(normalized_absolute(-1, 0, 0, 0, 1920, 1080).is_err());
         assert!(normalized_absolute(1920, 0, 0, 0, 1920, 1080).is_err());
         assert!(normalized_absolute(0, 0, 0, 0, 1, 1).is_err());
+    }
+
+    /// 尺寸不一致就拒，而且要说出两个尺寸 —— 模型的下一步是重新截图，它需要知道差在哪。
+    #[test]
+    fn a_resized_window_is_refused_and_both_sizes_are_named() {
+        assert!(check_same_size((800, 600), (800, 600)).is_ok());
+
+        let error = check_same_size((1024, 600), (800, 600)).unwrap_err();
+        assert!(error.contains("1024x600"), "{}", error);
+        assert!(error.contains("800x600"), "{}", error);
+        assert!(error.contains("capture it again"), "{}", error);
     }
 }
