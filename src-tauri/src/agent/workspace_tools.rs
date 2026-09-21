@@ -1659,8 +1659,19 @@ async fn browser_read_page_tool(
         &permissions.page_read_origins,
     ) {
         Ok(target) => target,
-        // target 只写 `chrome`：这一步的失败原因里含候选页面，而一次被拒的调用不该
-        // 顺带把"你开着这些页面"写进记录 —— 和截图那边只写 `desktop` 同一条理由。
+        // target 只写 `chrome`。这里**不是**说细节里没有页面信息 —— `refuse_external` 会
+        // 把这句话原样记下来，而"命中了这几个"就含着候选页面的标题。它们都在用户给过的
+        // origin 清单里，所以出现在记录里不是新的披露；写 `chrome` 只是不让一次被拒的
+        // 调用在**动作对象**那一栏认领某个具体页面。
+        Err(error) => {
+            return refuse_external("browser_read_page_refused", "chrome", error, permissions)
+        }
+    };
+    // 批准的是这个 origin 上的这一页，读回来之后要和它比一次。
+    let approved_origin = match crate::services::browser::origin_of(&target.tab.url) {
+        Ok(origin) => origin,
+        // 到不了：候选正是按 `origin_of` 过滤出来的。仍然拒而不是 `unwrap` —— 一个 panic
+        // 会把整次运行带走，而这条路径上唯一该发生的事是"不读"。
         Err(error) => {
             return refuse_external("browser_read_page_refused", "chrome", error, permissions)
         }
@@ -1716,11 +1727,23 @@ async fn browser_read_page_tool(
         }
     };
 
+    // 页面在等批准的这两分钟里可能导航到别处，而调试 socket 绑的是 target，不是 URL ——
+    // 它照样有效。所以这里拿**页面自己报的**地址复核一次；它和正文来自同一次求值，所以
+    // 这道检查没有缝可钻。跨 origin 就当没读到：文本已经进了这个进程，但它不会进模型。
+    if let Err(error) = crate::services::browser::verify_read_origin(&approved_origin, &page.url) {
+        return refuse_external(
+            "browser_read_page_refused",
+            &target.tab.url,
+            error,
+            permissions,
+        );
+    }
+
     // 记录在返回值之前：一次读到空白页的调用同样是一次披露尝试，而"什么都没记"会让
     // `publish_external_actions` 提前返回，整轮运行看起来什么都没发生过。
     permissions.record_external(AgentExternalAction {
         kind: "browser_read_page".to_string(),
-        target: target.tab.url.clone(),
+        target: page.url.clone(),
         detail: format!(
             "Disclosed {} character(s) of page text to the model{}.",
             page.text.chars().count(),
@@ -1735,7 +1758,7 @@ async fn browser_read_page_tool(
         return Ok(format!(
             "\"{}\" ({}) has no visible text — it may still be loading, or it renders into a \
              canvas.",
-            target.tab.title, target.tab.url
+            target.tab.title, page.url
         ));
     }
     let truncation_note = if page.truncated {
@@ -1747,9 +1770,11 @@ async fn browser_read_page_tool(
     } else {
         String::new()
     };
+    // 报的是页面自己给的 URL：同一个 origin 内的路径跳转是同一次授权里的事，但模型该
+    // 知道它读到的是哪一页，而不是两分钟前列表里的那一页。
     Ok(format!(
         "{} — {}\n\n{}{}",
-        target.tab.title, target.tab.url, page.text, truncation_note
+        target.tab.title, page.url, page.text, truncation_note
     ))
 }
 
@@ -3095,6 +3120,85 @@ mod tests {
         let actions = granted.take_external_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "browser_read_page_cancelled");
+    }
+
+    /// 一个只回答一次 `/json/list` 的假 CDP 端点，返回它监听的端口。
+    ///
+    /// 真起一个 socket 而不是把 `list_page_sessions` 抽象掉：入口那道 Stop 闸门是**等待
+    /// 之前**取的，所以"批准送到之后才按 Stop"这条缝只有在真的走完"列出 → 问人"两步
+    /// 之后才到得了。
+    async fn fake_cdp_list(body: String) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.flush().await;
+        });
+        port
+    }
+
+    /// Stop 落在"批准送到"和"真的读"之间时，仍然不读。
+    ///
+    /// 入口那道闸门是等待之前取的，最长已经过期两分钟；`refuse_all` 也找不到挂起的请求，
+    /// 因为那一条刚刚被批准取走了。少这一次复查，那一页照样被读出去。
+    ///
+    /// 用 `#[test]` 自己建 runtime 而不是 `#[tokio::test]`：`env_test_guard()` 是一把
+    /// **同步**锁，在 async 测试里它会跨 `await` 存活，而这个测试要靠它独占
+    /// `AGENT_IDE_CDP_PORT`。
+    #[test]
+    fn a_stop_between_the_approval_and_the_read_still_prevents_it() {
+        let _guard = workspace::env_test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let port = fake_cdp_list(
+                r#"[{"id":"1","type":"page","title":"Preview","url":"http://127.0.0.1:1420/index.html",
+                     "webSocketDebuggerUrl":"ws://127.0.0.1:65535/devtools/page/1"}]"#
+                    .to_string(),
+            )
+            .await;
+            std::env::set_var("AGENT_IDE_CDP_PORT", port.to_string());
+
+            let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+            let registry = crate::agent::approval::ApprovalRegistry::new();
+            let mut granted = WorkspaceToolPermissions::default()
+                .with_page_read(true, vec!["http://127.0.0.1:1420".to_string()])
+                .with_approval(crate::agent::approval::ApprovalGate::new(
+                    registry.clone(),
+                    events.clone(),
+                ));
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            granted.adopt_cancel(cancel.clone());
+
+            // 批准之前先把开关拉下来，模拟 Stop 恰好落在决定送到的那一刻
+            let answer = tokio::spawn(answer_when_asked(
+                events.clone(),
+                registry.clone(),
+                true,
+                Some(cancel),
+            ));
+            let error = browser_read_page_tool(Some("1420"), None, &granted)
+                .await
+                .unwrap_err();
+            assert!(answer.await.unwrap(), "应该有一条挂起的请求可以回答");
+
+            std::env::remove_var("AGENT_IDE_CDP_PORT");
+            assert!(error.contains("stopped"), "{}", error);
+            let actions = granted.take_external_actions();
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].kind, "browser_read_page_cancelled");
+        });
     }
 
     /// 两个授权位都要有，而且缺哪个都不通告、也不认领。

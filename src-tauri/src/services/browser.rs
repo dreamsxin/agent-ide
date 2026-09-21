@@ -317,8 +317,12 @@ pub const MAX_PAGE_TEXT_CHARS: usize = 20_000;
 ///
 /// `chars` 是截断**之前**的长度：模型只有知道"还有多少没看到"才判断得出该不该换个
 /// 更窄的读法，只给一段掐断的文本会让它以为自己读完了。
+///
+/// `url` 是**页面自己报的**当时的地址，不是 `/json/list` 里那个 —— 它和正文来自同一次
+/// 求值，所以它是唯一能用来复核"读到的确实是批准过的那个站点"的东西。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageText {
+    pub url: String,
     pub text: String,
     pub truncated: bool,
     pub chars: usize,
@@ -337,9 +341,13 @@ pub struct ReadTarget {
 
 /// 在已经打开的页面里选出**唯一**一个要读的。
 ///
+/// 至少要给一个筛选条件。空条件会命中每一个被允许的页面，而"命中多个"的拒绝话术里带着
+/// 候选页面的标题和 URL —— 于是一次不带参数的调用就成了 `workspace_browser_tabs`，绕开
+/// 了那个工具自己的授权。截图那边是同一条规则（`select_capture_target` 也拒绝空条件）。
+/// 代价是模型必须先知道一个子串；这正是"读哪一页"本来就该带的信息。
+///
 /// 清单过滤的是**候选**，不只是决定工具存不存在：不在允许 origin 里的页面既不参与匹配，
-/// 也不出现在"命中了这几个"的列表里 —— 否则一次含糊的筛选条件就成了列出全部标签页的
-/// 后门，而那正是 `browser_tabs` 需要单独授权的原因。
+/// 也不出现在候选列表里 —— 否则允许清单只限制"能读到什么"，却不限制"能看见有什么"。
 ///
 /// 命中多个就拒绝而不是挑第一个：读错一页的代价是把另一个站点的内容交给模型，而"第一个"
 /// 取决于 Chrome 的返回顺序，没有任何人能预期它。
@@ -349,6 +357,13 @@ pub fn select_read_target(
     title_contains: Option<&str>,
     allowlist: &[String],
 ) -> Result<ReadTarget, String> {
+    if url_contains.is_none() && title_contains.is_none() {
+        return Err(
+            "Name the page with 'url_contains' and/or 'title_contains' — reading is per page, \
+             so an empty filter is refused rather than resolved to whatever is open."
+                .to_string(),
+        );
+    }
     let total = sessions.len();
     let allowed: Vec<PageSession> = sessions
         .into_iter()
@@ -423,18 +438,19 @@ fn contains_ignoring_case(haystack: &str, needle: Option<&str>) -> bool {
     }
 }
 
+/// 把筛选条件写成一句人话。
+///
+/// 拼出来而不是穷举四种组合：`select_read_target` 已经拒掉了"两个都没给"，穷举就得留一个
+/// 到不了的分支 —— 而到不了的分支后来总会有人走到。
 fn describe_read_filter(url_contains: Option<&str>, title_contains: Option<&str>) -> String {
-    match (url_contains, title_contains) {
-        (Some(url), Some(title)) => {
-            format!(
-                "a URL containing \"{}\" and a title containing \"{}\"",
-                url, title
-            )
-        }
-        (Some(url), None) => format!("a URL containing \"{}\"", url),
-        (None, Some(title)) => format!("a title containing \"{}\"", title),
-        (None, None) => "any allowed open page".to_string(),
+    let mut parts = Vec::new();
+    if let Some(url) = url_contains {
+        parts.push(format!("a URL containing \"{}\"", url));
     }
+    if let Some(title) = title_contains {
+        parts.push(format!("a title containing \"{}\"", title));
+    }
+    parts.join(" and ")
 }
 
 /// 取正文的固定表达式。
@@ -443,14 +459,21 @@ fn describe_read_filter(url_contains: Option<&str>, title_contains: Option<&str>
 /// 一个模型能决定内容的表达式等于把这个站点的会话整个交出去（读 cookie、以用户身份
 /// 发请求）。用户批准的是"读这一页写了什么"，那就只该有一段写死的取文本脚本。
 ///
+/// 表达式**连同 `location.href` 一起返回**，这是这段脚本最重要的一件事：授权是按 origin
+/// 给的，而那个判断此前用的是 `/json/list` 快照里的 URL —— 调试 socket 绑的是 target，
+/// 页面在"列出"和"读到"之间导航到别处时，socket 照样有效，于是读到的是一个没人授权过的
+/// 站点。URL 和正文来自**同一次求值**，所以这个复核没有缝可钻。
+///
 /// 截断在页面里做：一份长文档的 `innerText` 可以是几 MB，这些字节没人要看，却要先过
-/// 一遍 WebSocket 帧再在这边丢掉。
+/// 一遍 WebSocket 帧再在这边丢掉。按**码位**切（`Array.from`）而不是 `slice`：JS 的
+/// `slice` 数的是 UTF-16 单元，正好切在一个星文平面字符中间会留下半个代理对，那不是
+/// 合法 JSON，整次读取会以一句"响应不对"结束。
 pub fn page_text_expression(max_chars: usize) -> String {
     format!(
         "(() => {{ const raw = (document.body && document.body.innerText) || ''; \
-         const text = raw.replace(/\\n{{3,}}/g, '\\n\\n').trim(); \
-         return {{ text: text.slice(0, {max}), chars: text.length, \
-         truncated: text.length > {max} }}; }})()",
+         const points = Array.from(raw.replace(/\\n{{3,}}/g, '\\n\\n').trim()); \
+         return {{ url: location.href, text: points.slice(0, {max}).join(''), \
+         chars: points.length, truncated: points.length > {max} }}; }})()",
         max = max_chars
     )
 }
@@ -460,6 +483,10 @@ pub fn page_text_expression(max_chars: usize) -> String {
 /// 地址来自 Chrome 自己的响应，正常情况下就是 `ws://127.0.0.1:<port>/devtools/page/<id>`。
 /// 仍然要查一遍：这是一个由**响应内容**决定我们去连哪里的字段，端口被别的服务占着、
 /// 或者响应经过了什么东西转发时，我们会把脚本送到一个陌生的地方去执行。
+///
+/// 结尾那个 `/` 是这道检查的全部力气所在，不是格式上的讲究：少了它，
+/// `ws://127.0.0.1:9222@evil.example/x` 就能通过 —— userinfo 的 `@` 恰好占住 authority
+/// 的位置，而真正被连接的主机是 `evil.example`。
 pub fn validate_page_ws_url(ws_url: &str, port: u16) -> Result<(), String> {
     let expected = format!("ws://127.0.0.1:{}/", port);
     if ws_url.starts_with(&expected) {
@@ -469,6 +496,25 @@ pub fn validate_page_ws_url(ws_url: &str, port: u16) -> Result<(), String> {
         "Refusing to attach to {}: the page debugger must be on {}",
         ws_url, expected
     ))
+}
+
+/// 读回来的那一页，是不是用户批准的那一页。
+///
+/// 比的是 origin 而不是完整 URL：授权本来就是按 origin 给的，同一个站点内的跳转属于
+/// 同一次授权（和 `browser_open` 一致）。跨 origin 就拒绝，而且**不说**跳到哪儿去了 ——
+/// 那正是一个没被授权的站点，把它的地址写进返回值等于替这次被拒的读取完成了披露。
+///
+/// 这是 `ApprovedWindow::verify` 在浏览器侧的对应物：那边靠句柄 + pid 认窗口，这边靠
+/// target 的 socket 认页面（socket 就绑在 target 上，所以身份是结构保证的），需要复核的
+/// 只剩"它现在在哪个站点"。
+pub fn verify_read_origin(approved_origin: &str, read_url: &str) -> Result<(), String> {
+    match origin_of(read_url) {
+        Ok(origin) if origin == approved_origin => Ok(()),
+        _ => Err(format!(
+            "That page navigated away from {} after it was approved, so nothing was read.",
+            approved_origin
+        )),
+    }
 }
 
 /// 解析 `Runtime.evaluate` 的回答。
@@ -507,7 +553,14 @@ pub fn parse_evaluate_response(body: &str) -> Result<PageText, String> {
         .get("text")
         .and_then(|text| text.as_str())
         .ok_or_else(|| "CDP returned a value without page text.".to_string())?;
+    // URL 缺了就是错误，不是"那就不查了"：这个字段是跨 origin 复核的唯一依据，
+    // 悄悄退回"没有 URL 也放行"会把整道复核变成装饰。
+    let url = payload
+        .get("url")
+        .and_then(|url| url.as_str())
+        .ok_or_else(|| "CDP returned page text without the page's own URL.".to_string())?;
     Ok(PageText {
+        url: url.to_string(),
         text: text.to_string(),
         truncated: payload
             .get("truncated")
@@ -583,9 +636,10 @@ async fn evaluate_page_text(ws_url: &str, max_chars: usize) -> Result<PageText, 
             Some(Err(error)) => return Err(format!("The DevTools connection failed: {}", error)),
         }
     };
-    // 关不掉也不算这次读失败：正文已经拿到了，而一条没礼貌关掉的 socket 会被 Chrome
-    // 自己回收。
-    let _ = socket.close(None).await;
+    // 不 `await` 关闭握手：这整段都在超时里，而一个不肯把 close 帧冲出去的对端会让一次
+    // **已经成功**的读取以"页面没有在 10 秒内回答"结束 —— 一句假话。丢掉 socket 就关掉了
+    // 底层连接，剩下的礼貌由 Chrome 自己回收。
+    drop(socket);
     parse_evaluate_response(&answer)
 }
 
@@ -750,7 +804,8 @@ mod tests {
         ];
         let allowlist = vec!["https://example.com".to_string()];
 
-        let ambiguous = select_read_target(open.clone(), None, None, &allowlist).unwrap_err();
+        let ambiguous =
+            select_read_target(open.clone(), Some("example.com"), None, &allowlist).unwrap_err();
         assert!(ambiguous.contains("Docs A") && ambiguous.contains("Docs B"));
 
         let none = select_read_target(open.clone(), Some("/nope"), None, &allowlist).unwrap_err();
@@ -760,8 +815,26 @@ mod tests {
         assert_eq!(chosen.tab.url, "https://example.com/b");
     }
 
+    /// 不带筛选条件的调用要拒掉，而不是解析成"反正只有一个"。
+    ///
+    /// 空条件命中每一个被允许的页面，而"命中多个"的拒绝话术里带着候选页面的标题和 URL ——
+    /// 于是一次无参调用就是 `workspace_browser_tabs`，绕开了那个工具自己的授权。
+    #[test]
+    fn a_read_without_a_filter_is_refused_instead_of_listing_everything() {
+        let open = vec![
+            session("Docs A", "https://example.com/a", true),
+            session("Docs B", "https://example.com/b", true),
+        ];
+
+        let error = select_read_target(open, None, None, &["*".to_string()]).unwrap_err();
+
+        assert!(!error.contains("Docs A"), "{}", error);
+        assert!(!error.contains("Docs B"), "{}", error);
+        assert!(error.contains("url_contains"));
+    }
+
     /// 清单过滤的是**候选**：不在允许 origin 里的页面既不参与匹配，标题也不出现在
-    /// 拒绝理由里 —— 否则一个含糊的筛选条件就成了列出全部标签页的后门。
+    /// 拒绝理由里 —— 否则允许清单只限制"能读到什么"，却不限制"能看见有什么"。
     #[test]
     fn pages_outside_the_allowed_origins_are_neither_read_nor_named() {
         let open = vec![
@@ -770,7 +843,7 @@ mod tests {
         ];
         let allowlist = vec!["http://127.0.0.1:1420".to_string()];
 
-        let chosen = select_read_target(open.clone(), None, None, &allowlist).unwrap();
+        let chosen = select_read_target(open.clone(), Some("127.0.0.1"), None, &allowlist).unwrap();
         assert_eq!(chosen.tab.url, "http://127.0.0.1:1420/");
 
         let refused = select_read_target(open, Some("accounts"), None, &allowlist).unwrap_err();
@@ -784,7 +857,7 @@ mod tests {
     fn an_unattachable_page_says_why() {
         let error = select_read_target(
             vec![session("Busy", "https://example.com/busy", false)],
-            None,
+            Some("/busy"),
             None,
             &["*".to_string()],
         )
@@ -795,14 +868,17 @@ mod tests {
     }
 
     /// 截断在页面里做，而且两处都用同一个上限 —— 只在一处写死会让"传回来的"和
-    /// "报出来的"对不上。
+    /// "报出来的"对不上。按码位切：`slice` 数 UTF-16 单元，切在星文平面字符中间会留下
+    /// 半个代理对，那不是合法 JSON。还要把 `location.href` 带回来，跨 origin 复核靠它。
     #[test]
-    fn the_page_side_script_truncates_and_reports_the_full_length() {
+    fn the_page_side_script_truncates_by_code_point_and_reports_the_url() {
         let expression = page_text_expression(1234);
 
+        assert!(expression.contains("Array.from"));
         assert!(expression.contains("slice(0, 1234)"));
-        assert!(expression.contains("text.length > 1234"));
-        assert!(expression.contains("chars: text.length"));
+        assert!(expression.contains("points.length > 1234"));
+        assert!(expression.contains("chars: points.length"));
+        assert!(expression.contains("url: location.href"));
     }
 
     /// 只连回环上属于这个端口的调试 socket：这是一个由响应内容决定"去连哪儿"的字段。
@@ -814,6 +890,10 @@ mod tests {
             "ws://127.0.0.1:9333/devtools/page/A",
             "wss://127.0.0.1:9222/devtools/page/A",
             "ws://127.0.0.1:92220/devtools/page/A",
+            // 结尾那个 `/` 是这道检查的全部力气：少了它，userinfo 的 `@` 就能占住
+            // authority 的位置，真正被连接的主机是 `evil.example`
+            "ws://127.0.0.1:9222@evil.example/devtools/page/A",
+            "ws://127.0.0.1:9222.evil.example/devtools/page/A",
         ] {
             assert!(
                 validate_page_ws_url(hostile, 9222).is_err(),
@@ -821,6 +901,26 @@ mod tests {
                 hostile
             );
         }
+    }
+
+    /// 页面在等批准的两分钟里导航走了，就当没读到 —— 而且不说它去了哪儿。
+    ///
+    /// 调试 socket 绑的是 target，页面导航到别处它照样有效，所以"列出时在允许清单里"
+    /// 不等于"读到时还在"。跳转后的那个站点正是没被授权的那个，把它的地址写进返回值
+    /// 等于替这次被拒的读取完成了披露。
+    #[test]
+    fn a_page_that_navigated_after_approval_is_not_read() {
+        assert!(
+            verify_read_origin("https://example.com", "https://example.com/other/path").is_ok()
+        );
+
+        let error =
+            verify_read_origin("https://example.com", "https://evil.example/landing").unwrap_err();
+        assert!(!error.contains("evil.example"), "{}", error);
+        assert!(error.contains("https://example.com"));
+
+        // 页面报了个读不出 origin 的地址（`about:blank`、`chrome-error://`）也算跳走了
+        assert!(verify_read_origin("https://example.com", "about:blank").is_err());
     }
 
     /// 三种失败都不能变成"读到了空文本"：模型会据此断定页面是空的然后往下走。
@@ -840,6 +940,11 @@ mod tests {
 
         assert!(parse_evaluate_response(r#"{"id":1,"result":{}}"#).is_err());
         assert!(parse_evaluate_response("not json").is_err());
+        // 没有 URL 就没法复核跨 origin，所以缺它是错误而不是"那就不查了"
+        assert!(parse_evaluate_response(
+            r#"{"id":1,"result":{"result":{"value":{"text":"hi","chars":2}}}}"#
+        )
+        .is_err());
     }
 
     /// 截断了就必须说，而且要说出原本有多长：只给一段掐断的文本会让模型以为读完了。
@@ -847,12 +952,95 @@ mod tests {
     fn a_truncated_page_reports_the_length_it_had() {
         let answer = parse_evaluate_response(
             r#"{"id":1,"result":{"result":{"type":"object","value":
-               {"text":"abc","chars":50000,"truncated":true}}}}"#,
+               {"url":"https://example.com/docs","text":"abc","chars":50000,"truncated":true}}}}"#,
         )
         .unwrap();
 
         assert_eq!(answer.text, "abc");
+        assert_eq!(answer.url, "https://example.com/docs");
         assert!(answer.truncated);
         assert_eq!(answer.chars, 50_000);
+    }
+
+    /// 一个只回答一次的假 CDP 页面 socket。
+    ///
+    /// 返回它监听的端口。只服务一个连接：这些测试各自只读一页。
+    async fn fake_page_debugger(reply: serde_json::Value) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // 先照着 Chrome 的样子来一条无关事件：回答必须按 id 认，拿第一条消息当结果
+            // 会把这条事件解析成"这一页是空的"
+            socket
+                .send(Message::Text(
+                    r#"{"method":"Runtime.executionContextCreated","params":{}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let _request = socket.next().await;
+            socket
+                .send(Message::Text(reply.to_string().into()))
+                .await
+                .unwrap();
+            // 不主动关：真正的 Chrome 也不会在回答之后立刻关，而读取方不该依赖它关
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        port
+    }
+
+    /// 真的连一次 WebSocket 并读回正文。
+    ///
+    /// 这条路径上此前没有任何自动化覆盖：握手、按 id 认回答、以及"读到的 URL"都只在
+    /// 真的连上去之后才发生。
+    #[tokio::test]
+    async fn the_page_text_comes_back_over_a_real_websocket() {
+        let port = fake_page_debugger(serde_json::json!({
+            "id": 1,
+            "result": { "result": { "type": "object", "value": {
+                "url": "http://127.0.0.1:1420/index.html",
+                "text": "Preview is up",
+                "chars": 13,
+                "truncated": false
+            }}}
+        }))
+        .await;
+
+        let page = read_page_text(
+            &format!("ws://127.0.0.1:{}/devtools/page/1", port),
+            port,
+            100,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.text, "Preview is up");
+        assert_eq!(page.url, "http://127.0.0.1:1420/index.html");
+        assert!(!page.truncated);
+    }
+
+    /// 连得上但关掉了连接，要说"在回答之前就关了"，而不是报成超时。
+    #[tokio::test]
+    async fn a_socket_that_closes_without_answering_says_so() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _request = socket.next().await;
+            let _ = socket.close(None).await;
+        });
+
+        let error = read_page_text(
+            &format!("ws://127.0.0.1:{}/devtools/page/1", port),
+            port,
+            100,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("closed"), "{}", error);
+        assert!(!error.contains("did not answer within"), "{}", error);
     }
 }
