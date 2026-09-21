@@ -142,7 +142,15 @@ interface AgentStore {
   forgetEarlierExternalActions: () => Promise<void>;
   restoreAgentSession: (workspacePath?: string) => void;
   reconcileBackendRun: () => Promise<void>;
-  clearAgentSession: () => void;
+  /**
+   * 清掉这一次会话：界面上的任务、步骤、SDD，**以及后端的对话历史**。
+   *
+   * 后端那半边必须一起清。少清它的话，界面看着是全新开始，而下一条提问仍然带着上一个
+   * 任务的 `conversation_digest()` 进模型上下文 —— 用户看不见，也没法解释模型为什么在
+   * 接着聊上一件事。
+   */
+  clearAgentSession: () => Promise<void>;
+
   setPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
   markDiffApplied: (diffId: string) => void;
@@ -155,9 +163,9 @@ interface AgentStore {
   clearMessages: () => void;
   /** 从后端拉一次真正的上下文；界面要显示它之前必须先调 */
   loadConversationTurns: () => Promise<void>;
-  /** 从这一轮起（含它）把上下文切掉。失败会抛，调用方负责告诉用户 */
   truncateConversationFrom: (turnId: string) => Promise<void>;
-  reset: () => void;
+
+
 
   // ====== 异步 Actions (IPC) ======
   sendPrompt: (params: {
@@ -513,7 +521,30 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           ? { ...state.restoredSession, backendMatched: matched }
           : null,
       }));
+      // 步骤和 SDD 也要对账，理由和 `restoreDiffs` 一样：它们在后端只活在内存里，前端却从
+      // localStorage 恢复。不对账的话，Run/Skip 会打到一个后端根本不认识的步骤上 —— 那是
+      // 一排点了报错的按钮，而"界面显示的和后端实际的不一致"正是这个产品要避免的。
+      // 只在后端确实有的时候覆盖：后端空着说明那次运行早结束了，恢复出来的那份仍然是用户
+      // 上次看到的东西，而 `restoredSession` 横幅已经在说明这件事。
+      //
+      // 两次调用都把命令名写成字面量、各自 try/catch，而不是抽一个 `reconcile(command)`
+      // 辅助函数：名字一进变量，`tests/ipc-contract.test.ts` 那条"注册了却没人调"的扫描
+      // 就看不见它了 —— 这个仓库每一处按名字查的工具都一样。
+      try {
+        const steps = await invoke<Step[]>("get_agent_steps");
+        if (steps.length > 0) set({ steps });
+      } catch (err: unknown) {
+        console.warn("[AgentStore] get_agent_steps reconciliation failed:", err);
+      }
+      try {
+        const sddArtifacts = await invoke<SddArtifact[]>("get_agent_sdd_artifacts");
+        if (sddArtifacts.length > 0) set({ sddArtifacts });
+      } catch (err: unknown) {
+        console.warn("[AgentStore] get_agent_sdd_artifacts reconciliation failed:", err);
+      }
       persistAgentSession(get());
+
+
     } catch (err) {
       console.warn("[AgentStore] get_agent_state reconciliation failed:", err);
       set((state) => ({
@@ -523,7 +554,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }));
     }
   },
-  clearAgentSession: () => {
+  clearAgentSession: async () => {
     clearPersistedAgentSession();
     set({
       state: "idle",
@@ -539,8 +570,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       isStreaming: false,
       agentRunId: null,
       restoredSession: null,
+      conversationTurns: [],
     });
+    if (!isTauriRuntime()) return;
+    try {
+      // 后端的对话历史是下一条提问的上下文来源，不清它就等于"看起来重新开始、实际还在
+      // 接着上一个任务聊"。清不掉要说出来，因为这件事在界面上完全看不出来。
+      await invoke("clear_agent_conversation");
+    } catch (err: unknown) {
+      set({
+        error: `Cleared this view, but the backend still has the previous conversation: ${String(err)}`,
+      });
+    }
   },
+
   addDiff: (diff) =>
     set((s) => {
       const diffs = [...s.diffs, diff];
@@ -611,24 +654,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
     set({ conversationTurns: turns });
   },
-  reset: () => {
-    clearPersistedAgentSession();
-    set({
-      state: "idle",
-      currentTask: null,
-      steps: [],
-      diffs: [],
-      sddArtifacts: [],
-      activeSddArtifact: null,
-      ghostSuggestions: [],
-      error: null,
-      lastApplyResult: null,
-      streamContent: "",
-      isStreaming: false,
-      agentRunId: null,
-      restoredSession: null,
-    });
-  },
+
+
+
 
   // ====== 权限管理实现 ======
   setPermissionPreset: (preset) => {
@@ -1448,10 +1476,10 @@ function describeError(err: unknown): string {
   return JSON.stringify(err);
 }
 
-
 interface PersistedAgentSession {
   workspacePath: string;
   runId: string | null;
+
   state: AgentState;
   mode: AgentMode;
   ideMode: IdeMode;

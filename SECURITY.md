@@ -252,7 +252,7 @@ What the backend does **not** enforce:
 
 Consequences for the operator: treat adding an MCP server as equivalent to installing a plugin with full user privileges. Prefer `AutoApprovedOnly` and list tools explicitly. Under the `run-commands` permission preset the policy resolves to `AllowAll`, so every discovered tool is callable without a human in the loop.
 
-`call_mcp_tool` intentionally uses `AllowAll`: it is a user-initiated escape hatch, not an Agent-initiated call. Note that no UI currently invokes it — `McpPanel.tsx` only calls `get_mcp_config`, `get_mcp_tools`, `save_mcp_config` and `discover_mcp_tools` — so today the permissive policy is reachable only over IPC.
+MCP tool calls made during a run go through the per-run policy; there is no command that bypasses it. (`call_mcp_tool`, which used `AllowAll` for a settings-panel "try it" button that was never built, has been deleted — see Known Limitations 14.)
 
 
 ## Agent Write Deny List
@@ -489,7 +489,8 @@ Ordered by how much they would matter to an operator. Each was confirmed by read
 11. **A token cap cannot be enforced against providers that report no usage** (local runtimes, mock endpoints). This is surfaced rather than silently treated as zero.
 12. **Hunk matching is textual**, not AST-aware. Ambiguous matches are rejected rather than guessed, and `baseHash` catches stale edits, but line-offset tolerance is not implemented.
 13. **macOS and Linux credential backends are unvalidated at runtime.** Windows is verified end to end. Linux and macOS CI jobs now attempt the round trip — Linux under `dbus-run-session` with `gnome-keyring`, macOS against the login Keychain — but **neither result has been confirmed yet**. Linux's first run failed before reaching the tests, on an unrelated RGBA icon problem that has since been fixed, so both stay listed as unvalidated until a run gets that far.
-14. **`call_mcp_tool` has no UI caller.** It is registered and uses `AllowAll` by design, but nothing in the frontend invokes it, so the permissive policy is reachable only over IPC. Either wire it to a user-initiated action or drop it — a permissive command with no visible entry point is the kind of thing that gets forgotten.
+14. ~~**`call_mcp_tool` has no UI caller.**~~ Resolved by deleting it. It was registered with `AllowAll` and no frontend entry point, so the permissive policy was reachable only over IPC; the alternative — building a "run this tool" button — would have shipped an arbitrary MCP invocation surface nobody had asked for. `tests/ipc-contract.test.ts` now fails on any command that is registered and never invoked, so this cannot come back unnoticed. Three other unreachable commands went with it: `disconnect_mcp_servers` (the registry already shuts servers down on reconfigure), `update_llm_config` (superseded by `save_llm_profile`, and it silently discarded every per-profile setting), and `file_exists`.
+
 
 
 ## Vulnerability Reporting

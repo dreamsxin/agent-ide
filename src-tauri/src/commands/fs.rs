@@ -79,12 +79,6 @@ pub fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
     Ok(entries)
 }
 
-/// 检查文件是否存在
-#[tauri::command]
-pub fn file_exists(path: String) -> Result<bool, String> {
-    Ok(workspace::resolve_existing(&path).is_ok())
-}
-
 // ====== CRUD 操作 ======
 
 /// 删除文件或递归删除目录

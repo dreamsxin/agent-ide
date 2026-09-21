@@ -112,11 +112,13 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
               </div>
             </div>
             <button
-              onClick={clearAgentSession}
+              onClick={() => void clearAgentSession()}
+              title="Also clears the conversation history the next prompt would inherit"
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] hover:bg-surface-border/30"
             >
               Clear
             </button>
+
           </div>
         </div>
       )}

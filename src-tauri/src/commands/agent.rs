@@ -2559,27 +2559,6 @@ pub async fn save_sdd_artifact(
     })
 }
 
-/// Update LLM configuration.
-#[tauri::command]
-pub async fn update_llm_config(
-    endpoint: String,
-    api_key: String,
-    model: String,
-    agent_state: State<'_, AgentGlobalState>,
-) -> Result<(), String> {
-    let compression = agent_state
-        .context_compression
-        .lock()
-        .map_err(|e| e.to_string())?
-        .clone();
-    {
-        let mut config = agent_state.llm_profiles.lock().map_err(|e| e.to_string())?;
-        llm_profiles::update_default_profile(&mut config, endpoint, api_key, model, compression)?;
-    }
-
-    Ok(())
-}
-
 /// Get LLM configuration with the API key masked.
 #[derive(Debug, Serialize)]
 pub struct LlmConfigResponse {

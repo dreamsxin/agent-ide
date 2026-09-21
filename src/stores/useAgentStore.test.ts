@@ -414,9 +414,42 @@ describe("applyAllDiffs", () => {
   });
 });
 
+describe("clearAgentSession", () => {
+  /**
+   * "Clear" 是界面上已经有的那个按钮。它只清前端的话，下一条提问仍然带着上一个任务的
+   * 对话摘要进模型上下文 —— 界面看着是全新开始，模型还在接着上一件事聊，而用户看不出来。
+   */
+  it("also clears the conversation the backend would feed to the next prompt", async () => {
+    useAgentStore.setState({
+      conversationTurns: [{ id: "turn-1", prompt: "old task", outcome: "did things" }] as never,
+      currentTask: { id: "t1", title: "old", description: "", status: "running" } as never,
+    });
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    await useAgentStore.getState().clearAgentSession();
+
+    expect(invokeMock).toHaveBeenCalledWith("clear_agent_conversation");
+    expect(useAgentStore.getState().conversationTurns).toEqual([]);
+    expect(useAgentStore.getState().currentTask).toBeNull();
+  });
+
+  /**
+   * 清不掉后端那半边必须说出来：界面已经空了，而上下文还在，这件事没有任何其他迹象。
+   */
+  it("says so when the view was cleared but the backend was not", async () => {
+    invokeMock.mockRejectedValueOnce("no orchestrator");
+
+    await useAgentStore.getState().clearAgentSession();
+
+    expect(useAgentStore.getState().error).toContain("previous conversation");
+  });
+});
+
 describe("restoreDiffs", () => {
   it("prefers the backend list over the persisted one", async () => {
     const backendDiff = { id: "diff-backend", file: "a.ts", status: "pending", hunks: [] };
+
+
     invokeMock.mockResolvedValueOnce([backendDiff]);
 
     await useAgentStore.getState().restoreDiffs("/tmp/ws");

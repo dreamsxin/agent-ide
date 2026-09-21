@@ -155,6 +155,38 @@ describe("Tauri IPC contract", () => {
         expect(missing, "these commands are invoked but not registered in lib.rs").toEqual([]);
     });
 
+    /**
+     * 反方向：注册了却没人调。
+     *
+     * 只查一个方向的代价这次被抓到了：七个命令注册在 `lib.rs` 里、前端一次都没调过，
+     * 其中 `call_mcp_tool` 用的是 `AllowAll` 策略 —— 一个没有任何界面入口的宽松命令，
+     * 只能从 IPC 到达，SECURITY.md 早就把它记成了待办，而测试一直是绿的。
+     *
+     * 事件那条检查从一开始就是双向的，并且写明了"两种漂移都真实存在"；命令这边只查一半
+     * 显然是漏的，不是决定。
+     *
+     * 豁免名单是空的，而且应该一直是空的：一个命令要么有界面入口，要么删掉。真需要一个
+     * 只从 IPC 调用的命令时，在这里写上它和理由 —— 那个摩擦是故意的。
+     */
+    it("has no command that is registered but never invoked", () => {
+        const registered = registeredCommands();
+        const invoked = invokedCommands();
+        const ipcOnly: string[] = [];
+
+        expect(registered.size).toBeGreaterThan(20);
+        expect(invoked.size).toBeGreaterThan(10);
+
+        const unreachable = [...registered].filter(
+            (name) => !invoked.has(name) && !ipcOnly.includes(name)
+        );
+
+        expect(
+            unreachable,
+            "these commands are registered but nothing in src/ invokes them — wire them to a control or delete them"
+        ).toEqual([]);
+    });
+
+
     it("parses the whole handler list, not just the beginning", () => {
         const registered = registeredCommands();
 

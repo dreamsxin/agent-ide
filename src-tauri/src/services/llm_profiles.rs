@@ -571,52 +571,6 @@ pub fn run_spend_cap(
     (pricing, cap)
 }
 
-pub fn update_default_profile(
-    config: &mut LlmProfilesConfig,
-    endpoint: String,
-    api_key: String,
-    model: String,
-    compression: ContextCompressionMode,
-) -> Result<(), String> {
-    let profile = LlmProfile {
-        id: DEFAULT_PROFILE_ID.to_string(),
-        name: "Default".to_string(),
-        provider: infer_provider(&endpoint).to_string(),
-        endpoint,
-        credential_ref: Some(credentials::llm_credential_ref(DEFAULT_PROFILE_ID)),
-        api_key: String::new(),
-        model,
-        max_context_tokens: None,
-        reserved_output_tokens: None,
-        max_output_tokens: None,
-        max_run_tokens: None,
-        prompt_micros_per_million: None,
-        completion_micros_per_million: None,
-        max_run_spend_micros: None,
-        tool_call_mode: default_tool_call_mode(),
-        model_type: None,
-        model_path: None,
-        model_file: None,
-        n_threads: None,
-        n_ctx: None,
-        n_gpu_layers: None,
-        n_batch: None,
-        temperature: None,
-        top_p: None,
-        top_k: None,
-        max_tokens: None,
-    };
-    credentials::store_secret(
-        &credentials::llm_credential_ref(DEFAULT_PROFILE_ID),
-        &api_key,
-    )?;
-    upsert_profile(&mut config.profiles, profile);
-    config.active_profile_id = DEFAULT_PROFILE_ID.to_string();
-    config.context_compression = compression;
-    save_llm_config_to_disk(config);
-    Ok(())
-}
-
 pub fn save_profile(
     config: &mut LlmProfilesConfig,
     request: SaveLlmProfileRequest,

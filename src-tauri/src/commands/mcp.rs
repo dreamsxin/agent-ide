@@ -264,30 +264,6 @@ pub async fn get_mcp_tools(
     Ok(mcp_state.registry.tools().await)
 }
 
-/// 手动调用一个 MCP 工具，用于设置面板里验证 server 是否可用。
-/// 这是用户主动点击触发的，因此绕过按运行生效的自动批准策略。
-#[tauri::command]
-pub async fn call_mcp_tool(
-    tool_name: String,
-    arguments: Option<String>,
-    mcp_state: State<'_, McpState>,
-) -> Result<String, String> {
-    mcp_state
-        .registry
-        .call(
-            &tool_name,
-            arguments.as_deref().unwrap_or("{}"),
-            McpToolPolicy::AllowAll,
-        )
-        .await
-}
-
-#[tauri::command]
-pub async fn disconnect_mcp_servers(mcp_state: State<'_, McpState>) -> Result<(), String> {
-    mcp_state.registry.shutdown_all().await;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{redact_arguments, truncate, McpToolInvoker};
