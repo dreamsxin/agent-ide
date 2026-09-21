@@ -229,10 +229,18 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 带超时的客户端。构造失败时退回默认客户端而不是报错：没有超时也比连不上好，
 /// 而这个分支在 reqwest 里实际上不可达。
+///
+/// **不走代理**。reqwest 默认会读 `HTTP_PROXY` / `ALL_PROXY`，于是在设了代理的机器上
+/// （公司网络里很常见），发往 127.0.0.1 的 CDP 请求会被送去代理。两个后果都不能接受：
+/// 浏览器工具会以一堆看不懂的错误静默失效，而不是给出那句"用 --remote-debugging-port
+/// 启动 Chrome"；更糟的是 `open_url` 把目标 URL 放在请求行里，经代理就等于把"Agent 正在
+/// 打开什么"泄露给了一个用户从没授权过的第三方。这条是一次测试意外发现的：连一个没人监听
+/// 的端口居然返回了空响应体，而不是连接被拒。
 fn cdp_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(REQUEST_TIMEOUT)
+        .no_proxy()
         .build()
         .unwrap_or_default()
 }
@@ -643,6 +651,72 @@ async fn evaluate_page_text(ws_url: &str, max_chars: usize) -> Result<PageText, 
     parse_evaluate_response(&answer)
 }
 
+/// 假的 CDP HTTP 端点，供测试使用。
+///
+/// 放在生产模块里（`#[cfg(test)]`）而不是各个测试模块里各写一份：`workspace_tools` 那边
+/// 也需要一个，而两份假服务迟早会在"哪个端点回什么"上分叉 —— 那时两边测的就不是同一个
+/// 协议了。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Arc, Mutex};
+
+    pub struct FakeCdp {
+        pub port: u16,
+        /// 收到的请求行，按顺序。断言"用的是 PUT /json/new"要靠它。
+        pub requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeCdp {
+        pub fn request_lines(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+    }
+
+    /// 起一个只服务 `connections` 个连接的假 CDP。
+    ///
+    /// 按请求行里有没有 `/json/new` 决定回哪份 body。故意不做完整路由：这些测试要验的是
+    /// 我们的客户端**发了什么**、以及**怎么解析回来的东西**，不是重写一个 Chrome。
+    pub async fn spawn(list_body: String, new_body: String, connections: usize) -> FakeCdp {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for _ in 0..connections {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = [0_u8; 2048];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let first_line = request.lines().next().unwrap_or_default().to_string();
+                let body = if first_line.contains("/json/new") {
+                    new_body.clone()
+                } else {
+                    list_body.clone()
+                };
+                recorded
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(first_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                     {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+        FakeCdp { port, requests }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +836,105 @@ mod tests {
             "https://anything.example",
             &["*".to_string()]
         ));
+    }
+
+    /// 连得上的时候，标签页列表真的从 HTTP 上读回来。
+    ///
+    /// `list_tabs` 和 `open_url` 此前一行覆盖都没有 —— 所有测试都停在解析函数上，而
+    /// "请求发去了哪个端点、用的什么方法"恰好是 CDP 这条链上最容易错的部分。
+    #[tokio::test]
+    async fn the_tab_list_is_read_over_http() {
+        let fake = test_support::spawn(
+            r#"[{"id":"1","type":"page","title":"Docs","url":"https://example.com/docs",
+                 "webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]"#
+                .to_string(),
+            "{}".to_string(),
+            1,
+        )
+        .await;
+
+        let tabs = list_tabs(fake.port).await.expect("列表应该读回来");
+
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].title, "Docs");
+        let lines = fake.request_lines();
+        assert!(lines[0].starts_with("GET /json/list"), "{}", lines[0]);
+    }
+
+    /// 开页面要用 **PUT /json/new**，而且 URL 要经过规范化再放进查询参数。
+    ///
+    /// Chrome 111 之后 `/json/new` 拒绝 GET，所以方法错了在新版 Chrome 上就是整个功能失效。
+    #[tokio::test]
+    async fn opening_a_url_puts_a_new_tab_with_the_normalized_url() {
+        let fake = test_support::spawn(
+            "[]".to_string(),
+            r#"{"id":"7","title":"Docs","url":"https://example.com/docs"}"#.to_string(),
+            1,
+        )
+        .await;
+
+        let tab = open_url(fake.port, "https://example.com/docs")
+            .await
+            .expect("应该开成功");
+
+        assert_eq!(tab.id, "7");
+        assert_eq!(tab.url, "https://example.com/docs");
+        let lines = fake.request_lines();
+        // 端点形状是 `/json/new?<编码后的 url>`，**没有** `url=` 这个参数名 —— 这是 Chrome
+        // 自己的格式，写这条测试时我先猜错了一次，所以把真实形状钉在这里。
+        assert!(lines[0].starts_with("PUT /json/new?"), "{}", lines[0]);
+        assert!(lines[0].contains("example.com"), "{}", lines[0]);
+        assert!(!lines[0].contains("url="), "{}", lines[0]);
+    }
+
+    /// 端点不存在时要说清**怎么办**，而不是一句 "connection refused"。
+    ///
+    /// 这条路径是用户第一次用浏览器工具时最可能撞上的：Chrome 没带
+    /// `--remote-debugging-port` 起，而那句话是他唯一需要的信息。
+    ///
+    /// 用 1 号端口而不是"先占一个临时端口再放掉"：放掉之后那个号会立刻被并行跑的别的
+    /// 测试的假服务抢走，于是连接**成功**了，这条测试就变成了随机失败。1 号端口需要管理员
+    /// 才绑得上，没人会占。
+    #[tokio::test]
+    async fn a_closed_port_says_how_to_start_chrome() {
+        let error = list_tabs(1).await.unwrap_err();
+
+        assert!(error.contains("--remote-debugging-port"), "{}", error);
+        assert!(error.contains('1'), "{}", error);
+    }
+
+    /// 设了代理也照样直连 127.0.0.1。
+    ///
+    /// reqwest 默认读 `HTTP_PROXY` / `ALL_PROXY`，而这台机器上就设了一个 —— 上面那条
+    /// "连不上要说怎么办"的测试第一次跑出来是"空响应体"，因为请求被送去了代理。生产里
+    /// 的后果更重：`open_url` 把目标 URL 放在请求行里，经代理就是一次没人授权过的披露。
+    ///
+    /// 用 `#[test]` 自己建 runtime：`env_test_guard()` 是同步锁，async 测试里它会跨 `await`。
+    #[test]
+    fn a_proxy_in_the_environment_does_not_intercept_loopback_cdp() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let fake = test_support::spawn(
+                r#"[{"id":"1","type":"page","title":"Docs","url":"https://example.com/docs"}]"#
+                    .to_string(),
+                "{}".to_string(),
+                1,
+            )
+            .await;
+            // 指向一个没人监听的端口：走代理的话这次请求不可能拿到那份列表
+            std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
+            std::env::set_var("ALL_PROXY", "http://127.0.0.1:1");
+
+            let tabs = list_tabs(fake.port).await;
+
+            std::env::remove_var("HTTP_PROXY");
+            std::env::remove_var("ALL_PROXY");
+            assert_eq!(tabs.expect("应该直连读到列表").len(), 1);
+        });
     }
 
     fn session(title: &str, url: &str, readable: bool) -> PageSession {

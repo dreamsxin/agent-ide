@@ -3622,26 +3622,16 @@ mod tests {
 
     /// 一个只回答一次 `/json/list` 的假 CDP 端点，返回它监听的端口。
     ///
+    /// 复用 `services::browser` 里那份假服务，而不是在这里再写一个：两份假服务迟早会在
+    /// "哪个端点回什么"上分叉，那时两边测的就不是同一个协议了。
+    ///
     /// 真起一个 socket 而不是把 `list_page_sessions` 抽象掉：入口那道 Stop 闸门是**等待
     /// 之前**取的，所以"批准送到之后才按 Stop"这条缝只有在真的走完"列出 → 问人"两步
     /// 之后才到得了。
     async fn fake_cdp_list(body: String) -> u16 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request).await;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.flush().await;
-        });
-        port
+        crate::services::browser::test_support::spawn(body, "{}".to_string(), 1)
+            .await
+            .port
     }
 
     /// Stop 落在"批准送到"和"真的读"之间时，仍然不读。

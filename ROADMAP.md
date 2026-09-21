@@ -1491,6 +1491,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The DPI question 101 left open is answered**: the shipped app is Per-Monitor-V2 aware because tao calls `SetProcessDpiAwarenessContext`, while `cargo test` has no event loop and runs DPI-unaware — so the test exercises a DPI mode production never uses, which is the other reason its coordinate assertion stays loose. Mixed-scaling hardware is still unverified.
    - Rust 425 → 426.
 
+104. **The browser HTTP path finally gets tested, and it immediately found a proxy leak (2026-09-21)**
+   `open_url` and `list_tabs` had **zero** coverage — an audit noted that years ago in repo time and every cycle since then tested the parsers instead. The fake CDP server built for 98's Stop test made this cheap, so it moved into `services::browser::test_support` (one fake, two users: a second copy would have drifted on "which endpoint answers what") and now three tests travel the real HTTP path.
+   - **The finding: `cdp_client()` went through the machine's proxy.** reqwest honours `HTTP_PROXY` / `ALL_PROXY` by default, and this machine has one set. The symptom was absurd enough to notice: a request to a port with nothing listening came back with an *empty response body* instead of connection-refused. Two consequences in production, and the second one is a disclosure — the browser tools fail with unrecognisable errors instead of the actionable "start Chrome with `--remote-debugging-port`", and `open_url` puts the target URL in the request line, so a proxy learns what the Agent is opening. `no_proxy()` now, with a test that sets both env vars at a dead port and asserts the list still comes back.
+   - **The tests also corrected me about the endpoint shape.** I asserted `PUT /json/new?url=…`; Chrome's format is `/json/new?<encoded url>` with no parameter name. The assertion was wrong, not the code — but that is exactly the kind of thing a parser test can never tell you, and the method matters: Chrome 111+ rejects `GET` on that endpoint, so getting it wrong means the whole feature is dead on current Chrome.
+   - **One of my new tests was itself racy and I fixed it rather than keeping it green by luck.** "Bind an ephemeral port then drop it" gives a port number that a *parallel* test's fake server can immediately claim — the connection then succeeds. Port 1 needs administrator rights to bind, so nothing takes it.
+   - Rust 426 → 430.
+
 
 
 
