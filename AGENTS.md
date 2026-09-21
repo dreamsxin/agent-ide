@@ -42,7 +42,16 @@ npm test
   frozen repo copies with `*.test.tsx`; the default include runs those. New test
   directories must be added explicitly or they never run.
 - **`workspace::env_test_guard()` is only a mutex**, it does not set
-  `AGENT_IDE_CONFIG_DIR`. A test needing config isolation sets it itself.
+  `AGENT_IDE_CONFIG_DIR`. A test needing config isolation sets it itself. It is also a
+  *sync* guard: in an `#[tokio::test]` it lives across an `await`, which clippy rejects.
+  Use `#[test]` plus a hand-built runtime and `block_on`.
+- **An HTTP client aimed at 127.0.0.1 must set `no_proxy()`.** reqwest honours
+  `HTTP_PROXY` / `ALL_PROXY`, so without it a loopback request goes to the machine's
+  proxy: the call fails unrecognisably, and whatever is in the URL (the page the Agent
+  is opening) reaches a third party. See `browser::cdp_client`; `LlmClient` is the
+  opposite case and keeps the proxy deliberately.
+- **Win32 window identity is four checks and still not exact**: alive, app, pid, class
+  (`ApprovedWindow::verify`). Handles get recycled, so never re-find a window by title.
 - **Windows path quirks are a security boundary.** `.git./hooks` and `name::$DATA`
   resolve like `.git/hooks` and `name`; deny-list comparison goes through
   `normalize_component_for_denial`.
@@ -85,8 +94,8 @@ npm test
   belongs in `WorkspaceToolPermissions`.
 - **Monaco's module-level registrations live in `components/editor/monacoGlobals.ts`.**
   `languages.register*` and `editor.registerCommand` belong to the monaco module, so
-  they register once per module (`WeakSet` guard) and are never disposed. Only
-  per-editor things (listeners, `addAction`) belong in `onMount` / `disposablesRef`.
+  they register once (`WeakSet` guard) and are never disposed. Only per-editor things
+  (listeners, `addAction`) belong in `onMount` / `disposablesRef`.
 
 ## Conventions
 

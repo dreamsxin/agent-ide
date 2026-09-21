@@ -1520,6 +1520,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Rejected: comparing the window's position.** A user moving a window between capture and click is normal and the coordinates stay correct (they are window-relative and recomputed from the current rect), so a position check would refuse legitimate clicks. Size is different: it invalidates the coordinates, which is why that one *is* a check.
    - Rust 431 (the new case is an arm of an existing test — `a_remembered_window_is_verified_for_clicking_too` now covers same-app-same-pid-different-class, which was previously a silent pass).
 
+108. **The injected project memory had no guard against its own budget (2026-09-21)**
+   `AGENTS.md` is injected into every Agent run and bounded at 8 000 bytes; the file's own header says "keep it under ~7 500 — measure, do not guess". The truncation *mechanism* was tested three ways. **This repo's own copy was not**, and the part that gets cut is the tail — "Where decisions go" — so crossing the line produces no error, just a run that quietly stops seeing the last rules.
+   - Measured before touching anything: 6 658 bytes. Then added three traps this session earned (the sync `env_test_guard` in an async test, `no_proxy()` for loopback clients, Win32 identity being four checks and still inexact), which took it to 7 460 — inside the guidance but with ~40 bytes of headroom, i.e. the next line crosses it. Trimmed two over-long bullets back to **7 375**.
+   - `this_repos_project_memory_fits_with_headroom` now reads the real file and asserts both the hard limit and a 500-byte margin. A test that only asserted the hard limit would go red exactly when the damage is already invisible; the margin makes it go red while there is still room to think.
+   - Worth naming the pattern: the mechanism was well tested and the *instance* was not. Same shape as 98's "deleting the append call left all tests green" and 103's "the e2e never reached `SendInput` here" — a guard that works, protecting something nobody checked.
+   - Rust 431 → 432.
+
 
 
 

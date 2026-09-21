@@ -108,4 +108,38 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(temp);
     }
+
+    /// **这个仓库自己的** `AGENTS.md` 必须装得下，而且要留出余量。
+    ///
+    /// 截断机制本身上面已经测过了 —— 但那只证明"超了会被切"，不证明"我们的那份没超"。
+    /// 而这份文件被注入每一次 Agent 运行，被切掉的是**尾部**，也就是"决定写到哪里"那一节：
+    /// 没有任何报错，只是从此每次运行都少看到几条规则。这条测试把那次静默变成一次红色。
+    ///
+    /// 留 500 字节余量而不是贴着 8 000：贴着上限的话，下一个人加一行就越界，而越界的症状
+    /// 是看不见的。`AGENTS.md` 自己写的就是"keep it under ~7 500"，这里把那句话变成可执行的。
+    #[test]
+    fn this_repos_project_memory_fits_with_headroom() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(PROJECT_MEMORY_FILE);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读不到 {}: {}", path.display(), error));
+        let bytes = content.trim().len();
+
+        // 硬上限：超过就会被真的切掉
+        assert!(
+            bytes <= MAX_PROJECT_MEMORY_CHARS,
+            "AGENTS.md 有 {} 字节，超过了 {} 的注入上限，尾部会被静默切掉",
+            bytes,
+            MAX_PROJECT_MEMORY_CHARS
+        );
+        // 余量：越界的症状看不见，所以在还看得见的时候就报
+        let recommended = MAX_PROJECT_MEMORY_CHARS - 500;
+        assert!(
+            bytes <= recommended,
+            "AGENTS.md 有 {} 字节，已经超过建议的 {}；该精简，而不是继续往上加",
+            bytes,
+            recommended
+        );
+    }
 }
