@@ -193,6 +193,13 @@ pub struct SendPromptRequest {
     /// 允许被截图的应用清单；空清单等于不许。
     #[serde(default, rename = "captureApps")]
     pub capture_apps: Option<Vec<String>>,
+    /// 是否允许读一个已经打开的页面的正文。和 `allowBrowserUse` 分开：列表说"你开着
+    /// 这个站点"，正文是站点上的内容，包括只有登录之后才看得到的那部分。
+    #[serde(default, rename = "allowPageRead")]
+    pub allow_page_read: bool,
+    /// 允许被读取正文的 origin 清单；空清单等于不许。
+    #[serde(default, rename = "pageReadOrigins")]
+    pub page_read_origins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +279,12 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::capture_apps`
     #[serde(default, rename = "captureApps")]
     pub capture_apps: Option<Vec<String>>,
+    /// 同 `SendPromptRequest::allow_page_read`
+    #[serde(default, rename = "allowPageRead")]
+    pub allow_page_read: bool,
+    /// 同 `SendPromptRequest::page_read_origins`
+    #[serde(default, rename = "pageReadOrigins")]
+    pub page_read_origins: Option<Vec<String>>,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -350,12 +363,16 @@ pub async fn send_agent_prompt(
         request.allow_command_run,
         allow_write,
         request.allow_file_create,
-        request.allow_browser_use,
-        request.browser_origins.clone().unwrap_or_default(),
-        request.allow_computer_use,
-        request.computer_apps.clone().unwrap_or_default(),
-        request.allow_computer_capture,
-        request.capture_apps.clone().unwrap_or_default(),
+        ExternalGrants {
+            allow_browser: request.allow_browser_use,
+            browser_origins: request.browser_origins.clone().unwrap_or_default(),
+            allow_page_read: request.allow_page_read,
+            page_read_origins: request.page_read_origins.clone().unwrap_or_default(),
+            allow_computer: request.allow_computer_use,
+            computer_apps: request.computer_apps.clone().unwrap_or_default(),
+            allow_capture: request.allow_computer_capture,
+            capture_apps: request.capture_apps.clone().unwrap_or_default(),
+        },
         agent_state.approval_gate(&app_handle),
     );
     // 移进去而不是克隆：局部变量之后就不能再交给别人，多一个消费者会编译不过
@@ -522,6 +539,24 @@ fn allowed_agent_commands(
         .collect()
 }
 
+/// 一次运行的**外部**授权，四对开关 + 清单。
+///
+/// 收成一个具名字段的结构，而不是继续往 `agent_tool_permissions` 后面加位置参数：加到
+/// 第十个参数时调用点已经是一串 `false, Vec::new(), false, Vec::new()`，"这个 true 是哪档
+/// 权限"只能靠数位置 —— 而数错一位的后果是把截图授权当成了浏览器授权。四档彼此独立，
+/// 每一档都是"开关 + 非空清单"两个条件同时成立才放行。
+#[derive(Debug, Default, Clone)]
+pub struct ExternalGrants {
+    pub allow_browser: bool,
+    pub browser_origins: Vec<String>,
+    pub allow_page_read: bool,
+    pub page_read_origins: Vec<String>,
+    pub allow_computer: bool,
+    pub computer_apps: Vec<String>,
+    pub allow_capture: bool,
+    pub capture_apps: Vec<String>,
+}
+
 /// 本次运行允许 Agent 执行哪些命令。
 ///
 /// 清单由后端从**项目自己声明的**任务推导（package.json scripts、Cargo），不是
@@ -530,12 +565,7 @@ fn agent_tool_permissions(
     allow_command_run: bool,
     allow_write: bool,
     allow_create: bool,
-    allow_browser: bool,
-    browser_origins: Vec<String>,
-    allow_computer: bool,
-    computer_apps: Vec<String>,
-    allow_capture: bool,
-    capture_apps: Vec<String>,
+    grants: ExternalGrants,
     approval: crate::agent::approval::ApprovalGate,
 ) -> crate::agent::workspace_tools::WorkspaceToolPermissions {
     // 未授权时连扫都不扫：`discover_project_tasks` 要读 package.json / Cargo.toml。
@@ -551,9 +581,10 @@ fn agent_tool_permissions(
         allow_write,
         allow_create,
     )
-    .with_browser(allow_browser, browser_origins)
-    .with_computer(allow_computer, computer_apps)
-    .with_capture(allow_capture, capture_apps)
+    .with_browser(grants.allow_browser, grants.browser_origins)
+    .with_page_read(grants.allow_page_read, grants.page_read_origins)
+    .with_computer(grants.allow_computer, grants.computer_apps)
+    .with_capture(grants.allow_capture, grants.capture_apps)
     // 批准通道是必填参数而不是可选的 `.with_approval()` 调用：漏掉它的运行会把每一次
     // 撤不回的动作都拒掉（`Unattended`），而那种"功能整体消失"的故障恰恰是本项目
     // 反复出现的一类 —— 加了个新东西却没接上它的消费者。让编译器管这件事。
@@ -910,12 +941,16 @@ pub async fn run_agent_step(
         request.allow_command_run,
         allow_write,
         request.allow_file_create,
-        request.allow_browser_use,
-        request.browser_origins.clone().unwrap_or_default(),
-        request.allow_computer_use,
-        request.computer_apps.clone().unwrap_or_default(),
-        request.allow_computer_capture,
-        request.capture_apps.clone().unwrap_or_default(),
+        ExternalGrants {
+            allow_browser: request.allow_browser_use,
+            browser_origins: request.browser_origins.clone().unwrap_or_default(),
+            allow_page_read: request.allow_page_read,
+            page_read_origins: request.page_read_origins.clone().unwrap_or_default(),
+            allow_computer: request.allow_computer_use,
+            computer_apps: request.computer_apps.clone().unwrap_or_default(),
+            allow_capture: request.allow_computer_capture,
+            capture_apps: request.capture_apps.clone().unwrap_or_default(),
+        },
         agent_state.approval_gate(&app_handle),
     );
     tool_permissions.adopt_cancel(side_effect_switch);
@@ -2124,20 +2159,16 @@ mod tests {
         );
     }
 
-    /// 每个 bool 全靠位置传，换一下顺序照样编译得过。这条把它们各自落到哪个字段
-    /// 钉住：只允许写盘时，命令清单必须是空的，新建文件必须仍然不允许。
+    /// 三个 bool 仍然靠位置传，换一下顺序照样编译得过。这条把它们各自落到哪个字段
+    /// 钉住：只允许写盘时，命令清单必须是空的，新建文件必须仍然不允许。四档外部授权
+    /// 走具名字段，这里钉的是"它们彼此不互相蕴含"。
     #[test]
     fn each_flag_lands_on_its_own_permission() {
         let write_only = agent_tool_permissions(
             false,
             true,
             false,
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
+            ExternalGrants::default(),
             test_approval_gate(),
         );
         assert!(write_only.allowed_commands.is_empty());
@@ -2149,12 +2180,7 @@ mod tests {
             false,
             false,
             true,
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
+            ExternalGrants::default(),
             test_approval_gate(),
         );
         assert!(!create_only.allow_write);
@@ -2165,12 +2191,11 @@ mod tests {
             false,
             false,
             false,
-            true,
-            vec!["http://127.0.0.1:1420".to_string()],
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
+            ExternalGrants {
+                allow_browser: true,
+                browser_origins: vec!["http://127.0.0.1:1420".to_string()],
+                ..ExternalGrants::default()
+            },
             test_approval_gate(),
         );
         assert!(!browser_only.allow_write);
@@ -2178,17 +2203,36 @@ mod tests {
         assert_eq!(browser_only.browser_origins.len(), 1);
         // 桌面观察也是独立的一档：给了浏览器不等于能看桌面
         assert!(!browser_only.allow_computer);
+        // 能**打开**一个页面也不等于能**读**它的正文：正文里有登录之后才看得到的东西
+        assert!(!browser_only.allow_page_read);
+        assert!(browser_only.page_read_origins.is_empty());
+
+        let page_read_only = agent_tool_permissions(
+            false,
+            false,
+            false,
+            ExternalGrants {
+                allow_page_read: true,
+                page_read_origins: vec!["https://example.com".to_string()],
+                ..ExternalGrants::default()
+            },
+            test_approval_gate(),
+        );
+        assert!(page_read_only.allow_page_read);
+        assert_eq!(page_read_only.page_read_origins.len(), 1);
+        // 反过来同理：允许读一份已经打开的文档，不等于允许它去开新页面
+        assert!(!page_read_only.allow_browser);
+        assert!(page_read_only.browser_origins.is_empty());
 
         let computer_only = agent_tool_permissions(
             false,
             false,
             false,
-            false,
-            Vec::new(),
-            true,
-            vec!["Code.exe".to_string()],
-            false,
-            Vec::new(),
+            ExternalGrants {
+                allow_computer: true,
+                computer_apps: vec!["Code.exe".to_string()],
+                ..ExternalGrants::default()
+            },
             test_approval_gate(),
         );
         assert!(computer_only.allow_computer);
@@ -2204,12 +2248,11 @@ mod tests {
             false,
             false,
             false,
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
-            true,
-            vec!["Code.exe".to_string()],
+            ExternalGrants {
+                allow_capture: true,
+                capture_apps: vec!["Code.exe".to_string()],
+                ..ExternalGrants::default()
+            },
             test_approval_gate(),
         );
         assert!(capture_only.allow_capture);

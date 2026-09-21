@@ -227,6 +227,7 @@ interface AgentStore {
   setPermissionPreset: (preset: AgentPermissionPreset) => void;
   togglePermission: (key: BooleanPermissionKey) => void;
   setBrowserOrigins: (origins: string[]) => void;
+  setPageReadOrigins: (origins: string[]) => void;
   /** 设置允许被观察的应用清单（可执行文件名）。空清单等于不许观察。 */
   setComputerApps: (apps: string[]) => void;
   setCaptureApps: (apps: string[]) => void;
@@ -627,6 +628,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => ({
       permissions: { ...s.permissions, browserOrigins: origins },
     })),
+  setPageReadOrigins: (origins) =>
+    set((s) => ({
+      permissions: { ...s.permissions, pageReadOrigins: origins },
+    })),
   setComputerApps: (apps) =>
     set((s) => ({
       permissions: { ...s.permissions, computerApps: apps },
@@ -717,6 +722,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           allowFileCreate: get().permissions.allowFileCreate,
           allowBrowserUse: get().permissions.allowBrowserUse,
           browserOrigins: get().permissions.browserOrigins,
+          allowPageRead: get().permissions.allowPageRead,
+          pageReadOrigins: get().permissions.pageReadOrigins,
           allowComputerUse: get().permissions.allowComputerUse,
           computerApps: get().permissions.computerApps,
           allowComputerCapture: get().permissions.allowComputerCapture,
@@ -1103,6 +1110,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           allowFileCreate: get().permissions.allowFileCreate,
           allowBrowserUse: get().permissions.allowBrowserUse,
           browserOrigins: get().permissions.browserOrigins,
+          allowPageRead: get().permissions.allowPageRead,
+          pageReadOrigins: get().permissions.pageReadOrigins,
           allowComputerUse: get().permissions.allowComputerUse,
           computerApps: get().permissions.computerApps,
           allowComputerCapture: get().permissions.allowComputerCapture,

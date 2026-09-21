@@ -43,6 +43,11 @@ keyring = { version = "3", features = [
     "sync-secret-service",
 ] }
 async-trait = "0.1"
+# 读页面内容要走 WebSocket 上的 CDP 会话：`/json/list` 这类 HTTP 端点只给得出标题和
+# URL，`Runtime.evaluate` 只存在于 WebSocket 通道上。默认 feature 是 `connect` +
+# `handshake`，不含任何 TLS —— 这条连接只去 127.0.0.1，引入 rustls/native-tls 只会
+# 让一份用不上的证书栈进构建。
+tokio-tungstenite = "0.30"
 # 窗口截图要编码成 PNG：provider 只认 png/jpg/gif/webp，BMP 不在交集里，而手写一个
 # PNG 编码器（zlib + CRC + 过滤器）不是 base64 那种二十行的量级。
 png = "0.18.1"

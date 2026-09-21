@@ -27,6 +27,8 @@ describe("permissionsForPreset", () => {
       allowCommandRun: false,
       allowBrowserUse: false,
       browserOrigins: [],
+      allowPageRead: false,
+      pageReadOrigins: [],
       allowComputerUse: false,
       computerApps: [],
       allowComputerCapture: false,
@@ -46,6 +48,9 @@ describe("permissionsForPreset", () => {
     expect(permissionsForPreset("run-commands").allowComputerCapture).toBe(false);
     expect(permissionsForPreset("run-commands").captureApps).toEqual([]);
     expect(permissionsForPreset("create-files").allowComputerCapture).toBe(false);
+    // 读页面正文同样不在阶梯上：它交出去的是站点上的内容，包括登录后才可见的部分
+    expect(permissionsForPreset("run-commands").allowPageRead).toBe(false);
+    expect(permissionsForPreset("run-commands").pageReadOrigins).toEqual([]);
   });
 
   it("returns a fresh object so callers cannot mutate the shared presets", () => {
@@ -76,6 +81,8 @@ describe("mcpApprovalForPermissions", () => {
         allowCommandRun: false,
         allowBrowserUse: false,
         browserOrigins: [],
+        allowPageRead: false,
+        pageReadOrigins: [],
         allowComputerUse: false,
         computerApps: [],
         allowComputerCapture: false,
@@ -89,6 +96,8 @@ describe("mcpApprovalForPermissions", () => {
         allowCommandRun: true,
         allowBrowserUse: false,
         browserOrigins: [],
+        allowPageRead: false,
+        pageReadOrigins: [],
         allowComputerUse: false,
         computerApps: [],
         allowComputerCapture: false,
@@ -243,6 +252,7 @@ describe("normalizeApprovalRequest", () => {
     // 以前这里还有 file_delete / command_run / git_push / git_force 四种，后端从来不发
     expect(normalizeDestructiveOpType("git_force")).toBe("unknown");
     expect(normalizeDestructiveOpType("browser_open")).toBe("browser_open");
+    expect(normalizeDestructiveOpType("browser_read_page")).toBe("browser_read_page");
     expect(normalizeDestructiveOpType("computer_capture")).toBe("computer_capture");
   });
 });

@@ -162,6 +162,20 @@ export interface AgentPermission {
    */
   browserOrigins: string[];
   /**
+   * 是否允许 Agent 读取一个已经打开的页面的正文。
+   *
+   * 和 `allowBrowserUse` 分开，因为披露的东西不是一个量级：标签页列表说的是"你开着
+   * 这个站点"，正文说的是站点上的**内容** —— 包括只有登录之后才看得到的那部分。
+   * 后端也是两道闸门：这个开关 + 下面的 origin 清单。它不点击、不输入、不导航。
+   */
+  allowPageRead: boolean;
+  /**
+   * 允许被读取正文的 origin（`scheme://host[:port]`，`*` 表示不限）。
+   *
+   * 独立于 `browserOrigins`：允许把一份文档**打开**，不等于允许把它的正文抄给模型。
+   */
+  pageReadOrigins: string[];
+  /**
    * 是否允许 Agent 观察桌面（枚举可见窗口，只读）。
    *
    * 和浏览器分开：那边的范围是"哪些站点"，这里是"哪些应用"，互不蕴含。窗口标题里有
@@ -208,6 +222,8 @@ export const READ_ONLY_PERMISSIONS: AgentPermission = {
   allowCommandRun: false,
   allowBrowserUse: false,
   browserOrigins: [],
+  allowPageRead: false,
+  pageReadOrigins: [],
   allowComputerUse: false,
   computerApps: [],
   allowComputerCapture: false,
@@ -220,6 +236,8 @@ export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   allowCommandRun: false,
   allowBrowserUse: false,
   browserOrigins: [],
+  allowPageRead: false,
+  pageReadOrigins: [],
   allowComputerUse: false,
   computerApps: [],
   allowComputerCapture: false,
@@ -237,6 +255,8 @@ export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   allowCommandRun: true,
   allowBrowserUse: false,
   browserOrigins: [],
+  allowPageRead: false,
+  pageReadOrigins: [],
   allowComputerUse: false,
   computerApps: [],
   allowComputerCapture: false,
@@ -273,7 +293,7 @@ export function mcpApprovalForPermissions(permissions: AgentPermission): McpTool
  * `git_force` 四种，没有任何后端路径产生它们 —— 连同对话框里对应的图标和标签，
  * 那是四份看起来像"这些操作有确认"的假象。
  */
-export type DestructiveOpType = "browser_open" | "computer_capture";
+export type DestructiveOpType = "browser_open" | "browser_read_page" | "computer_capture";
 
 export interface DestructiveOpConfirm {
   id: string;
@@ -293,6 +313,7 @@ export interface DestructiveOpConfirm {
 export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | "unknown" {
   switch (value) {
     case "browser_open":
+    case "browser_read_page":
     case "computer_capture":
       return value;
     default:

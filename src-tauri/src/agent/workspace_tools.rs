@@ -31,6 +31,9 @@ pub const DELETE_FILE: &str = "workspace_delete_file";
 pub const MOVE_FILE: &str = "workspace_move_file";
 pub const BROWSER_OPEN: &str = "workspace_browser_open";
 pub const BROWSER_TABS: &str = "workspace_browser_tabs";
+/// 读一个已经打开的页面的可见文本。和 `BROWSER_TABS` 分开授权：列表说"你开着这个站点"，
+/// 正文是站点上的内容，包括只有登录之后才看得到的那部分。
+pub const BROWSER_READ_PAGE: &str = "workspace_browser_read_page";
 /// 枚举桌面上可见的顶层窗口。只读，但会披露窗口标题，所以同样按应用授权并留痕。
 pub const COMPUTER_WINDOWS: &str = "workspace_computer_windows";
 /// 截一个窗口。和窗口枚举分开授权：标题说"Signal 开着"，截图把消息内容也交出去了。
@@ -116,6 +119,16 @@ pub struct WorkspaceToolPermissions {
     /// 空清单等于不许访问任何站点，`allow_browser` 也救不了 —— 两者是"能不能用浏览器"
     /// 和"能去哪些站点"两个问题，任何一个没给都不该放行。
     pub browser_origins: Vec<String>,
+    /// 是否允许读一个已经打开的页面的正文。
+    ///
+    /// 和 `allow_browser` 分开，理由和截图不复用窗口枚举清单一样：标签页列表披露的是
+    /// "你开着这个站点"，正文披露的是站点上的**内容** —— 包括只有登录之后才看得到的那
+    /// 部分。共用一个开关等于把"能开页面"悄悄升级成"能读你所有登录态下的页面"。
+    pub allow_page_read: bool,
+    /// 允许被**读取正文**的 origin 清单。空清单等于不许读任何页面。
+    ///
+    /// 独立于 `browser_origins`：允许把一份文档**打开**，不等于允许把它的正文抄给模型。
+    pub page_read_origins: Vec<String>,
     /// 是否允许观察桌面（目前只有窗口枚举，只读）。
     ///
     /// 和浏览器分开：浏览器权限的范围是"哪些站点"，这里的范围是"哪些应用"，两个问题
@@ -219,6 +232,13 @@ impl WorkspaceToolPermissions {
     pub fn with_browser(mut self, allow_browser: bool, browser_origins: Vec<String>) -> Self {
         self.allow_browser = allow_browser;
         self.browser_origins = browser_origins;
+        self
+    }
+
+    /// 读页面正文的授权：开关 + 单独的 origin 清单。
+    pub fn with_page_read(mut self, allow_page_read: bool, page_read_origins: Vec<String>) -> Self {
+        self.allow_page_read = allow_page_read;
+        self.page_read_origins = page_read_origins;
         self
     }
 
@@ -336,6 +356,14 @@ impl WorkspaceToolPermissions {
     /// 浏览器工具是否可用：开关和清单都要有。
     fn allows_browser(&self) -> bool {
         self.allow_browser && !self.browser_origins.is_empty()
+    }
+
+    /// 读页面正文是否被授权：开关 + 非空的**读取**清单。
+    ///
+    /// 故意不要求 `allow_browser`：读一个用户自己打开的页面不需要先有开页面的权限，
+    /// 而反过来把两者绑在一起会让"我只想让它看一眼本地预览"变成必须同时给出导航权限。
+    fn allows_page_read(&self) -> bool {
+        self.allow_page_read && !self.page_read_origins.is_empty()
     }
 
     /// 桌面观察是否可用：开关、非空应用清单，以及这个平台上真的有实现。
@@ -596,6 +624,39 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         });
     }
 
+    if permissions.allows_page_read() {
+        definitions.push(ToolDefinition {
+            name: BROWSER_READ_PAGE.to_string(),
+            description: format!(
+                "Read the visible text of a page that is already open in the attached Chrome. \
+                 Only pages on these origins can be read: {}. Name the page with 'url_contains' \
+                 and/or 'title_contains'; if more than one readable page matches, nothing is read \
+                 and the candidates are listed so you can narrow it down. The user is shown which \
+                 page matched and must approve the read; they may refuse, and if nobody answers \
+                 within two minutes the call fails. Everything visible on that page is disclosed, \
+                 including content that is only there because the user is signed in, so use it to \
+                 read a doc or check a rendered preview — it does not click, type or navigate. At \
+                 most {} characters come back, and the full length is reported when the text is \
+                 truncated.",
+                permissions.page_read_origins.join(", "),
+                crate::services::browser::MAX_PAGE_TEXT_CHARS
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url_contains": {
+                        "type": "string",
+                        "description": "Substring of the page's URL, e.g. /docs/install"
+                    },
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Substring of the page's title"
+                    }
+                }
+            }),
+        });
+    }
+
     if permissions.allows_computer() {
         definitions.push(ToolDefinition {
             name: COMPUTER_WINDOWS.to_string(),
@@ -712,6 +773,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             RUN_COMMAND => self.permissions.allows_commands(),
             WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
             BROWSER_OPEN | BROWSER_TABS => self.permissions.allows_browser(),
+            BROWSER_READ_PAGE => self.permissions.allows_page_read(),
             COMPUTER_WINDOWS => self.permissions.allows_computer(),
             COMPUTER_CAPTURE => self.permissions.allows_capture(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
@@ -742,6 +804,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                     | MOVE_FILE
                     | BROWSER_OPEN
                     | BROWSER_TABS
+                    | BROWSER_READ_PAGE
                     | COMPUTER_WINDOWS
                     | COMPUTER_CAPTURE
             );
@@ -755,7 +818,11 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 // 浏览器，桌面那条就悄悄只剩一行普通日志 —— 加了新工具没检查记录侧的老毛病。
                 if matches!(
                     tool_name,
-                    BROWSER_OPEN | BROWSER_TABS | COMPUTER_WINDOWS | COMPUTER_CAPTURE
+                    BROWSER_OPEN
+                        | BROWSER_TABS
+                        | BROWSER_READ_PAGE
+                        | COMPUTER_WINDOWS
+                        | COMPUTER_CAPTURE
                 ) {
                     self.permissions.record_external(AgentExternalAction {
                         kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
@@ -822,6 +889,14 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 .await
             }
             BROWSER_TABS => browser_tabs_tool(&self.permissions),
+            BROWSER_READ_PAGE => {
+                browser_read_page_tool(
+                    string_arg(&args, "url_contains"),
+                    string_arg(&args, "title_contains"),
+                    &self.permissions,
+                )
+                .await
+            }
             COMPUTER_WINDOWS => computer_windows_tool(&self.permissions),
             COMPUTER_CAPTURE => {
                 computer_capture_tool(
@@ -1536,6 +1611,146 @@ fn browser_tabs_tool(permissions: &WorkspaceToolPermissions) -> Result<String, S
         .map(|tab| format!("- {} — {}", tab.title, tab.url))
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+/// 读一个已经打开的页面的可见文本。
+///
+/// 授权是**独立**的一对（开关 + 读取 origin 清单），不搭 `allow_browser` 的便车：标签页
+/// 列表说的是"你开着这个站点"，正文说的是站点上的**内容** —— 包括只有登录之后才看得到
+/// 的那部分。共用一个开关等于把"能开一个页面"悄悄升级成"能读你所有登录态下的页面"，
+/// 和截图不复用窗口枚举清单是同一条理由。
+///
+/// 静态授权之外还要**逐次问人**，而且问的是选出来的那一个页面：模型给的是筛选条件，
+/// 命中哪个页面它自己也未必清楚，所以框里写的必须是选择的结果。
+///
+/// 这个工具不点击、不输入、不导航：`Runtime.evaluate` 的表达式是写死的（见
+/// `page_text_expression`），模型无法决定在那个页面的源里执行什么。
+async fn browser_read_page_tool(
+    url_contains: Option<&str>,
+    title_contains: Option<&str>,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allows_page_read() {
+        return refuse_external(
+            "browser_read_page_refused",
+            "chrome",
+            "Reading page content is not authorized for this run, or no origin is allowed."
+                .to_string(),
+            permissions,
+        );
+    }
+    let port = crate::services::browser::configured_port();
+    let sessions = match crate::services::browser::list_page_sessions(port).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            return refuse_external(
+                "browser_read_page_failed",
+                &format!("127.0.0.1:{}", port),
+                error,
+                permissions,
+            )
+        }
+    };
+    // 先只**选**页面，不读。批准框必须说得出具体是哪一页，而那句话只能来自选择的结果。
+    let target = match crate::services::browser::select_read_target(
+        sessions,
+        url_contains,
+        title_contains,
+        &permissions.page_read_origins,
+    ) {
+        Ok(target) => target,
+        // target 只写 `chrome`：这一步的失败原因里含候选页面，而一次被拒的调用不该
+        // 顺带把"你开着这些页面"写进记录 —— 和截图那边只写 `desktop` 同一条理由。
+        Err(error) => {
+            return refuse_external("browser_read_page_refused", "chrome", error, permissions)
+        }
+    };
+
+    let request = crate::agent::approval::ApprovalRequest::new(
+        "browser_read_page",
+        "Read a page's text",
+        format!(
+            "The agent wants to read the text of \"{}\"",
+            target.tab.title
+        ),
+        format!(
+            "{} — everything visible on that page goes to the model, including anything that is \
+             only there because you are signed in. This disclosure cannot be taken back.",
+            target.tab.url
+        ),
+    );
+    let outcome = permissions.require_approval(&request).await;
+    if let Some(detail) = outcome.refusal_detail() {
+        return refuse_external(
+            &format!("browser_read_page{}", outcome.record_suffix()),
+            &target.tab.url,
+            detail.to_string(),
+            permissions,
+        );
+    }
+    // 批准之后再看一次 Stop：入口那道闸门是等待之前取的，理由同 `browser_open_tool`。
+    if permissions.cancelled() {
+        return refuse_external(
+            "browser_read_page_cancelled",
+            &target.tab.url,
+            "This run was stopped after the approval, so nothing was read.".to_string(),
+            permissions,
+        );
+    }
+
+    let page = match crate::services::browser::read_page_text(
+        &target.ws_url,
+        port,
+        crate::services::browser::MAX_PAGE_TEXT_CHARS,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(error) => {
+            return refuse_external(
+                "browser_read_page_failed",
+                &target.tab.url,
+                error,
+                permissions,
+            )
+        }
+    };
+
+    // 记录在返回值之前：一次读到空白页的调用同样是一次披露尝试，而"什么都没记"会让
+    // `publish_external_actions` 提前返回，整轮运行看起来什么都没发生过。
+    permissions.record_external(AgentExternalAction {
+        kind: "browser_read_page".to_string(),
+        target: target.tab.url.clone(),
+        detail: format!(
+            "Disclosed {} character(s) of page text to the model{}.",
+            page.text.chars().count(),
+            if page.truncated {
+                format!(" (the page has {}; the rest was not read)", page.chars)
+            } else {
+                String::new()
+            }
+        ),
+    });
+    if page.text.is_empty() {
+        return Ok(format!(
+            "\"{}\" ({}) has no visible text — it may still be loading, or it renders into a \
+             canvas.",
+            target.tab.title, target.tab.url
+        ));
+    }
+    let truncation_note = if page.truncated {
+        format!(
+            "\n\n[Truncated: the page holds {} characters, the first {} are above.]",
+            page.chars,
+            crate::services::browser::MAX_PAGE_TEXT_CHARS
+        )
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "{} — {}\n\n{}{}",
+        target.tab.title, target.tab.url, page.text, truncation_note
+    ))
 }
 
 /// 列出桌面上可见的顶层窗口。computer use 的第一片，只读。
@@ -2805,6 +3020,81 @@ mod tests {
             events.count(crate::agent::approval::APPROVAL_REQUESTED_EVENT),
             0
         );
+    }
+
+    /// 读正文是**自己的**一对闸门，不搭浏览器授权的便车。
+    ///
+    /// 这条钉的是授权的独立性：给了"能开页面"的运行，工具连通告都不该有 —— 列表说
+    /// "你开着这个站点"，正文是站点上的内容，包括只有登录之后才看得到的那部分。
+    #[test]
+    fn reading_a_page_needs_its_own_switch_and_its_own_allowlist() {
+        let advertises = |permissions: &WorkspaceToolPermissions| {
+            tool_definitions(permissions)
+                .into_iter()
+                .any(|definition| definition.name == BROWSER_READ_PAGE)
+        };
+
+        let browser_only = WorkspaceToolPermissions::default()
+            .with_browser(true, vec!["https://example.com".to_string()]);
+        assert!(!advertises(&browser_only));
+        assert!(!WorkspaceToolInvoker::without_logging(browser_only).handles(BROWSER_READ_PAGE));
+
+        // 开关给了但清单是空的，仍然不放行：空清单是"一个都不许"，不是"没配就全放"
+        let switch_only = WorkspaceToolPermissions::default().with_page_read(true, Vec::new());
+        assert!(!advertises(&switch_only));
+        assert!(!WorkspaceToolInvoker::without_logging(switch_only).handles(BROWSER_READ_PAGE));
+
+        let granted = WorkspaceToolPermissions::default()
+            .with_page_read(true, vec!["https://example.com".to_string()]);
+        assert!(advertises(&granted));
+        assert!(WorkspaceToolInvoker::without_logging(granted.clone()).handles(BROWSER_READ_PAGE));
+        // 通告里要写出清单，模型才不会反复试探注定被拒的站点
+        let description = tool_definitions(&granted)
+            .into_iter()
+            .find(|definition| definition.name == BROWSER_READ_PAGE)
+            .expect("已授权就该通告")
+            .description;
+        assert!(description.contains("https://example.com"));
+    }
+
+    /// 没授权就调用也要留痕，而且不弹框。
+    #[tokio::test]
+    async fn an_unauthorized_read_is_recorded_and_never_asks() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let denied = WorkspaceToolPermissions::default().with_approval(
+            crate::agent::approval::ApprovalGate::new(
+                crate::agent::approval::ApprovalRegistry::new(),
+                events.clone(),
+            ),
+        );
+
+        assert!(browser_read_page_tool(Some("/docs"), None, &denied)
+            .await
+            .is_err());
+
+        let actions = denied.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_read_page_refused");
+        assert_eq!(
+            events.count(crate::agent::approval::APPROVAL_REQUESTED_EVENT),
+            0
+        );
+    }
+
+    /// Stop 之后的读取请求在入口就被拒，并且记成 `_cancelled` 而不是普通失败。
+    #[tokio::test]
+    async fn a_read_after_stop_is_refused_at_the_door() {
+        let mut granted = WorkspaceToolPermissions::default()
+            .with_page_read(true, vec!["https://example.com".to_string()]);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        granted.adopt_cancel(cancel);
+        let invoker = WorkspaceToolInvoker::without_logging(granted.clone());
+
+        assert!(invoker.invoke(BROWSER_READ_PAGE, "{}").await.is_err());
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "browser_read_page_cancelled");
     }
 
     /// 两个授权位都要有，而且缺哪个都不通告、也不认领。

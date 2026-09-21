@@ -133,6 +133,26 @@ describe("ConfirmDialog", () => {
 
     expect(document.activeElement?.textContent).toBe("Deny");
   });
+
+  /**
+   * 每一档动作都要有自己的说法。读一页正文和打开一个页面是两件不同的事，标签落回
+   * 原始的 opType（或者更糟，落到"Browser Navigation"上）会让用户以为他批准的是导航。
+   */
+  it("读页面正文有自己的标签，不会显示成导航", () => {
+    useAgentStore.setState({
+      pendingConfirm: request({
+        opType: "browser_read_page",
+        title: "Read a page's text",
+        description: 'The agent wants to read the text of "Docs"',
+      }),
+    });
+
+    render(<ConfirmDialog />);
+
+    expect(screen.getByText("Page Reading")).toBeTruthy();
+    expect(screen.queryByText("Browser Navigation")).toBeNull();
+    expect(screen.queryByText("browser_read_page")).toBeNull();
+  });
 });
 
 describe("closeConfirm", () => {

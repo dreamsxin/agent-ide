@@ -138,6 +138,7 @@ export default function SettingsPanel() {
   const setPermissionPreset = useAgentStore((s) => s.setPermissionPreset);
   const togglePermission = useAgentStore((s) => s.togglePermission);
   const setBrowserOrigins = useAgentStore((s) => s.setBrowserOrigins);
+  const setPageReadOrigins = useAgentStore((s) => s.setPageReadOrigins);
   const setComputerApps = useAgentStore((s) => s.setComputerApps);
   const setCaptureApps = useAgentStore((s) => s.setCaptureApps);
 
@@ -793,6 +794,41 @@ export default function SettingsPanel() {
               {permissions.browserOrigins.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
                   No origin allowed yet — the browser tools stay hidden from the Agent.
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label="Page Reading"
+            desc="Allow Agent to read the text of a page you already have open (contents, not just the title; needs an allowed origin below)"
+            checked={permissions.allowPageRead}
+            onChange={() => togglePermission("allowPageRead")}
+          />
+          {permissions.allowPageRead && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="page-read-origins">
+                Readable origins (one per line, `*` for any)
+              </label>
+              <textarea
+                id="page-read-origins"
+                rows={2}
+                spellCheck={false}
+                value={permissions.pageReadOrigins.join("\n")}
+                onChange={(event) =>
+                  setPageReadOrigins(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="http://127.0.0.1:1420"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 这份清单和上面那份是分开的：能打开一个页面 ≠ 能读它登录后才显示的正文 */}
+              {permissions.pageReadOrigins.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  No origin allowed yet — the page reading tool stays hidden from the Agent.
                 </p>
               )}
             </div>
