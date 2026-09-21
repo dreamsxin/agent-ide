@@ -420,8 +420,9 @@ pub(crate) mod test_support {
             WM_RBUTTONDOWN => {
                 RIGHT_CLICKS.fetch_add(1, Ordering::SeqCst);
             }
-            // 只有窗口类带了 `CS_DBLCLKS` 才会收到这条：Win32 不会把两下按键"合成"成双击
-            // 事件，是窗口类自己要求的。这正是双击能不能成立的真实条件。
+            // 真实使用里，只有窗口类带了 `CS_DBLCLKS` 才会收到这条：Win32 不会自己把两下
+            // 按键"合成"成双击事件，是窗口类要求的。（直接 `SendMessageW` 送这条消息不受
+            // 这个限制，所以下面那条计数测试验的是"数得对"，样式是否真的设上了另有断言。）
             WM_LBUTTONDBLCLK => {
                 DOUBLE_CLICKS.fetch_add(1, Ordering::SeqCst);
             }
@@ -701,15 +702,27 @@ mod tests {
     #[test]
     fn the_test_window_counts_each_kind_of_mouse_input_separately() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SendMessageW, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+            GetClassLongPtrW, SendMessageW, CS_DBLCLKS, GCL_STYLE, WM_LBUTTONDBLCLK,
+            WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
         };
         let window = test_support::TestWindow::open("Agent IDE message test", 320, 240);
         let hwnd = window.handle as windows_sys::Win32::Foundation::HWND;
         // 客户区 (40, 30)：低 16 位是 x、高 16 位是 y
         let point = (30_isize << 16) | 40;
 
-        // SAFETY: 句柄来自上面那个还活着的窗口；`SendMessageW` 会等到消息被处理完才返回，
-        // 所以下面的断言看到的一定是处理之后的状态。
+        // 样式要在这里查一次。下面那几条 `SendMessageW` 不受 `CS_DBLCLKS` 约束，所以把
+        // `style` 改回 0 也照样绿 —— 而双击能不能成立**全靠**这个样式，那条断言只在肯交出
+        // 前台的会话里才跑得到。这一行让"样式没了"在任何会话里都会红。
+        // SAFETY: 句柄来自上面那个还活着的窗口。
+        let style = unsafe { GetClassLongPtrW(hwnd, GCL_STYLE) };
+        assert_ne!(
+            style as u32 & CS_DBLCLKS,
+            0,
+            "测试窗口类没带 CS_DBLCLKS，双击那条测试验的就不是真实条件了"
+        );
+
+        // SAFETY: 句柄同上；`SendMessageW` 会等到消息被处理完才返回，所以下面的断言看到的
+        // 一定是处理之后的状态。
         unsafe {
             SendMessageW(hwnd, WM_LBUTTONDOWN, 0, point);
             SendMessageW(hwnd, WM_RBUTTONDOWN, 0, point);
