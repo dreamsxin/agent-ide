@@ -1597,6 +1597,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Also removed: the store's `reset` action, which had no caller (`clearAgentSession` is the one the UI uses).
    - Frontend 223 → 226; Rust 445 → 446. Registered commands 97 → 93.
 
+115. **The silent plaintext key fallback, removed (2026-09-22)**
+   Item 3 of the credential write-up above has been sitting unimplemented while items 1 and 2 shipped. `LlmProfile::api_key()` preferred the plaintext `api_key` field over the keyring entry, so one failed migration left `config.json` holding a key *and* winning over the keyring from then on — the worst of both storage models, which is exactly what the keyring was added to avoid.
+   - **Order reversed: keyring first, plaintext never by default.** A plaintext-only profile now fails with a message naming the profile, where to re-enter the key, and the opt-in variable. That is the recorded decision (308): failing loudly beats silently using the thing we told the user we would not use.
+   - **`AGENT_IDE_ALLOW_PLAINTEXT_KEY` is the escape hatch**, per 310. An environment variable rather than a config field, because the config file *is* the plaintext's hiding place — putting the switch in there lets the thing under suspicion sign its own permission slip. `0` and `false` count as off; a variable named ALLOW set to `0` meaning "allowed" would be its own defect.
+   - **Both halves of a failed keyring read are reported.** When the entry cannot be read *and* a plaintext key exists, the error carries the keyring error and the reason the plaintext was skipped. With only one half, the user fixes the wrong side: "could not read" sends them to re-enter (which also fails, because writing is broken too), and "plaintext ignored" tells them nothing about the keyring.
+   - **Provenance is visible, not just enforced.** Settings shows `sk-1****7890 (plaintext in config.json)`; masking it identically to a keyring-backed key is what made this invisible in the first place. And `has_readable_api_key` no longer counts an un-opted-in plaintext key — a profile that would fail every run must not display as configured, which is the same trap the existing comment there describes for write failures.
+   - **The file is still not rewritten when the store fails.** Deleting the user's only copy of a key to satisfy a policy would be worse than the policy violation. The fix is about what we *use*, not about destroying what they have.
+   - Rust 446 → 449.
+
+
 
 
 

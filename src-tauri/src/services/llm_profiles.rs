@@ -262,44 +262,97 @@ impl LlmProfile {
         Some(max_context.saturating_sub(reserved).saturating_sub(512))
     }
 
+    /// 取出这个 profile 的密钥。**keyring 优先，明文字段不再是兜底。**
+    ///
+    /// 以前的顺序是"明文字段有值就用它"，那让 keyring 的保证形同虚设：只要有一次迁移失败，
+    /// `config.json` 里就永久留着一份明文，而且从此优先于 keyring 里那份 —— 两种存储模型
+    /// 的坏处一起吃。ROADMAP 308 的决定是宁可响亮地失败、让用户重新输一次。
+    ///
+    /// 明文仍然可用，但必须由用户显式开启（`AGENT_IDE_ALLOW_PLAINTEXT_KEY`）。差别在于
+    /// 用户**知不知道**：同一台机器上明文可能完全可以接受，不能接受的是它悄悄发生。
     pub fn api_key(&self) -> Result<String, String> {
-        if !self.api_key.trim().is_empty() {
-            return Ok(self.api_key.clone());
+        let plaintext = self.api_key.trim();
+        if let Some(credential_ref) = self.credential_ref.as_deref() {
+            match credentials::read_secret(credential_ref) {
+                Ok(secret) => return Ok(secret),
+                // keyring 读不出来的时候才考虑明文：有明文而且用户开了口子就用它，否则
+                // 把两件事一起说清楚 —— 读失败的原因，和那份明文为什么没被用。
+                Err(error) => {
+                    if plaintext.is_empty() {
+                        return Err(error);
+                    }
+                    if plaintext_keys_allowed() {
+                        return Ok(self.api_key.clone());
+                    }
+                    return Err(format!(
+                        "Could not read the stored credential for profile '{}' ({}), and its \
+                         plaintext api_key in config.json is ignored by default. Re-enter the key \
+                         in Settings, or set {}=1 to use the plaintext one.",
+                        self.name, error, ALLOW_PLAINTEXT_KEY_ENV
+                    ));
+                }
+            }
         }
-        let credential_ref = self.credential_ref.as_ref().ok_or_else(|| {
-            format!(
+        if plaintext.is_empty() {
+            return Err(format!(
                 "LLM credential is not configured for profile '{}'",
                 self.name
-            )
-        })?;
-        credentials::read_secret(credential_ref)
+            ));
+        }
+        if plaintext_keys_allowed() {
+            return Ok(self.api_key.clone());
+        }
+        Err(format!(
+            "Profile '{}' only has a plaintext api_key in config.json, which is ignored by \
+             default. Re-enter the key in Settings so it goes to the OS keyring, or set {}=1 to \
+             use the plaintext one.",
+            self.name, ALLOW_PLAINTEXT_KEY_ENV
+        ))
     }
 
     pub fn masked_api_key(&self) -> String {
+        // 实际探测条目是否可读，而不是"有 credentialRef 就当成已保存"。后者会在写入失败时
+        // 谎报密钥已存在，用户看到 "Enter to overwrite" 于是留空保存，陷入永远修不好的循环。
+        if let Some(credential_ref) = self.credential_ref.as_deref() {
+            if let Ok(secret) = credentials::read_secret(credential_ref) {
+                return mask_api_key(&secret);
+            }
+        }
+        // 明文那份要说出它**是明文**，而不是和 keyring 里的那份显示成一模一样。这是
+        // ROADMAP 310 里"可见的 plaintext 指示"那一半：用户有权知道密钥存在哪儿。
         if !self.api_key.trim().is_empty() {
-            return mask_api_key(&self.api_key);
+            return format!("{} (plaintext in config.json)", mask_api_key(&self.api_key));
         }
-        match self.credential_ref.as_deref() {
-            // 实际探测条目是否可读，而不是"有 credentialRef 就当成已保存"。
-            // 后者会在写入失败时谎报密钥已存在，用户看到 "Enter to overwrite"
-            // 于是留空保存，陷入永远修不好的循环。
-            Some(credential_ref) => match credentials::read_secret(credential_ref) {
-                Ok(secret) => mask_api_key(&secret),
-                Err(_) => "not configured".to_string(),
-            },
-            None => "not configured".to_string(),
-        }
+        "not configured".to_string()
     }
 
-    /// 该 profile 是否真的有可读的密钥
+    /// 该 profile 是否真的有**能用**的密钥
     pub fn has_readable_api_key(&self) -> bool {
-        if !self.api_key.trim().is_empty() {
-            return true;
-        }
-        self.credential_ref
+        if self
+            .credential_ref
             .as_deref()
             .is_some_and(credentials::has_secret)
+        {
+            return true;
+        }
+        // 没开口子的明文不算"能用"：算的话设置面板会显示"已配置"，而每次运行都会失败。
+        !self.api_key.trim().is_empty() && plaintext_keys_allowed()
     }
+}
+
+/// 明文密钥的显式开关。
+///
+/// 环境变量而不是配置项：配置文件本身就是那份明文所在的地方，把开关也放进去等于让
+/// 被质疑的东西自己签字。
+pub const ALLOW_PLAINTEXT_KEY_ENV: &str = "AGENT_IDE_ALLOW_PLAINTEXT_KEY";
+
+fn plaintext_keys_allowed() -> bool {
+    std::env::var(ALLOW_PLAINTEXT_KEY_ENV)
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
 }
 
 pub fn save_llm_config_to_disk(config: &LlmProfilesConfig) {
@@ -833,9 +886,111 @@ mod tests {
             max_tokens: None,
         };
 
-        assert_eq!(profile.to_response().api_key_masked, "sk-1****7890");
+        // 明文那份要带上它存在哪儿。和 keyring 里的显示成一样，用户就无从知道这台机器上
+        // 的密钥其实躺在一个固定路径的明文文件里。
+        assert_eq!(
+            profile.to_response().api_key_masked,
+            "sk-1****7890 (plaintext in config.json)"
+        );
         assert_eq!(profile.to_response().effective_input_tokens, Some(123392));
         assert_eq!(profile.to_response().tool_call_mode, "native_tools");
+    }
+
+    /// 只有明文的 profile，默认**不能**用来跑。
+    ///
+    /// 这是 ROADMAP 308 的决定：明文兜底让 keyring 的保证形同虚设 —— 一次迁移失败之后，
+    /// `config.json` 里那份明文会永久地优先于 keyring 里那份，两种存储模型的坏处一起吃。
+    /// 拒绝要说清楚三件事：为什么没用它、去哪儿重新输、以及那个显式开关。
+    #[test]
+    fn a_plaintext_only_profile_is_refused_unless_it_is_opted_into() {
+        let _guard = workspace::env_test_guard();
+        std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
+
+        let mut profile = sample_profile();
+        profile.credential_ref = None;
+        profile.api_key = "sk-plaintext".to_string();
+
+        let error = profile.api_key().unwrap_err();
+        assert!(error.contains("plaintext"), "{}", error);
+        assert!(error.contains("Settings"), "{}", error);
+        assert!(error.contains(ALLOW_PLAINTEXT_KEY_ENV), "{}", error);
+        // 设置面板不能显示成"已配置"：显示成已配置而每次运行都失败，是最难自己修的那种状态
+        assert!(!profile.has_readable_api_key());
+
+        // 显式开启之后照用，不再抱怨：可接受与否是用户的判断，不知情才是问题
+        std::env::set_var(ALLOW_PLAINTEXT_KEY_ENV, "1");
+        assert_eq!(profile.api_key().unwrap(), "sk-plaintext");
+        assert!(profile.has_readable_api_key());
+        std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
+    }
+
+    /// keyring 读不出来时，错误里要**同时**有读失败的原因和那份明文为什么被忽略。
+    ///
+    /// 只说其中一半的话，用户会去修错的那一边：只说"读不出来"他会重输（而重输也会失败，
+    /// 因为写入同样坏了），只说"明文被忽略"他不知道 keyring 出了什么事。
+    #[test]
+    fn a_failed_keyring_read_says_why_the_plaintext_was_not_used() {
+        let _guard = workspace::env_test_guard();
+        std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
+
+        let mut profile = sample_profile();
+        // 一个几乎不可能存在的条目名，保证读取失败
+        profile.credential_ref = Some("llm-profile:missing-on-purpose-9f3a".to_string());
+        profile.api_key = "sk-plaintext".to_string();
+
+        let error = profile.api_key().unwrap_err();
+        assert!(error.contains("plaintext"), "{}", error);
+        assert!(error.contains(ALLOW_PLAINTEXT_KEY_ENV), "{}", error);
+    }
+
+    /// `0` 和 `false` 不算开启：一个名字里带 ALLOW 的变量被设成 `0`，意思是不允许。
+    #[test]
+    fn the_plaintext_switch_reads_like_a_switch() {
+        let _guard = workspace::env_test_guard();
+        for value in ["", "0", "false", "FALSE"] {
+            std::env::set_var(ALLOW_PLAINTEXT_KEY_ENV, value);
+            assert!(
+                !plaintext_keys_allowed(),
+                "{:?} should not enable it",
+                value
+            );
+        }
+        for value in ["1", "true", "yes"] {
+            std::env::set_var(ALLOW_PLAINTEXT_KEY_ENV, value);
+            assert!(plaintext_keys_allowed(), "{:?} should enable it", value);
+        }
+        std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
+    }
+
+    fn sample_profile() -> LlmProfile {
+        LlmProfile {
+            id: "p1".to_string(),
+            name: "Work".to_string(),
+            provider: "openai".to_string(),
+            endpoint: "https://api.openai.com/v1".to_string(),
+            credential_ref: None,
+            api_key: String::new(),
+            model: "gpt-4o".to_string(),
+            max_context_tokens: None,
+            reserved_output_tokens: None,
+            max_output_tokens: None,
+            max_run_tokens: None,
+            prompt_micros_per_million: None,
+            completion_micros_per_million: None,
+            max_run_spend_micros: None,
+            tool_call_mode: default_tool_call_mode(),
+            model_type: None,
+            model_path: None,
+            model_file: None,
+            n_threads: None,
+            n_ctx: None,
+            n_gpu_layers: None,
+            n_batch: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
+        }
     }
 
     #[test]

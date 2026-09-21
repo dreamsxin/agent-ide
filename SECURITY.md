@@ -77,7 +77,8 @@ Implementation details:
 
 Known limitations:
 
-- **A plaintext key can persist on disk.** `skip_serializing` prevents *writing* one, but not reading one. A legacy or hand-edited `config.json` containing `api_key` is read on load, and `migrate_profile_credentials` then tries to move it into the keyring. If that store operation fails the file is deliberately left unrewritten so the key is not lost — meaning the plaintext stays on disk and is preferred over the keyring entry in memory. There is no file-permission hardening on `~/.agent-ide`.
+- **A plaintext key can persist on disk, but it is no longer used by default.** `skip_serializing` prevents *writing* one, but not reading one. A legacy or hand-edited `config.json` containing `api_key` is read on load, and `migrate_profile_credentials` then tries to move it into the keyring; if that store operation fails the file is deliberately left unrewritten so the key is not lost. What changed is what happens next: the keyring is now read **first**, and a plaintext key is **ignored** unless `AGENT_IDE_ALLOW_PLAINTEXT_KEY` is set to something other than `0`/`false`. Without the opt-in, the run fails with a message naming the profile, the keyring error if there was one, where to re-enter the key, and the variable. The Settings panel shows such a key as `sk-1****7890 (plaintext in config.json)` rather than masking it identically to a keyring-backed one, and `has_readable_api_key` reports it as *not* configured — a profile that would fail every run must not look configured. There is still no file-permission hardening on `~/.agent-ide`.
+
 - **MCP tool arguments are logged with secret-looking keys redacted.** Values under keys containing `token`, `secret`, `password`, `passwd`, `apikey`, `api_key`, `authorization`, or `credential` are replaced with `[redacted]` before the argument JSON reaches the action log; arguments that are not valid JSON are not logged verbatim at all. Redaction keys on the field *name*, so a secret passed under an innocuous key is still logged.
 - `reveal_llm_api_key` has no confirmation prompt, rate limit, or audit entry.
 - Git HTTPS credentials are passed as plaintext over IPC by design, and persisted (when the user opts in) as `"{user}\n{pass}"` in the OS store. `GIT_USERNAME` / `GIT_PASSWORD` are accepted as an environment fallback.
@@ -477,7 +478,8 @@ Known gaps:
 Ordered by how much they would matter to an operator. Each was confirmed by reading the code, not inferred.
 
 1. **MCP tools are unconstrained.** They bypass the workspace boundary, the Agent write deny list, and the diff-review UI entirely. Adding an MCP server is equivalent to granting arbitrary code execution. This is the single largest gap.
-2. **A plaintext API key can persist in `~/.agent-ide/config.json`** if keyring migration ever fails, and it is then preferred over the keyring entry. No file-permission hardening.
+2. **A plaintext API key can still persist in `~/.agent-ide/config.json`** if keyring migration ever fails — the file is left unrewritten rather than losing the user's only copy. It is no longer *used*: the keyring is read first, and the plaintext is ignored unless `AGENT_IDE_ALLOW_PLAINTEXT_KEY` is set, with the Settings panel labelling it as plaintext either way. No file-permission hardening.
+
 3. **Repository-wide Git write operations escape the workspace boundary** when the workspace root is a subdirectory of a larger repository, because `Repository::discover` walks upward. Affects `checkout_head` and `git_commit` with no file list. The git-diff context section is now pathspec-scoped and no longer affected.
 4. **Workspace-local language server binaries are executed in preference to `PATH`**, so opening an untrusted repository runs code it supplies.
 5. **MCP argument redaction keys on field names**, so a secret passed under a key that does not look secret is still written to the action log. Tool *results* are logged without redaction.
