@@ -338,6 +338,163 @@ mod platform {
 pub use platform::list_windows_with_handles;
 pub use platform::{describe_window, list_windows, window_pid};
 
+/// 造一个真实窗口，给那些非得有窗口才测得到的东西用。
+///
+/// 截图和点击都是"对着一个真窗口做 Win32 调用"，纯函数覆盖不到：GDI 的 stride 算错、
+/// `SendInput` 根本没发出去，在单元测试里都是绿的。两边共用这一份而不是各写一个 ——
+/// 一份跑着、一份烂掉是这类测试最常见的结局。
+#[cfg(all(test, windows))]
+pub(crate) mod test_support {
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+    use std::sync::Arc;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+        RegisterClassW, TranslateMessage, MSG, PM_REMOVE, WM_LBUTTONDOWN, WNDCLASSW,
+        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+
+    static CLICKS: AtomicU32 = AtomicU32::new(0);
+    static CLIENT_X: AtomicI32 = AtomicI32::new(-1);
+    static CLIENT_Y: AtomicI32 = AtomicI32::new(-1);
+
+    /// 记下落点的客户区坐标。`lParam` 低 16 位是 x、高 16 位是 y，都是**有符号**的。
+    unsafe extern "system" fn record_clicks(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_LBUTTONDOWN {
+            CLICKS.fetch_add(1, Ordering::SeqCst);
+            CLIENT_X.store((lparam & 0xFFFF) as i16 as i32, Ordering::SeqCst);
+            CLIENT_Y.store(((lparam >> 16) & 0xFFFF) as i16 as i32, Ordering::SeqCst);
+        }
+        DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// 一个活着的测试窗口。
+    ///
+    /// 消息泵在自己的线程上，因为 Win32 的窗口是线程亲和的 —— 而这恰好也是生产里的形状：
+    /// 被截图、被点击的窗口属于别的线程、别的进程。
+    pub struct TestWindow {
+        pub handle: isize,
+        stop: Arc<AtomicBool>,
+        pump: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestWindow {
+        /// 开一个可见窗口。创建失败就 panic：没有被测对象的时候，这些测试不该悄悄变绿。
+        pub fn open(title: &str, width: i32, height: i32) -> Self {
+            CLICKS.store(0, Ordering::SeqCst);
+            CLIENT_X.store(-1, Ordering::SeqCst);
+            CLIENT_Y.store(-1, Ordering::SeqCst);
+            let class_name = wide("AgentIdeTestWindow");
+            let window_title = wide(title);
+            let stop = Arc::new(AtomicBool::new(false));
+            let pump_stop = stop.clone();
+            let (sender, receiver) = std::sync::mpsc::channel::<isize>();
+            let pump = std::thread::spawn(move || {
+                // SAFETY: 类名和标题是本地的、以 0 结尾的宽字符串；回调是本模块里的函数。
+                let hwnd = unsafe {
+                    let class = WNDCLASSW {
+                        style: 0,
+                        lpfnWndProc: Some(record_clicks),
+                        cbClsExtra: 0,
+                        cbWndExtra: 0,
+                        hInstance: GetModuleHandleW(std::ptr::null()),
+                        hIcon: std::ptr::null_mut(),
+                        hCursor: std::ptr::null_mut(),
+                        hbrBackground: std::ptr::null_mut(),
+                        lpszMenuName: std::ptr::null(),
+                        lpszClassName: class_name.as_ptr(),
+                    };
+                    // 同一进程里注册第二次会失败，但不影响创建 —— 类已经在了
+                    RegisterClassW(&class);
+                    CreateWindowExW(
+                        0,
+                        class_name.as_ptr(),
+                        window_title.as_ptr(),
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        120,
+                        120,
+                        width,
+                        height,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        GetModuleHandleW(std::ptr::null()),
+                        std::ptr::null(),
+                    )
+                };
+                let _ = sender.send(hwnd as isize);
+                if hwnd.is_null() {
+                    return;
+                }
+                // 一直泵到被要求停：置前、绘制、那一下点击各自都要走消息队列，只泵一次不够
+                while !pump_stop.load(Ordering::SeqCst) {
+                    let mut message = MSG {
+                        hwnd: std::ptr::null_mut(),
+                        message: 0,
+                        wParam: 0,
+                        lParam: 0,
+                        time: 0,
+                        pt: POINT { x: 0, y: 0 },
+                    };
+                    // SAFETY: `message` 是本地变量，窗口属于这个线程。
+                    while unsafe {
+                        PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE)
+                    } != 0
+                    {
+                        unsafe {
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // SAFETY: 销毁这个线程自己创建的窗口。
+                unsafe { DestroyWindow(hwnd) };
+            });
+            let handle = receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("窗口线程应该报出句柄");
+            assert_ne!(handle, 0, "创建测试窗口失败，这条测试就没有被测对象了");
+            Self {
+                handle,
+                stop,
+                pump: Some(pump),
+            }
+        }
+
+        pub fn clicks() -> u32 {
+            CLICKS.load(Ordering::SeqCst)
+        }
+
+        pub fn last_click() -> (i32, i32) {
+            (
+                CLIENT_X.load(Ordering::SeqCst),
+                CLIENT_Y.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    /// 靠 `Drop` 收尾，而不是在测试末尾 join：断言 panic 时那一行根本执行不到，窗口会活过
+    /// 这条测试 —— 而下一条测试可能正要按标题找窗口。
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(pump) = self.pump.take() {
+                let _ = pump.join();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

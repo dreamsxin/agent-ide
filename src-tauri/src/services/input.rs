@@ -391,118 +391,17 @@ mod tests {
 #[cfg(all(test, windows))]
 mod injection_tests {
     use super::click_in_window;
-    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-        PeekMessageW, PostQuitMessage, RegisterClassW, TranslateMessage, MSG, PM_REMOVE,
-        WM_LBUTTONDOWN, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    };
-
-    static CLICKS: AtomicU32 = AtomicU32::new(0);
-    static CLIENT_X: AtomicI32 = AtomicI32::new(-1);
-    static CLIENT_Y: AtomicI32 = AtomicI32::new(-1);
-
-    /// 记下落点的客户区坐标。`lParam` 低 16 位是 x，高 16 位是 y，都是**有符号**的。
-    unsafe extern "system" fn record_clicks(
-        hwnd: HWND,
-        message: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        if message == WM_LBUTTONDOWN {
-            CLICKS.fetch_add(1, Ordering::SeqCst);
-            CLIENT_X.store((lparam & 0xFFFF) as i16 as i32, Ordering::SeqCst);
-            CLIENT_Y.store(((lparam >> 16) & 0xFFFF) as i16 as i32, Ordering::SeqCst);
-        }
-        DefWindowProcW(hwnd, message, wparam, lparam)
-    }
-
-    fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(std::iter::once(0)).collect()
-    }
+    use crate::services::computer::test_support::TestWindow;
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 
     #[test]
     fn a_click_reaches_the_window_it_was_aimed_at() {
-        let class_name = wide("AgentIdeClickTestWindow");
-        let title = wide("Agent IDE click test");
-        // 窗口和消息循环必须在同一个线程上（Win32 的窗口是线程亲和的），而点击要从**另一个**
-        // 线程发出 —— 那也正是生产里的形状：被点的窗口属于别的进程。
-        let (sender, receiver) = std::sync::mpsc::channel::<isize>();
-        let pump = std::thread::spawn(move || {
-            // SAFETY: 类名和标题是本地的、以 0 结尾的宽字符串；回调是本模块里的函数。
-            let hwnd = unsafe {
-                let class = WNDCLASSW {
-                    style: 0,
-                    lpfnWndProc: Some(record_clicks),
-                    cbClsExtra: 0,
-                    cbWndExtra: 0,
-                    hInstance: GetModuleHandleW(std::ptr::null()),
-                    hIcon: std::ptr::null_mut(),
-                    hCursor: std::ptr::null_mut(),
-                    hbrBackground: std::ptr::null_mut(),
-                    lpszMenuName: std::ptr::null(),
-                    lpszClassName: class_name.as_ptr(),
-                };
-                // 重复注册会失败，但这个测试进程里只注册一次，失败也只影响下面的创建
-                RegisterClassW(&class);
-                CreateWindowExW(
-                    0,
-                    class_name.as_ptr(),
-                    title.as_ptr(),
-                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                    120,
-                    120,
-                    480,
-                    360,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    GetModuleHandleW(std::ptr::null()),
-                    std::ptr::null(),
-                )
-            };
-            let _ = sender.send(hwnd as isize);
-            if hwnd.is_null() {
-                return;
-            }
-            // 泵 3 秒。不能只泵一次：置前、绘制、以及那一下点击都各自要走消息队列。
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            while std::time::Instant::now() < deadline {
-                let mut message = MSG {
-                    hwnd: std::ptr::null_mut(),
-                    message: 0,
-                    wParam: 0,
-                    lParam: 0,
-                    time: 0,
-                    pt: POINT { x: 0, y: 0 },
-                };
-                // SAFETY: `message` 是本地变量，窗口属于这个线程。
-                while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) }
-                    != 0
-                {
-                    unsafe {
-                        TranslateMessage(&message);
-                        DispatchMessageW(&message);
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            // SAFETY: 同上；销毁自己创建的窗口。
-            unsafe {
-                DestroyWindow(hwnd);
-                PostQuitMessage(0);
-            }
-        });
-
-        let handle = receiver
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("窗口线程应该报出句柄");
-        assert_ne!(handle, 0, "创建测试窗口失败，这条测试就没有被测对象了");
+        let window = TestWindow::open("Agent IDE click test", 480, 360);
 
         // 点客户区中间偏上的一个点。坐标是**窗口矩形**相对的，和 `CaptureFrame` 一致。
         let (x, y) = (200_u32, 180_u32);
-        let outcome = click_in_window(handle, 480, 360, x, y);
+        let outcome = click_in_window(window.handle, 480, 360, x, y);
         // 留点时间让那一下走完消息队列
         std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -510,7 +409,7 @@ mod injection_tests {
             Ok(()) => {
                 println!("injection path exercised: the window was clicked for real");
                 assert_eq!(
-                    CLICKS.load(Ordering::SeqCst),
+                    TestWindow::clicks(),
                     1,
                     "置前成功却没收到点击：说明那一下落在了别的地方"
                 );
@@ -523,9 +422,8 @@ mod injection_tests {
                     bottom: 0,
                 };
                 // SAFETY: `client` 是本地变量；句柄来自上面那个还活着的窗口。
-                unsafe { GetClientRect(handle as HWND, &mut client) };
-                let px = CLIENT_X.load(Ordering::SeqCst);
-                let py = CLIENT_Y.load(Ordering::SeqCst);
+                unsafe { GetClientRect(window.handle as _, &mut client) };
+                let (px, py) = TestWindow::last_click();
                 assert!(
                     px >= 0 && px < client.right && py >= 0 && py < client.bottom,
                     "落点 ({}, {}) 不在客户区 {}x{} 里",
@@ -552,13 +450,11 @@ mod injection_tests {
                     error
                 );
                 assert_eq!(
-                    CLICKS.load(Ordering::SeqCst),
+                    TestWindow::clicks(),
                     0,
                     "既然拒绝了，就不该有任何一下被发出去"
                 );
             }
         }
-
-        let _ = pump.join();
     }
 }

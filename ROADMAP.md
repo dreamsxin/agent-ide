@@ -1505,6 +1505,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Total and read timeouts stay absent, and that is the interesting half.** A reasoning model can go minutes before the first token, so any "no data for N seconds" rule kills legitimate long generations. A hung response is covered by Stop instead — the `tokio::select!` in `send_with_retry` — which is a button the user holds rather than a number I guessed. The CDP client's 10 s total timeout is right for the same reason reversed: `/json/list` either answers immediately or is not there.
    - Rust 430 (no new tests: the change is a builder option, and a test that asserts "we set a 15 s connect timeout" would only restate the line).
 
+106. **The GDI capture path gets the same treatment as the click (2026-09-21)**
+   102 built a real window to test `SendInput`. The same machinery makes the *other* Win32 path testable, and that one had never been exercised either: `PrintWindow` + `GetDIBits` in `copy_window_pixels`. A wrong stride, an upside-down bitmap or a leaked GDI object is invisible to every parser test.
+   - **The window helper moved to `services::computer::test_support`** rather than being copied. `computer` is the module that owns window enumeration, so both `capture` and `input` depend on it already; two copies of "create a window and pump it" is the shape where one copy rots while the other keeps working.
+   - **Clean-up is now a `Drop` impl**, which also fixes something the 103 audit flagged: the old test joined its pump thread on the last line, so a failing assertion left the window alive — and the next test may be looking for a window by title.
+   - **`a_real_window_is_captured_at_the_size_it_reports`** goes from "find it by app name and title" to "decode the PNG and check it against the size the capture reports". Those two numbers come from different paths (`GetWindowRect` via the enumeration, and the bitmap the encoder was handed), so agreement is worth something.
+   - **The assertion is deliberately not about pixels.** The test window has no background brush, so what it renders is up to the system and the compositor; pinning colours would pin this machine. What is pinned is that the image describes the window it claims to, at 4 bytes per pixel — a dropped channel shifts the whole image and would look plausible in a thumbnail.
+   - Rust 430 → 431.
+
 
 
 

@@ -680,6 +680,53 @@ mod tests {
             .is_ok());
     }
 
+    /// 真的截一个真窗口。
+    ///
+    /// GDI 那一段（`PrintWindow` + `GetDIBits`）此前一行覆盖都没有：stride 算错、位图上下
+    /// 颠倒、句柄漏掉，纯函数测试全是绿的。这条从"按应用名和标题找到它"一路走到"解出来的
+    /// PNG 和它自己报的尺寸一致"。
+    ///
+    /// 断言落在"这张图描述的就是它说的那个窗口"，不落在像素内容上：这个测试窗口没有背景
+    /// 画刷，画出来什么颜色由系统和合成器决定，钉像素只会钉住这台机器。
+    #[cfg(windows)]
+    #[test]
+    fn a_real_window_is_captured_at_the_size_it_reports() {
+        let _window = crate::services::computer::test_support::TestWindow::open(
+            "Agent IDE capture test",
+            420,
+            300,
+        );
+        // 给窗口一点时间画出第一帧，否则 `PrintWindow` 拿到的可能是一张还没内容的位图
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let app = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+            .expect("测试进程应该有可执行文件名");
+
+        let approved = resolve_capture_target(Some(&app), Some("capture test"), &["*".to_string()])
+            .expect("刚开的窗口应该找得到");
+        let capture = capture_approved_window(&approved).expect("应该截得出来");
+
+        // 解出来的尺寸必须和它自己报的一致 —— 这两个数字来自两条不同的路径
+        let decoder = png::Decoder::new(std::io::Cursor::new(&capture.png));
+        let mut reader = decoder.read_info().expect("应该是合法 PNG");
+        let mut pixels = vec![0u8; reader.output_buffer_size().expect("known size")];
+        let info = reader.next_frame(&mut pixels).expect("一帧");
+        assert_eq!(
+            (info.width, info.height),
+            (capture.target.width, capture.target.height)
+        );
+        // 每像素 4 字节：少一个通道会让整张图错位，而那在缩略图上看不出来
+        assert_eq!(
+            info.buffer_size(),
+            (capture.target.width as usize) * (capture.target.height as usize) * 4
+        );
+        assert!(capture.target.title.contains("capture test"));
+    }
+
     /// 编码出来的必须是真的 PNG，而且尺寸不匹配要报错而不是写出一张坏图。
     #[test]
     fn the_encoder_writes_a_real_png_and_refuses_a_mismatched_buffer() {
