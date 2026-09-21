@@ -143,8 +143,8 @@ mod platform {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+        EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+        GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
     };
 
     /// `EnumWindows` 的回调把结果攒进这里。
@@ -310,6 +310,32 @@ mod platform {
             .into_owned();
         full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string()
     }
+
+    /// 窗口类名。
+    ///
+    /// 身份检查里最后一块能拿到的东西。应用名 + pid 相同的情况下，句柄被**同一进程**里
+    /// 另一个窗口回收是查不出来的（Chrome 关一个窗口开一个提示气泡就是这样）——而类名
+    /// 在那种情况下通常不同（`Chrome_WidgetWin_1` 对 `tooltips_class32`）。它不是万能的：
+    /// 同一类的两个兄弟窗口照样分不开，所以这只是把那道缝收窄，不是焊死。
+    pub fn window_class(handle: isize) -> Option<String> {
+        // SAFETY: 句柄只用来查，越界由 `IsWindow` 挡在前面；缓冲区是本地的。
+        unsafe {
+            let hwnd = handle as HWND;
+            if IsWindow(hwnd) != TRUE {
+                return None;
+            }
+            let mut buffer = vec![0u16; 256];
+            let length = GetClassNameW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+            if length <= 0 {
+                return None;
+            }
+            Some(
+                std::ffi::OsString::from_wide(&buffer[..length as usize])
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -336,6 +362,8 @@ mod platform {
 
 #[cfg(windows)]
 pub use platform::list_windows_with_handles;
+#[cfg(windows)]
+pub use platform::window_class;
 pub use platform::{describe_window, list_windows, window_pid};
 
 /// 造一个真实窗口，给那些非得有窗口才测得到的东西用。

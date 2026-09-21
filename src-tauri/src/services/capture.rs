@@ -198,6 +198,12 @@ pub struct ApprovedWindow {
     handle: isize,
     /// 批准那一刻这个窗口属于哪个进程。取不到时是 `None`（降级为只比应用名）。
     pid: Option<u32>,
+    /// 批准那一刻的窗口类名。
+    ///
+    /// 身份检查里最后一层。应用名和 pid 都相同时，句柄被**同一进程**里另一个窗口回收是
+    /// 查不出来的，而类名在最常见的那种情况下不同（Chrome 关掉一个主窗口、开出一个提示
+    /// 气泡）。同类的兄弟窗口仍然分不开，所以这是收窄那道缝，不是焊死它。
+    class: Option<String>,
 }
 
 impl ApprovedWindow {
@@ -209,28 +215,41 @@ impl ApprovedWindow {
         self.pid
     }
 
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
+    }
+
     /// 从一帧截图记下来的身份重建它，用来在**之后**的动作（点击）之前再验一次。
     ///
     /// 让点击复用同一个 `verify` 而不是自己再写一遍三项检查：写两遍的那一遍迟早会少一项，
     /// 而少的那一项恰好是"句柄被同一应用的另一个窗口回收"——它在 ROADMAP 94 里就是这么
     /// 被漏掉的。
-    pub fn remembered(target: CaptureTarget, handle: isize, pid: Option<u32>) -> Self {
+    pub fn remembered(
+        target: CaptureTarget,
+        handle: isize,
+        pid: Option<u32>,
+        class: Option<String>,
+    ) -> Self {
         Self {
             target,
             handle,
             pid,
+            class,
         }
     }
 
     /// 批准之后、动手之前，确认那个句柄指的还是同一个窗口。
     ///
-    /// 三件事，缺一不可：
+    /// 四件事，缺一不可：
     /// - 窗口还活着；
     /// - 还属于同一个应用 —— Win32 在窗口销毁后会把句柄回收，"`IsWindow` 说有效"
     ///   不等于"还是那一个"；
     /// - pid 还是同一个 —— 这是上一条看不出来的那一半：句柄被**同一应用**的新窗口
     ///   回收时应用名照样对得上，而那是最容易发生的一种（Chrome 关一个窗口开一个）。
     ///   批准时取不到 pid 就只能退回到比应用名，这一点在 SECURITY.md 里写明了。
+    /// - 类名还是同一个 —— 这是 pid 也看不出来的那一层：**同一个进程**里的另一个窗口
+    ///   拿到这个句柄时，应用名和 pid 全都对得上。类名在最常见的那种情况下不同
+    ///   （主窗口 → 提示气泡）。同类的兄弟窗口仍然分不开，所以这只是收窄那道缝。
     ///
     /// 标题**允许**变：它会跟着未读数、播放进度、脏标记不停跳，把标题相等当成条件会让
     /// 用户批准过的截图被频繁拒掉，而模型的合理反应是再问一次 —— 那正是审批疲劳。
@@ -243,6 +262,7 @@ impl ApprovedWindow {
         &self,
         current: Option<&DesktopWindow>,
         current_pid: Option<u32>,
+        current_class: Option<&str>,
         not_done: &str,
     ) -> Result<CaptureTarget, String> {
         let Some(current) = current else {
@@ -262,6 +282,15 @@ impl ApprovedWindow {
                 return Err(format!(
                     "The approved window is gone and its handle now belongs to another window of \
                      the same app, so {}.",
+                    not_done
+                ));
+            }
+        }
+        if let (Some(approved), Some(now)) = (self.class.as_deref(), current_class) {
+            if approved != now {
+                return Err(format!(
+                    "The approved window is gone and its handle now belongs to a different kind of \
+                     window in the same process, so {}.",
                     not_done
                 ));
             }
@@ -309,6 +338,7 @@ mod platform {
             target,
             handle,
             pid: crate::services::computer::window_pid(handle),
+            class: crate::services::computer::window_class(handle),
         })
     }
 
@@ -320,7 +350,13 @@ mod platform {
     pub fn capture_approved_window(approved: &ApprovedWindow) -> Result<WindowCapture, String> {
         let current = crate::services::computer::describe_window(approved.handle);
         let current_pid = crate::services::computer::window_pid(approved.handle);
-        let resolved = approved.verify(current.as_ref(), current_pid, "nothing was captured")?;
+        let current_class = crate::services::computer::window_class(approved.handle);
+        let resolved = approved.verify(
+            current.as_ref(),
+            current_pid,
+            current_class.as_deref(),
+            "nothing was captured",
+        )?;
         // 尺寸可能在批准之后变了，所以上限要按现在的尺寸重新算
         check_capture_pixels(resolved.width, resolved.height)?;
         let rgba = copy_window_pixels(approved.handle as HWND, resolved.width, resolved.height)?;
@@ -566,25 +602,26 @@ mod tests {
             target: CaptureTarget::from_window(&window("Docs — pricing", "chrome.exe")),
             handle: 0x1234,
             pid: Some(4242),
+            class: None,
         };
 
         // 关掉了
         let error = approved
-            .verify(None, None, "nothing was captured")
+            .verify(None, None, None, "nothing was captured")
             .expect_err("closed");
         assert!(error.contains("closed"), "{}", error);
 
         // 句柄被回收给了另一个应用的窗口
         let recycled = window("Docs — pricing", "signal.exe");
         let error = approved
-            .verify(Some(&recycled), Some(4242), "nothing was captured")
+            .verify(Some(&recycled), Some(4242), None, "nothing was captured")
             .expect_err("another app");
         assert!(error.contains("another app"), "{}", error);
 
         // 句柄被回收给了同一个应用的另一个窗口：应用名一样、标题一样，只有 pid 不同
         let sibling = window("Docs — pricing", "chrome.exe");
         let error = approved
-            .verify(Some(&sibling), Some(99), "nothing was captured")
+            .verify(Some(&sibling), Some(99), None, "nothing was captured")
             .expect_err("same app, another window");
         assert!(
             error.contains("another window of the same app"),
@@ -595,14 +632,14 @@ mod tests {
         // 同一个窗口，标题跳了：放行，而且返回的是**现在**的标题，记录才说得对
         let ticked = window("(3) Docs — pricing", "chrome.exe");
         let resolved = approved
-            .verify(Some(&ticked), Some(4242), "nothing was captured")
+            .verify(Some(&ticked), Some(4242), None, "nothing was captured")
             .expect("same window");
         assert_eq!(resolved.title, "(3) Docs — pricing");
 
         // 应用名的写法差异不算换应用
         let respelled = window("Docs — pricing", "CHROME.EXE");
         assert!(approved
-            .verify(Some(&respelled), Some(4242), "nothing was captured")
+            .verify(Some(&respelled), Some(4242), None, "nothing was captured")
             .is_ok());
     }
 
@@ -613,15 +650,16 @@ mod tests {
             target: CaptureTarget::from_window(&window("Docs — pricing", "chrome.exe")),
             handle: 0x1234,
             pid: None,
+            class: None,
         };
 
         let sibling = window("Docs — pricing", "chrome.exe");
         assert!(approved
-            .verify(Some(&sibling), Some(99), "nothing was captured")
+            .verify(Some(&sibling), Some(99), None, "nothing was captured")
             .is_ok());
         let other_app = window("Docs — pricing", "signal.exe");
         assert!(approved
-            .verify(Some(&other_app), Some(99), "nothing was captured")
+            .verify(Some(&other_app), Some(99), None, "nothing was captured")
             .is_err());
     }
 
@@ -653,12 +691,13 @@ mod tests {
             },
             0x1234,
             Some(4242),
+            Some("Chrome_WidgetWin_1".to_string()),
         );
 
         // 句柄被同一应用的另一个窗口回收：应用名对得上，pid 不同
         let sibling = window("Docs — pricing", "chrome.exe");
         let error = approved
-            .verify(Some(&sibling), Some(99), "nothing was clicked")
+            .verify(Some(&sibling), Some(99), None, "nothing was clicked")
             .expect_err("same app, another window");
         assert!(
             error.contains("another window of the same app"),
@@ -670,13 +709,30 @@ mod tests {
 
         // 关掉了同样按点击的话术报
         let closed = approved
-            .verify(None, None, "nothing was clicked")
+            .verify(None, None, None, "nothing was clicked")
             .expect_err("closed");
         assert!(closed.contains("nothing was clicked"), "{}", closed);
 
+        // **同一个进程**里换成了另一种窗口：应用名和 pid 全都对得上，只有类名不同。
+        // pid 那一层看不出这种情况，而它正是句柄回收最常见的样子（主窗口 → 提示气泡）。
+        let popup = approved
+            .verify(
+                Some(&sibling),
+                Some(4242),
+                Some("tooltips_class32"),
+                "nothing was clicked",
+            )
+            .expect_err("same process, different kind of window");
+        assert!(popup.contains("different kind of window"), "{}", popup);
+
         // 还是同一个窗口就放行，返回的是现在的标题
         assert!(approved
-            .verify(Some(&sibling), Some(4242), "nothing was clicked")
+            .verify(
+                Some(&sibling),
+                Some(4242),
+                Some("Chrome_WidgetWin_1"),
+                "nothing was clicked"
+            )
             .is_ok());
     }
 

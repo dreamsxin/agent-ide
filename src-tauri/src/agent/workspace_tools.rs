@@ -222,6 +222,8 @@ pub struct CaptureFrame {
     pub height: u32,
     handle: isize,
     pid: Option<u32>,
+    /// 截图那一刻的窗口类名。身份复核的第四层，见 `ApprovedWindow::verify`。
+    class: Option<String>,
 }
 
 /// 一次运行里最多记多少帧。
@@ -2095,6 +2097,7 @@ async fn computer_capture_tool(
     // 之后要靠同一套身份再验一次（`ApprovedWindow::remembered`）。
     let approved_handle = approved.handle();
     let approved_pid = approved.pid();
+    let approved_class = approved.class().map(str::to_string);
     let captured = match tokio::task::spawn_blocking(move || {
         crate::services::capture::capture_approved_window(&approved)
     })
@@ -2168,6 +2171,7 @@ async fn computer_capture_tool(
         height: capture.target.height,
         handle: approved_handle,
         pid: approved_pid,
+        class: approved_class,
     });
     Ok(format!(
         "Captured \"{}\" ({}) at {}x{} and attached it to this turn ({} bytes of PNG). Frame id: \
@@ -2296,10 +2300,17 @@ async fn computer_click_tool(
         },
         frame.handle,
         frame.pid,
+        frame.class.clone(),
     );
     let current = crate::services::computer::describe_window(frame.handle);
     let current_pid = crate::services::computer::window_pid(frame.handle);
-    let resolved = match remembered.verify(current.as_ref(), current_pid, "nothing was clicked") {
+    let current_class = crate::services::computer::window_class(frame.handle);
+    let resolved = match remembered.verify(
+        current.as_ref(),
+        current_pid,
+        current_class.as_deref(),
+        "nothing was clicked",
+    ) {
         Ok(resolved) => resolved,
         Err(error) => {
             return refuse_external(
@@ -3523,6 +3534,7 @@ mod tests {
             // 一个不可能有效的句柄：这些测试全部在真的动手之前就结束
             handle: 0,
             pid: Some(4242),
+            class: Some("AgentIdeTestWindow".to_string()),
         })
     }
 

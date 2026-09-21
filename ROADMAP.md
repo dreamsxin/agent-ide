@@ -1513,6 +1513,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The assertion is deliberately not about pixels.** The test window has no background brush, so what it renders is up to the system and the compositor; pinning colours would pin this machine. What is pinned is that the image describes the window it claims to, at 4 bytes per pixel — a dropped channel shifts the whole image and would look plausible in a thumbnail.
    - Rust 430 → 431.
 
+107. **Narrowing the in-process handle recycle with the window class (2026-09-21)**
+   103 found that a handle recycled *inside the same process* passes `verify`: same app, same pid, and only the frame's size check left between the model and a window it never captured. I wrote it off as "Win32 has no stable per-window identity", which is true and was also lazy — there is one more cheap discriminator.
+   - **The window class.** `GetClassNameW` is recorded at capture time and compared before the click (and before a re-capture). It catches the most common shape of in-process recycling by a wide margin: a main window closes and a tooltip, popup or menu inherits the handle, which differs by class (`Chrome_WidgetWin_1` versus `tooltips_class32`). It does **not** catch two sibling windows of the same class — that case stays open, and SECURITY.md now says exactly where the line is instead of the vaguer "a window of the same app can still inherit the handle".
+   - **Compared only when both sides are known**, like pid: an unavailable class degrades to the previous behaviour rather than refusing everything. The alternative — treating "cannot read the class" as a mismatch — would have made the whole capability fail on any window Win32 declines to describe.
+   - **Rejected: comparing the window's position.** A user moving a window between capture and click is normal and the coordinates stay correct (they are window-relative and recomputed from the current rect), so a position check would refuse legitimate clicks. Size is different: it invalidates the coordinates, which is why that one *is* a check.
+   - Rust 431 (the new case is an arm of an existing test — `a_remembered_window_is_verified_for_clicking_too` now covers same-app-same-pid-different-class, which was previously a silent pass).
+
 
 
 
