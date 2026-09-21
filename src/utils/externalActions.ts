@@ -102,11 +102,25 @@ export function describeExternalAction(action: ExternalActionRecord): string {
   return action.detail ? `${target} — ${action.detail}` : target;
 }
 
+/**
+ * 清空动作在日志里留下的墓碑 kind，和后端的 `LOG_CLEARED_KIND` 对齐。
+ *
+ * 它不是一次外部动作：既没有出网也没有截屏。算进"已经发生 N 次"会让那个数字不再可信，
+ * 而那个数字是这块 UI 唯一的作用。
+ */
+export const LOG_CLEARED_KIND = "external_log_cleared";
+
+/** 这条只是日志自己的记账，不是 Agent 做的事。 */
+export function isBookkeepingAction(action: ExternalActionRecord): boolean {
+  return action.kind === LOG_CLEARED_KIND;
+}
+
 /** 有几次真的发生了，有几次被拒/失败。给标题用。 */
 export function summarizeExternalActions(actions: ExternalActionRecord[]): {
   performed: number;
   refused: number;
 } {
-  const refused = actions.filter(isRefusedAction).length;
-  return { performed: actions.length - refused, refused };
+  const real = actions.filter((action) => !isBookkeepingAction(action));
+  const refused = real.filter(isRefusedAction).length;
+  return { performed: real.length - refused, refused };
 }

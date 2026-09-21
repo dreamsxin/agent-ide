@@ -138,6 +138,8 @@ interface AgentStore {
   restoreDiffs: (workspacePath?: string) => Promise<void>;
   /** 从后端读回撤不回的外部动作（`get_agent_external_actions`）。 */
   refreshExternalActions: () => Promise<void>;
+  /** 忘掉更早会话留下的外部动作记录；这一次会话的不受影响。 */
+  forgetEarlierExternalActions: () => Promise<void>;
   restoreAgentSession: (workspacePath?: string) => void;
   reconcileBackendRun: () => Promise<void>;
   clearAgentSession: () => void;
@@ -476,6 +478,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set({ externalActions: normalizeExternalActions(backend) });
     } catch (err: unknown) {
       console.warn("[AgentStore] get_agent_external_actions failed:", err);
+    }
+  },
+  forgetEarlierExternalActions: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      // 后端只会忘掉更早会话的那些，并在磁盘上留一条墓碑；所以这里不自己删本地数组，
+      // 而是重新读一遍 —— 界面上剩下什么，由那份唯一的记录说了算。
+      await invoke("forget_earlier_external_actions");
+      await get().refreshExternalActions();
+    } catch (err: unknown) {
+      // 清不掉要说出来：静默失败会让用户以为记录没了，而它还在磁盘上
+      set({ error: `Could not clear the earlier external action records: ${String(err)}` });
     }
   },
   restoreAgentSession: (workspacePath) => {

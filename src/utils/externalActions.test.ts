@@ -3,6 +3,7 @@ import {
   describeExternalAction,
   isFromOtherRun,
   isRefusedAction,
+  LOG_CLEARED_KIND,
   normalizeExternalActions,
   summarizeExternalActions,
 } from "./externalActions";
@@ -95,6 +96,19 @@ describe("isFromOtherRun", () => {
 });
 
 describe("restored records", () => {
+  /**
+   * 墓碑不是一次外部动作：它既没有出网也没有截屏。算进"已经发生 N 次"会让那个数字不再
+   * 可信，而那个数字是这块 UI 唯一的作用。
+   */
+  it("does not count the cleared-log tombstone as something that happened", () => {
+    const actions = normalizeExternalActions([
+      { id: "1", kind: "browser_open", target: "https://a.example" },
+      { id: "2", kind: LOG_CLEARED_KIND, target: "D:/work/x", detail: "3 record(s) cleared" },
+    ]);
+
+    expect(summarizeExternalActions(actions)).toEqual({ performed: 1, refused: 0 });
+  });
+
   it("only trusts an explicit true, so an older backend's records read as this session's", () => {
     // 后端不给这个字段时当成"这次会话的"：把刚刚发生的事标成历史，用户会以为它没发生
     const [current] = normalizeExternalActions([

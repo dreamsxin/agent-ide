@@ -1441,6 +1441,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Accepted with reasoning, not fixed**: the append runs inside the orchestrator critical section (the drain-and-record invariant is stronger than the cost of a sub-millisecond whole-file write); two app instances against one home directory can lose each other's records (no single-instance guard today); and the durable log is now itself a disclosure surface — full URLs with query strings and window titles, in plaintext, unbounded by age, with no in-app prune. That last one is written into SECURITY.md as a stated trade with "a clear-the-log control" named as the open item, because an audit record that forgets is not an audit record but one that never forgets is a second copy of everything sensitive the Agent saw.
    - Rust 409 (two tests replaced, not added), frontend 219.
 
+99. **A prune control for the durable log, and why it can only reach backwards (2026-09-21)**
+   98 left "a clear-the-log control" as the open item, because an audit record that never forgets is a second copy of every URL and window title the Agent saw. This is that control, and its scope is the whole design.
+   - **It only removes *earlier sessions*.** `forget_earlier_external_actions` passes the ids of this session's records as `keep_ids`. A control that can erase what just happened makes the record deniable, and a deniable record is not a compensating control for an irreversible action — it is a formality. What the user actually wants is "stop showing me last month", which is exactly the restored set.
+   - **It leaves a tombstone.** `external_log_cleared` records how many were dropped and when. A log that silently got shorter and a log somebody trimmed are indistinguishable afterwards; the tombstone is the difference. It survives later clears (it is not an action, it is the note that something is missing), and because it is not an action it is excluded from the "N external action(s)" count via `isBookkeepingAction` — counting it would have been exactly the class of counting defect the last four audits kept finding.
+   - **An unreadable log is not cleared.** `forget_earlier_sessions` returns an error rather than writing a fresh file: the quarantine path in 98 exists to keep a file a human might still read, and "clear" must not be the one operation that deletes it for certain.
+   - **The frontend re-reads instead of trimming its own array.** What is on screen is whatever the one durable record says; deleting locally first would show "cleared" even when the backend refused. A failure raises the error banner rather than silently leaving the old rows.
+   - **The button only appears when there is something to forget**, and its label carries the count ("Forget 12 earlier"). The external-actions block had *no* buttons by design — that rule is about Undo, which cannot exist for a navigation; this control does not claim to reverse anything, and the tooltip says what it does to the durable log.
+   - Rust 409 → 412, frontend 219 → 222.
+
 
 
 

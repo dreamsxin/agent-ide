@@ -77,6 +77,7 @@ pub fn run() {
             commands::agent::get_agent_steps,
             commands::agent::get_agent_diffs,
             commands::agent::get_agent_external_actions,
+            commands::agent::forget_earlier_external_actions,
             commands::agent::get_agent_sdd_artifacts,
             commands::agent::save_sdd_artifact,
             commands::agent::update_llm_config,

@@ -176,6 +176,66 @@ fn quarantine_unreadable_log(reason: &str) -> Result<String, String> {
     Ok(moved.to_string_lossy().to_string())
 }
 
+/// 清空动作留下的墓碑记录的 kind。
+///
+/// 界面按它认出这条不是一次外部动作：它既没有出网也没有截屏，算进"已经发生 N 次"会让
+/// 那个数字不再可信，而那个数字是这块 UI 唯一的作用。
+pub const LOG_CLEARED_KIND: &str = "external_log_cleared";
+
+/// 忘掉当前工作区**之前会话**留下的记录，留下一条墓碑。
+///
+/// `keep_ids` 是这一次会话自己的记录。清空只对更早的那些生效：让用户能抹掉手上这次运行
+/// 刚做的事，等于把这份记录变成"可以事后否认"的东西 —— 那它就不再是补偿控制了。用户真
+/// 正需要的是"别再给我看上个月的"，那正好是 `restored` 的那一批。
+///
+/// 删掉多少条要**留一条墓碑**，而不是静默变短：一份说不清自己被剪过的审计文件，和一份
+/// 被人删过的审计文件在事后看起来完全一样。墓碑自己不会被下一次清空删掉（它属于当前
+/// 会话之外，但它记的是"这里少了东西"，不是一次动作），所以它也进 `keep`。
+pub fn forget_earlier_sessions(keep_ids: &[String]) -> Result<usize, String> {
+    let Some(workspace) = current_workspace() else {
+        return Err("no workspace has been saved yet".to_string());
+    };
+    let existing = match read_all() {
+        Ok(existing) => existing,
+        // 读不出来的时候不能"清空"：那会把一份人还能看的文件变成一句确定的删除
+        Err(reason) => return Err(format!("the log could not be read ({})", reason)),
+    };
+    let mut kept: Vec<PersistedAction> = Vec::with_capacity(existing.len());
+    let mut forgotten = 0_usize;
+    for entry in existing {
+        let mine = entry.workspace == workspace;
+        let keep =
+            !mine || keep_ids.contains(&entry.action.id) || entry.action.kind == LOG_CLEARED_KIND;
+        if keep {
+            kept.push(entry);
+        } else {
+            forgotten += 1;
+        }
+    }
+    if forgotten == 0 {
+        return Ok(0);
+    }
+    kept.push(PersistedAction {
+        workspace: workspace.clone(),
+        action: ExternalActionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            kind: LOG_CLEARED_KIND.to_string(),
+            target: workspace,
+            detail: format!(
+                "{} record(s) from earlier sessions were cleared at the user's request.",
+                forgotten
+            ),
+            run_id: None,
+            restored: false,
+        },
+    });
+    let content =
+        serde_json::to_string_pretty(&kept).map_err(|error| format!("serialize: {}", error))?;
+    std::fs::write(log_path(), content).map_err(|error| format!("write: {}", error))?;
+    Ok(forgotten)
+}
+
 /// 追加并压回上限，丢**最旧**的。
 ///
 /// 纯函数，因为上限这件事只在写满之后才出问题，而那种时候没人在看磁盘。
@@ -377,5 +437,60 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].run_id, None);
         assert!(restored[0].restored);
+    }
+
+    /// 清空只对**更早的会话**生效，而且要留下墓碑。
+    ///
+    /// 两条都是这个功能的要点：能抹掉手上这次运行刚做的事，等于把这份记录变成可以事后
+    /// 否认的东西；而静默变短的审计文件和被人删过的审计文件在事后看起来一模一样。
+    #[test]
+    fn forgetting_earlier_sessions_keeps_this_one_and_leaves_a_tombstone() {
+        let _env = LogEnv::new("D:/work/project");
+        append_for_current_workspace(&[record("old-1", "browser_open")]);
+        append_for_current_workspace(&[record("old-2", "computer_capture")]);
+        append_for_current_workspace(&[record("mine", "browser_open")]);
+
+        let forgotten = forget_earlier_sessions(&["mine".to_string()]).expect("清空应该成功");
+
+        assert_eq!(forgotten, 2);
+        let left = load_for_current_workspace();
+        let kinds: Vec<&str> = left.iter().map(|action| action.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["browser_open", LOG_CLEARED_KIND]);
+        assert_eq!(left[0].id, "mine");
+        // 墓碑要说清少了几条，否则它只是一行没有信息的噪声
+        assert!(left[1].detail.contains("2 record(s)"), "{}", left[1].detail);
+    }
+
+    /// 别的工作区的记录不受影响，墓碑也不会被下一次清空吃掉。
+    #[test]
+    fn forgetting_is_scoped_and_the_tombstone_survives() {
+        let _env = LogEnv::new("D:/work/project-a");
+        append_for_current_workspace(&[record("a-old", "browser_open")]);
+        workspace::save_workspace_path("D:/work/project-b").expect("切工作区");
+        append_for_current_workspace(&[record("b-old", "browser_open")]);
+
+        assert_eq!(forget_earlier_sessions(&[]).expect("清空 B"), 1);
+        // 再清一次：已经没有可忘的了，而墓碑必须还在
+        assert_eq!(forget_earlier_sessions(&[]).expect("再清一次"), 0);
+        assert_eq!(load_for_current_workspace().len(), 1);
+        assert_eq!(load_for_current_workspace()[0].kind, LOG_CLEARED_KIND);
+
+        workspace::save_workspace_path("D:/work/project-a").expect("切回 A");
+        let in_a = load_for_current_workspace();
+        assert_eq!(in_a.len(), 1);
+        assert_eq!(in_a[0].id, "a-old");
+    }
+
+    /// 读不出来的时候**不能**清空：那会把一份人还能看的文件变成一次确定的删除。
+    #[test]
+    fn an_unreadable_log_is_not_cleared() {
+        let _env = LogEnv::new("D:/work/project");
+        std::fs::write(log_path(), "not json at all").expect("写坏文件");
+
+        assert!(forget_earlier_sessions(&[]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(log_path()).unwrap(),
+            "not json at all"
+        );
     }
 }

@@ -480,3 +480,53 @@ describe("restoreAgentSession", () => {
   });
 });
 
+describe("forgetEarlierExternalActions", () => {
+  /**
+   * 界面上剩下什么由后端那份唯一的记录说了算，所以清空之后必须重新读一遍 ——
+   * 本地先删一遍的版本会在后端拒绝时显示成"已经清掉了"。
+   */
+  it("re-reads the record instead of trimming the local copy", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "forget_earlier_external_actions") return Promise.resolve(2);
+      if (command === "get_agent_external_actions") {
+        return Promise.resolve([
+          { id: "mine", kind: "browser_open", target: "https://a.example" },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    useAgentStore.setState({
+      externalActions: [
+        {
+          id: "old",
+          timestamp: "",
+          kind: "browser_open",
+          target: "https://old.example",
+          detail: "",
+          runId: null,
+          restored: true,
+        },
+      ],
+    });
+
+    await useAgentStore.getState().forgetEarlierExternalActions();
+
+    const commands = invokeMock.mock.calls.map((call) => call[0]);
+    expect(commands).toContain("forget_earlier_external_actions");
+    expect(commands).toContain("get_agent_external_actions");
+    expect(useAgentStore.getState().externalActions.map((a) => a.id)).toEqual(["mine"]);
+  });
+
+  it("surfaces a failure instead of pretending the records are gone", async () => {
+    invokeMock.mockImplementation((command: string) =>
+      command === "forget_earlier_external_actions"
+        ? Promise.reject(new Error("the log could not be read"))
+        : Promise.resolve([])
+    );
+
+    await useAgentStore.getState().forgetEarlierExternalActions();
+
+    expect(useAgentStore.getState().error).toContain("could not be read");
+  });
+});
+

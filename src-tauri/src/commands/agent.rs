@@ -2457,6 +2457,37 @@ pub async fn get_agent_external_actions(
     Ok(orch.external_actions.clone())
 }
 
+/// 忘掉更早会话留下的外部动作记录，返回忘掉了几条。
+///
+/// 只对更早的那些生效：让用户能抹掉手上这次运行刚做的事，等于把这份记录变成可以事后否认
+/// 的东西。磁盘上留一条墓碑说明少了几条 —— 一份说不清自己被剪过的审计文件，和一份被人
+/// 删过的审计文件在事后看起来一样。
+///
+/// 锁分两次拿，中间放文件 IO：这条不是运行路径上的，但一次磁盘读写不该把其他命令堵在
+/// 后面。
+#[tauri::command]
+pub async fn forget_earlier_external_actions(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<usize, String> {
+    let keep_ids: Vec<String> = {
+        let orch = agent_state.orchestrator.lock().await;
+        orch.external_actions
+            .iter()
+            .filter(|action| !action.restored)
+            .map(|action| action.id.clone())
+            .collect()
+    };
+    let forgotten = crate::agent::external_log::forget_earlier_sessions(&keep_ids)?;
+    if forgotten > 0 {
+        agent_state
+            .orchestrator
+            .lock()
+            .await
+            .forget_restored_external_actions();
+    }
+    Ok(forgotten)
+}
+
 #[tauri::command]
 pub async fn get_agent_sdd_artifacts(
     agent_state: State<'_, AgentGlobalState>,

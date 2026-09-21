@@ -231,6 +231,8 @@ export default function DiffView() {
   const externalActions = useAgentStore((s) => s.externalActions);
   const agentRunId = useAgentStore((s) => s.agentRunId);
   const externalSummary = summarizeExternalActions(externalActions);
+  const restoredCount = externalActions.filter((action) => action.restored).length;
+  const forgetEarlierExternalActions = useAgentStore((s) => s.forgetEarlierExternalActions);
   const lastApplyResult = useAgentStore((s) => s.lastApplyResult);
   const clearApplyResult = useAgentStore((s) => s.clearApplyResult);
   const applyAllDiffs = useAgentStore((s) => s.applyAllDiffs);
@@ -332,10 +334,25 @@ export default function DiffView() {
           {/* 这一块没有按钮，这是它的重点：导航没有 previous 可以还原，能提供的只有
               记录本身。放在审查区顶部而不是只写进日志，是因为用户来这里就是为了
               看"Agent 做了什么"。 */}
-          <div className="mb-1 font-medium text-amber-300">
-            {externalSummary.performed} external action(s) — cannot be undone
-            {externalSummary.refused > 0 &&
-              `, ${externalSummary.refused} refused, failed or stopped`}
+          <div className="mb-1 flex items-baseline justify-between gap-2">
+            <span className="font-medium text-amber-300">
+              {externalSummary.performed} external action(s) — cannot be undone
+              {externalSummary.refused > 0 &&
+                `, ${externalSummary.refused} refused, failed or stopped`}
+            </span>
+            {/* 唯一的按钮，而且只能忘掉**更早会话**的记录。能抹掉刚刚发生的事就等于让这
+                份记录变成可以事后否认的东西；而完全没有清理入口，会让一份永不遗忘的
+                明文日志成为 Agent 见过的所有敏感内容的第二份副本。 */}
+            {restoredCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void forgetEarlierExternalActions()}
+                className="flex-shrink-0 rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
+                title="Removes them from the durable log and leaves a note that they were cleared. This session's records stay."
+              >
+                Forget {restoredCount} earlier
+              </button>
+            )}
           </div>
           {/* 全部列出来，只加滚动：截断成"最近 10 条"等于在用户唯一被告知要看的地方
               把这份记录悄悄砍掉，和它替换掉的 emit-only 设计是同一类毛病。 */}

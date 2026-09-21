@@ -715,6 +715,15 @@ impl AgentOrchestrator {
         }
     }
 
+    /// 把恢复出来的那些从列表里去掉，只留这一次会话自己的。
+    ///
+    /// **不变量**：只删 `restored` 的。用户能抹掉手上这次运行刚做的事，就等于把这份记录
+    /// 变成可以事后否认的东西 —— 那它不再是一个撤不回能力的补偿。磁盘那侧同时留下一条
+    /// 墓碑，所以"这里少过东西"本身不会被抹掉。
+    pub fn forget_restored_external_actions(&mut self) {
+        self.external_actions.retain(|action| !action.restored);
+    }
+
     /// 回到中间某一步。
     ///
     /// **锁不变量**：压回滚点（293）、挂 diff（294）、重刷 baseHash（297）必须在
