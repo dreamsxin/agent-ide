@@ -524,25 +524,28 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // 步骤和 SDD 也要对账，理由和 `restoreDiffs` 一样：它们在后端只活在内存里，前端却从
       // localStorage 恢复。不对账的话，Run/Skip 会打到一个后端根本不认识的步骤上 —— 那是
       // 一排点了报错的按钮，而"界面显示的和后端实际的不一致"正是这个产品要避免的。
-      // 只在后端确实有的时候覆盖：后端空着说明那次运行早结束了，恢复出来的那份仍然是用户
-      // 上次看到的东西，而 `restoredSession` 横幅已经在说明这件事。
+      //
+      // 对上了就照抄后端，**包括抄一个空列表**：那正是"后端这次重新规划成了空"的情况，而
+      // 界面上还留着上一个任务的步骤 —— 这时横幅写的是"Backend run matched"，用户没有任何
+      // 理由怀疑那几行是假的。对不上才保留恢复出来的那份，横幅也已经在说明它可能对不上。
       //
       // 两次调用都把命令名写成字面量、各自 try/catch，而不是抽一个 `reconcile(command)`
       // 辅助函数：名字一进变量，`tests/ipc-contract.test.ts` 那条"注册了却没人调"的扫描
       // 就看不见它了 —— 这个仓库每一处按名字查的工具都一样。
       try {
         const steps = await invoke<Step[]>("get_agent_steps");
-        if (steps.length > 0) set({ steps });
+        if (matched || steps.length > 0) set({ steps });
       } catch (err: unknown) {
         console.warn("[AgentStore] get_agent_steps reconciliation failed:", err);
       }
       try {
         const sddArtifacts = await invoke<SddArtifact[]>("get_agent_sdd_artifacts");
-        if (sddArtifacts.length > 0) set({ sddArtifacts });
+        if (matched || sddArtifacts.length > 0) set({ sddArtifacts });
       } catch (err: unknown) {
         console.warn("[AgentStore] get_agent_sdd_artifacts reconciliation failed:", err);
       }
       persistAgentSession(get());
+
 
 
     } catch (err) {

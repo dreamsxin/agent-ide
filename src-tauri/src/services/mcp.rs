@@ -626,6 +626,59 @@ impl McpRegistry {
             }
         }
     }
+
+    /// 把配置里已经不该再活着的 server 停掉，并忘掉它们的工具；返回被停掉的名字。
+    ///
+    /// 保存配置的时候调用。在面板里把一个 server 关掉或者删掉之后，它的子进程原来还在跑、
+    /// 工具还留在注册表里，直到用户再点一次 Discover Tools —— 而删掉最后一个 server 之后
+    /// 那个按钮是禁用的，也就是说除了重启应用没有别的办法停掉它。
+    ///
+    /// 只动"不该再活着"的那些，而不是像 `discover` 一样全停再全起：保存一次配置不该顺带
+    /// 重连每一个 server，重连会把本次运行已经发现的工具列表整个换掉。
+    pub async fn retain_configured(&self, config: &McpConfig) -> Vec<String> {
+        let connected: Vec<String> = self.connections.lock().await.keys().cloned().collect();
+        let dropped = servers_to_drop(&connected, config);
+        if dropped.is_empty() {
+            return dropped;
+        }
+        let mut removed: Vec<Arc<Mutex<McpConnection>>> = Vec::new();
+        {
+            let mut guard = self.connections.lock().await;
+            for name in &dropped {
+                if let Some(connection) = guard.remove(name) {
+                    removed.push(connection);
+                }
+            }
+        }
+        self.tools
+            .lock()
+            .await
+            .retain(|tool| !dropped.contains(&tool.server));
+        for connection in removed {
+            if let Ok(connection) = Arc::try_unwrap(connection) {
+                connection.into_inner().shutdown().await;
+            }
+        }
+        dropped
+    }
+}
+
+/// 当前连着的 server 里，哪些在新配置下不该再活着。
+///
+/// 抽成纯函数是为了能断言它：真正的连接需要拉起子进程，所以"停错了哪个"在测试里唯一看得见
+/// 的方式就是这一层。被停掉的判定有两种 —— 配置里删掉了，或者留着但 `enabled` 关掉了；
+/// 只看前一种的话，"关掉开关"就变成了一个什么都没发生的开关。
+fn servers_to_drop(connected: &[String], config: &McpConfig) -> Vec<String> {
+    connected
+        .iter()
+        .filter(|name| {
+            !config
+                .servers
+                .iter()
+                .any(|server| server.enabled && &&server.name == name)
+        })
+        .cloned()
+        .collect()
 }
 
 /// 模型给出的参数必须是 JSON 对象；空串按空参数处理
@@ -645,6 +698,37 @@ fn parse_tool_arguments(arguments: &str) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 保存配置之后，该停的 server 必须被算进去；不该停的一个都不能动。
+    ///
+    /// 这条盯的是一个"开关什么都没做"的缺陷：把 server 的 `enabled` 关掉，原来只是写了一次
+    /// 配置文件，子进程还在跑、工具还在注册表里，而唯一真正关停的入口（Discover Tools）在
+    /// 删掉最后一个 server 之后是禁用的。
+    #[test]
+    fn saving_a_config_drops_servers_that_should_no_longer_be_running() {
+        let server = |name: &str, enabled: bool| McpServerConfig {
+            name: name.to_string(),
+            command: "node".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            enabled,
+            auto_approve: Vec::new(),
+        };
+        let config = McpConfig {
+            servers: vec![server("files", true), server("shell", false)],
+            ..Default::default()
+        };
+        let connected = vec!["files".to_string(), "shell".to_string(), "gone".to_string()];
+
+        let dropped = servers_to_drop(&connected, &config);
+
+        // 关掉开关的和配置里删掉的都要停；还启用着的不能停
+        assert!(dropped.contains(&"shell".to_string()));
+        assert!(dropped.contains(&"gone".to_string()));
+        assert!(!dropped.contains(&"files".to_string()));
+        assert_eq!(dropped.len(), 2);
+    }
 
     fn descriptor(tool: &str, auto_approved: bool) -> McpToolDescriptor {
         McpToolDescriptor {

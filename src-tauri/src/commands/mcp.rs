@@ -200,9 +200,18 @@ pub fn get_mcp_config() -> McpConfig {
     load_config()
 }
 
+/// 保存配置，并把这次保存之后不该再活着的 server 停掉。
+///
+/// 停掉那一步是必须的，不是顺手做的：面板里关掉或者删掉一个 server 只会 `persist` 一次配置，
+/// 而真正的关停原来只发生在 `discover` 里。也就是说"关掉"之后子进程还在跑、工具还在注册表
+/// 里；删掉最后一个 server 之后 Discover Tools 按钮还是禁用的，那时除了重启应用没有别的办法。
 #[tauri::command]
-pub fn save_mcp_config(config: McpConfig) -> Result<McpConfig, String> {
+pub async fn save_mcp_config(
+    config: McpConfig,
+    mcp_state: State<'_, McpState>,
+) -> Result<McpConfig, String> {
     save_config(&config)?;
+    mcp_state.registry.retain_configured(&config).await;
     Ok(config)
 }
 

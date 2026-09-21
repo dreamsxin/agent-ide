@@ -128,6 +128,11 @@ function invokedCommands(): Map<string, string> {
     const invoked = new Map<string, string>();
 
     for (const path of frontendSources()) {
+        // 测试文件里的调用不算"有界面入口"：一个只被测试调用的命令，在产品里仍然是死的，
+        // 而这条检查存在的理由正是这个。
+        if (path.endsWith(".test.ts") || path.endsWith(".test.tsx")) {
+            continue;
+        }
         const source = readFileSync(path, "utf8");
         // invoke("name") 以及 invoke<T>("name")
         for (const match of source.matchAll(/\binvoke(?:<[^>]*>)?\(\s*"([a-z0-9_]+)"/g)) {
@@ -139,13 +144,16 @@ function invokedCommands(): Map<string, string> {
     return invoked;
 }
 
+
 describe("Tauri IPC contract", () => {
     it("registers every command the frontend invokes", () => {
         const registered = registeredCommands();
         const invoked = invokedCommands();
 
-        // 前提检查：解析本身必须有效，否则这条测试会以"全部通过"的方式静默失效
-        expect(registered.size).toBeGreaterThan(20);
+        // 前提检查：解析本身必须有效，否则这条测试会以"全部通过"的方式静默失效。
+        // 下限贴着真实数量（当前 93）。`> 20` 那种宽松下限的问题是：注册块的解析一旦只认出
+        // 一小半命令，下面那条反方向检查照样绿 —— 没被认出来的那些根本不在集合里。
+        expect(registered.size).toBeGreaterThan(85);
         expect(invoked.size).toBeGreaterThan(10);
 
         const missing = [...invoked.entries()]
@@ -173,8 +181,7 @@ describe("Tauri IPC contract", () => {
         const invoked = invokedCommands();
         const ipcOnly: string[] = [];
 
-        expect(registered.size).toBeGreaterThan(20);
-        expect(invoked.size).toBeGreaterThan(10);
+        expect(registered.size).toBeGreaterThan(85);
 
         const unreachable = [...registered].filter(
             (name) => !invoked.has(name) && !ipcOnly.includes(name)
@@ -186,8 +193,8 @@ describe("Tauri IPC contract", () => {
         ).toEqual([]);
     });
 
-
     it("parses the whole handler list, not just the beginning", () => {
+
         const registered = registeredCommands();
 
         // 抽查最近新增的几个：它们在列表末尾，能证明解析覆盖到了结尾

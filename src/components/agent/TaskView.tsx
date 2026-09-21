@@ -33,6 +33,8 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
   const currentTask = useAgentStore((s) => s.currentTask);
   const agentRunId = useAgentStore((s) => s.agentRunId);
   const restoredSession = useAgentStore((s) => s.restoredSession);
+  const error = useAgentStore((s) => s.error);
+
   const chatProfileId = useAgentStore((s) => s.chatProfileId);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
@@ -88,7 +90,18 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
         <span className="text-xs font-semibold text-surface-text">{title}</span>
         <span className="text-[10px] text-surface-muted capitalize">{agentState}</span>
       </div>
+      {/*
+        错误要在这个面板里也显示。原来只有 Chat 和 Changes 两个页签渲染 `error`，而它们和
+        Plan 是互斥的页签 —— 也就是说在这里点 Clear 之后"前端清了、后端的对话还在"那条提示
+        谁也看不见，界面看起来和成功一模一样。
+      */}
+      {error && (
+        <div className="rounded border border-diff-delete/40 bg-diff-delete/10 px-2 py-1.5 text-[11px] text-diff-delete">
+          {error}
+        </div>
+      )}
       {steps.length > 0 && restoredSession && (
+
         <div className="rounded border border-diff-modify/30 bg-diff-modify/10 px-2 py-1.5 text-[11px] text-surface-muted">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">

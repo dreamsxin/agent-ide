@@ -738,20 +738,6 @@ pub fn profiles_response(config: &LlmProfilesConfig) -> LlmProfilesResponse {
     }
 }
 
-pub fn infer_provider(endpoint: &str) -> &'static str {
-    if endpoint.contains("openai.azure.com") {
-        "azure"
-    } else if endpoint.contains("api.openai.com") {
-        "openai"
-    } else if endpoint.contains("anthropic.com") {
-        "anthropic"
-    } else if endpoint.contains("deepseek.com") {
-        "deepseek"
-    } else {
-        "custom"
-    }
-}
-
 fn upsert_profile(profiles: &mut Vec<LlmProfile>, profile: LlmProfile) {
     if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
         *existing = profile;
