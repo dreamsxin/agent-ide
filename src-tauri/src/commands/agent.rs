@@ -205,6 +205,12 @@ pub struct SendPromptRequest {
     /// 允许被读取正文的 origin 清单；空清单等于不许。
     #[serde(default, rename = "pageReadOrigins")]
     pub page_read_origins: Option<Vec<String>>,
+    /// 是否允许往窗口里注入点击。这个产品里最狠的一档：撤不回，而且能点掉确认框。
+    #[serde(default, rename = "allowComputerInput")]
+    pub allow_computer_input: bool,
+    /// 允许被点击的应用清单；空清单等于不许。
+    #[serde(default, rename = "inputApps")]
+    pub input_apps: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +296,12 @@ pub struct RunAgentStepRequest {
     /// 同 `SendPromptRequest::page_read_origins`
     #[serde(default, rename = "pageReadOrigins")]
     pub page_read_origins: Option<Vec<String>>,
+    /// 同 `SendPromptRequest::allow_computer_input`
+    #[serde(default, rename = "allowComputerInput")]
+    pub allow_computer_input: bool,
+    /// 同 `SendPromptRequest::input_apps`
+    #[serde(default, rename = "inputApps")]
+    pub input_apps: Option<Vec<String>>,
     #[serde(rename = "extraPrompt")]
     pub extra_prompt: Option<String>,
     #[serde(rename = "regeneratedFromDiffId")]
@@ -377,6 +389,8 @@ pub async fn send_agent_prompt(
             computer_apps: request.computer_apps.clone().unwrap_or_default(),
             allow_capture: request.allow_computer_capture,
             capture_apps: request.capture_apps.clone().unwrap_or_default(),
+            allow_input: request.allow_computer_input,
+            input_apps: request.input_apps.clone().unwrap_or_default(),
         },
         agent_state.approval_gate(&app_handle),
     );
@@ -560,6 +574,8 @@ pub struct ExternalGrants {
     pub computer_apps: Vec<String>,
     pub allow_capture: bool,
     pub capture_apps: Vec<String>,
+    pub allow_input: bool,
+    pub input_apps: Vec<String>,
 }
 
 /// 本次运行允许 Agent 执行哪些命令。
@@ -590,6 +606,7 @@ fn agent_tool_permissions(
     .with_page_read(grants.allow_page_read, grants.page_read_origins)
     .with_computer(grants.allow_computer, grants.computer_apps)
     .with_capture(grants.allow_capture, grants.capture_apps)
+    .with_input(grants.allow_input, grants.input_apps)
     // 批准通道是必填参数而不是可选的 `.with_approval()` 调用：漏掉它的运行会把每一次
     // 撤不回的动作都拒掉（`Unattended`），而那种"功能整体消失"的故障恰恰是本项目
     // 反复出现的一类 —— 加了个新东西却没接上它的消费者。让编译器管这件事。
@@ -970,6 +987,8 @@ pub async fn run_agent_step(
             computer_apps: request.computer_apps.clone().unwrap_or_default(),
             allow_capture: request.allow_computer_capture,
             capture_apps: request.capture_apps.clone().unwrap_or_default(),
+            allow_input: request.allow_computer_input,
+            input_apps: request.input_apps.clone().unwrap_or_default(),
         },
         agent_state.approval_gate(&app_handle),
     );
@@ -2310,6 +2329,27 @@ mod tests {
         // 反过来也成立：给了截图不等于顺带给了窗口枚举
         assert!(!capture_only.allow_computer);
         assert!(capture_only.computer_apps.is_empty());
+        // 也不等于给了**动手**：读窗口内容和往窗口里点是两件不同性质的事，后者撤不回
+        assert!(!capture_only.allow_input);
+        assert!(capture_only.input_apps.is_empty());
+
+        let input_only = agent_tool_permissions(
+            false,
+            false,
+            false,
+            ExternalGrants {
+                allow_input: true,
+                input_apps: vec!["Code.exe".to_string()],
+                ..ExternalGrants::default()
+            },
+            test_approval_gate(),
+        );
+        assert!(input_only.allow_input);
+        assert_eq!(input_only.input_apps.len(), 1);
+        // 点击那一档也不会把截图或枚举一起带出来
+        assert!(!input_only.allow_capture);
+        assert!(input_only.capture_apps.is_empty());
+        assert!(!input_only.allow_computer);
     }
 
     /// 请求里给了模式就用它，没给才回落到设置里的默认值。

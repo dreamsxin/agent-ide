@@ -205,6 +205,23 @@ impl ApprovedWindow {
         self.handle
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// 从一帧截图记下来的身份重建它，用来在**之后**的动作（点击）之前再验一次。
+    ///
+    /// 让点击复用同一个 `verify` 而不是自己再写一遍三项检查：写两遍的那一遍迟早会少一项，
+    /// 而少的那一项恰好是"句柄被同一应用的另一个窗口回收"——它在 ROADMAP 94 里就是这么
+    /// 被漏掉的。
+    pub fn remembered(target: CaptureTarget, handle: isize, pid: Option<u32>) -> Self {
+        Self {
+            target,
+            handle,
+            pid,
+        }
+    }
+
     /// 批准之后、动手之前，确认那个句柄指的还是同一个窗口。
     ///
     /// 三件事，缺一不可：
@@ -219,29 +236,34 @@ impl ApprovedWindow {
     /// 用户批准过的截图被频繁拒掉，而模型的合理反应是再问一次 —— 那正是审批疲劳。
     /// 代价说清楚：同一个窗口在这段时间里换了内容（切了标签页）时，截到的是新内容，
     /// 所以记录里写的是**截图时**的标题，与批准时不同则两个都写。
+    ///
+    /// `not_done` 是拒绝话术的尾巴（"nothing was captured" / "nothing was clicked"）：
+    /// 同一套身份检查服务两个动作，而告诉用户"因此什么都没发生"时必须说对是哪一个。
     pub fn verify(
         &self,
         current: Option<&DesktopWindow>,
         current_pid: Option<u32>,
+        not_done: &str,
     ) -> Result<CaptureTarget, String> {
         let Some(current) = current else {
-            return Err("The approved window has closed, so nothing was captured.".to_string());
+            return Err(format!("The approved window has closed, so {}.", not_done));
         };
         let resolved = CaptureTarget::from_window(current);
         if crate::services::computer::normalize_app_name(&resolved.app)
             != crate::services::computer::normalize_app_name(&self.target.app)
         {
-            return Err(
-                "The approved window is gone and its handle now belongs to another app, so nothing was captured."
-                    .to_string(),
-            );
+            return Err(format!(
+                "The approved window is gone and its handle now belongs to another app, so {}.",
+                not_done
+            ));
         }
         if let (Some(approved), Some(now)) = (self.pid, current_pid) {
             if approved != now {
-                return Err(
-                    "The approved window is gone and its handle now belongs to another window of the same app, so nothing was captured."
-                        .to_string(),
-                );
+                return Err(format!(
+                    "The approved window is gone and its handle now belongs to another window of \
+                     the same app, so {}.",
+                    not_done
+                ));
             }
         }
         Ok(resolved)
@@ -298,7 +320,7 @@ mod platform {
     pub fn capture_approved_window(approved: &ApprovedWindow) -> Result<WindowCapture, String> {
         let current = crate::services::computer::describe_window(approved.handle);
         let current_pid = crate::services::computer::window_pid(approved.handle);
-        let resolved = approved.verify(current.as_ref(), current_pid)?;
+        let resolved = approved.verify(current.as_ref(), current_pid, "nothing was captured")?;
         // 尺寸可能在批准之后变了，所以上限要按现在的尺寸重新算
         check_capture_pixels(resolved.width, resolved.height)?;
         let rgba = copy_window_pixels(approved.handle as HWND, resolved.width, resolved.height)?;
@@ -547,20 +569,22 @@ mod tests {
         };
 
         // 关掉了
-        let error = approved.verify(None, None).expect_err("closed");
+        let error = approved
+            .verify(None, None, "nothing was captured")
+            .expect_err("closed");
         assert!(error.contains("closed"), "{}", error);
 
         // 句柄被回收给了另一个应用的窗口
         let recycled = window("Docs — pricing", "signal.exe");
         let error = approved
-            .verify(Some(&recycled), Some(4242))
+            .verify(Some(&recycled), Some(4242), "nothing was captured")
             .expect_err("another app");
         assert!(error.contains("another app"), "{}", error);
 
         // 句柄被回收给了同一个应用的另一个窗口：应用名一样、标题一样，只有 pid 不同
         let sibling = window("Docs — pricing", "chrome.exe");
         let error = approved
-            .verify(Some(&sibling), Some(99))
+            .verify(Some(&sibling), Some(99), "nothing was captured")
             .expect_err("same app, another window");
         assert!(
             error.contains("another window of the same app"),
@@ -571,13 +595,15 @@ mod tests {
         // 同一个窗口，标题跳了：放行，而且返回的是**现在**的标题，记录才说得对
         let ticked = window("(3) Docs — pricing", "chrome.exe");
         let resolved = approved
-            .verify(Some(&ticked), Some(4242))
+            .verify(Some(&ticked), Some(4242), "nothing was captured")
             .expect("same window");
         assert_eq!(resolved.title, "(3) Docs — pricing");
 
         // 应用名的写法差异不算换应用
         let respelled = window("Docs — pricing", "CHROME.EXE");
-        assert!(approved.verify(Some(&respelled), Some(4242)).is_ok());
+        assert!(approved
+            .verify(Some(&respelled), Some(4242), "nothing was captured")
+            .is_ok());
     }
 
     /// 批准时读不到 pid 就只能退回到比应用名 —— 这一档降级要明说，不能假装它不存在。
@@ -590,9 +616,13 @@ mod tests {
         };
 
         let sibling = window("Docs — pricing", "chrome.exe");
-        assert!(approved.verify(Some(&sibling), Some(99)).is_ok());
+        assert!(approved
+            .verify(Some(&sibling), Some(99), "nothing was captured")
+            .is_ok());
         let other_app = window("Docs — pricing", "signal.exe");
-        assert!(approved.verify(Some(&other_app), Some(99)).is_err());
+        assert!(approved
+            .verify(Some(&other_app), Some(99), "nothing was captured")
+            .is_err());
     }
 
     /// 批准框里那一行必须说得出是哪个窗口、多大。

@@ -33,6 +33,8 @@ describe("permissionsForPreset", () => {
       computerApps: [],
       allowComputerCapture: false,
       captureApps: [],
+      allowComputerInput: false,
+      inputApps: [],
     });
     // create-files 放开新建文件，但不放开命令执行 —— MCP 工具策略依赖这一点
     expect(permissionsForPreset("create-files").allowFileCreate).toBe(true);
@@ -51,6 +53,9 @@ describe("permissionsForPreset", () => {
     // 读页面正文同样不在阶梯上：它交出去的是站点上的内容，包括登录后才可见的部分
     expect(permissionsForPreset("run-commands").allowPageRead).toBe(false);
     expect(permissionsForPreset("run-commands").pageReadOrigins).toEqual([]);
+    // 点击更不在：它撤不回，而且能点掉任何一个确认框
+    expect(permissionsForPreset("run-commands").allowComputerInput).toBe(false);
+    expect(permissionsForPreset("run-commands").inputApps).toEqual([]);
   });
 
   it("returns a fresh object so callers cannot mutate the shared presets", () => {
@@ -87,6 +92,8 @@ describe("mcpApprovalForPermissions", () => {
         computerApps: [],
         allowComputerCapture: false,
         captureApps: [],
+        allowComputerInput: false,
+        inputApps: [],
       })
     ).toBe("auto_approved_only");
 
@@ -102,6 +109,8 @@ describe("mcpApprovalForPermissions", () => {
         computerApps: [],
         allowComputerCapture: false,
         captureApps: [],
+        allowComputerInput: false,
+        inputApps: [],
       })
     ).toBe("allow_all");
   });
@@ -254,6 +263,7 @@ describe("normalizeApprovalRequest", () => {
     expect(normalizeDestructiveOpType("browser_open")).toBe("browser_open");
     expect(normalizeDestructiveOpType("browser_read_page")).toBe("browser_read_page");
     expect(normalizeDestructiveOpType("computer_capture")).toBe("computer_capture");
+    expect(normalizeDestructiveOpType("computer_click")).toBe("computer_click");
   });
 });
 

@@ -139,6 +139,7 @@ export default function SettingsPanel() {
   const togglePermission = useAgentStore((s) => s.togglePermission);
   const setBrowserOrigins = useAgentStore((s) => s.setBrowserOrigins);
   const setPageReadOrigins = useAgentStore((s) => s.setPageReadOrigins);
+  const setInputApps = useAgentStore((s) => s.setInputApps);
   const setComputerApps = useAgentStore((s) => s.setComputerApps);
   const setCaptureApps = useAgentStore((s) => s.setCaptureApps);
 
@@ -903,8 +904,44 @@ export default function SettingsPanel() {
               )}
             </div>
           )}
+          <PermissionToggle
+            label="Window Click"
+            desc="Allow Agent to send one left click into a window it has captured (cannot be undone; each click needs your approval; needs an allowed app below, Windows only)"
+            checked={permissions.allowComputerInput}
+            onChange={() => togglePermission("allowComputerInput")}
+          />
+          {permissions.allowComputerInput && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="input-apps">
+                Clickable apps (one per line, `*` for any)
+              </label>
+              <textarea
+                id="input-apps"
+                rows={2}
+                spellCheck={false}
+                value={permissions.inputApps.join("\n")}
+                onChange={(event) =>
+                  setInputApps(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="Code.exe"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 又是一份单独的清单：能看窗口内容 ≠ 能往里面点，而后者撤不回 */}
+              {permissions.inputApps.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  No app allowed yet — the click tool stays hidden from the Agent.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
+
 
 
       <div className="mt-2 grid grid-cols-2 gap-2">

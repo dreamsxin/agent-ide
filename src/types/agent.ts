@@ -198,12 +198,18 @@ export interface AgentPermission {
    * 悄悄升级成"能看内容"。同样只有 Windows 有实现。
    */
   allowComputerCapture: boolean;
-  /**
-   * 允许被截图的应用（可执行文件名，`*` 表示不限）。
-   *
-   * 独立于 `computerApps`：允许**看到** VS Code 窗口存在，不等于允许**看见**它里面的代码。
-   */
+  /** 允许被截图的应用（进程名，`*` 表示不限）。 */
   captureApps: string[];
+  /**
+   * 是否允许 Agent 往一个窗口里注入点击。
+   *
+   * 这个产品里最狠的一档：一次点击撤不回，而且它能点掉任何一个确认框 —— 包括本产品
+   * 自己那个。后端除了这个开关和下面的清单，还要求那一下必须对着模型**已经截过的那一
+   * 帧**给坐标，并且每次都要人工批准。
+   */
+  allowComputerInput: boolean;
+  /** 允许被点击的应用（进程名，`*` 表示不限）。独立于 `captureApps`。 */
+  inputApps: string[];
 }
 
 /**
@@ -228,6 +234,8 @@ export const READ_ONLY_PERMISSIONS: AgentPermission = {
   computerApps: [],
   allowComputerCapture: false,
   captureApps: [],
+  allowComputerInput: false,
+  inputApps: [],
 };
 
 /** `create-files` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
@@ -242,6 +250,8 @@ export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   computerApps: [],
   allowComputerCapture: false,
   captureApps: [],
+  allowComputerInput: false,
+  inputApps: [],
 };
 
 /**
@@ -261,6 +271,8 @@ export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   computerApps: [],
   allowComputerCapture: false,
   captureApps: [],
+  allowComputerInput: false,
+  inputApps: [],
 };
 
 /** 根据预设获取权限 */
@@ -293,7 +305,11 @@ export function mcpApprovalForPermissions(permissions: AgentPermission): McpTool
  * `git_force` 四种，没有任何后端路径产生它们 —— 连同对话框里对应的图标和标签，
  * 那是四份看起来像"这些操作有确认"的假象。
  */
-export type DestructiveOpType = "browser_open" | "browser_read_page" | "computer_capture";
+export type DestructiveOpType =
+  | "browser_open"
+  | "browser_read_page"
+  | "computer_capture"
+  | "computer_click";
 
 export interface DestructiveOpConfirm {
   id: string;
@@ -315,6 +331,7 @@ export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | 
     case "browser_open":
     case "browser_read_page":
     case "computer_capture":
+    case "computer_click":
       return value;
     default:
       return "unknown";

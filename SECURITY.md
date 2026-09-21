@@ -194,6 +194,27 @@ What it does **not** do: it does not navigate, click, type, or read a page that 
 
 Page reading is **not** in the preset ladder either: all three presets set `allowPageRead: false` with an empty list.
 
+## Window Click
+
+`workspace_computer_click` sends one left mouse click into a window. It is the most dangerous capability in the product: a click cannot be undone, and it can dismiss any confirmation dialog — including this application's own approval dialog. Its shape reflects that.
+
+What the backend enforces:
+
+- **Its own pair of gates**, `allowComputerInput` plus a non-empty `inputApps` list, and Windows only. It reuses neither `allowComputerUse` (seeing that a window exists) nor `allowComputerCapture` (reading what is in it): those are disclosures, this one acts. Neither direction implies the other, and `each_flag_lands_on_its_own_permission` pins that.
+- **Coordinates only exist against a frame the model has already seen.** `workspace_computer_capture` mints a frame id (window handle + pid + size), and the click takes `frame`, `x`, `y` — there is no window selector on the click tool at all. This is the core of the design: choosing the window by filter is how you click the wrong window's dialog, and the frame binds "what you looked at" to "what you clicked". A click with no frame is refused with instructions to capture first. In practice this means a real click needs *both* grants, but that is enforced by the frame rather than by making one switch depend on the other.
+- **The frame's app is checked against `inputApps` at click time.** The frame was produced under the capture grant, and the two lists can differ — without this check, "may screenshot Signal" would quietly become "may click Signal".
+- **Plus per-click human approval**, in the usual order: static authority, then the frame, then the prompt, which names the window and the exact coordinates. Stop is re-checked after the approval.
+- **Identity is re-verified with the same three checks as capture** (`ApprovedWindow::verify` — alive, same app, same pid), because a handle can be recycled to another window between the capture and the click.
+- **A resized window is refused.** If the window's rect no longer matches the frame, the coordinates no longer point at the same thing; "close enough" here means clicking something random.
+- **The window must come to the front.** `SendInput` delivers to screen coordinates, so a covered window would receive nothing and whatever is on top would receive the click. If `SetForegroundWindow` fails, the click is refused rather than sent.
+- **Out-of-bounds coordinates are refused, not clamped**, and off-desktop screen points too — clamping turns a miscalculated click into a click in a corner, and corners have things in them.
+- **Move, down and up go in a single `SendInput` call**, so a user moving the real mouse mid-sequence cannot turn the click into a drag.
+- **Every attempt is recorded** as `computer_click` / `_refused` / `_cancelled` / `_failed`, with the coordinates, the window title at click time, and the frame size.
+
+What it does **not** do: no typing, no key presses, no right-click or double-click, no drag, no scrolling, and no reading of the result — after a click the model must capture the window again to see what happened. There is no full-screen coordinate space: every click is relative to one approved window.
+
+Known limits: the click is real system input, so it lands wherever that window is — if the user moves the mouse or types at the same moment, the two streams interleave. Stop does not abort a click already in flight (it is a single Win32 call, so the window is microseconds, not seconds). Clicking is **not** in the preset ladder: all three presets set `allowComputerInput: false` with an empty list.
+
 ## MCP Tool Exposure
 
 Model Context Protocol servers are the largest privilege surface in the product, and the one with the fewest backend guarantees. This section states plainly what is and is not enforced.
@@ -266,7 +287,7 @@ Everything above is authority decided **before** a run starts. Per-action approv
 
 Keyboard reachability is part of this, not polish: the prompt has `role="dialog"` / `aria-modal`, focus starts on **Deny**, and Escape denies. A gate that can only be answered with a mouse does not exist for keyboard users, and a stray Enter must never be an authorization.
 
-Scope today: `workspace_browser_open`, `workspace_browser_read_page` and `workspace_computer_capture`. Headless entry points (the CLI) install no channel, so an irreversible action there is refused rather than performed unattended — which is currently moot, since the CLI grants neither browser, page-reading nor desktop authority. A request the frontend cannot read (an `opType` a newer backend introduced) is **refused immediately** using the id from the payload rather than dropped: dropping it left the backend waiting out its full timeout while the UI looked hung. `tests/ipc-contract.test.ts` additionally fails if the backend asks approval for an op type the frontend's normalizer does not accept, so the mismatch is normally caught before it ships. Remaining single-slot limit: the frontend holds one pending request at a time, and replacing an unanswered one logs a warning — the backend can hold several, but tool calls run serially today, so two concurrent prompts are not reachable.
+Scope today: `workspace_browser_open`, `workspace_browser_read_page`, `workspace_computer_capture` and `workspace_computer_click`. Headless entry points (the CLI) install no channel, so an irreversible action there is refused rather than performed unattended — which is currently moot, since the CLI grants neither browser, page-reading, desktop nor click authority. A request the frontend cannot read (an `opType` a newer backend introduced) is **refused immediately** using the id from the payload rather than dropped: dropping it left the backend waiting out its full timeout while the UI looked hung. `tests/ipc-contract.test.ts` additionally fails if the backend asks approval for an op type the frontend's normalizer does not accept, so the mismatch is normally caught before it ships. Remaining single-slot limit: the frontend holds one pending request at a time, and replacing an unanswered one logs a warning — the backend can hold several, but tool calls run serially today, so two concurrent prompts are not reachable.
 
 Deliberately *not* behind a prompt: `workspace_browser_tabs` and `workspace_computer_windows`. Both disclose, but they disclose a *list* whose scope the allowlist already fixes, and both are called far more often than the three prompted actions — a prompt per call would be the kind of friction that trains people to click Approve without reading, which would cost more than it buys.
 

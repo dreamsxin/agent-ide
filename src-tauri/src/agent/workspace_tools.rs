@@ -38,6 +38,8 @@ pub const BROWSER_READ_PAGE: &str = "workspace_browser_read_page";
 pub const COMPUTER_WINDOWS: &str = "workspace_computer_windows";
 /// 截一个窗口。和窗口枚举分开授权：标题说"Signal 开着"，截图把消息内容也交出去了。
 pub const COMPUTER_CAPTURE: &str = "workspace_computer_capture";
+/// 往批准过的窗口里点一下。坐标只能对着一张已经截过的图给，见 `CaptureFrame`。
+pub const COMPUTER_CLICK: &str = "workspace_computer_click";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -147,6 +149,15 @@ pub struct WorkspaceToolPermissions {
     pub allow_capture: bool,
     /// 允许被**截图**的应用清单。空清单等于不许截任何窗口。
     pub capture_apps: Vec<String>,
+    /// 是否允许往窗口里注入点击。
+    ///
+    /// 这个产品里最狠的一档：一次点击撤不回，而且它能点掉任何一个确认框 —— 包括本产品
+    /// 自己弹出的那个。所以它既不复用 `allow_computer`（那只是看见窗口存在），也不复用
+    /// `allow_capture`（那只是读窗口内容），而且额外要求那一下必须对着模型**已经看过的
+    /// 那一帧**给坐标。
+    pub allow_input: bool,
+    /// 允许被**点击**的应用清单。空清单等于不许点任何窗口。
+    pub input_apps: Vec<String>,
     /// 这批授权属于哪一次运行。
     ///
     /// 在拿到执行权之后由命令层写进来，而不是在登记记录时去读 orchestrator 的
@@ -189,7 +200,35 @@ pub struct WorkspaceToolPermissions {
     /// 它问"此刻这一次要不要做"。撤不回的动作两个都要过 —— 运行开始时同意访问某个
     /// origin，不等于同意此刻打开这一个页面。
     approval: Option<crate::agent::approval::ApprovalGate>,
+    /// 这次运行里截过的窗口，按"帧"记着。点击只能对着其中一帧给坐标。
+    ///
+    /// 跟着 `Clone` 共享同一份（`Arc`），理由和 `images` 一样：授权对象在运行中会被克隆
+    /// 分发，两份各记一半的话，截图那一半留下的帧在点击那一半里查不到。
+    frames: std::sync::Arc<std::sync::Mutex<Vec<CaptureFrame>>>,
 }
+
+/// 一次截图留下的坐标系。
+///
+/// 点击的坐标只在**某一张具体的图**上有意义，所以这一帧要把三样东西钉在一起：哪个窗口
+/// （句柄 + pid，和截图用的是同一套身份）、多大（尺寸变了坐标就失效）、以及一个 id 让模型
+/// 说得出"我说的是那一张"。RefImpl 的 CUA 契约里把截图做成 `image` + `image_ref` 一对，
+/// 是同一个想法 —— 这是那份契约里唯一值得照搬的部分。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureFrame {
+    pub id: String,
+    pub app: String,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    handle: isize,
+    pid: Option<u32>,
+}
+
+/// 一次运行里最多记多少帧。
+///
+/// 8 够一段"截图 → 看 → 点 → 再截"的循环，而无界的话一次长跑会把每张截过的图的元信息
+/// 都攒着。挤掉最旧的：模型要点的总是刚看过的那张。
+const MAX_CAPTURE_FRAMES: usize = 8;
 
 type AgentImageLog = std::sync::Arc<std::sync::Mutex<Vec<crate::services::images::ImagePart>>>;
 
@@ -233,6 +272,55 @@ impl WorkspaceToolPermissions {
         self.allow_browser = allow_browser;
         self.browser_origins = browser_origins;
         self
+    }
+
+    /// 注入点击的授权：开关 + 单独的应用清单。
+    pub fn with_input(mut self, allow_input: bool, input_apps: Vec<String>) -> Self {
+        self.allow_input = allow_input;
+        self.input_apps = input_apps;
+        self
+    }
+
+    /// 记下一帧截图，返回它的 id。
+    ///
+    /// **不变量**：只有真的截成了才记。记一帧没截出来的图等于给模型一个可以拿去点击的
+    /// 坐标系，而它从没看过那张图。
+    fn remember_frame(&self, frame: CaptureFrame) -> String {
+        let id = frame.id.clone();
+        let mut frames = self
+            .frames
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        frames.push(frame);
+        if frames.len() > MAX_CAPTURE_FRAMES {
+            let excess = frames.len() - MAX_CAPTURE_FRAMES;
+            frames.drain(..excess);
+        }
+        id
+    }
+
+    /// 按 id 找那一帧。找不到时把还记得的 id 一起给出去，模型才知道该重新截图。
+    fn frame(&self, id: &str) -> Result<CaptureFrame, String> {
+        let frames = self
+            .frames
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(frame) = frames.iter().find(|frame| frame.id == id) {
+            return Ok(frame.clone());
+        }
+        let known: Vec<&str> = frames.iter().map(|frame| frame.id.as_str()).collect();
+        Err(if known.is_empty() {
+            "There is no captured frame to click on yet. Capture the window first — coordinates \
+             only mean something on an image you have seen."
+                .to_string()
+        } else {
+            format!(
+                "No frame called \"{}\". This run remembers: {}. Capture the window again if the \
+                 one you want has been dropped.",
+                id,
+                known.join(", ")
+            )
+        })
     }
 
     /// 读页面正文的授权：开关 + 单独的 origin 清单。
@@ -380,6 +468,16 @@ impl WorkspaceToolPermissions {
     /// 顺带变成"允许看窗口内容"，等于替用户扩大了他已经给过的授权。
     fn allows_capture(&self) -> bool {
         cfg!(windows) && self.allow_capture && !self.capture_apps.is_empty()
+    }
+
+    /// 注入点击是否被授权：开关 + 非空的**点击**清单，而且只有 Windows 上有实现。
+    ///
+    /// 故意不要求 `allow_capture`：两者在授权上互不蕴含（给了看不等于给了动手，反之亦然）。
+    /// 但点击在**运行时**必然需要一帧截图，而帧只能由 `computer_capture` 产生 —— 也就是说
+    /// 实际要点成一下，用户必须两档都给过。这一条由帧而不是由开关来保证：写成开关依赖
+    /// 会让"能截图"看起来像是"能点击"的一部分。
+    fn allows_input(&self) -> bool {
+        cfg!(windows) && self.allow_input && !self.input_apps.is_empty()
     }
 
     /// 接过这次运行的副作用开关。
@@ -696,6 +794,43 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         });
     }
 
+    if permissions.allows_input() {
+        definitions.push(ToolDefinition {
+            name: COMPUTER_CLICK.to_string(),
+            description: format!(
+                "Click once, with the left mouse button, inside a window you have already \
+                 captured. Only windows of these apps can be clicked: {}. You must pass the \
+                 'frame' id printed by {}, plus 'x' and 'y' in pixels of that captured image, \
+                 measured from its top-left corner — there is no way to click a window you have \
+                 not looked at. The window is brought to the front and the click is refused if it \
+                 cannot be, if the window has been resized since the capture, or if its handle now \
+                 belongs to a different window. The user is shown the window and the coordinates \
+                 and must approve each click; a click cannot be undone — it can submit a form, \
+                 accept a dialog, or delete something.",
+                permissions.input_apps.join(", "),
+                COMPUTER_CAPTURE
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "frame": {
+                        "type": "string",
+                        "description": "Frame id from a previous workspace_computer_capture"
+                    },
+                    "x": {
+                        "type": "integer",
+                        "description": "Pixels from the left edge of that captured image"
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Pixels from the top edge of that captured image"
+                    }
+                },
+                "required": ["frame", "x", "y"]
+            }),
+        });
+    }
+
     if permissions.allows_commands() {
         definitions.push(ToolDefinition {
             name: RUN_COMMAND.to_string(),
@@ -776,6 +911,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             BROWSER_READ_PAGE => self.permissions.allows_page_read(),
             COMPUTER_WINDOWS => self.permissions.allows_computer(),
             COMPUTER_CAPTURE => self.permissions.allows_capture(),
+            COMPUTER_CLICK => self.permissions.allows_input(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -807,6 +943,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                     | BROWSER_READ_PAGE
                     | COMPUTER_WINDOWS
                     | COMPUTER_CAPTURE
+                    | COMPUTER_CLICK
             );
             if side_effecting {
                 let detail = format!(
@@ -823,6 +960,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                         | BROWSER_READ_PAGE
                         | COMPUTER_WINDOWS
                         | COMPUTER_CAPTURE
+                        | COMPUTER_CLICK
                 ) {
                     self.permissions.record_external(AgentExternalAction {
                         kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
@@ -906,6 +1044,15 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 )
                 .await
             }
+            COMPUTER_CLICK => {
+                computer_click_tool(
+                    string_arg(&args, "frame"),
+                    u32_arg(&args, "x"),
+                    u32_arg(&args, "y"),
+                    &self.permissions,
+                )
+                .await
+            }
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
@@ -930,6 +1077,22 @@ fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// 取一个非负整数参数。
+///
+/// 同时接受 JSON 数字和数字字符串：模型时不时会把 `x` 写成 `"320"`，而这个参数错了一次的
+/// 代价是那一下点在别处。负数和小数当成缺失，由调用点统一报"要一个像素坐标" —— 悄悄
+/// 截断成 0 会让那一下落在窗口左上角，而左上角上通常有东西。
+fn u32_arg(args: &serde_json::Value, key: &str) -> Option<u32> {
+    let value = args.get(key)?;
+    if let Some(number) = value.as_u64() {
+        return u32::try_from(number).ok();
+    }
+    value
+        .as_str()
+        .map(str::trim)
+        .and_then(|text| text.parse::<u32>().ok())
 }
 
 /// 凭据文件对 Agent 一律不可读。
@@ -1928,6 +2091,10 @@ async fn computer_capture_tool(
     }
 
     let approved_title = approved.target.title.clone();
+    // 句柄和 pid 要在 `approved` 被移进阻塞任务之前取出来：它们是这一帧的身份，而点击
+    // 之后要靠同一套身份再验一次（`ApprovedWindow::remembered`）。
+    let approved_handle = approved.handle();
+    let approved_pid = approved.pid();
     let captured = match tokio::task::spawn_blocking(move || {
         crate::services::capture::capture_approved_window(&approved)
     })
@@ -1991,13 +2158,178 @@ async fn computer_capture_tool(
             bytes
         ),
     });
+    // 记一帧。只有到这里（真的截成了、图也已经挂上这一轮）才记：一个指向"没截出来的图"
+    // 的坐标系等于让模型对着它没看过的东西给坐标。
+    let frame_id = permissions.remember_frame(CaptureFrame {
+        id: format!("frame-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        app: capture.target.app.clone(),
+        title: capture.target.title.clone(),
+        width: capture.target.width,
+        height: capture.target.height,
+        handle: approved_handle,
+        pid: approved_pid,
+    });
     Ok(format!(
-        "Captured \"{}\" ({}) at {}x{} and attached it to this turn ({} bytes of PNG).",
+        "Captured \"{}\" ({}) at {}x{} and attached it to this turn ({} bytes of PNG). Frame id: \
+         {} — pass it to {} with x and y in pixels of this image if you need to click something \
+         on it.",
         capture.target.title,
         capture.target.app,
         capture.target.width,
         capture.target.height,
-        bytes
+        bytes,
+        frame_id,
+        COMPUTER_CLICK
+    ))
+}
+
+/// 往一帧截图上点一下。
+///
+/// 授权是**第五对**（开关 + 点击清单），不复用截图那一对：看见窗口存在、读到窗口内容、
+/// 往窗口里动手，是三件不同性质的事，而这一件撤不回。
+///
+/// 坐标只能对着一帧已经截过的图给，窗口由那一帧决定 —— 不接受筛选条件。这条是整套设计
+/// 的核心：`browser_read_page` 那边"按条件再找一遍"的教训在点击上代价更大（点错窗口的
+/// 那一下会落在别人的确认框上），而帧把"你看到的"和"你点的"绑成了同一个东西。
+async fn computer_click_tool(
+    frame_id: Option<&str>,
+    x: Option<u32>,
+    y: Option<u32>,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allows_input() {
+        return refuse_external(
+            "computer_click_refused",
+            "desktop",
+            "Clicking a desktop window is not authorized for this run, or no app is allowed."
+                .to_string(),
+            permissions,
+        );
+    }
+    let (Some(frame_id), Some(x), Some(y)) = (frame_id, x, y) else {
+        return refuse_external(
+            "computer_click_refused",
+            "desktop",
+            "A click needs a frame id plus x and y as whole numbers of pixels in that captured \
+             image."
+                .to_string(),
+            permissions,
+        );
+    };
+    let frame = match permissions.frame(frame_id) {
+        Ok(frame) => frame,
+        Err(error) => {
+            return refuse_external("computer_click_refused", "desktop", error, permissions)
+        }
+    };
+    // 清单对**这一帧的应用**再查一遍。帧是截图那一档授权造出来的，两份清单可以不一样 ——
+    // 不查的话，"允许截 Signal"就顺带变成了"允许点 Signal"。
+    if !crate::services::computer::app_allowed(&frame.app, &permissions.input_apps) {
+        return refuse_external(
+            "computer_click_refused",
+            "desktop",
+            format!(
+                "\"{}\" is not in this run's list of clickable apps, so nothing was clicked.",
+                frame.app
+            ),
+            permissions,
+        );
+    }
+    if let Err(error) = crate::services::input::check_click_inside(frame.width, frame.height, x, y)
+    {
+        return refuse_external("computer_click_refused", "desktop", error, permissions);
+    }
+
+    let request = crate::agent::approval::ApprovalRequest::new(
+        "computer_click",
+        "Click inside a window",
+        format!(
+            "The agent wants to click at ({}, {}) in \"{}\"",
+            x, y, frame.title
+        ),
+        format!(
+            "{} — the window will be brought to the front and a single left click will be sent to \
+             that point. A click cannot be undone: it can submit a form, accept a dialog, or \
+             delete something.",
+            frame.app
+        ),
+    );
+    let outcome = permissions.require_approval(&request).await;
+    if let Some(detail) = outcome.refusal_detail() {
+        return refuse_external(
+            &format!("computer_click{}", outcome.record_suffix()),
+            &frame.app,
+            detail.to_string(),
+            permissions,
+        );
+    }
+    // 批准之后再看一次 Stop，理由同 `browser_open_tool`：入口那道闸门是等待之前取的。
+    if permissions.cancelled() {
+        return refuse_external(
+            "computer_click_cancelled",
+            &frame.app,
+            "This run was stopped after the approval, so nothing was clicked.".to_string(),
+            permissions,
+        );
+    }
+
+    // 身份再验一次，用的是截图那一套（句柄 + pid）。窗口可能在这段时间里关了，而句柄会
+    // 被回收给别的窗口 —— 那一下就会落在一个谁也没批准过的窗口上。
+    let remembered = crate::services::capture::ApprovedWindow::remembered(
+        crate::services::capture::CaptureTarget {
+            title: frame.title.clone(),
+            app: frame.app.clone(),
+            width: frame.width,
+            height: frame.height,
+        },
+        frame.handle,
+        frame.pid,
+    );
+    let current = crate::services::computer::describe_window(frame.handle);
+    let current_pid = crate::services::computer::window_pid(frame.handle);
+    let resolved = match remembered.verify(current.as_ref(), current_pid, "nothing was clicked") {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return refuse_external("computer_click_failed", &frame.app, error, permissions)
+        }
+    };
+
+    let handle = frame.handle;
+    let (frame_width, frame_height) = (frame.width, frame.height);
+    // 阻塞任务：`SetForegroundWindow` 和 `SendInput` 都是同步的 Win32 调用，而这里在
+    // 异步执行器上 —— 和截图那条路径同一个理由。
+    let clicked = match tokio::task::spawn_blocking(move || {
+        crate::services::input::click_in_window(handle, frame_width, frame_height, x, y)
+    })
+    .await
+    {
+        Ok(clicked) => clicked,
+        Err(error) => {
+            return refuse_external(
+                "computer_click_failed",
+                &frame.app,
+                format!("The click task did not finish: {}", error),
+                permissions,
+            )
+        }
+    };
+    if let Err(error) = clicked {
+        return refuse_external("computer_click_failed", &frame.app, error, permissions);
+    }
+
+    permissions.record_external(AgentExternalAction {
+        kind: "computer_click".to_string(),
+        target: frame.app.clone(),
+        detail: format!(
+            "Clicked at ({}, {}) in \"{}\" ({}), on the {}x{} frame captured earlier. A click \
+             cannot be undone.",
+            x, y, resolved.title, frame.app, frame.width, frame.height
+        ),
+    });
+    Ok(format!(
+        "Clicked at ({}, {}) in \"{}\". Capture the window again to see what changed — this tool \
+         does not report the result of the click.",
+        x, y, resolved.title
     ))
 }
 
@@ -3120,6 +3452,142 @@ mod tests {
         let actions = granted.take_external_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "browser_read_page_cancelled");
+    }
+
+    /// 点击是**第五对**闸门，截图授权不带它出来。
+    ///
+    /// 这一条钉的是授权的独立性：读一个窗口里有什么，和往那个窗口里动手，是两件不同性质
+    /// 的事，而后者撤不回。
+    #[test]
+    fn clicking_needs_its_own_switch_and_its_own_allowlist() {
+        let advertises = |permissions: &WorkspaceToolPermissions| {
+            tool_definitions(permissions)
+                .into_iter()
+                .any(|definition| definition.name == COMPUTER_CLICK)
+        };
+
+        let capture_only =
+            WorkspaceToolPermissions::default().with_capture(true, vec!["chrome.exe".to_string()]);
+        assert!(!advertises(&capture_only));
+        assert!(!WorkspaceToolInvoker::without_logging(capture_only).handles(COMPUTER_CLICK));
+
+        // 开关给了但清单空着，仍然不放行
+        let switch_only = WorkspaceToolPermissions::default().with_input(true, Vec::new());
+        assert!(!advertises(&switch_only));
+
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+        // 只有 Windows 上有实现，别的平台连通告都不该有 —— 一个永远失败的工具比没有更糟
+        assert_eq!(advertises(&granted), cfg!(windows));
+    }
+
+    /// 一帧记下来的坐标系，用来喂点击那条路径上的测试。
+    #[cfg(windows)]
+    fn frame_of(permissions: &WorkspaceToolPermissions, app: &str) -> String {
+        permissions.remember_frame(CaptureFrame {
+            id: "frame-test".to_string(),
+            app: app.to_string(),
+            title: "Docs — pricing".to_string(),
+            width: 800,
+            height: 600,
+            // 一个不可能有效的句柄：这些测试全部在真的动手之前就结束
+            handle: 0,
+            pid: Some(4242),
+        })
+    }
+
+    /// 没有帧就不许点：坐标只在一张**模型看过的图**上有意义。
+    ///
+    /// 这是整套设计的核心。允许"按标题找个窗口点一下"的话，点错窗口的那一下会落在别人的
+    /// 确认框上，而模型并不知道自己点的是什么。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_click_without_a_frame_is_refused_and_says_to_capture_first() {
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+
+        let error = computer_click_tool(None, Some(10), Some(10), &granted)
+            .await
+            .unwrap_err();
+        assert!(error.contains("frame id"), "{}", error);
+
+        let unknown = computer_click_tool(Some("frame-nope"), Some(10), Some(10), &granted)
+            .await
+            .unwrap_err();
+        assert!(unknown.contains("Capture the window first"), "{}", unknown);
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 2);
+        assert!(actions
+            .iter()
+            .all(|action| action.kind == "computer_click_refused"));
+    }
+
+    /// 帧在，但那个应用不在**点击**清单里 —— 截图清单不算。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_frame_from_an_app_that_may_not_be_clicked_is_refused() {
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+        let frame = frame_of(&granted, "signal.exe");
+
+        let error = computer_click_tool(Some(&frame), Some(10), Some(10), &granted)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("signal.exe"), "{}", error);
+        assert!(error.contains("clickable"), "{}", error);
+        assert_eq!(granted.take_external_actions().len(), 1);
+    }
+
+    /// 坐标越界就拒，而不是夹到边上：夹一下会让算错的坐标变成"点在角落里"，而角落里有东西。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_click_outside_the_captured_frame_is_refused() {
+        let granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+        let frame = frame_of(&granted, "chrome.exe");
+
+        let error = computer_click_tool(Some(&frame), Some(800), Some(10), &granted)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("800x600"), "{}", error);
+        assert_eq!(granted.take_external_actions().len(), 1);
+    }
+
+    /// Stop 之后的点击在入口就被拒，记成 `_cancelled`。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_click_after_stop_is_refused_at_the_door() {
+        let mut granted =
+            WorkspaceToolPermissions::default().with_input(true, vec!["chrome.exe".to_string()]);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        granted.adopt_cancel(cancel);
+        let invoker = WorkspaceToolInvoker::without_logging(granted.clone());
+
+        assert!(invoker.invoke(COMPUTER_CLICK, "{}").await.is_err());
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "computer_click_cancelled");
+    }
+
+    /// 参数是数字还是数字字符串都收，但负数和小数当缺失。
+    ///
+    /// 悄悄截断成 0 会让那一下落在窗口左上角，而左上角上通常有东西。
+    #[test]
+    fn a_pixel_argument_takes_numbers_and_numeric_strings_only() {
+        let args = serde_json::json!({
+            "a": 320, "b": "480", "c": -1, "d": 1.5, "e": "x", "f": null
+        });
+        assert_eq!(u32_arg(&args, "a"), Some(320));
+        assert_eq!(u32_arg(&args, "b"), Some(480));
+        assert_eq!(u32_arg(&args, "c"), None);
+        assert_eq!(u32_arg(&args, "d"), None);
+        assert_eq!(u32_arg(&args, "e"), None);
+        assert_eq!(u32_arg(&args, "f"), None);
+        assert_eq!(u32_arg(&args, "missing"), None);
     }
 
     /// 一个只回答一次 `/json/list` 的假 CDP 端点，返回它监听的端口。

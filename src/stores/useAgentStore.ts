@@ -230,6 +230,7 @@ interface AgentStore {
   togglePermission: (key: BooleanPermissionKey) => void;
   setBrowserOrigins: (origins: string[]) => void;
   setPageReadOrigins: (origins: string[]) => void;
+  setInputApps: (apps: string[]) => void;
   /** 设置允许被观察的应用清单（可执行文件名）。空清单等于不许观察。 */
   setComputerApps: (apps: string[]) => void;
   setCaptureApps: (apps: string[]) => void;
@@ -646,6 +647,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => ({
       permissions: { ...s.permissions, pageReadOrigins: origins },
     })),
+  setInputApps: (apps) =>
+    set((s) => ({
+      permissions: { ...s.permissions, inputApps: apps },
+    })),
   setComputerApps: (apps) =>
     set((s) => ({
       permissions: { ...s.permissions, computerApps: apps },
@@ -742,6 +747,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           computerApps: get().permissions.computerApps,
           allowComputerCapture: get().permissions.allowComputerCapture,
           captureApps: get().permissions.captureApps,
+          allowComputerInput: get().permissions.allowComputerInput,
+          inputApps: get().permissions.inputApps,
           allowCommandRun: get().permissions.allowCommandRun,
           runId,
           ideMode: requestIdeMode,
@@ -1130,6 +1137,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           computerApps: get().permissions.computerApps,
           allowComputerCapture: get().permissions.allowComputerCapture,
           captureApps: get().permissions.captureApps,
+          allowComputerInput: get().permissions.allowComputerInput,
+          inputApps: get().permissions.inputApps,
           extraPrompt: params.extraPrompt ?? null,
           regeneratedFromDiffId: params.regeneratedFromDiffId ?? null,
           regeneratedFromHunkIndex: params.regeneratedFromHunkIndex ?? null,

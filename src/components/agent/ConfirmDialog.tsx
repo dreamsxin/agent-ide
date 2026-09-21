@@ -5,12 +5,14 @@ const OP_LABELS: Record<string, string> = {
   browser_open: "Browser Navigation",
   browser_read_page: "Page Reading",
   computer_capture: "Window Capture",
+  computer_click: "Window Click",
 };
 
 const OP_ICONS: Record<string, string> = {
   browser_open: "\u{1F310}",
   browser_read_page: "\u{1F4C4}",
   computer_capture: "\u{1F4F8}",
+  computer_click: "\u{1F5B1}",
 };
 
 /**
