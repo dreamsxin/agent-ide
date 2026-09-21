@@ -315,7 +315,7 @@ impl WorkspaceToolPermissions {
         }
         let known: Vec<&str> = frames.iter().map(|frame| frame.id.as_str()).collect();
         Err(if known.is_empty() {
-            "There is no captured frame to click on yet. Capture the window first — coordinates \
+            "There is no captured frame to aim at yet. Capture the window first — coordinates \
              only mean something on an image you have seen."
                 .to_string()
         } else {
@@ -847,10 +847,12 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                 "Scroll the mouse wheel over a point inside a window you have already captured, \
                  the same way {} works: pass the 'frame' id, 'x' and 'y' in pixels of that image, \
                  plus 'notches' — positive scrolls up (away from you), negative scrolls down. At \
-                 most 10 notches per call, so ask again for the rest; every call needs its own \
-                 approval. Only windows of these apps can be scrolled: {}. Capture the window \
-                 again afterwards to see what is now on screen — this tool does not report the \
-                 result.",
+                 most 10 notches either way per call, so ask again for the rest; every call needs \
+                 its own approval. Only windows of these apps can be scrolled: {}. Note that \
+                 Windows delivers wheel input to the focused (or hovered) control, so the point \
+                 moves the pointer there but does not guarantee which pane scrolls. Capture the \
+                 window again afterwards to see what is now on screen — this tool does not report \
+                 the result.",
                 COMPUTER_CLICK,
                 permissions.input_apps.join(", ")
             ),
@@ -871,7 +873,7 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                     },
                     "notches": {
                         "type": "integer",
-                        "description": "Wheel notches: positive scrolls up, negative scrolls down, 1..10"
+                        "description": "Wheel notches: positive scrolls up, negative scrolls down, -10..10 and not 0"
                     }
                 },
                 "required": ["frame", "x", "y", "notches"]
@@ -1014,21 +1016,16 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 ) {
                     self.permissions.record_external(AgentExternalAction {
                         kind: format!("{}_cancelled", tool_name.trim_start_matches("workspace_")),
-                        target: string_arg(&args, "url")
-                            .unwrap_or(
-                                if matches!(
-                                    tool_name,
-                                    COMPUTER_WINDOWS
-                                        | COMPUTER_CAPTURE
-                                        | COMPUTER_CLICK
-                                        | COMPUTER_SCROLL
-                                ) {
-                                    "desktop"
-                                } else {
-                                    "chrome"
-                                },
-                            )
-                            .to_string(),
+                        target: if matches!(
+                            tool_name,
+                            COMPUTER_WINDOWS | COMPUTER_CAPTURE | COMPUTER_CLICK | COMPUTER_SCROLL
+                        ) {
+                            "desktop".to_string()
+                        } else {
+                            // 浏览器工具的 url 参数只在这里用，桌面工具没有 url。
+                            string_arg(&args, "url").unwrap_or("chrome").to_string()
+                        },
+
                         detail: detail.clone(),
                     });
                 }
@@ -1101,8 +1098,10 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 .await
             }
             COMPUTER_CLICK => {
-                // 动作名先解析：不认识的名字要在任何授权检查之前就拒掉，而且**不能**退回
+                // 动作名先解析：不认识的名字要在任何别的事情之前就拒掉，而且**不能**退回
                 // 左键 —— 模型想开右键菜单而我们真点了一下，是一次谁也没批准过的动作。
+                // 拒掉也要留痕：这是一次"它想动手"的尝试，而记录是这条链上唯一能事后
+                // 重建它的东西。
                 match crate::services::input::Gesture::from_click_action(string_arg(
                     &args, "action",
                 )) {
@@ -1116,19 +1115,19 @@ impl ToolInvoker for WorkspaceToolInvoker {
                         )
                         .await
                     }
-                    Err(error) => Err(error),
+                    Err(error) => refuse_external(
+                        "computer_click_refused",
+                        "desktop",
+                        error,
+                        &self.permissions,
+                    ),
                 }
             }
             COMPUTER_SCROLL => {
-                match i32_arg(&args, "notches")
-                    .ok_or_else(|| {
-                        "A scroll needs 'notches' as a whole number: positive scrolls up, \
-                         negative scrolls down."
-                            .to_string()
-                    })
-                    .and_then(crate::services::input::check_scroll_notches)
-                {
-                    Ok(notches) => {
+                // 格数只在这里转成手势；它的上下界由 `computer_pointer_tool` 查，和别的
+                // 检查在同一条路上。
+                match i32_arg(&args, "notches") {
+                    Some(notches) => {
                         computer_pointer_tool(
                             string_arg(&args, "frame"),
                             u32_arg(&args, "x"),
@@ -1138,7 +1137,14 @@ impl ToolInvoker for WorkspaceToolInvoker {
                         )
                         .await
                     }
-                    Err(error) => Err(error),
+                    None => refuse_external(
+                        "computer_scroll_refused",
+                        "desktop",
+                        "A scroll needs 'notches' as a whole number: positive scrolls up, negative \
+                         scrolls down, at most 10 either way."
+                            .to_string(),
+                        &self.permissions,
+                    ),
                 }
             }
             other => Err(format!("Unknown workspace tool: {}", other)),
@@ -2311,28 +2317,52 @@ async fn computer_pointer_tool(
     let kind = gesture.record_kind();
     let refused = format!("{}_refused", kind);
     let what = gesture.describe();
+    // **每一条**记录都要说出想做什么。`computer_click` 这一个类型盖着左键、双击、右键三种
+    // 手势，只写类型的话，事后从记录里分不出它当时想开右键菜单还是想点下去 —— 而那正是
+    // 用户唯一想知道的事。坐标和标题只有拿到帧之后才知道，所以下面每一步各自补上它有的。
+    let attempted = |detail: String| format!("{} Tried to send {}.", detail, what);
     if !permissions.allows_input() {
         return refuse_external(
             &refused,
             "desktop",
-            "Sending mouse input to a desktop window is not authorized for this run, or no app is \
-             allowed."
-                .to_string(),
+            attempted(
+                "Sending mouse input to a desktop window is not authorized for this run, or no app \
+                 is allowed."
+                    .to_string(),
+            ),
             permissions,
         );
+    }
+    // 格数的上下界在这条路上查，而不是只在参数解析那一层。`Gesture::Scroll` 的字段是公开的，
+    // 一个新的调用点很容易带着没查过的值进来，而这条路后面紧接着就是 `SendInput` —— 把
+    // 不变量放在离动手最近的地方，而不是放在某一个入口上。
+    if let crate::services::input::Gesture::Scroll { notches } = gesture {
+        if let Err(error) = crate::services::input::check_scroll_notches(notches) {
+            return refuse_external(&refused, "desktop", attempted(error), permissions);
+        }
     }
     let (Some(frame_id), Some(x), Some(y)) = (frame_id, x, y) else {
         return refuse_external(
             &refused,
             "desktop",
-            "This needs a frame id plus x and y as whole numbers of pixels in that captured image."
-                .to_string(),
+            attempted(
+                "This needs a frame id plus x and y as whole numbers of pixels in that captured \
+                 image."
+                    .to_string(),
+            ),
             permissions,
         );
     };
     let frame = match permissions.frame(frame_id) {
         Ok(frame) => frame,
-        Err(error) => return refuse_external(&refused, "desktop", error, permissions),
+        Err(error) => {
+            return refuse_external(
+                &refused,
+                "desktop",
+                attempted(format!("{} Aimed at ({}, {}).", error, x, y)),
+                permissions,
+            )
+        }
     };
     // 清单对**这一帧的应用**再查一遍。帧是截图那一档授权造出来的，两份清单可以不一样 ——
     // 不查的话，"允许截 Signal"就顺带变成了"允许点 Signal"。
@@ -2340,18 +2370,33 @@ async fn computer_pointer_tool(
         return refuse_external(
             &refused,
             "desktop",
-            format!(
-                "\"{}\" is not in this run's list of clickable apps, so nothing was sent.",
-                frame.app
-            ),
+            attempted(format!(
+                "\"{}\" is not in this run's list of apps that may be sent input, so nothing was \
+                 sent. Aimed at ({}, {}) in \"{}\".",
+                frame.app, x, y, frame.title
+            )),
             permissions,
         );
     }
     if let Err(error) = crate::services::input::check_click_inside(frame.width, frame.height, x, y)
     {
-        return refuse_external(&refused, "desktop", error, permissions);
+        return refuse_external(
+            &refused,
+            "desktop",
+            attempted(format!("{} Window: \"{}\".", error, frame.title)),
+            permissions,
+        );
     }
 
+    // 滚轮的派送规则和按键不一样，批准框里必须说出来：`WM_MOUSEWHEEL` 是发给焦点窗口的
+    // （打开"悬停即滚动"时发给指针下面那个窗口），坐标只决定指针移到哪儿。让批准框暗示它
+    // 有点的精度，等于让用户批准了一件我们保证不了的事。
+    let routing = if matches!(gesture, crate::services::input::Gesture::Scroll { .. }) {
+        " Windows delivers wheel input to the focused or hovered control, so the point moves the \
+         pointer there but does not decide which pane scrolls."
+    } else {
+        ""
+    };
     let request = crate::agent::approval::ApprovalRequest::new(
         kind,
         "Send mouse input to a window",
@@ -2361,8 +2406,8 @@ async fn computer_pointer_tool(
         ),
         format!(
             "{} — the window will be brought to the front and {} will be sent to that point. This \
-             cannot be undone: it can submit a form, accept a dialog, or delete something.",
-            frame.app, what
+             cannot be undone: it can submit a form, accept a dialog, or delete something.{}",
+            frame.app, what, routing
         ),
     );
     let outcome = permissions.require_approval(&request).await;
@@ -2473,8 +2518,8 @@ async fn computer_pointer_tool(
     });
     Ok(format!(
         "Sent {} at ({}, {}) in \"{}\"{}. Capture the window again to see what changed — this tool \
-         does not report the result.",
-        what, x, y, resolved.title, retitled
+         does not report the result.{}",
+        what, x, y, resolved.title, retitled, routing
     ))
 }
 
@@ -3683,6 +3728,10 @@ mod tests {
         assert!(actions
             .iter()
             .all(|action| action.kind == "computer_click_refused"));
+        // 每一条都要说出它想做什么：`computer_click` 这一个类型盖着三种手势
+        assert!(actions
+            .iter()
+            .all(|action| action.detail.contains("a left click")));
     }
 
     /// 帧在，但那个应用不在**点击**清单里 —— 截图清单不算。
@@ -3699,7 +3748,7 @@ mod tests {
                 .unwrap_err();
 
         assert!(error.contains("signal.exe"), "{}", error);
-        assert!(error.contains("clickable"), "{}", error);
+        assert!(error.contains("may be sent input"), "{}", error);
         assert_eq!(granted.take_external_actions().len(), 1);
     }
 
@@ -3751,7 +3800,7 @@ mod tests {
     ///
     /// 走的是 `invoke` 而不是那个纯函数：这条钉的是"参数校验真的接在这个工具名上"。
     /// 夹到 10 会让一次"滚 500 格"变成一次没人批准过的滚动；而 0 格报成功会让模型
-    /// 以为页面已经到底了。
+    /// 以为页面已经到底了。每一次都要留痕：被拒掉的"滚 500 格"正是用户最该看到的那条。
     #[cfg(windows)]
     #[tokio::test]
     async fn a_scroll_of_zero_or_too_many_notches_never_reaches_the_window() {
@@ -3777,11 +3826,17 @@ mod tests {
                 error
             );
         }
-        // 连批准框都没弹过，所以一条外部动作记录都不该有：这些都不是"尝试过"的动作
-        assert!(granted.take_external_actions().is_empty());
+
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 3);
+        assert!(actions
+            .iter()
+            .all(|action| action.kind == "computer_scroll_refused"));
+        // 记录里要能读出它想滚多少：`500` 那条正是这个上限存在的理由
+        assert!(actions[1].detail.contains("500"), "{}", actions[1].detail);
     }
 
-    /// 不认识的动作名要拒绝，而不是退回左键。
+    /// 不认识的动作名要拒绝，而不是退回左键，而且这次尝试要留痕。
     ///
     /// 走 `invoke`：解析发生在分派那一层，而"猜错的那一下"和"拒绝"在这里差的是一次
     /// 撤不回的动作。
@@ -3805,7 +3860,10 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("middle_click"), "{}", error);
-        assert!(granted.take_external_actions().is_empty());
+        let actions = granted.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "computer_click_refused");
+        assert!(actions[0].detail.contains("middle_click"));
     }
 
     /// Stop 之后的点击和滚动都在入口就被拒，记成 `_cancelled`，而且记在 `desktop` 名下。
@@ -3823,9 +3881,15 @@ mod tests {
 
         assert!(invoker.invoke(COMPUTER_CLICK, "{}").await.is_err());
         assert!(invoker.invoke(COMPUTER_SCROLL, "{}").await.is_err());
+        // 参数里塞一个 url 也不能改写这条记录归谁：这个默认值原来是先看 `url` 的，而
+        // 桌面工具没有 url 参数 —— 也就是说模型能自己选一次被拒的点击记在谁名下。
+        assert!(invoker
+            .invoke(COMPUTER_CLICK, "{\"url\":\"https://elsewhere.example\"}")
+            .await
+            .is_err());
 
         let actions = granted.take_external_actions();
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
         assert_eq!(actions[0].kind, "computer_click_cancelled");
         assert_eq!(actions[1].kind, "computer_scroll_cancelled");
         assert!(actions.iter().all(|action| action.target == "desktop"));

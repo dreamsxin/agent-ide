@@ -1,9 +1,9 @@
-//! 往一个用户批准过的窗口里注入一次鼠标点击。
+//! 往一个用户批准过的窗口里注入一次鼠标动作：点击、双击、右键，或者滚轮。
 //!
-//! 这是这个产品里最狠的一个能力，比导航和截图都狠：一次点击撤不回，而且它能点掉任何一
+//! 这是这个产品里最狠的一个能力，比导航和截图都狠：这些动作撤不回，而且它能点掉任何一
 //! 个确认框 —— 包括本产品自己弹出的那个。所以这里的形状和别处不一样：
 //!
-//! - **坐标只能对着一张模型已经看过的截图给。** 点击必须带上一次 `computer_capture` 留下
+//! - **坐标只能对着一张模型已经看过的截图给。** 动作必须带上一次 `computer_capture` 留下
 //!   的 frame id；窗口是那一帧决定的，不是筛选条件决定的。"按标题再找一遍"这条路在
 //!   ROADMAP 93 里已经被证明是错的（标题是被操作方自己能改的东西），而对点击来说错一次
 //!   的代价是点在另一个窗口的另一个位置上。
@@ -16,6 +16,11 @@
 //! 更"干净"，但现代 UI 框架（Chrome、Electron、WPF）大量依赖真实的输入队列状态（hover、
 //! capture、IME），发消息经常什么都不发生，而"点了但没反应"在这条链上是最坏的结果：
 //! 模型会重试。
+//!
+//! 一个例外要说清楚：**滚轮不是按坐标派送的**。`WM_MOUSEWHEEL` 由系统发给焦点窗口（或者
+//! 在"悬停即滚动"打开时发给指针下面那个窗口），所以这里的坐标只决定指针移到哪儿，具体
+//! 哪个控件收到那几格是系统定的。这条保证不了，所以写在这里、也写在工具描述和 SECURITY.md
+//! 里，而不是让批准框暗示它有点的精度。
 
 /// 往窗口里注入的那一下具体是什么。
 ///
@@ -99,13 +104,13 @@ pub fn check_scroll_notches(notches: i32) -> Result<i32, String> {
     Ok(notches)
 }
 
-/// 一次点击的坐标是否落在那一帧里面。
+/// 一次动作的坐标是否落在那一帧里面。
 ///
 /// 上界是排他的：宽 800 的图上 x=800 是外面第一列。差一个像素在这里不是小事 ——
 /// 落在窗口外面的那一下会打到别的窗口上。
 pub fn check_click_inside(width: u32, height: u32, x: u32, y: u32) -> Result<(), String> {
     if width == 0 || height == 0 {
-        return Err("That frame has no pixels, so there is nowhere to click.".to_string());
+        return Err("That frame has no pixels, so there is nowhere to aim.".to_string());
     }
     if x >= width || y >= height {
         return Err(format!(
@@ -127,7 +132,7 @@ pub fn check_same_size(now: (u32, u32), frame: (u32, u32)) -> Result<(), String>
     }
     Err(format!(
         "That window is now {}x{} but the frame you captured was {}x{}; capture it again before \
-         clicking, because the coordinates no longer point at the same thing.",
+         aiming, because the coordinates no longer point at the same thing.",
         now.0, now.1, frame.0, frame.1
     ))
 }
@@ -148,13 +153,15 @@ pub fn normalized_absolute(
     virtual_height: i32,
 ) -> Result<(i32, i32), String> {
     if virtual_width <= 1 || virtual_height <= 1 {
-        return Err("The virtual desktop has no size, so the click cannot be placed.".to_string());
+        return Err(
+            "The virtual desktop has no size, so the pointer cannot be placed.".to_string(),
+        );
     }
     let dx = screen_x - virtual_left;
     let dy = screen_y - virtual_top;
     if dx < 0 || dy < 0 || dx >= virtual_width || dy >= virtual_height {
         return Err(format!(
-            "({}, {}) is outside the desktop, so nothing was clicked.",
+            "({}, {}) is outside the desktop, so nothing was sent.",
             screen_x, screen_y
         ));
     }
@@ -321,10 +328,11 @@ mod platform {
             )
         };
         if sent as usize != events.len() {
-            // 只送出去一部分的时候，这个手势按下的键可能正按着 —— 桌面会停在"拖拽中"。
-            // 补一个抬起，别把这个状态留给用户去猜。只补这个手势真的按过的键：给没按过的
-            // 键补一个抬起，本身就是一个凭空多出来的输入事件。补得成不成都照样报失败。
-            let mut release: Vec<INPUT> = buttons_to_release(gesture)
+            // 只送出去一部分的时候，已经发出去的按下可能没有配对的抬起 —— 桌面会停在
+            // "拖拽中"。补的是**按 `sent` 算出来还按着的那些键**，而不是这个手势定义里按过
+            // 的键：批次在第一个事件（移动）就断掉时一个键都没按下，这时候补一个抬起等于凭空
+            // 多发一个输入事件，它可能刚好完成用户自己正按着的那一下。补得成不成都照样报失败。
+            let mut release: Vec<INPUT> = buttons_still_held(gesture, sent as usize)
                 .into_iter()
                 .map(|flags| mouse(absolute_flags(flags), 0, normalized_x, normalized_y))
                 .collect();
@@ -338,19 +346,27 @@ mod platform {
                     )
                 };
             }
+            // 失败这条路上也要把指针放回去：指针停在 Agent 瞄的位置上会改变 hover 状态，
+            // 也改变用户下一次真实点击的起点 —— 这一点和成功那条路没有区别。
+            restore_cursor(cursor_known, cursor_before);
             return Err(format!(
                 "Only {} of {} input events were accepted; {} may be incomplete, and any button \
-                 it pressed was released so it is not left held down.",
+                 left held down by the accepted part was released.",
                 sent,
                 events.len(),
                 gesture.describe()
             ));
         }
-        if cursor_known {
-            // SAFETY: 只写光标位置，参数是本地变量里的坐标。
-            unsafe { SetCursorPos(cursor_before.x, cursor_before.y) };
-        }
+        restore_cursor(cursor_known, cursor_before);
         Ok(())
+    }
+
+    /// 把指针放回点之前的位置。
+    fn restore_cursor(known: bool, before: POINT) {
+        if known {
+            // SAFETY: 只写光标位置，参数是本地变量里的坐标。
+            unsafe { SetCursorPos(before.x, before.y) };
+        }
     }
 
     /// 绝对坐标事件必须带的两个标志。
@@ -360,6 +376,10 @@ mod platform {
     /// 两者恰好相等，所以漏掉毫无症状；一接上第二块屏，落点就被压缩到主屏上的某个位置 ——
     /// 目标窗口在副屏上被确认成了前台，而那一下点在主屏中央，运行期间那里很可能正是本应用
     /// 自己的批准框。
+    ///
+    /// 真正决定落点的只有那个移动事件：按键和滚轮事件上的 `dx`/`dy` 不被当成位置（没有
+    /// `MOUSEEVENTF_MOVE`就没有移动）。它们照样带上这两个标志是为了整批一致 —— 让"绝对
+    /// 坐标怎么解释"只有一个答案，而不是每个事件各自一份。
     fn absolute_flags(base: u32) -> u32 {
         base | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     }
@@ -387,14 +407,27 @@ mod platform {
         }
     }
 
-    /// 这个手势按下过哪些键 —— 发送只完成一半时要补的抬起。
-    fn buttons_to_release(gesture: Gesture) -> Vec<u32> {
-        match gesture {
-            Gesture::Click | Gesture::DoubleClick => vec![MOUSEEVENTF_LEFTUP],
-            Gesture::RightClick => vec![MOUSEEVENTF_RIGHTUP],
-            // 滚轮不按任何键，补一个抬起等于凭空多发一个输入事件。
-            Gesture::Scroll { .. } => Vec::new(),
+    /// 发送只完成了 `sent` 个事件时，还按着哪些键 —— 要补的抬起。
+    ///
+    /// 按 `sent` 算而不是按手势定义算：批次在第一个事件（移动）就断掉时一个键都没按下，
+    /// 这时候补一个抬起是一个凭空多出来的输入事件，它可能刚好完成用户自己正按着的那一下。
+    /// `sent` 里含最前面那个移动事件，所以按键序列要跳过它。
+    fn buttons_still_held(gesture: Gesture, sent: usize) -> Vec<u32> {
+        let mut held: Vec<u32> = Vec::new();
+        for (flags, _) in gesture_events(gesture)
+            .into_iter()
+            .take(sent.saturating_sub(1))
+        {
+            match flags {
+                MOUSEEVENTF_LEFTDOWN => held.push(MOUSEEVENTF_LEFTUP),
+                MOUSEEVENTF_RIGHTDOWN => held.push(MOUSEEVENTF_RIGHTUP),
+                MOUSEEVENTF_LEFTUP => held.retain(|flag| *flag != MOUSEEVENTF_LEFTUP),
+                MOUSEEVENTF_RIGHTUP => held.retain(|flag| *flag != MOUSEEVENTF_RIGHTUP),
+                // 滚轮不按任何键
+                _ => {}
+            }
         }
+        held
     }
 
     /// 轮询到那个窗口真的成为前台，或者等够了。
@@ -470,22 +503,37 @@ mod platform {
             assert!(down < 0, "{}", down);
         }
 
-        /// 只发出去一半时补的抬起，只能是这个手势真按过的键。
+        /// 只发出去一半时补的抬起，只能是**那一半真的按下了、又还没抬起**的键。
         ///
-        /// 给没按过的键补抬起，本身就是一个凭空多出来的输入事件 —— 它可能刚好完成用户
-        /// 自己按着的那一下。
+        /// 按手势定义算（"点击按过左键，所以补左键"）在批次断在第一个事件上时是错的：那时
+        /// 一个键都没按下，补出来的抬起是一个凭空多出来的输入事件，它可能刚好完成用户自己
+        /// 正按着的那一下 —— 也就是把一次失败变成了一次没人批准的点击。
         #[test]
-        fn only_the_buttons_a_gesture_pressed_are_released() {
-            assert_eq!(buttons_to_release(Gesture::Click), vec![MOUSEEVENTF_LEFTUP]);
+        fn only_the_buttons_left_held_by_the_accepted_part_are_released() {
+            // 什么都没发出去，或者只发出去那个移动：一个键都没按下
+            assert!(buttons_still_held(Gesture::Click, 0).is_empty());
+            assert!(buttons_still_held(Gesture::Click, 1).is_empty());
+            // 移动 + 按下：左键正按着
             assert_eq!(
-                buttons_to_release(Gesture::DoubleClick),
+                buttons_still_held(Gesture::Click, 2),
                 vec![MOUSEEVENTF_LEFTUP]
             );
+            // 整批都出去了：已经配对抬起过了
+            assert!(buttons_still_held(Gesture::Click, 3).is_empty());
             assert_eq!(
-                buttons_to_release(Gesture::RightClick),
+                buttons_still_held(Gesture::RightClick, 2),
                 vec![MOUSEEVENTF_RIGHTUP]
             );
-            assert!(buttons_to_release(Gesture::Scroll { notches: 1 }).is_empty());
+            // 双击断在第二下的按下上
+            assert_eq!(
+                buttons_still_held(Gesture::DoubleClick, 4),
+                vec![MOUSEEVENTF_LEFTUP]
+            );
+            assert!(buttons_still_held(Gesture::DoubleClick, 3).is_empty());
+            // 滚轮任何位置都不按键
+            for sent in 0..=2 {
+                assert!(buttons_still_held(Gesture::Scroll { notches: 1 }, sent).is_empty());
+            }
         }
     }
 }

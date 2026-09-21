@@ -910,13 +910,12 @@ export default function SettingsPanel() {
             checked={permissions.allowComputerInput}
             onChange={() => togglePermission("allowComputerInput")}
           />
-
           {permissions.allowComputerInput && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="input-apps">
                 Clickable / scrollable apps (one per line, `*` for any)
-
               </label>
+
               <textarea
                 id="input-apps"
                 rows={2}

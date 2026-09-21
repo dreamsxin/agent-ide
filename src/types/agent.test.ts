@@ -265,7 +265,7 @@ describe("normalizeApprovalRequest", () => {
     expect(normalizeDestructiveOpType("computer_capture")).toBe("computer_capture");
     expect(normalizeDestructiveOpType("computer_click")).toBe("computer_click");
     expect(normalizeDestructiveOpType("computer_scroll")).toBe("computer_scroll");
-
   });
+
 });
 

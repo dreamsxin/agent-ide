@@ -260,7 +260,12 @@ describe("approval op types", () => {
      *
      * 多一条规则跟着这个间接层走，而不是为了好扫描把代码改回四份复制 —— 但下面的前提断言
      * 才是真正的保险：这条规则失效时，`toContain` 会红，而不是安静地少扫两个名字。
+     *
+     * 已知残留：这里只认引号里的字面量，不像上面两条那样过一遍 `stringConstants()`。
+     * 哪天有人把这些字符串提成常量（`Gesture::Middle => MIDDLE_CLICK_KIND`），新的那个
+     * 就会从集合里掉出去而前提断言照样绿 —— 提常量的那个人要顺手把这条规则也补上。
      */
+
     function pointerOpTypes(): string[] {
         const names = new Set<string>();
         for (const source of rustSources()) {
@@ -293,9 +298,9 @@ describe("approval op types", () => {
     });
 });
 
-
 /**
  * 第四种没人把关的名字：**内置工具**。
+
  *
  * `SECURITY.md` 是"后端实际强制了什么"的那份文档，而 AGENTS.md 把"文档必须对着代码核过"
  * 写成了规则 —— 靠的是每次有人记得去核。这个会话里我自己就把那条规则破了好几次（数错了
@@ -327,8 +332,8 @@ describe("built-in tool documentation", () => {
         expect(tools).toContain("workspace_computer_click");
         expect(tools).toContain("workspace_computer_scroll");
 
-
         const security = readFileSync("SECURITY.md", "utf8");
+
         const undocumented = tools.filter((name) => !security.includes(name));
         expect(
             undocumented,

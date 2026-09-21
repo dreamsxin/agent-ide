@@ -312,8 +312,8 @@ export type DestructiveOpType =
   | "computer_click"
   | "computer_scroll";
 
-
 export interface DestructiveOpConfirm {
+
   id: string;
   opType: DestructiveOpType;
   title: string;
@@ -336,8 +336,8 @@ export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | 
     case "computer_click":
     case "computer_scroll":
       return value;
-
     default:
+
       return "unknown";
   }
 }

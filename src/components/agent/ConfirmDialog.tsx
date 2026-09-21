@@ -17,9 +17,9 @@ const OP_ICONS: Record<string, string> = {
   computer_scroll: "\u{1F503}",
 };
 
-
 /**
  * 逐动作批准的提示框。
+
  *
  * 后端有一次撤不回的动作正**挂在这里等**：`agent-approval-requested` 把它放进
  * `pendingConfirm`，两个按钮各送一个决定回去。所以这个组件不是装饰 —— 不点，动作
