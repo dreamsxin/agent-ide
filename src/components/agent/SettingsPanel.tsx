@@ -4,6 +4,11 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
 import { formatTokenCount, parseTokenInput } from "../../utils/tokenInput";
 import {
+  ASSUMED_MAX_CONTEXT_TOKENS,
+  DEFAULT_RESERVED_OUTPUT_TOKENS,
+  estimateInputTokens,
+} from "../../utils/contextBudget";
+import {
   llmConnectionCheckedAt,
   llmConnectionIndicator,
   llmTargetFingerprint,
@@ -586,28 +591,29 @@ export default function SettingsPanel() {
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Context Budget — all four are <span className="text-surface-text">token counts</span>
+          Context Budget — all four are <span className="text-surface-text">token counts</span>,
+          and all four are <span className="text-surface-text">optional</span>
         </div>
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
             label="Max context"
-            title="The model's context window, from its documentation. Used for budgeting only — it is never sent to the provider."
+            title="The model's context window, from its documentation. Empty means the estimate assumes 128,000. Budgeting only — never sent to the provider."
             value={maxContextTokens}
             onChange={setMaxContextTokens}
-            placeholder="128k"
+            placeholder="128k assumed"
             unit="tokens"
           />
           <BudgetInput
             label="Reserved output"
-            title="How much of the window to keep free for the answer when estimating how much context fits. Budgeting only."
+            title="How much of the window to keep free for the answer when estimating. Empty means 4,096. Budgeting only."
             value={reservedOutputTokens}
             onChange={setReservedOutputTokens}
-            placeholder="4k"
+            placeholder="4k default"
             unit="tokens"
           />
           <BudgetInput
             label="Max output"
-            title="The output limit actually sent to the provider. Empty means the provider picks one, which is often only a few thousand tokens."
+            title="The output limit actually sent to the provider. A provider preset fills this in; empty means the provider picks one, which is often only a few thousand tokens."
             value={maxOutputTokens}
             onChange={setMaxOutputTokens}
             placeholder="provider default"
@@ -626,22 +632,34 @@ export default function SettingsPanel() {
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
           Effective input estimate:{" "}
           <span className="font-mono text-surface-text">
-            {formatTokenBudget(estimateInputTokens(maxContextTokens, reservedOutputTokens, maxOutputTokens))}
+            {formatTokenCount(
+              estimateInputTokens(
+                parseTokenInput(maxContextTokens),
+                parseTokenInput(reservedOutputTokens),
+                parseTokenInput(maxOutputTokens)
+              )
+            )}
           </span>{" "}
           tokens (max context − reserved output − 512). You can type{" "}
           <span className="font-mono text-surface-text">128k</span> or{" "}
           <span className="font-mono text-surface-text">1m</span>; the number under each box is what was
-          understood. This is model metadata for budgeting; current context modes still control compression
-          strategy. Per-run cap stops a run once the provider-reported total tokens reach it; leave it empty
-          for no limit.{" "}
+          understood.{" "}
           <span className="text-surface-text">
-            Max output is the only one of these that is sent to the provider.
+            You only need to touch these when your model differs from the assumptions
+          </span>{" "}
+          — with all of them empty the estimate assumes a {ASSUMED_MAX_CONTEXT_TOKENS.toLocaleString()}
+          -token window and reserves {DEFAULT_RESERVED_OUTPUT_TOKENS.toLocaleString()} for the answer, and
+          nothing is sent to the provider. There is no per-model table on purpose: the vendors change these
+          numbers faster than this app ships, and a wrong window is worse than an assumed one because the
+          percentage looks trustworthy.{" "}
+          <span className="text-surface-text">
+            Max output is the only one of these that reaches the provider.
           </span>{" "}
           Picking a provider preset fills it in (4096 for OpenAI/Azure/DeepSeek, 8192 for Anthropic), and a
           reasoning model can spend all of that on thinking and return an empty answer — raise it for those.
-          Clearing the box does not mean "no limit": the provider then picks one, usually a few thousand tokens.
         </div>
       </div>
+
 
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
@@ -1099,18 +1117,6 @@ function numberToInput(value?: number) {
 }
 
 
-function estimateInputTokens(maxContext: string, reservedOutput: string, maxOutput: string) {
-  const context = parseTokenInput(maxContext);
-  if (!context) return undefined;
-  const reserved = parseTokenInput(reservedOutput) ?? parseTokenInput(maxOutput) ?? 4096;
-  return Math.max(0, context - reserved - 512);
-}
-
-
-function formatTokenBudget(value?: number) {
-  if (value === undefined) return "not set";
-  return value.toLocaleString();
-}
 
 function PermissionToggle({
   label,

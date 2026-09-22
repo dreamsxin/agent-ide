@@ -1763,6 +1763,17 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Still open from 127: `AgentRunSummary` shows `currentTask.title` while the history row shows the session title, so the two can disagree; single-step runs and repair still set no title; no rename.
    - Rust 478 → 479; frontend 252 → 253.
 
+129. **The three budget fields already had defaults; the panel just never said so (2026-09-22)**
+   Asked directly: *这三个数值能不能给一个默认，我看很多 agent IDE 都不用设置*. Checking before answering: **two of the three already had one.** `reserved_output_tokens.or(max_output_tokens).unwrap_or(4096)` has been the rule in both budget formulas all along, and Max output is filled in by whichever provider preset you pick (125). Only the window had none — and because `effective_input_tokens` returned `None` without it, the row read "not set", which made the whole group look mandatory.
+   - **`Max context` now has an assumed value for the estimate**: `ASSUMED_MAX_CONTEXT_TOKENS = 128_000`, labelled "128k assumed" in the placeholder and named in the help text. Assuming **low** is the safe direction — the budget looks tighter and warns earlier, never the reverse.
+   - **It is deliberately not a per-model table.** I went looking for real numbers first and the public sources contradict each other for the same model names (one DeepSeek family documented as 128K/8K in one place and 1M/384K in another; Claude and GPT tables disagree across aggregators and shift release to release). Hardcoding that would pin a snapshot that is wrong on arrival, and **a wrong window is worse than an assumed one** because the percentage next to it looks trustworthy. The honest version of this feature is asking the endpoint (some model-list APIs expose `context_length`), which is a separate piece of work.
+   - **The assumption is confined to the displayed estimate.** `estimated_input_tokens_from_budget` still returns `None` when the window is unset, so the context packer trims against nothing rather than against a guess — cutting a user's context on an invented window would be worse than not cutting. The outgoing request is untouched: `max_tokens` is still only sent when Max output has a value.
+   - **The magic numbers are named and shared**: `DEFAULT_RESERVED_OUTPUT_TOKENS`, `CONTEXT_ASSEMBLY_HEADROOM_TOKENS`, `ASSUMED_MAX_CONTEXT_TOKENS` in `services/context.rs`, mirrored in `src/utils/contextBudget.ts` with a test pinning both sides to the same 123,392 for an unconfigured profile — the settings panel has to compute this before anything is saved, so the formula genuinely needs two implementations, and the previous pair had drifted into three copies of `4096` and `512`.
+   - `LlmProfileResponse.effectiveInputTokens` went from `Option<u32>` to `u32`: an Option that is never `None` is the kind of shape the audits keep catching.
+   - Section header now says all four are optional, and each field's tooltip says what happens when it is empty.
+   - Rust 479 → 480; frontend 253 → 258 (`src/utils/contextBudget.test.ts`).
+
+
 
 
 

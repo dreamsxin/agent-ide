@@ -99,7 +99,9 @@ pub struct LlmProfileResponse {
     #[serde(rename = "maxRunSpendMicros")]
     pub max_run_spend_micros: Option<u64>,
     #[serde(rename = "effectiveInputTokens")]
-    pub effective_input_tokens: Option<u32>,
+    /// 界面上那行估算。**总是有值**：三个预算字段都空着时按假定窗口和默认预留算，
+    /// 见 `LlmProfile::effective_input_tokens`。
+    pub effective_input_tokens: u32,
     #[serde(rename = "toolCallMode")]
     pub tool_call_mode: String,
     #[serde(rename = "modelType")]
@@ -261,13 +263,24 @@ impl LlmProfile {
         }
     }
 
-    pub fn effective_input_tokens(&self) -> Option<u32> {
-        let max_context = self.max_context_tokens?;
+    /// 界面上那行"有效输入预算"。
+    ///
+    /// 三个字段都没填也给得出数字：窗口按 `ASSUMED_MAX_CONTEXT_TOKENS` 算、预留输出按
+    /// `DEFAULT_RESERVED_OUTPUT_TOKENS` 算。以前窗口没填就返回 `None`，界面显示 "not set"，
+    /// 于是这三个框看起来像"不填就不能用" —— 而实际上后两个一直有默认、Max output 还会被
+    /// 供应商预设填上。假定值只影响这一行估算，不影响发出去的请求，也不影响装配器裁不裁
+    /// （见 `estimated_input_tokens_from_budget`）。
+    pub fn effective_input_tokens(&self) -> u32 {
+        let max_context = self
+            .max_context_tokens
+            .unwrap_or(crate::services::context::ASSUMED_MAX_CONTEXT_TOKENS);
         let reserved = self
             .reserved_output_tokens
             .or(self.max_output_tokens)
-            .unwrap_or(4096);
-        Some(max_context.saturating_sub(reserved).saturating_sub(512))
+            .unwrap_or(crate::services::context::DEFAULT_RESERVED_OUTPUT_TOKENS);
+        max_context
+            .saturating_sub(reserved)
+            .saturating_sub(crate::services::context::CONTEXT_ASSEMBLY_HEADROOM_TOKENS)
     }
 
     /// 取出这个 profile 的密钥。**keyring 优先，明文字段不再是兜底。**
@@ -919,8 +932,37 @@ mod tests {
             profile.to_response().api_key_masked,
             "sk-1****7890 (plaintext in config.json)"
         );
-        assert_eq!(profile.to_response().effective_input_tokens, Some(123392));
+        assert_eq!(profile.to_response().effective_input_tokens, 123392);
         assert_eq!(profile.to_response().tool_call_mode, "native_tools");
+    }
+
+    /// 三个预算字段都空着也要给得出一个数字。
+    ///
+    /// 用户的原话是"很多 agent IDE 都不用设置"——而这里两个其实早就有默认（预留输出 4096、
+    /// Max output 由供应商预设填），只有窗口没有；窗口一空，这一行就显示 "not set"，于是整组
+    /// 看起来像"不填不能用"。假定窗口**估低**是安全方向：预算显得更紧，不会让人以为还有余量。
+    #[test]
+    fn the_input_estimate_works_without_configuring_anything() {
+        let mut profile = sample_profile();
+        profile.max_context_tokens = None;
+        profile.reserved_output_tokens = None;
+        profile.max_output_tokens = None;
+
+        // 128000 - 4096 - 512
+        assert_eq!(profile.effective_input_tokens(), 123_392);
+
+        // 填了窗口就用填的那个
+        profile.max_context_tokens = Some(32_000);
+        assert_eq!(profile.effective_input_tokens(), 32_000 - 4_096 - 512);
+
+        // 没填预留输出时退回 Max output（那是这个模型真正会占掉的那部分）
+        profile.reserved_output_tokens = None;
+        profile.max_output_tokens = Some(8_192);
+        assert_eq!(profile.effective_input_tokens(), 32_000 - 8_192 - 512);
+
+        // 预留输出比窗口还大也不能变成一个巨大的数（saturating）
+        profile.reserved_output_tokens = Some(999_999);
+        assert_eq!(profile.effective_input_tokens(), 0);
     }
 
     /// 只有明文的 profile，默认**不能**用来跑。
