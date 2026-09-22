@@ -14,12 +14,19 @@ pub const MAX_PROJECT_MEMORY_CHARS: usize = 8_000;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMemoryInfo {
+    /// 有没有真的打开了工作区。
+    ///
+    /// `workspace_root()` 在什么都没打开时会退回到进程的当前目录 —— 开发环境里于是读到
+    /// **本仓库**的 `AGENTS.md`，界面照着它说"这个工作区有一份 7 KB 的项目记忆"，而用户
+    /// 什么都没打开。这个字段存在就是为了不说那句话。
+    pub workspace_open: bool,
     pub exists: bool,
     /// 这份文件该在哪；不存在时也给出来，用户要知道该在哪新建
     pub path: String,
     /// 磁盘上的字节数（trim 之后，和注入时算的是同一个数）
     pub bytes: usize,
-    /// 注入上限
+    /// 注入前的硬上限。装得下不等于全部都会进提示词：上下文预算还会按配额再削一次
+    /// （`context.rs` 里项目记忆那一节占 15%），聊天里也能把这一节整个关掉。
     pub limit: usize,
     /// 超了上限：尾部不会进入任何一次运行
     pub truncated: bool,
@@ -46,6 +53,7 @@ pub fn project_memory_info() -> Result<ProjectMemoryInfo, String> {
         .map(|text| text.trim().len())
         .unwrap_or(0);
     Ok(ProjectMemoryInfo {
+        workspace_open: crate::services::workspace::current_workspace_key().is_some(),
         exists: content.is_some(),
         path: path.display().to_string(),
         bytes,
@@ -85,7 +93,8 @@ pub fn draft_project_memory_prompt(exists: bool, bytes: usize) -> String {
         )
     };
     format!(
-        "{opening}\n\n\
+        "Draft this project's {file}\n\n\
+         {opening}\n\n\
          Write the file for the next Agent that works here, not for a human reader. Before you \
          write anything, find the evidence: read the package manifests and lockfiles, the scripts \
          and task definitions, the CI config, the test layout, and the top-level directories. \
@@ -114,6 +123,7 @@ pub fn draft_project_memory_prompt(exists: bool, bytes: usize) -> String {
          or three lines what you put in it and what you deliberately left out because you could not \
          verify it.",
         opening = opening,
+        file = PROJECT_MEMORY_FILE,
         limit = MAX_PROJECT_MEMORY_CHARS,
         target = MAX_PROJECT_MEMORY_CHARS - 500,
     )

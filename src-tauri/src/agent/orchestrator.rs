@@ -1080,8 +1080,11 @@ impl AgentOrchestrator {
             self.conversation.drain(..excess);
         }
         // 标题只认用户自己提的那一问：`Ran step: 加测试` 当标题会让历史列表里一排会话
-        // 长得一模一样，而真正区分它们的那句话恰好被丢掉了
-        if !derived && self.session_title.is_none() {
+        // 长得一模一样，而真正区分它们的那句话恰好被丢掉了。
+        //
+        // 人起的名字优先于这里的任何推导：`session_title_is_custom` 就是为这一行存在的 ——
+        // 靠"标题为空"来判断只是今天恰好等价，而要守的那句话是"人定的名字不会被机器改掉"。
+        if !derived && !self.session_title_is_custom && self.session_title.is_none() {
             self.session_title = Some(session_title_from(prompt));
         }
         self.persist_session();
@@ -1262,9 +1265,17 @@ impl AgentOrchestrator {
     /// 空名字是错误而不是"恢复自动标题"：后者要靠猜用户的意图，而两种解释的结果在屏幕上
     /// 完全不同 —— 他会以为改名没生效。
     ///
-    /// 记下"这是人起的名字"：否则下一次推导（比如恢复之后的第一轮）会把它盖回去。
+    /// 记下"这是人起的名字"：`push_turn` 会查这个标记，不让自动推导把它盖回去。
     pub fn rename_session(&mut self, title: &str) -> Result<String, String> {
         let normalized = normalized_session_title(title)?;
+        // 一轮都还没有的会话在磁盘上**不存在**（惰性落盘），而 `persist_session` 对这种会话
+        // 做的事是 `remove` —— 它返回成功，于是"改名成功"和"这一行刚被删掉"在界面上一模一样：
+        // 任务从列表里消失，名字没变，没有任何报错。
+        if self.conversation.is_empty() {
+            return Err(
+                "That task has no turns yet, so there is nothing saved to rename.".to_string(),
+            );
+        }
         self.session_title = Some(normalized.clone());
         self.session_title_is_custom = true;
         self.persist_session();
@@ -1284,25 +1295,42 @@ impl AgentOrchestrator {
     /// 关系写在标题里（`Fork of X`）而不是存一个 `parent_id` 字段：界面上唯一需要回答的问题
     /// 是"这是从哪来的"，而标题已经回答了它。存一个没人读的字段只会在下次改结构时挡路。
     ///
-    /// 立刻落盘，不等第一轮：分叉出来的会话在列表里必须马上看得见，否则用户会以为没成功。
+    /// **先落盘再切换当前会话**，和 `delete_agent_session` 同一条规矩：反过来的话，一次失败的
+    /// 写入会把用户留在一个磁盘上不存在的会话里 —— 前一个会话的上下文已经从内存里没了，界面
+    /// 却还指着旧的那一行，而下一次提问会记进这个幽灵会话。
     pub fn fork_session(
         &mut self,
         stored: crate::agent::session_store::StoredSession,
     ) -> Result<(), String> {
-        self.session_id = new_session_id();
-        self.session_created_at = crate::agent::session_store::now_ms();
-        self.session_title = Some(session_title_from(&format!("Fork of {}", stored.title)));
-        // 分叉出来的名字是机器起的，所以不算"人定的名字"：用户随后改名时不会被任何自动
-        // 推导挡住，而第一轮提问也不该把 `Fork of …` 换成那句话（标题已经非空）
-        self.session_title_is_custom = false;
-        self.next_turn_id = stored.next_turn_id.max(1);
-        self.conversation = stored.turns;
-        self.session_persist_error = None;
-        self.persist_session();
-        match &self.session_persist_error {
-            Some(error) => Err(format!("The forked task was not saved: {}", error)),
-            None => Ok(()),
+        let workspace = crate::services::workspace::current_workspace_key()
+            .ok_or("No workspace is open, so a forked task cannot be saved.")?;
+        if stored.turns.is_empty() {
+            // 空会话分叉出来也会被惰性落盘删掉，"成功"之后列表里什么都没有
+            return Err("That task has no turns to fork.".to_string());
         }
+        let fork = crate::agent::session_store::StoredSession {
+            id: new_session_id(),
+            workspace,
+            title: session_title_from(&format!("Fork of {}", stored.title)),
+            // 分叉出来的名字是机器起的，所以不算"人定的名字"：用户随后改名不会被任何自动
+            // 推导挡住。第一轮提问也不会把 `Fork of …` 换掉 —— 标题已经非空。
+            title_is_custom: false,
+            created_at: crate::agent::session_store::now_ms(),
+            updated_at: crate::agent::session_store::now_ms(),
+            next_turn_id: stored.next_turn_id.max(1),
+            turns: stored.turns,
+        };
+        crate::agent::session_store::upsert(&fork)
+            .map_err(|error| format!("The forked task was not saved: {}", error))?;
+
+        self.session_id = fork.id;
+        self.session_created_at = fork.created_at;
+        self.session_title = Some(fork.title);
+        self.session_title_is_custom = false;
+        self.next_turn_id = fork.next_turn_id;
+        self.conversation = fork.turns;
+        self.session_persist_error = None;
+        Ok(())
     }
 
     /// 换 run id。**不**授予执行权 —— 那是 `try_begin_run` 的事。
@@ -4310,6 +4338,42 @@ mod tests {
     /// 续跑必须把暂停前工具**实际返回的内容**带回请求里。
     ///
     /// 在此之前跨阶段只传扁平文本，而扁平文本里从来没有工具返回值 ——
+    /// 一轮都没有的会话不能"改名成功"。
+    ///
+    /// 惰性落盘意味着它在磁盘上并不存在，而 `persist_session` 对这种会话做的是 `remove`
+    /// （不存在也算成功）—— 于是"改好了"和"这一行刚被删掉"在界面上完全一样：任务从列表里
+    /// 消失、名字没变、没有任何报错。分叉同理。
+    #[test]
+    fn an_unsaved_task_cannot_be_renamed_or_forked() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let refusal = orchestrator.rename_session("Anything").unwrap_err();
+        assert!(refusal.contains("no turns"), "{}", refusal);
+        // 名字也不能只在内存里改掉：下一轮会把它写出去，而用户看到的是"改名后来又生效了"
+        assert!(orchestrator
+            .session_snapshot()
+            .unwrap()
+            .title
+            .contains("Untitled"));
+
+        let empty = crate::agent::session_store::StoredSession {
+            id: "session-empty".to_string(),
+            workspace: "C:\\work\\project".to_string(),
+            title: "nothing here".to_string(),
+            title_is_custom: false,
+            created_at: 1,
+            updated_at: 2,
+            next_turn_id: 1,
+            turns: Vec::new(),
+        };
+        let before = orchestrator.session_id.clone();
+        assert!(orchestrator.fork_session(empty).is_err());
+        // 失败的分叉不能把当前会话换掉
+        assert_eq!(orchestrator.session_id, before);
+    }
+
     /// 人起的名字不能被机器改回去。
     ///
     /// 标题本来是"第一句话推出来的"，而推导的触发条件是"标题为空"。改名之后标题非空，所以

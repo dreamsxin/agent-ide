@@ -455,6 +455,7 @@ export function normalizeAgentQuestion(value: unknown): AgentQuestion | null {
  * 保持一致 —— 在前端再写一份迟早会和后端说的不是同一件事。
  */
 export interface ProjectMemoryInfo {
+  workspaceOpen: boolean;
   exists: boolean;
   path: string;
   bytes: number;
@@ -485,6 +486,7 @@ export function normalizeProjectMemoryInfo(value: unknown): ProjectMemoryInfo | 
     return null;
   }
   return {
+    workspaceOpen: raw.workspaceOpen === true,
     exists: raw.exists === true,
     path,
     bytes,

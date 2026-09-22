@@ -175,8 +175,12 @@ pub fn upsert(session: &StoredSession) -> Result<(), String> {
             // 刚写的这个排在最前，不参与"最旧"的评比
             let a_current = a.id == session.id;
             let b_current = b.id == session.id;
+            // 起过名字的排在没起过的前面：改名是用户能给出的最强信号"这一条我要留着"，
+            // 而它恰好是唯一不刷新活动时间的操作 —— 不保护的话，那条被特意命名的记录
+            // 反而最容易被上限挤掉
             b_current
                 .cmp(&a_current)
+                .then(b.title_is_custom.cmp(&a.title_is_custom))
                 .then(b.updated_at.cmp(&a.updated_at))
         });
         sessions.truncate(MAX_SESSIONS);

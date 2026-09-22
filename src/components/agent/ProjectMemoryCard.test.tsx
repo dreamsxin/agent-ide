@@ -25,6 +25,7 @@ beforeEach(() => {
 
 function info(overrides: Record<string, unknown> = {}) {
   return {
+    workspaceOpen: true,
     exists: true,
     path: "C:\\work\\project\\AGENTS.md",
     bytes: 1200,
@@ -36,6 +37,23 @@ function info(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ProjectMemoryCard", () => {
+  /**
+   * 什么都没打开时，后端的 `workspace_root()` 会退回到进程的当前目录 —— 于是会读到**别的**
+   * 项目的 AGENTS.md，而界面照着它说"这个工作区有一份"。这条测试钉住那句话不许出现。
+   */
+  it("says to open a workspace instead of describing someone else's file", async () => {
+    invokeMock.mockResolvedValue(info({ workspaceOpen: false, bytes: 7000 }));
+
+    render(<ProjectMemoryCard />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/No workspace is open/)).toBeDefined();
+    });
+    expect(screen.queryByText(/7000/)).toBeNull();
+    // 没有可做的动作：那个按钮会把提示词指向一个用户没打开的目录
+    expect(screen.queryByText("Update it with the Agent")).toBeNull();
+  });
+
   it("says a project has no memory file, and where it would go", async () => {
     invokeMock.mockResolvedValue(info({ exists: false, bytes: 0 }));
 
@@ -61,11 +79,13 @@ describe("ProjectMemoryCard", () => {
     await waitFor(() => {
       expect(screen.getByText(/9200 bytes/)).toBeDefined();
     });
-    expect(screen.getByText(/only the first 8000/)).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByText(/only the first 8000/)).toBeDefined();
+    });
     expect(screen.getByText("Update it with the Agent")).toBeDefined();
   });
 
-  it("says the whole file is sent when it fits", async () => {
+  it("says the file fits without claiming it always reaches the model whole", async () => {
     invokeMock.mockResolvedValue(info());
 
     render(<ProjectMemoryCard />);
@@ -73,7 +93,9 @@ describe("ProjectMemoryCard", () => {
     await waitFor(() => {
       expect(screen.getByText(/1200 of 8000 bytes/)).toBeDefined();
     });
-    expect(screen.getByText(/all of it is sent/)).toBeDefined();
+    // "装得下"是事实；"每次都完整发出去"不是 —— 上下文预算和聊天里的开关都能再削它
+    expect(screen.getByText(/fits the injection bound/)).toBeDefined();
+    expect(screen.getByText(/context budget can still trim it/)).toBeDefined();
   });
 
   /** 按钮发的必须是后端给的那段提示词：前端自己编一段就会和后端的上限、文件名说不到一起。 */

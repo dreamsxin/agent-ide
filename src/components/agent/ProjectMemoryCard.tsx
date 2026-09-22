@@ -41,14 +41,20 @@ export default function ProjectMemoryCard() {
   useEffect(() => {
     void load();
   }, [load]);
-  // 起草跑完之后再读一次：那次运行可能刚好把文件写出来了
+  // 起草跑完之后再读一次：那次运行可能刚好把文件写出来了。同时清掉"已发出"那句话 ——
+  // 它描述的是刚结束的那一次，留着会在后面无关的运行里继续挂着
   useEffect(() => {
-    if (!isStreaming) void load();
+    if (!isStreaming) {
+      setSent(false);
+      void load();
+    }
   }, [isStreaming, load]);
 
   if (!isTauriRuntime()) {
     return null;
   }
+
+  const actionable = info?.workspaceOpen === true;
 
   return (
     <div className="rounded border border-surface-border bg-surface-panel p-3">
@@ -59,13 +65,14 @@ export default function ProjectMemoryCard() {
       <p className="mt-1 text-[10px] leading-relaxed text-surface-muted">
         {describe(info, error)}
       </p>
-      {info && (
+      {actionable && info && (
         <button
           type="button"
           disabled={isStreaming}
           onClick={() => {
-            setSent(true);
-            void sendPrompt({ prompt: info.draftPrompt });
+            // 先发再说"已发出"：`sendPrompt` 自己会把失败写进 store 的 error，而这里
+            // 提前显示成功会在"没配模型"时说一句彻头彻尾的假话
+            void sendPrompt({ prompt: info.draftPrompt }).then(() => setSent(true));
           }}
           title="Ask the Agent to inspect this repo and propose the file as a reviewable change"
           className="mt-2 rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
@@ -86,17 +93,23 @@ export default function ProjectMemoryCard() {
 /**
  * 一句话说清此刻是哪一种状态。
  *
- * 三种状态必须区分开：读不出来、没有这份文件、有但尾部被丢掉。三者在"规则没生效"上是一样的
- * 结果，而用户要做的事完全不同。
+ * 四种状态必须区分开：没打开工作区、读不出来、没有这份文件、有但尾部被丢掉。前三种在
+ * "规则没生效"上结果一样，而用户要做的事完全不同。
+ *
+ * "装得下"也不敢说成"全都发出去了"：上下文预算会按配额再削一次（项目记忆那一节占 15%），
+ * 聊天里还能把这一节整个关掉 —— 说成"全部发送"就又是一句用户没法验证的假话。
  */
 function describe(info: ProjectMemoryInfo | null, error: string | null): string {
   if (error) return error;
   if (!info) return "Reading the project memory status…";
+  if (!info.workspaceOpen) {
+    return "No workspace is open, so there is no project memory to read yet. Open a workspace folder first.";
+  }
   if (!info.exists) {
     return `No AGENTS.md in this workspace, so every run starts without your project's conventions — the Agent guesses the build commands and the layout. It would go to ${info.path}.`;
   }
   if (info.truncated) {
-    return `AGENTS.md is ${info.bytes} bytes, but only the first ${info.limit} are sent with every run — everything after that is dropped, and the tail is where the last rules you wrote are. Shorten it, or have the Agent tighten it.`;
+    return `AGENTS.md is ${info.bytes} bytes, but only the first ${info.limit} reach a run — everything after that is dropped, and the tail is where the last rules you wrote are. Shorten it, or have the Agent tighten it.`;
   }
-  return `AGENTS.md is ${info.bytes} of ${info.limit} bytes, and all of it is sent with every run.`;
+  return `AGENTS.md is ${info.bytes} of ${info.limit} bytes, so it fits the injection bound. A tight context budget can still trim it, and Chat can switch project memory off for one run.`;
 }
