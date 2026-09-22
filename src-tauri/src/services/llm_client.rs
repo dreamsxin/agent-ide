@@ -1287,6 +1287,9 @@ impl LlmClient {
         let mut full_response = String::new();
         let mut tool_calls = ToolCallAccumulator::default();
         let mut usage: Option<LlmUsage> = None;
+        // 流式这一侧的失败诊断素材，见循环里和收尾处的用法
+        let mut finish_reason: Option<String> = None;
+        let mut reasoning_chars: usize = 0;
         let mut stream = response.bytes_stream();
         let mut sse_buf = String::new();
 
@@ -1303,10 +1306,13 @@ impl LlmClient {
         #[derive(Deserialize)]
         struct StreamChoice {
             delta: StreamDelta,
+            /// 流式这一侧也要收它：空响应时它是唯一能区分"被输出上限截断"和"模型真的没话说"
+            /// 的线索，而这两件事的处理完全不同。
+            #[serde(default)]
+            finish_reason: Option<String>,
         }
 
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct StreamDelta {
             content: Option<String>,
             #[serde(rename = "reasoning_content")]
@@ -1355,7 +1361,17 @@ impl LlmClient {
                             }
                         }
                         for choice in &parsed.choices {
-                            // 仅取 content，跳过 reasoning_content（推理内容）
+                            if let Some(ref reason) = choice.finish_reason {
+                                if !reason.is_empty() {
+                                    finish_reason = Some(reason.clone());
+                                }
+                            }
+                            // 只把 content 转发给界面，跳过 reasoning_content（推理内容）；
+                            // 但它的**长度**要留下：一次空回答里，"思考了 14 000 字"正是
+                            // 解释发生了什么的那个数字
+                            if let Some(ref text) = choice.delta.reasoning_content {
+                                reasoning_chars += text.chars().count();
+                            }
                             if let Some(ref text) = choice.delta.content {
                                 if !text.is_empty() {
                                     if cancel_flag.load(Ordering::SeqCst) {
@@ -1379,9 +1395,27 @@ impl LlmClient {
         if let Some(ref meter) = self.usage_meter {
             meter.record_usage(usage.as_ref());
         }
+
+        let finished_tool_calls = tool_calls.finish();
+        // 流也可能在输出上限处被截断，那时 content 是空的、tool_calls 也是空的。
+        // 以前这里直接返回 Ok("")：界面上表现为 Agent "跑完了但什么都没说"，日志里一切正常，
+        // 而真正的原因（思考把输出预算吃光了）一个字都看不到。非流式那条路早就会报错，
+        // 同一个失败在两条路上必须有同一句解释。
+        if full_response.is_empty() && finished_tool_calls.is_empty() {
+            return Err(empty_response_error(
+                &self.config,
+                1,
+                &format!(
+                    "stream: finish_reason={}, content_chars=0, reasoning_chars={}, tool_calls=0",
+                    finish_reason.as_deref().unwrap_or("none"),
+                    reasoning_chars
+                ),
+            ));
+        }
+
         Ok(LlmStreamOutput {
             content: full_response,
-            tool_calls: tool_calls.finish(),
+            tool_calls: finished_tool_calls,
             usage,
         })
     }
@@ -1520,17 +1554,10 @@ impl LlmClient {
         }
 
         if content.is_none() && tool_calls.is_empty() {
-            return Err(format!(
-                "LLM response had no message content and no tool calls. {} choice(s) returned [{}]. \
-                 finish_reason=length means the output was cut off at max output tokens; a large \
-                 reasoning_chars with empty content means the model spent the whole output budget \
-                 on reasoning.",
+            return Err(empty_response_error(
+                &self.config,
                 choice_count,
-                if choice_diagnostics.is_empty() {
-                    "no choices".to_string()
-                } else {
-                    choice_diagnostics
-                }
+                &choice_diagnostics,
             ));
         }
 
@@ -2022,6 +2049,46 @@ fn output_token_key(config: &LlmConfig) -> &'static str {
     }
 }
 
+/// 一次调用什么都没产出时，把"这次的输出上限是谁定的"说清楚。
+///
+/// 这是这条错误里唯一能让用户知道下一步该改什么的信息，而方向和直觉相反：**没设** Max output
+/// 时该做的是显式设一个更大的值，而不是继续让供应商决定 —— 省略这个字段不等于"没有上限"，
+/// 只等于"上限由供应商挑"，而那个默认往往只有几 k，推理模型的思考过程一口就能吃完，于是
+/// content 是空的、finish_reason 是 length。设过上限时才是"把它调大"。
+///
+/// 单独一个纯函数而不是在两处各拼一遍：流式和非流式是同一个失败，两边措辞不一致的话，用户
+/// 会以为自己碰到的是两个不同的问题。
+fn empty_response_error(config: &LlmConfig, choice_count: usize, diagnostics: &str) -> String {
+    let budget = match config.max_output_tokens {
+        Some(limit) => format!(
+            "This request sent {}={}; raise Max output for this profile so the model has room for \
+             its reasoning *and* an answer.",
+            output_token_key(config),
+            limit
+        ),
+        None => format!(
+            "This request sent no {} at all, so the provider's own default applied — leaving Max \
+             output empty does not remove the limit, it only lets the provider pick one, and that \
+             default is often a few thousand tokens. Set Max output explicitly for this profile \
+             (a reasoning model usually needs 8k or more).",
+            output_token_key(config)
+        ),
+    };
+    format!(
+        "LLM response had no message content and no tool calls. {} choice(s) returned [{}]. \
+         finish_reason=length means the output was cut off at the output limit; a large \
+         reasoning_chars with empty content means the model spent the whole output budget on \
+         reasoning. {}",
+        choice_count,
+        if diagnostics.is_empty() {
+            "no choices"
+        } else {
+            diagnostics
+        },
+        budget
+    )
+}
+
 /// StarCoder 模型引擎
 pub struct StarCoderEngine {
     /// 保留以便真实推理引擎接入时读取模型路径与采样参数
@@ -2375,6 +2442,62 @@ mod image_wire_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cloud_config(provider: &str, model: &str, max_output_tokens: Option<u32>) -> LlmConfig {
+        LlmConfig {
+            endpoint: "https://example.invalid/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            provider: provider.to_string(),
+            max_output_tokens,
+            tool_call_mode: "text_protocol".to_string(),
+            model_type: ModelType::OpenAI,
+            local_model_config: None,
+        }
+    }
+
+    /// 空响应那条错误里唯一有用的部分是"下一步改什么"，而两种情况的答案相反。
+    ///
+    /// 没设上限时说"调大它"是错的建议 —— 字段根本没发出去，能改的是"显式设一个"；这正是
+    /// 用户读完原来那句话之后会走的错方向（"那我把 Max output 关掉试试"，而它本来就是关的）。
+    #[test]
+    fn the_empty_response_error_points_the_right_way_in_both_cases() {
+        let with_cap = empty_response_error(
+            &cloud_config("deepseek", "deepseek-reasoner", Some(1024)),
+            1,
+            "choice 0: finish_reason=length, content_chars=0, reasoning_chars=14710, tool_calls=0",
+        );
+        assert!(with_cap.contains("max_tokens=1024"), "{}", with_cap);
+        assert!(with_cap.contains("raise Max output"), "{}", with_cap);
+
+        let without_cap = empty_response_error(
+            &cloud_config("deepseek", "deepseek-reasoner", None),
+            1,
+            "choice 0: finish_reason=length, content_chars=0, reasoning_chars=14710, tool_calls=0",
+        );
+        // 关键一句：留空不等于没有上限，只等于上限由供应商挑
+        assert!(
+            without_cap.contains("does not remove the limit"),
+            "{}",
+            without_cap
+        );
+        assert!(
+            without_cap.contains("Set Max output explicitly"),
+            "{}",
+            without_cap
+        );
+        // 诊断素材必须原样带着，否则复盘时连"思考了多少"都没有
+        assert!(without_cap.contains("reasoning_chars=14710"));
+
+        // 字段名跟着模型走：o 系列上说 max_tokens 会让用户去翻一个不存在的字段
+        let o_series = empty_response_error(&cloud_config("openai", "o3-mini", Some(2048)), 1, "");
+        assert!(
+            o_series.contains("max_completion_tokens=2048"),
+            "{}",
+            o_series
+        );
+        assert!(o_series.contains("no choices"), "{}", o_series);
+    }
 
     /// 三个分支说的必须是三件不同的事。以前这段逻辑在 `commands::agent` 里要
     /// `AppHandle` 才能调用，所以"部分回报"和"全部回报"曾长期共用同一句话。

@@ -604,8 +604,9 @@ export default function SettingsPanel() {
             label="Max output"
             value={maxOutputTokens}
             onChange={setMaxOutputTokens}
-            placeholder="4096"
+            placeholder="provider default"
           />
+
           <BudgetInput
             label="Per-run cap"
             value={maxRunTokens}
@@ -620,7 +621,15 @@ export default function SettingsPanel() {
           </span>
           . This is model metadata for budgeting; current context modes still control compression strategy.
           Per-run cap stops a run once the provider-reported total tokens reach it; leave it empty for no limit.
+          {" "}
+          <span className="text-surface-text">
+            Max output is the only one that is sent to the provider.
+          </span>{" "}
+          Leaving it empty does not mean "no limit" — it means the provider picks one, and that default is
+          often a few thousand tokens. A reasoning model can spend all of it on thinking and return an empty
+          answer, so set it explicitly (8k or more) for those.
         </div>
+
       </div>
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
