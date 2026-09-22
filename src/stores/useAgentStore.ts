@@ -754,7 +754,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       isStreaming: true,
       agentRunId: runId,
       restoredSession: null,
-      currentTask: title ? { id: runId, title } : null,
+      // 标题推不出来（整段 prompt 只有空白）时保留上一轮的，而不是把它抹成 null
+      currentTask: title ? { id: runId, title } : get().currentTask,
+      // 上一轮测到的占用不属于这一轮。不清掉的话，一次没有用量回报的运行（本地
+      // runtime、mock，或者中途失败）会让界面继续显示上一轮的数字，而标签写着"这次"。
+      contextUsage: null,
     });
     persistAgentSession(get());
     try {
@@ -1145,6 +1149,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       isStreaming: true,
       agentRunId: runId,
       restoredSession: null,
+      // 见 `sendPrompt`：上一轮测到的占用不属于这一轮
+      contextUsage: null,
     });
     persistAgentSession(get());
     try {
@@ -1193,7 +1199,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   continueAgentPipeline: async () => {
-    set({ error: null, streamContent: "", isStreaming: true, restoredSession: null });
+    set({ error: null, streamContent: "", isStreaming: true, restoredSession: null, contextUsage: null });
     persistAgentSession(get());
     try {
       if (!isTauriRuntime()) {

@@ -49,7 +49,9 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
   const fileContents = useEditorStore((s) => s.fileContents);
   const selectedText = useEditorStore((s) => s.selectedText);
 
-  const title = currentTask?.title ?? "Agent Task";
+  // 没有任务时说"还没有"，不编一个像任务名的字面量：单步执行 / 续跑 / 修复都不设
+  // 标题（它们接的是已有任务），而恢复出来的会话可能根本没有任务。
+  const title = currentTask?.title ?? "No task yet";
   const canRun = agentState === "idle" || agentState === "done" || agentState === "waiting_user" || agentState === "error";
 
   const updateStepField = async (step: Step, updates: Partial<Step>) => {

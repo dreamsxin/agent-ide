@@ -60,16 +60,11 @@ export interface RunUsage {
  */
 export function normalizeContextUsage(value: unknown): ContextUsageMeasurement | null {
   if (!value || typeof value !== "object") return null;
-  const raw = value as Record<string, unknown>;
-  const count = (key: string): number => {
-    const candidate = raw[key];
-    return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
-      ? Math.floor(candidate)
-      : 0;
-  };
-  const lastTotalTokens = count("lastTotalTokens");
-  if (lastTotalTokens === 0) return null;
-  return { lastPromptTokens: count("lastPromptTokens"), lastTotalTokens };
+  const candidate = (value as Record<string, unknown>).peakTotalTokens;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) {
+    return null;
+  }
+  return { peakTotalTokens: Math.floor(candidate) };
 }
 
 export function normalizeRunUsage(value: unknown): RunUsage | null {
@@ -525,17 +520,17 @@ export interface GhostSuggestion {
 }
 
 /**
- * 上下文占用的**测量值**：来自供应商回报的最后一次请求。
+ * 上下文占用的**测量值**：这次运行里最大的那次请求，来自供应商回报的用量。
  *
  * 和 `ContextEstimateResponse` 不是一回事，也不能相加或互相校对：估算是发送前按
  * 字符推出来的、只覆盖打包进去的那几节上下文；这个是真实 token，覆盖整个请求
  * （系统提示词、工具 schema、逐阶段累积的消息都在里面）。
+ *
+ * 为什么是最大值：占用问的是"窗口最满的时候有多满"。最后一次请求会被紧随其后的小
+ * 请求顶掉 —— 下一个阶段、单步执行、自动修复都可能只发几百 token。
  */
 export interface ContextUsageMeasurement {
-  /** 最后一次请求的输入 token */
-  lastPromptTokens: number;
-  /** 输入 + 输出。上下文窗口是两者共用的，所以占用要算总数 */
-  lastTotalTokens: number;
+  peakTotalTokens: number;
 }
 
 /**

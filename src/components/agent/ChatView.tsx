@@ -619,28 +619,25 @@ export default function ChatView() {
           </div>
         )}
         {/*
-          测量值单独一行，和上面那行估算刻意不并排：上面是发送前按字符推的、只覆盖打包
+          测量值单独一块，和上面那行估算刻意区分开：上面是发送前按字符推的、只覆盖打包
           进去的那几节；这一行是供应商回报的真实 token，覆盖整个请求（系统提示词、工具
-          schema、逐阶段累积的消息都算在里面）。两个数字并排会被当成可以互相校对。
-          窗口未知或没有测到用量时整行不出现 —— 不显示比显示一个假的百分比好。
+          schema、逐阶段累积的消息都算在里面）。分母用的是模型窗口 `maxContextTokens`，
+          不是上面那行的输入预算 —— 分子含输出，拿输入预算当分母会算出超过 100% 的数。
+          窗口未知或这次运行没有测到用量时整块不出现：不显示比显示一个假的百分比好。
         */}
-        {contextUsage && selectedProfile?.effectiveInputTokens ? (
-          <div className="mb-1.5 px-0.5 text-[10px] text-surface-muted">
-            Measured last request:{" "}
+        {contextUsage && selectedProfile?.maxContextTokens ? (
+          <div className="mb-1.5 border-t border-surface-border/60 px-0.5 pt-1 text-[10px] text-surface-muted">
+            Provider-measured peak request:{" "}
             <span className="font-mono text-surface-text">
-              {contextUsage.lastTotalTokens.toLocaleString()}
+              {contextUsage.peakTotalTokens.toLocaleString()}
             </span>
             {" / "}
             <span className="font-mono text-surface-text">
-              {selectedProfile.effectiveInputTokens.toLocaleString()}
+              {selectedProfile.maxContextTokens.toLocaleString()}
             </span>{" "}
-            tokens ·{" "}
+            context tokens ·{" "}
             <span className="font-mono text-surface-text">
-              {Math.min(
-                100,
-                Math.round((contextUsage.lastTotalTokens / selectedProfile.effectiveInputTokens) * 100)
-              )}
-              %
+              {Math.round((contextUsage.peakTotalTokens / selectedProfile.maxContextTokens) * 100)}%
             </span>
           </div>
         ) : null}

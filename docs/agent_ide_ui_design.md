@@ -391,8 +391,9 @@ Apply Patch -> Editor
 
 **Task:**
 ```typescript
-{ id, title, status, steps: [], affectedFiles: [] }
+{ id, title }
 ```
+Steps live in `steps`, not on the task; see ROADMAP 118.
 
 **Step:**
 ```typescript

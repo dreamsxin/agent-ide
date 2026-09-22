@@ -1996,6 +1996,38 @@ mod tests {
     ///
     /// 超时设得很短是为了让"忘了应答"的测试不至于挂两分钟；不给 `None` 是因为生产
     /// 路径上一定有通道，测试要走的是同一条路。
+    /// 这条事件是界面上那一行"测到的占用"的唯一来源，而它的键名是驼峰序列化出来的。
+    /// 少了 `#[serde(rename_all)]`，前端的归一化会把整个载荷判成无效，那一行就永远
+    /// 不出现 —— 五条命令全绿，界面静默少一块。所以这里连键名一起钉住。
+    #[test]
+    fn the_context_meter_reaches_the_frontend_with_the_keys_it_expects() {
+        let orch = AgentOrchestrator::new();
+        let events = RecordingEvents::new();
+        let meter = crate::services::llm_client::RunUsageMeter::new(None);
+
+        // 没发过请求：连 action log 都不该有，更不该有占用
+        emit_usage_action_log(&orch, &events, &meter);
+        assert_eq!(events.count("agent-context-usage"), 0);
+
+        // 发了但供应商不报用量：有 action log，没有占用
+        meter.record_call();
+        meter.record_usage(Some(&crate::services::llm_client::LlmUsage::default()));
+        emit_usage_action_log(&orch, &events, &meter);
+        assert_eq!(events.count("agent-context-usage"), 0);
+
+        meter.record_usage(Some(&crate::services::llm_client::LlmUsage {
+            prompt_tokens: Some(12_000),
+            completion_tokens: Some(500),
+            total_tokens: None,
+        }));
+        emit_usage_action_log(&orch, &events, &meter);
+        let payload = events
+            .payloads_for("agent-context-usage")
+            .pop()
+            .expect("context usage event");
+        assert_eq!(payload["peakTotalTokens"], 12_500);
+    }
+
     fn test_approval_gate() -> crate::agent::approval::ApprovalGate {
         crate::agent::approval::ApprovalGate::new(
             crate::agent::approval::ApprovalRegistry::new(),

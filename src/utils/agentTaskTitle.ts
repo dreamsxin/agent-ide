@@ -20,6 +20,9 @@ export function deriveTaskTitle(prompt: string): string {
   if (!firstLine) return "";
 
   const collapsed = firstLine.replace(/\s+/g, " ");
-  if (collapsed.length <= MAX_TASK_TITLE_CHARS) return collapsed;
-  return `${collapsed.slice(0, TRUNCATED_TITLE_CHARS)}...`;
+  // 按码点切，不按 UTF-16 码元：`slice` 会把一个 emoji 劈成半个代理对，标题栏里
+  // 就会出现一个替换字符（U+FFFD）。中日韩字符每个是一个码元，不受影响，emoji 受。
+  const points = Array.from(collapsed);
+  if (points.length <= MAX_TASK_TITLE_CHARS) return collapsed;
+  return `${points.slice(0, TRUNCATED_TITLE_CHARS).join("")}...`;
 }

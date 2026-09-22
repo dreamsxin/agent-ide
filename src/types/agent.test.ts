@@ -272,10 +272,7 @@ describe("normalizeApprovalRequest", () => {
 
 describe("normalizeContextUsage", () => {
   it("keeps a measured request", () => {
-    expect(normalizeContextUsage({ lastPromptTokens: 12000, lastTotalTokens: 12500 })).toEqual({
-      lastPromptTokens: 12000,
-      lastTotalTokens: 12500,
-    });
+    expect(normalizeContextUsage({ peakTotalTokens: 12500 })).toEqual({ peakTotalTokens: 12500 });
   });
 
   /**
@@ -283,11 +280,13 @@ describe("normalizeContextUsage", () => {
    * mock 端点都是这样）。返回 null 才能让界面整行不显示，而不是显示一个 0%。
    */
   it("treats a zero total as no measurement at all", () => {
-    expect(normalizeContextUsage({ lastPromptTokens: 0, lastTotalTokens: 0 })).toBeNull();
-    expect(normalizeContextUsage({ lastTotalTokens: -5 })).toBeNull();
-    expect(normalizeContextUsage({ lastTotalTokens: Number.NaN })).toBeNull();
+    expect(normalizeContextUsage({ peakTotalTokens: 0 })).toBeNull();
+    expect(normalizeContextUsage({ peakTotalTokens: -5 })).toBeNull();
+    expect(normalizeContextUsage({ peakTotalTokens: Number.NaN })).toBeNull();
     expect(normalizeContextUsage(null)).toBeNull();
     expect(normalizeContextUsage("12000")).toBeNull();
+    // 后端换了键名（比如掉了 camelCase 重命名）时必须判无效，而不是渲染 0
+    expect(normalizeContextUsage({ peak_total_tokens: 12500 })).toBeNull();
   });
 });
 

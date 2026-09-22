@@ -576,13 +576,14 @@ impl TokenPricing {
 pub struct RunUsageMeter {
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
-    /// 最后一次**回报过用量**的请求的输入 token。
+    /// 这次运行里**最大**的那次请求的输入 / 输入+输出 token。
     ///
-    /// 和累加值是两回事：累加是花费，这个是占用。一次运行会发很多请求，每个请求都
-    /// 带着越来越长的 transcript，"窗口有多满"由最后那一次说了算 —— 把它们加起来
-    /// 会得到一个远超窗口的数字，看着像早就该炸了。
-    last_prompt_tokens: AtomicU64,
-    last_completion_tokens: AtomicU64,
+    /// 为什么是最大值而不是最后一次：占用问的是"窗口最满的时候有多满"。累加是花费；
+    /// 而"最后一次"会被小请求覆盖 —— 一个烧了 12 轮工具的 Coder 阶段之后，跟着的
+    /// Reviewer 阶段只发一个受 24 000 字符上限约束的小请求，单步执行和自动修复更是
+    /// 会用一个几百 token 的请求把刚才那次大请求顶掉。
+    peak_prompt_tokens: AtomicU64,
+    peak_total_tokens: AtomicU64,
     /// 发出去的供应商请求数
     calls: AtomicU64,
     /// 其中供应商回报了用量的请求数
@@ -596,13 +597,13 @@ pub struct RunUsageMeter {
 
 /// 发给界面的上下文占用测量值。见 `RunUsageSnapshot::context_meter`。
 ///
-/// 分母（模型的上下文窗口）不在这里：界面已经有 `effectiveInputTokens`，从这里再发
-/// 一份会出现两个来源，而它们迟早会不一致。
+/// 只有一个数字：这次运行里最大的那次请求。输入侧的分量没有单独发 —— 界面上没有它的
+/// 位置，发一个没人读的字段就是在攒下一次不一致。分母（模型窗口）也不在这里：界面已经
+/// 有 `maxContextTokens`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextMeter {
-    pub last_prompt_tokens: u64,
-    pub last_total_tokens: u64,
+    pub peak_total_tokens: u64,
 }
 
 /// 某一时刻的用量快照
@@ -611,9 +612,9 @@ pub struct RunUsageSnapshot {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
-    /// 最后一次回报过用量的请求的输入 / 输入+输出 token，见 `RunUsageMeter`
-    pub last_prompt_tokens: u64,
-    pub last_total_tokens: u64,
+    /// 最大那次请求的输入 / 输入+输出 token，见 `RunUsageMeter`
+    pub peak_prompt_tokens: u64,
+    pub peak_total_tokens: u64,
     pub calls: u64,
     pub reported_calls: u64,
     pub max_total_tokens: Option<u64>,
@@ -634,17 +635,16 @@ impl RunUsageSnapshot {
     /// 三条规则，都是刻意的：
     /// - 数字只来自供应商回报的用量，不来自本地估算。两者单位不同（估算是按字符推的），
     ///   放在同一个位置会让人以为它们可以互相校对。
-    /// - 取**最后一次**请求而不是累加。累加是这次运行花了多少，占用是最后那一次请求
-    ///   有多大 —— 一次 6 阶段的运行累加起来轻易超过窗口，显示出来就是一句假话。
+    /// - 取这次运行里**最大**的那次请求，不是累加也不是最后一次。累加是花费；最后一次
+    ///   会被紧随其后的小请求（下一个阶段、单步执行、自动修复）顶掉。
     /// - 一次都没回报就返回 `None`，让界面什么都不显示，而不是显示 0%。本地推理和
     ///   mock 端点从不回报用量，0% 在那里会是永久的谎。
     pub fn context_meter(&self) -> Option<ContextMeter> {
-        if self.last_total_tokens == 0 {
+        if self.peak_total_tokens == 0 {
             return None;
         }
         Some(ContextMeter {
-            last_prompt_tokens: self.last_prompt_tokens,
-            last_total_tokens: self.last_total_tokens,
+            peak_total_tokens: self.peak_total_tokens,
         })
     }
 
@@ -751,7 +751,9 @@ impl RunUsageMeter {
         Ok(())
     }
 
-    fn record_call(&self) {
+    /// 记一次发出去的请求。`pub(crate)` 是为了让命令层的测试能搭出"发过请求但供应商
+    /// 没报用量"这个状态 —— 那正是占用测量值必须缺席的那一档。
+    pub(crate) fn record_call(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -769,23 +771,21 @@ impl RunUsageMeter {
         self.prompt_tokens.fetch_add(prompt, Ordering::SeqCst);
         self.completion_tokens
             .fetch_add(completion, Ordering::SeqCst);
-        // 覆盖而不是累加：这两个字段回答的是"最后一次请求占了多少窗口"
-        self.last_prompt_tokens.store(prompt, Ordering::SeqCst);
-        self.last_completion_tokens
-            .store(completion, Ordering::SeqCst);
+        // 取最大值，见 `peak_prompt_tokens`
+        self.peak_prompt_tokens.fetch_max(prompt, Ordering::SeqCst);
+        self.peak_total_tokens
+            .fetch_max(prompt + completion, Ordering::SeqCst);
     }
 
     pub fn snapshot(&self) -> RunUsageSnapshot {
         let prompt_tokens = self.prompt_tokens.load(Ordering::SeqCst);
         let completion_tokens = self.completion_tokens.load(Ordering::SeqCst);
-        let last_prompt_tokens = self.last_prompt_tokens.load(Ordering::SeqCst);
-        let last_completion_tokens = self.last_completion_tokens.load(Ordering::SeqCst);
         RunUsageSnapshot {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
-            last_prompt_tokens,
-            last_total_tokens: last_prompt_tokens + last_completion_tokens,
+            peak_prompt_tokens: self.peak_prompt_tokens.load(Ordering::SeqCst),
+            peak_total_tokens: self.peak_total_tokens.load(Ordering::SeqCst),
             calls: self.calls.load(Ordering::SeqCst),
             reported_calls: self.reported_calls.load(Ordering::SeqCst),
             max_total_tokens: self.max_total_tokens,
@@ -2594,12 +2594,11 @@ mod tests {
         let err = meter.check_budget().unwrap_err();
         assert!(err.contains("105 of 100 tokens"), "{}", err);
 
-        // 上下文占用是**最后一次**请求，不是累加。这两个数字在这条测试里必须不同，
-        // 否则把 store 写成 fetch_add 也能过。
+        // 上下文占用取这次运行里**最大**的那次请求，既不是累加也不是最后一次。
+        // 最后一次在这条测试里是较小的那个（45 < 60），所以写成 store 会挂。
         let meter = meter.snapshot().context_meter().expect("meter");
-        assert_eq!(meter.last_prompt_tokens, 30);
-        assert_eq!(meter.last_total_tokens, 45);
-        assert_ne!(meter.last_total_tokens, snapshot.total_tokens);
+        assert_eq!(meter.peak_total_tokens, 60);
+        assert_ne!(meter.peak_total_tokens, snapshot.total_tokens);
     }
 
     /// 一次都没回报用量时不能给界面一个 0：本地 runtime 和 mock 端点从不回报，
@@ -2619,7 +2618,7 @@ mod tests {
             total_tokens: None,
         }));
         let reported = meter.snapshot().context_meter().expect("meter");
-        assert_eq!(reported.last_total_tokens, 7);
+        assert_eq!(reported.peak_total_tokens, 7);
     }
 
     /// 供应商不报用量（本地 runtime、mock）时 total 是 0。这不能被当成"没花"，
