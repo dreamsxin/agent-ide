@@ -71,18 +71,29 @@ const MAX_SEARCH_RESULTS: usize = 60;
 const MAX_WALKED_FILES: usize = 20_000;
 /// grep 单行回传的字符上限。一行 minified JS 能有几万字符
 const MAX_GREP_LINE_CHARS: usize = 200;
+/// 搜索时愿意整读进内存的单文件字节上限。
+///
+/// `read_to_string` 不看大小，一个提交进仓库的 500MB 日志/CSV 会被整份读进来只为了扫几行；
+/// 而这么大的文件里几乎不会有模型要找的源码。读取工具早就有 `MAX_READ_BYTES`，搜索没有。
+const MAX_SEARCHED_FILE_BYTES: u64 = 2_000_000;
 /// 列目录最多回传的条目数
 const MAX_LIST_ENTRIES: usize = 200;
 /// 命令输出回传给模型的字符上限。保尾部：报错在末尾
 const MAX_COMMAND_OUTPUT_CHARS: usize = 12_000;
-/// 遍历时跳过的目录：构建产物和依赖树，不是源码
-const SKIPPED_DIRS: [&str; 6] = [
+/// 遍历时跳过的目录：构建产物和依赖树，不是源码。
+///
+/// `artifacts` 在这个仓库里放的是 e2e 冻结下来的整份仓库副本（`vite.config.ts` 的
+/// `test.include` 也是为它才钉死的）：不跳过的话每个文件都会出现两次，而模型可能去引用甚至
+/// 改那份陈旧副本里的代码。
+const SKIPPED_DIRS: [&str; 8] = [
     ".git",
     "node_modules",
     "target",
     "dist",
     "build",
     ".agent-ide",
+    "artifacts",
+    "coverage",
 ];
 
 /// Agent 通过写入工具落下的一次改动。
@@ -560,6 +571,7 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                 "Find files by name pattern. `*` and `?` stay inside one path segment, `**` \
                  crosses segments, and a pattern with no `/` matches in any directory — so \
                  `*.test.ts` finds them everywhere while `src/*.ts` only finds top-level ones. \
+                 Brace expansion like {ts,tsx} is not supported: call it once per extension. \
                  Use it to locate the files a change belongs in before reading any of them."
                     .to_string(),
             parameters: serde_json::json!({
@@ -1154,7 +1166,12 @@ impl ToolInvoker for WorkspaceToolInvoker {
             ),
             GLOB_FILES => glob_files_tool(string_arg(&args, "pattern").ok_or("Missing 'pattern'")?),
             GREP_TEXT => grep_text_tool(
-                string_arg(&args, "pattern").ok_or("Missing 'pattern'")?,
+                // 正则不走 `string_arg`：它会 trim，而前后空格在正则里是有意义的 ——
+                // `" $"`（找行尾空格）被 trim 成 `"$"` 会匹配每一行
+                args.get("pattern")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .ok_or("Missing 'pattern'")?,
                 string_arg(&args, "path_glob"),
             ),
             LIST_FILES => list_files_tool(string_arg(&args, "path").unwrap_or(".")),
@@ -1445,9 +1462,27 @@ fn list_files_tool(path: &str) -> Result<String, String> {
 /// 预期，也是 ripgrep / fd 的行为。严格锚定的话 `*.ts` 只匹配根目录下的文件，而模型会以为
 /// 仓库里没有 TS 文件。
 fn glob_to_regex(pattern: &str) -> Result<regex::Regex, String> {
-    let pattern = pattern.trim();
+    // 反斜杠先归一成 `/`：候选路径一律是 `/` 分隔（见 `collect_workspace_files`），不归一的话
+    // `src\**\*.rs` 里的反斜杠会被当字面量转义，结果是"没有匹配"而不是"模式写错了" —— 模型
+    // 会据此以为仓库里没有这类文件。Windows 上模型刚读过一个反斜杠路径时就会这么写。
+    let normalized = pattern.trim().replace('\\', "/");
+    let mut pattern = normalized.as_str();
+    // 前导 `./` 和 `/` 都不可能出现在相对路径里。保留它们等于让模式必然不匹配，而这两种写法
+    // 恰恰是模型刚看过一个绝对路径之后最容易写出来的。
+    while let Some(rest) = pattern.strip_prefix("./") {
+        pattern = rest;
+    }
+    pattern = pattern.strip_prefix('/').unwrap_or(pattern);
     if pattern.is_empty() {
         return Err("The glob pattern is empty.".to_string());
+    }
+    // 花括号展开没实现，而把它当字面量是最坏的结果：`**/*.{ts,tsx}` 会安静地零命中，提示语
+    // 还会把原因指向 `**`。明确拒掉，让模型知道要分两次调用。
+    if pattern.contains('{') || pattern.contains('}') {
+        return Err(format!(
+            "Brace expansion is not supported in {:?} — call the tool once per extension, e.g. **/*.ts then **/*.tsx.",
+            pattern
+        ));
     }
     let mut expression = String::from("^");
     if !pattern.contains('/') {
@@ -1459,7 +1494,11 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex, String> {
         match chars[index] {
             '*' => {
                 let double = chars.get(index + 1) == Some(&'*');
-                if double {
+                // `**` 只有独占一整段时才跨分隔符：`src/a**` 里的它是段内通配，按 `*` 处理，
+                // 否则 `src/a**` 会匹配到 `src/abc/def.rs`，和别的 glob 实现不一致。
+                let own_segment = (index == 0 || chars[index - 1] == '/')
+                    && matches!(chars.get(index + 2), None | Some('/'));
+                if double && own_segment {
                     // `**/` 也要匹配零层目录：`**/*.ts` 必须能命中根目录下的 a.ts
                     if chars.get(index + 2) == Some(&'/') {
                         expression.push_str("(?:.*/)?");
@@ -1468,6 +1507,9 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex, String> {
                         expression.push_str(".*");
                         index += 2;
                     }
+                } else if double {
+                    expression.push_str("[^/]*");
+                    index += 2;
                 } else {
                     expression.push_str("[^/]*");
                     index += 1;
@@ -1484,8 +1526,21 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex, String> {
         }
     }
     expression.push('$');
-    regex::Regex::new(&expression)
+    // Windows 的文件系统不区分大小写，所以 `**/README.MD` 打不中 `README.md` 只会让两个读取
+    // 工具对"这个文件存不存在"给出互相矛盾的答案（`workspace_read_file` 打得开）。
+    regex::RegexBuilder::new(&expression)
+        .case_insensitive(cfg!(windows))
+        .build()
         .map_err(|error| format!("That glob does not translate to a valid pattern: {}", error))
+}
+
+/// 一次工作区遍历的结果。
+///
+/// 带 `truncated` 而不是只给文件列表：撞上上限时两个工具都会回"没有匹配"，那和"真的没有"
+/// 长得一模一样，模型会据此下结论。不完整必须说出来。
+struct WorkspaceWalk {
+    files: Vec<(String, std::path::PathBuf)>,
+    truncated: bool,
 }
 
 /// 收集工作区里可以给模型看的文件（相对路径 + 绝对路径）。
@@ -1493,23 +1548,45 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex, String> {
 /// 跳过的目录和凭据文件与搜索、读取工具完全一致 —— 三个工具各写一份过滤规则的话，总有一个
 /// 会漏掉 `.env`，而那一个就是泄漏点。上限存在是因为一个大仓库能有几十万个文件，把它们全
 /// 收进内存只为了丢掉绝大多数。
-fn collect_workspace_files(root: &Path, dir: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
-    if out.len() >= MAX_WALKED_FILES {
+fn collect_workspace_files(root: &Path) -> WorkspaceWalk {
+    let mut walk = WorkspaceWalk {
+        files: Vec::new(),
+        truncated: false,
+    };
+    collect_workspace_files_into(root, root, &mut walk);
+    walk
+}
+
+fn collect_workspace_files_into(root: &Path, dir: &Path, walk: &mut WorkspaceWalk) {
+    if walk.files.len() >= MAX_WALKED_FILES {
+        walk.truncated = true;
         return;
     }
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in read_dir.flatten() {
-        if out.len() >= MAX_WALKED_FILES {
+    // 按名字排序再遍历：`read_dir` 的顺序由文件系统决定，不排的话同一个模式两次调用可能给出
+    // 不同顺序，撞上上限时留下的还是不同的那两万个文件。
+    let mut entries: Vec<_> = read_dir.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if walk.files.len() >= MAX_WALKED_FILES {
+            walk.truncated = true;
             return;
         }
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        if is_dir {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // 符号链接一律跳过：它可以指到工作区外（`notes.txt -> ~/.ssh/id_rsa`），而只检查链接
+        // 名字的凭据过滤看不出来，读出来的内容还会挂着一个看起来在工作区内的路径。
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             if !SKIPPED_DIRS.contains(&name.as_str()) {
-                collect_workspace_files(root, &path, out);
+                collect_workspace_files_into(root, &path, walk);
             }
             continue;
         }
@@ -1521,7 +1598,7 @@ fn collect_workspace_files(root: &Path, dir: &Path, out: &mut Vec<(String, std::
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        out.push((relative, path));
+        walk.files.push((relative, path));
     }
 }
 
@@ -1529,19 +1606,24 @@ fn collect_workspace_files(root: &Path, dir: &Path, out: &mut Vec<(String, std::
 fn glob_files_tool(pattern: &str) -> Result<String, String> {
     let matcher = glob_to_regex(pattern)?;
     let root = workspace::workspace_root()?;
-    let mut files = Vec::new();
-    collect_workspace_files(&root, &root, &mut files);
+    let walk = collect_workspace_files(&root);
 
-    let mut hits: Vec<String> = files
+    let mut hits: Vec<String> = walk
+        .files
         .into_iter()
         .filter(|(relative, _)| matcher.is_match(relative))
         .map(|(relative, _)| relative)
         .collect();
     if hits.is_empty() {
-        return Ok(format!(
+        let mut message = format!(
             "No files match {:?}. Remember that `*` does not cross directories — use `**/` for that.",
             pattern
-        ));
+        );
+        if walk.truncated {
+            message.push('\n');
+            message.push_str(&walk_truncated_note());
+        }
+        return Ok(message);
     }
     // 排序让同一个模式两次调用给出同一个顺序：模型会按"第一个"来引用结果
     hits.sort();
@@ -1550,7 +1632,20 @@ fn glob_files_tool(pattern: &str) -> Result<String, String> {
     if truncated {
         hits.push("... [more files omitted; narrow the pattern]".to_string());
     }
+    if walk.truncated {
+        hits.push(walk_truncated_note());
+    }
     Ok(hits.join("\n"))
+}
+
+/// 遍历撞上 `MAX_WALKED_FILES` 时附在结果末尾的说明。
+///
+/// 上限写在格式串里而不是抄一遍数字：抄的那份迟早和常量对不上。
+fn walk_truncated_note() -> String {
+    format!(
+        "... [the walk stopped at {} files, so this result may be incomplete; search a subdirectory]",
+        MAX_WALKED_FILES
+    )
 }
 
 /// 按正则搜内容，返回 `path:line: text`。
@@ -1566,18 +1661,23 @@ fn grep_text_tool(pattern: &str, path_glob: Option<&str>) -> Result<String, Stri
         None => None,
     };
     let root = workspace::workspace_root()?;
-    let mut files = Vec::new();
-    collect_workspace_files(&root, &root, &mut files);
+    let walk = collect_workspace_files(&root);
 
     let mut matches: Vec<String> = Vec::new();
-    for (relative, path) in files {
-        if matches.len() >= MAX_SEARCH_RESULTS {
+    // 多收一条再判断：正好 60 条时 `len() >= 60` 分不出"刚好装满"和"还有更多"，于是会让
+    // 模型去缩小一个已经返回了全部结果的模式
+    let probe = MAX_SEARCH_RESULTS + 1;
+    for (relative, path) in walk.files {
+        if matches.len() >= probe {
             break;
         }
         if let Some(matcher) = &path_matcher {
             if !matcher.is_match(&relative) {
                 continue;
             }
+        }
+        if !is_searchable_size(&path) {
+            continue;
         }
         // 二进制文件读不成 UTF-8，跳过而不是报错 —— 和 `search_text_tool` 一致
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1599,19 +1699,39 @@ fn grep_text_tool(pattern: &str, path_glob: Option<&str>) -> Result<String, Stri
                 trimmed.to_string()
             };
             matches.push(format!("{}:{}: {}", relative, index + 1, shown));
-            if matches.len() >= MAX_SEARCH_RESULTS {
+            if matches.len() >= probe {
                 break;
             }
         }
     }
 
     if matches.is_empty() {
-        return Ok(format!("No matches for /{}/", pattern));
+        let mut message = format!("No matches for /{}/", pattern);
+        if walk.truncated {
+            message.push('\n');
+            message.push_str(&walk_truncated_note());
+        }
+        return Ok(message);
     }
-    if matches.len() >= MAX_SEARCH_RESULTS {
+    let omitted = matches.len() > MAX_SEARCH_RESULTS;
+    matches.truncate(MAX_SEARCH_RESULTS);
+    if omitted {
         matches.push("... [more matches omitted; narrow the pattern]".to_string());
     }
+    if walk.truncated {
+        matches.push(walk_truncated_note());
+    }
     Ok(matches.join("\n"))
+}
+
+/// 这个文件小到值得整读进来搜吗。
+///
+/// 拿不到元数据时按"可以"处理：读失败会在下一步被跳过，而因为 `metadata` 失败就漏搜一个
+/// 正常文件是更糟的结果。
+fn is_searchable_size(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|data| data.len() <= MAX_SEARCHED_FILE_BYTES)
+        .unwrap_or(true)
 }
 
 fn search_text_tool(query: &str, extension: Option<&str>) -> Result<String, String> {
@@ -1648,8 +1768,15 @@ fn walk_and_match(
         }
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        if is_dir {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // 符号链接一律跳过，理由同 `collect_workspace_files_into`：链接能指到工作区外，
+        // 而只看链接名字的凭据过滤拦不住它
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             if !SKIPPED_DIRS.contains(&name.as_str()) {
                 walk_and_match(root, &path, query, extension, matches);
             }
@@ -1663,6 +1790,9 @@ fn walk_and_match(
             if path.extension().and_then(|value| value.to_str()) != Some(extension) {
                 continue;
             }
+        }
+        if !is_searchable_size(&path) {
+            continue;
         }
         // 二进制文件读不成 UTF-8，直接跳过而不是报错
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -3504,6 +3634,30 @@ mod tests {
         assert!(glob_to_regex("   ").is_err());
     }
 
+    /// 模型会照着它刚看过的路径写模式：Windows 上是反斜杠，读过绝对路径之后是前导 `/`，
+    /// 想一次找两种扩展名时是 `{ts,tsx}`。前两种必须照样命中，第三种必须报错 ——
+    /// 把它们当字面量的结果是"零命中"，而模型会据此认定仓库里没有这类文件。
+    #[test]
+    fn a_glob_accepts_the_shapes_a_model_actually_writes() {
+        let back = glob_to_regex("src\\**\\*.rs").expect("valid");
+        assert!(back.is_match("src/agent/tools.rs"));
+
+        let rooted = glob_to_regex("/src/*.ts").expect("valid");
+        assert!(rooted.is_match("src/a.ts"));
+
+        let dotted = glob_to_regex("./src/*.ts").expect("valid");
+        assert!(dotted.is_match("src/a.ts"));
+
+        // 花括号是明确的错误，不是"没有匹配"
+        let braced = glob_to_regex("**/*.{ts,tsx}").unwrap_err();
+        assert!(braced.contains("Brace expansion"), "{}", braced);
+
+        // `**` 只有独占一整段才跨分隔符
+        let mid = glob_to_regex("src/a**").expect("valid");
+        assert!(mid.is_match("src/abc"));
+        assert!(!mid.is_match("src/abc/def.rs"));
+    }
+
     /// 两个只读搜索工具都必须过同一套过滤：跳过的目录、凭据文件。
     ///
     /// 三个搜索工具各写一份过滤规则的话，总有一个会漏掉 `.env` —— 而那一个就是泄漏点。
@@ -3531,6 +3685,70 @@ mod tests {
         // 同理：没命中的提示语里带着模式本身，所以断言"没命中"外加"没有任何 .env 的行号行"
         assert!(by_content.contains("No matches"), "{}", by_content);
         assert!(!by_content.contains(".env:"), "{}", by_content);
+    }
+
+    /// 过滤规则必须是"同一套"，而不是"看起来一样的三套"。
+    ///
+    /// 上一个测试写的是手算出来的期望值：只有一个工具的过滤漂了，它照样会通过。这里让两条
+    /// 独立的遍历路径（`collect_workspace_files` 和 `walk_and_match`）搜同一个词，比它们
+    /// 各自看见了哪些文件。
+    #[test]
+    fn both_walkers_see_the_same_files() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        let needle = "shared-needle";
+        env.write("src/app.ts", "const a = 'shared-needle';\n");
+        env.write("docs/notes.md", "shared-needle appears here too\n");
+        env.write(".env", "TOKEN=shared-needle\n");
+        env.write("node_modules/dep/index.ts", "const d = 'shared-needle';\n");
+        env.write("dist/bundle.js", "var x='shared-needle';\n");
+        env.write("artifacts/e2e/copy/app.ts", "const a = 'shared-needle';\n");
+
+        let old_paths = files_in(&search_text_tool(needle, None).expect("search runs"));
+        let new_paths = files_in(&grep_text_tool(needle, None).expect("grep runs"));
+        assert_eq!(
+            old_paths, new_paths,
+            "two walkers disagree on what is visible"
+        );
+        assert_eq!(
+            old_paths,
+            vec!["docs/notes.md".to_string(), "src/app.ts".to_string()],
+            "a skipped directory or a credential file became visible"
+        );
+    }
+
+    /// 从 `path:line: text` 结果里取出去重排序后的路径集合
+    fn files_in(output: &str) -> Vec<String> {
+        let mut paths: Vec<String> = output
+            .lines()
+            .filter_map(|line| line.split(':').next())
+            .filter(|path| path.contains('/') || path.contains('.'))
+            .map(str::to_string)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// 正好装满上限时不能说"还有更多"。
+    ///
+    /// 让模型去缩小一个已经返回了全部结果的模式，它会一直缩，而它本来已经拿到了全部。
+    #[test]
+    fn grep_only_claims_omission_when_it_omitted_something() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        let exact: String = (0..MAX_SEARCH_RESULTS)
+            .map(|_| "needle\n")
+            .collect::<String>();
+        env.write("src/exact.txt", &exact);
+
+        let full = grep_text_tool("needle", Some("src/exact.txt")).expect("grep runs");
+        assert_eq!(full.lines().count(), MAX_SEARCH_RESULTS, "{}", full);
+        assert!(!full.contains("omitted"), "{}", full);
+
+        env.write("src/more.txt", "needle\n");
+        let over = grep_text_tool("needle", Some("src/*.txt")).expect("grep runs");
+        assert!(over.contains("more matches omitted"), "{}", over);
     }
 
     /// grep 的价值在于"形状"而不是子串，所以正则要真的当正则用；而一个写坏的正则要
