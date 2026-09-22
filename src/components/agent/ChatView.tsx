@@ -225,6 +225,8 @@ export default function ChatView() {
   const updateActiveSddMarkdown = useAgentStore((s) => s.updateActiveSddMarkdown);
   const saveActiveSdd = useAgentStore((s) => s.saveActiveSdd);
   const promoteSddToCodePrompt = useAgentStore((s) => s.promoteSddToCodePrompt);
+  // 只为了重新估算而订阅：对话历史是后端上下文里的一节，改了它数字就该跟着变
+  const conversationTurns = useAgentStore((s) => s.conversationTurns);
   const [input, setInput] = useState("");
   // 失败后重试要重发的是失败的那条 prompt，不是输入框里当时碰巧有什么。
   // 原来 Retry 的 onClick 就是 handleSend、disabled 是 !input.trim()，而
@@ -352,6 +354,9 @@ export default function ChatView() {
     [contextOptions, problems, logs, taskRuns, terminalOutput]
   );
 
+  // 依赖里也带上 `turns`：对话历史是后端上下文里的一节，而 Clear / Cut from here 这两个
+  // 控件的全部作用就是改它。不依赖它的话，用户切掉三轮之后面板上的数字一动不动 ——
+  // 一个按了之后没有任何反应的控件，比没有这个控件更糟。
   useEffect(() => {
     let cancelled = false;
     const ctx = buildContext();
@@ -375,7 +380,7 @@ export default function ChatView() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory, ideRuntimeText]);
+  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory, ideRuntimeText, conversationTurns]);
 
   // 运行失败时把 prompt 放回输入框，Retry 才有可发的东西
   useEffect(() => {

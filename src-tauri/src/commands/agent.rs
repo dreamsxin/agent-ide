@@ -380,16 +380,9 @@ pub async fn send_agent_prompt(
     //
     // 写权限只跟 Auto 模式挂钩，且在这里就取好快照：Auto 本来就会在流水线结束后
     // 自动落盘，运行途中写不构成新的特权等级；Suggest 的约定是"人先看再落盘"。
-    //
-    // 对话历史顺便在同一个临界区里取。放在抢执行权之前是安全的：写历史的只有
-    // 持有执行权的那条路径，所以这一刻要么没人在跑（历史不会变），要么有人在跑而
-    // 下面的 `claim_run_for` 会直接拒掉这次请求。
-    let (allow_write, conversation) = {
+    let allow_write = {
         let orch = agent_state.orchestrator.lock().await;
-        (
-            matches!(orch.mode, AgentMode::Auto),
-            orch.conversation_digest(),
-        )
+        matches!(orch.mode, AgentMode::Auto)
     };
     let mut tool_permissions = agent_tool_permissions(
         request.allow_command_run,
@@ -426,20 +419,9 @@ pub async fn send_agent_prompt(
         tool_permissions.clone(),
     );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
-
-    let mut context = build_agent_context(
-        request.active_file,
-        request.active_file_content,
-        request.selection,
-        request.context_files,
-        request.ide_runtime,
-        // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
-        conversation,
-    );
     let context_sources = request
         .context_sources
         .unwrap_or_else(default_context_sources);
-    context.enrich_from_workspace_with_sources(&context_sources);
     let compression = resolve_context_compression(
         &agent_state.context_compression,
         request.context_compression.as_deref(),
@@ -458,7 +440,7 @@ pub async fn send_agent_prompt(
         .unwrap_or(IdeMode::Code);
     // 只在准备阶段持锁。运行本身由 `drive_run` 自己按阶段短持锁 —— 整段持锁会让
     // stop / apply / 状态查询全部排在模型调用后面。
-    let lease = {
+    let (lease, conversation) = {
         let mut orch = agent_state.orchestrator.lock().await;
         // 抢执行权要在改任何字段之前：抢不到就说明已经有运行在跑，这时候
         // 覆写它的工具面或记账器会把那次运行改坏。开关从授权里取，见 `claim_run_for`
@@ -468,9 +450,27 @@ pub async fn send_agent_prompt(
         orch.tool_permissions = tool_permissions.clone();
         orch.allow_file_create = request.allow_file_create;
         orch.start_usage_accounting(usage_meter.clone());
-        lease
+        // 历史必须和抢执行权在**同一个**临界区里取。`truncate_agent_conversation` /
+        // `clear_agent_conversation` 不需要执行权就能改历史，所以只要这两件事分开，
+        // 用户点了"切掉这一轮"之后启动的这次运行仍然会把那几轮发出去 —— 界面上
+        // 已经没有了，模型还在看着。
+        (lease, orch.conversation_digest())
     };
     let claim = lease.claim;
+
+    // 上下文在抢到执行权之后再装：`enrich_from_workspace_with_sources` 要读项目树、
+    // 跑一次 git diff，抢不到执行权时那些都是白干的。
+    let mut context = build_agent_context(
+        request.active_file,
+        request.active_file_content,
+        request.selection,
+        request.context_files,
+        request.ide_runtime,
+        // 把之前几轮喂回去：没有这一步每次 prompt 都是冷启动
+        conversation,
+    );
+    context.enrich_from_workspace_with_sources(&context_sources);
+
     let prompt_for_history = request.prompt.clone();
     let outcome = crate::agent::orchestrator::drive_run(
         &agent_state.orchestrator,
@@ -986,14 +986,10 @@ pub async fn run_agent_step(
     // 内置只读工作区工具：让模型自己决定读哪些文件，而不是只能吃预打包的上下文
     // 单步执行也走同一套授权：写权限只跟 Auto 模式挂钩
     //
-    // 历史和写权限同一个临界区取。单步以前不带历史：用户点"重跑这一步"想表达的
-    // "按刚才说的改"，在这条路径上永远丢掉，模型只看到步骤标题。
-    let (allow_write, conversation) = {
+    // 历史不在这里取：它必须和抢执行权同一个临界区，见下面的 `lease` 块。
+    let allow_write = {
         let orch = agent_state.orchestrator.lock().await;
-        (
-            matches!(orch.mode, AgentMode::Auto),
-            orch.conversation_digest(),
-        )
+        matches!(orch.mode, AgentMode::Auto)
     };
     let mut tool_permissions = agent_tool_permissions(
         request.allow_command_run,
@@ -1029,27 +1025,13 @@ pub async fn run_agent_step(
         tool_permissions.clone(),
     );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
-    let mut context = build_agent_context(
-        request.active_file,
-        request.active_file_content,
-        request.selection,
-        request.context_files,
-        // 流水线的每一步是 Agent 自己在跑，IDE 那一刻的问题面板/终端不是这一步的输入
-        None,
-        conversation,
-    );
     let context_sources = request
         .context_sources
         .unwrap_or_else(default_context_sources);
-    context.enrich_from_workspace_with_sources(&context_sources);
     let compression = resolve_context_compression(
         &agent_state.context_compression,
         request.context_compression.as_deref(),
     )?;
-    let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
-        compression.clone(),
-        context_budget,
-    ));
     let step = request.step;
     let step_prompt =
         agent_runtime::format_single_step_prompt(&step, request.extra_prompt.as_deref());
@@ -1062,7 +1044,7 @@ pub async fn run_agent_step(
         }
     });
 
-    let lease = {
+    let (lease, conversation) = {
         let mut orch = agent_state.orchestrator.lock().await;
         // 单步执行也要抢执行权：它同样改 steps / diffs / 状态机，还会换掉工具面
         // 和记账器。以前这里直接 begin_run，等于绕过守卫从一次流水线运行手里抢走
@@ -1088,10 +1070,28 @@ pub async fn run_agent_step(
                 compression
             ),
         );
-        lease
+        // 历史和执行权同一个临界区取，理由见 `send_agent_prompt` 里那一段
+        (lease, orch.conversation_digest())
     };
     let claim = lease.claim;
     let cancel_flag = lease.cancel;
+
+    // 单步以前不带历史：用户点"重跑这一步"想表达的"按刚才说的改"在这条路径上
+    // 永远丢掉，模型只看到步骤标题。装在抢到执行权之后，抢不到就不必读项目树和 git。
+    let mut context = build_agent_context(
+        request.active_file,
+        request.active_file_content,
+        request.selection,
+        request.context_files,
+        // 流水线的每一步是 Agent 自己在跑，IDE 那一刻的问题面板/终端不是这一步的输入
+        None,
+        conversation,
+    );
+    context.enrich_from_workspace_with_sources(&context_sources);
+    let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
+        compression.clone(),
+        context_budget,
+    ));
 
     let response = crate::agent::executor::execute_step(
         &llm,
@@ -1142,10 +1142,17 @@ pub async fn run_agent_step(
             // 一步步点 Run"这条完整的用法从头到尾不留任何历史 —— 下一句"再改一下"
             // 是冷启动，`verify_workspace` / `repair_workspace` 的"原始任务描述"兜底
             // 也没得可兜。记在 `record_step_success` 之后，结果里才看得到这一步的 diff。
-            orch.record_conversation_turn(&single_step_history_prompt(
-                &step,
-                request.extra_prompt.as_deref(),
-            ));
+            //
+            // 带上这一步自己的贡献：`turn_outcome` 说的是"审查区现在有哪些文件"，
+            // 连着跑三步会出现三条一模一样的 result，反而看不出哪一步干了什么。
+            orch.record_step_turn(
+                &single_step_history_prompt(&step, request.extra_prompt.as_deref()),
+                &format!(
+                    "this step added {} file diff{}",
+                    outcome.new_diffs,
+                    if outcome.new_diffs == 1 { "" } else { "s" }
+                ),
+            );
             finish_agent_run(
                 &mut orch,
                 &app_handle,
@@ -1317,7 +1324,7 @@ pub async fn continue_agent_pipeline(
                 &llm,
                 claim,
             );
-            orch.record_continued_turn(&continued_prompt);
+            orch.record_continued_turn(&continued_prompt, None);
             Ok("Agent pipeline continued".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
@@ -1547,7 +1554,7 @@ pub async fn verify_workspace(
     // 这条规则在三个命令里只有一处实现。
     let last_turn = {
         let orch = agent_state.orchestrator.lock().await;
-        orch.conversation.last().map(|turn| turn.prompt.clone())
+        orch.last_task_prompt()
     };
     let original_prompt = resolve_original_prompt(request.original_prompt, last_turn);
 
@@ -1627,10 +1634,8 @@ pub async fn repair_workspace(
         repair_permissions.reset_image_budget();
         let lease = claim_run_for(&mut orch, last_run_id, &mut repair_permissions)?;
         let tool_policy = orch.tool_policy;
-        let original_prompt = resolve_original_prompt(
-            request.original_prompt,
-            orch.conversation.last().map(|turn| turn.prompt.clone()),
-        );
+        let original_prompt =
+            resolve_original_prompt(request.original_prompt, orch.last_task_prompt());
         orch.start_usage_accounting(usage_meter.clone());
         (lease, original_prompt, repair_permissions, tool_policy)
     };
@@ -1692,9 +1697,23 @@ pub async fn repair_workspace(
     let outcome = outcome?;
 
     // 修复轮次会真的落盘，这件事必须进历史，否则下一句 prompt 看到的还是修复之前的
-    // 世界。走 `record_continued_turn`：任务描述和上一轮相同（最常见的情况，描述就是
-    // 从上一轮兜底来的）就只更新结果，调用方自己给了另一段描述才算新的一问。
-    orch.record_continued_turn(&prompt_for_history);
+    // 世界。走 `record_continued_turn`：任务描述和某一轮相同（最常见的情况，描述就是
+    // 从那一轮兜底来的）就只更新结果，一轮都对不上才算新的一问。
+    //
+    // 两种情况**不**记：一次也没迭代（检查一上来就全过了，没有模型调用、没有改动，
+    // 记一轮等于在历史里造一个没发生的回合）；描述是那句占位符（它的用处是让人一眼
+    // 看出"没有记录"，存成一轮之后它就成了下一次的"原始任务描述"，一句诊断用的话
+    // 被洗成了真实任务）。
+    if outcome.iterations > 0 && prompt_for_history != ORIGINAL_PROMPT_UNKNOWN {
+        orch.record_continued_turn(
+            &prompt_for_history,
+            Some(&format!(
+                "repair ran {} iteration{}",
+                outcome.iterations,
+                if outcome.iterations == 1 { "" } else { "s" }
+            )),
+        );
+    }
 
     Ok(RepairWorkspaceReport {
         iterations: outcome.iterations,
@@ -1733,7 +1752,7 @@ pub async fn agent_repair_prompt(
 
     let last_turn = {
         let orch = agent_state.orchestrator.lock().await;
-        orch.conversation.last().map(|turn| turn.prompt.clone())
+        orch.last_task_prompt()
     };
     let original_prompt = resolve_original_prompt(request.original_prompt, last_turn);
 
@@ -1874,15 +1893,33 @@ fn format_diff_list_details(diffs: &[FileDiff]) -> String {
 
 /// 单步执行进历史时记的是"人能看懂的那一句"，不是喂给模型的那份模板。
 ///
-/// `format_single_step_prompt` 产出的是带角色、约束、输出格式的整段提示词；把它塞进
-/// 历史，6 轮的摘要预算会被模板吃光，而下一轮真正需要的信息（这一步干了什么）在
-/// 400 字截断里恰好被切掉。
+/// `format_single_step_prompt` 产出的是带步骤类型、范围、执行模式和输出规则的整段
+/// 提示词。历史每轮只有 400 字，全填模板等于把这个窗口浪费掉。
+///
+/// 补充说明也要限长，而且只取第一行：`regenerateDiff` 传进来的 `extraPrompt` 是
+/// 一整段 hunk JSON 加整份文件内容，原样记下来就是往历史里塞一坨源码，之后每次
+/// prompt 都会把它再发一遍 —— 和记模板是同一个错，只是从另一个参数进来。
 fn single_step_history_prompt(step: &TaskStep, extra: Option<&str>) -> String {
-    match extra.map(str::trim).filter(|value| !value.is_empty()) {
+    let extra = extra
+        .and_then(|value| value.lines().find(|line| !line.trim().is_empty()))
+        .map(str::trim)
+        .map(|line| {
+            if line.chars().count() > MAX_STEP_EXTRA_CHARS {
+                let head: String = line.chars().take(MAX_STEP_EXTRA_CHARS).collect();
+                format!("{}…", head)
+            } else {
+                line.to_string()
+            }
+        });
+    match extra {
         Some(extra) => format!("Ran step: {} — {}", step.title, extra),
         None => format!("Ran step: {}", step.title),
     }
 }
+
+/// 步骤补充说明进历史时的字符上限。留得比 400 小得多：这一行的用处是"当时还额外
+/// 交代了什么"，步骤标题才是主语。
+const MAX_STEP_EXTRA_CHARS: usize = 100;
 
 /// 对话历史是**必填参数**，不是可以忘的字段。
 ///
@@ -2489,9 +2526,10 @@ mod tests {
         assert!(prompt.contains("Use more context"));
     }
 
-    /// 历史里那一行是给人和下一轮模型看的一句话，不能是整段提示词模板。
+    /// 历史里那一行是给人和下一轮模型看的一句话，不能是整段提示词模板，
+    /// 也不能是调用方顺手塞进来的一整份文件。
     #[test]
-    fn a_step_enters_history_as_a_sentence_not_as_the_template() {
+    fn a_step_enters_history_as_a_bounded_sentence() {
         let step = TaskStep {
             id: "s1".to_string(),
             title: "Fix parser".to_string(),
@@ -2503,16 +2541,40 @@ mod tests {
         };
 
         let recorded = single_step_history_prompt(&step, Some("Use more context"));
-        assert!(recorded.contains("Fix parser"), "{}", recorded);
-        assert!(recorded.contains("Use more context"), "{}", recorded);
+        assert_eq!(recorded, "Ran step: Fix parser — Use more context");
         // 模板里的字段名不该进历史：它们占的是那 400 字的额度
-        let template = agent_runtime::format_single_step_prompt(&step, Some("Use more context"));
-        assert!(template.len() > recorded.len() * 2, "{}", template);
         assert!(!recorded.contains("Execution mode"), "{}", recorded);
 
+        // `regenerateDiff` 传的是 hunk JSON 加整份文件内容。只留第一行、且限长，
+        // 否则历史里会存一坨源码，而且之后每次 prompt 都把它再发一遍。
+        let slab = format!(
+            "Regenerate these hunks:\n{}\nCurrent file content:\n{}",
+            "{ \"original\": \"const a = 1;\" }",
+            "const a = 1;\n".repeat(200)
+        );
+        let bounded = single_step_history_prompt(&step, Some(&slab));
+        assert!(
+            bounded.chars().count() < 150,
+            "{} chars: {}",
+            bounded.chars().count(),
+            bounded
+        );
+        assert!(
+            bounded.starts_with("Ran step: Fix parser — "),
+            "{}",
+            bounded
+        );
+        assert!(!bounded.contains("Current file content"), "{}", bounded);
+
         // 没有补充说明时不留一个空的分隔符
-        let plain = single_step_history_prompt(&step, Some("   "));
-        assert_eq!(plain, single_step_history_prompt(&step, None));
+        assert_eq!(
+            single_step_history_prompt(&step, Some("   ")),
+            single_step_history_prompt(&step, None)
+        );
+        assert_eq!(
+            single_step_history_prompt(&step, None),
+            "Ran step: Fix parser"
+        );
     }
 
     #[test]
@@ -2772,6 +2834,13 @@ pub fn get_workspace_path() -> Result<Option<String>, String> {
     workspace::load_workspace_path()
 }
 
+/// 没有任何任务描述可用时放进提示词的占位串。
+///
+/// 刻意是一句认得出来的话而不是空串，也因此**不能**被当成一轮真实历史存起来：
+/// 存下去之后它就成了下一次的"原始任务描述"，一句诊断用的话被洗成了真实任务。
+/// 见 `repair_workspace`。
+pub const ORIGINAL_PROMPT_UNKNOWN: &str = "(original task not recorded)";
+
 /// 修复/验证提示里那句"用户原本要什么"。
 ///
 /// `verify_workspace`、`repair_workspace`、`agent_repair_prompt` 三个命令都要这个值，
@@ -2784,7 +2853,7 @@ pub fn get_workspace_path() -> Result<Option<String>, String> {
 fn resolve_original_prompt(requested: Option<String>, last_turn: Option<String>) -> String {
     match requested {
         Some(prompt) if !prompt.trim().is_empty() => prompt,
-        _ => last_turn.unwrap_or_else(|| "(original task not recorded)".to_string()),
+        _ => last_turn.unwrap_or_else(|| ORIGINAL_PROMPT_UNKNOWN.to_string()),
     }
 }
 

@@ -266,6 +266,14 @@ pub struct ConversationTurn {
     pub id: String,
     pub prompt: String,
     pub outcome: String,
+    /// 这一轮是从一次步骤执行派生出来的，不是用户自己提的那一问。
+    ///
+    /// 单步跑完也要进历史（否则"生成计划 → 一步步点 Run"全程没有历史），但它不能
+    /// 充当"原始任务描述"：六步的计划一步步跑完，头部淘汰会把用户真正那一问挤掉，
+    /// 之后 verify / repair 的兜底就会拿着 `Ran step: 加测试` 当任务描述喂给模型 ——
+    /// 比"没有记录"更糟，因为它看起来像真的。
+    #[serde(default)]
+    pub derived: bool,
 }
 
 /// 保留的对话轮数
@@ -966,14 +974,27 @@ impl AgentOrchestrator {
 
     /// 记一轮已完成的对话。结果由当前状态推导，命令层不需要拼摘要。
     pub fn record_conversation_turn(&mut self, prompt: &str) {
-        let outcome = self.turn_outcome();
+        self.push_turn(prompt, false, None);
+    }
+
+    /// 记一轮由步骤执行派生出来的历史。
+    ///
+    /// `note` 说这一步自己贡献了什么。没有它，结果一栏就只有"审查区现在有哪些文件"，
+    /// 连着跑三步会出现三条一模一样的 result，哪一步干了什么反而看不出来。
+    pub fn record_step_turn(&mut self, prompt: &str, note: &str) {
+        self.push_turn(prompt, true, Some(note));
+    }
+
+    fn push_turn(&mut self, prompt: &str, derived: bool, note: Option<&str>) {
+        let outcome = self.turn_outcome_with(note);
 
         let id = format!("turn-{}", self.next_turn_id);
         self.next_turn_id = self.next_turn_id.wrapping_add(1);
         self.conversation.push(ConversationTurn {
             id,
             prompt: summarize_text(prompt.trim(), MAX_TURN_PROMPT_CHARS),
-            outcome: summarize_text(&outcome, MAX_TURN_OUTCOME_CHARS),
+            outcome,
+            derived,
         });
         // 只留末尾若干轮：早期的轮次对"接着上一句"没什么帮助，却一直占预算
         if self.conversation.len() > MAX_CONVERSATION_TURNS {
@@ -982,19 +1003,47 @@ impl AgentOrchestrator {
         }
     }
 
+    fn turn_outcome_with(&self, note: Option<&str>) -> String {
+        let outcome = match note {
+            Some(note) => format!("{} ({})", self.turn_outcome(), note),
+            None => self.turn_outcome(),
+        };
+        summarize_text(&outcome, MAX_TURN_OUTCOME_CHARS)
+    }
+
     /// 接着同一问继续干完之后更新历史：续跑流水线、自动修复走这里。
     ///
     /// 不无条件 push 新的一轮：续跑接的是暂停前那一问，暂停时那一轮已经记过了，
-    /// 再记一条会让历史里出现两条一模一样的 `asked:`，而摘要有 6 轮的上限 —— 重复
-    /// 挤掉的是真正不同的那几轮。命中同一问就只改写结果（暂停时是"没有文件改动"，
-    /// 干完了才有落盘），对不上（例如修复时调用方自己给了任务描述）才算新的一问。
-    pub fn record_continued_turn(&mut self, prompt: &str) {
-        let outcome = summarize_text(&self.turn_outcome(), MAX_TURN_OUTCOME_CHARS);
+    /// 再记一条会让历史里出现两条一模一样的 `asked:`，而摘要只有 6 轮的窗口 ——
+    /// 重复挤掉的是真正不同的那几轮。
+    ///
+    /// 从后往前找而不是只看最后一轮：暂停期间用户完全可以先问别的（暂停快照不会
+    /// 因此失效，Continue 还在），那时要更新的是中间那一轮。只看 `last` 会把它
+    /// 当成新的一问再记一条，于是同一问两条历史、其中一条的结果永远停在暂停那一刻。
+    /// 一轮都对不上（例如修复时调用方自己给了任务描述）才算新的一问。
+    pub fn record_continued_turn(&mut self, prompt: &str, note: Option<&str>) {
+        let outcome = self.turn_outcome_with(note);
         let asked = summarize_text(prompt.trim(), MAX_TURN_PROMPT_CHARS);
-        match self.conversation.last_mut() {
-            Some(last) if last.prompt == asked => last.outcome = outcome,
-            _ => self.record_conversation_turn(prompt),
+        match self
+            .conversation
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.prompt == asked)
+        {
+            Some(turn) => turn.outcome = outcome,
+            None => self.push_turn(prompt, false, note),
         }
+    }
+
+    /// 用户自己提的最后一问，给 verify / repair 当"原始任务描述"的兜底。
+    ///
+    /// 跳过派生轮：见 `ConversationTurn::derived`。
+    pub fn last_task_prompt(&self) -> Option<String> {
+        self.conversation
+            .iter()
+            .rev()
+            .find(|turn| !turn.derived)
+            .map(|turn| turn.prompt.clone())
     }
 
     /// 从指定的那一轮起（含它自己）把对话历史切掉，返回被丢掉的轮数。
@@ -4335,7 +4384,7 @@ mod tests {
         orchestrator
             .diffs
             .push(make_diff("src/list.ts", "const a = 1;", "const a = 2;"));
-        orchestrator.record_continued_turn("add pagination to the list");
+        orchestrator.record_continued_turn("add pagination to the list", None);
 
         assert_eq!(
             orchestrator.conversation.len(),
@@ -4347,13 +4396,42 @@ mod tests {
         assert!(!digest.contains("no file changes produced"), "{}", digest);
     }
 
+    /// 暂停期间用户可以先问别的 —— 暂停快照不会因此失效，Continue 按钮还在。
+    /// 只看最后一轮的话，续跑会把那一问当成新的一问再记一条，于是历史里同一问两条，
+    /// 而用户在界面上看到的那一条的结果永远停在"没有文件改动"。
+    #[test]
+    fn continuing_updates_the_paused_turn_even_if_another_ask_came_in_between() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("add pagination to the list");
+        let paused_turn = orchestrator.conversation[0].id.clone();
+        orchestrator.record_conversation_turn("what does the loader do?");
+
+        orchestrator
+            .diffs
+            .push(make_diff("src/list.ts", "const a = 1;", "const a = 2;"));
+        orchestrator.record_continued_turn("add pagination to the list", None);
+
+        assert_eq!(orchestrator.conversation.len(), 2, "不该多出一条重复的问");
+        // 界面按 id 切上下文，所以更新必须落在用户看到的那一轮上
+        let updated = orchestrator
+            .conversation
+            .iter()
+            .find(|turn| turn.id == paused_turn)
+            .expect("the paused turn is still there");
+        assert!(
+            updated.outcome.contains("src/list.ts"),
+            "{}",
+            updated.outcome
+        );
+    }
+
     /// 修复时调用方可以自己给一段任务描述。那就是另一问，必须单独成一轮，
     /// 否则上一问的结果会被一段跟它无关的描述覆盖掉。
     #[test]
     fn continuing_with_a_different_ask_starts_a_new_turn() {
         let mut orchestrator = AgentOrchestrator::new();
         orchestrator.record_conversation_turn("add pagination to the list");
-        orchestrator.record_continued_turn("fix the failing type check");
+        orchestrator.record_continued_turn("fix the failing type check", None);
 
         assert_eq!(orchestrator.conversation.len(), 2);
         let digest = orchestrator.conversation_digest().expect("digest");
@@ -4370,9 +4448,34 @@ mod tests {
         assert!(long_prompt.chars().count() > MAX_TURN_PROMPT_CHARS);
 
         orchestrator.record_conversation_turn(&long_prompt);
-        orchestrator.record_continued_turn(&long_prompt);
+        orchestrator.record_continued_turn(&long_prompt, None);
 
         assert_eq!(orchestrator.conversation.len(), 1);
+    }
+
+    /// 步骤轮不能充当"原始任务描述"：六步的计划一步步跑完会把用户那一问挤出窗口，
+    /// 之后 repair 的兜底会拿着 `Ran step: …` 当任务描述，而它看起来像真的。
+    #[test]
+    fn a_step_turn_never_becomes_the_original_task() {
+        let mut orchestrator = AgentOrchestrator::new();
+        assert_eq!(orchestrator.last_task_prompt(), None);
+
+        orchestrator.record_conversation_turn("add pagination to the list");
+        orchestrator.record_step_turn("Ran step: Add the tests", "this step added 2 file diff(s)");
+
+        assert_eq!(
+            orchestrator.last_task_prompt().as_deref(),
+            Some("add pagination to the list")
+        );
+        // 派生轮仍然要进摘要：一步步点 Run 的用法靠它才有连续性
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(digest.contains("Ran step: Add the tests"), "{}", digest);
+        // 而且要说清这一步自己贡献了什么，否则连跑三步会得到三条一样的结果
+        assert!(
+            digest.contains("this step added 2 file diff(s)"),
+            "{}",
+            digest
+        );
     }
 
     /// 应用之前是单向的：落盘之后审查界面就无能为力了，而"应用了才发现不对"
