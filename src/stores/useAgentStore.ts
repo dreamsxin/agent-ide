@@ -111,8 +111,11 @@ interface AgentStore {
   sessions: AgentSessionSummary[];
   /** 后端此刻在用的那个会话 id，列表据它高亮 */
   activeSessionId: string;
-  /** 会话历史写不进磁盘时的那句话；正常时为 null */
+  /** 会话历史写不进磁盘（或读不出来）时的那句话；正常时为 null */
   sessionWarning: string | null;
+  /** 这个环境此刻会不会存会话。false 时历史面板要说清"这里不保存"，而不是显示一个空列表 */
+  sessionsAreSaved: boolean;
+
 
 
 
@@ -199,7 +202,6 @@ interface AgentStore {
   clearStreamContent: () => void;
   addMessage: (msg: ChatMessage) => void;
   updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
-  clearMessages: () => void;
   /** 从后端拉一次真正的上下文；界面要显示它之前必须先调 */
   loadConversationTurns: () => Promise<void>;
   truncateConversationFrom: (turnId: string) => Promise<void>;
@@ -354,6 +356,23 @@ const DEFAULT_PIPELINE: PipelineStage[] = [
   { role: "reviewer", name: "Review", status: "pending" },
 ];
 
+/**
+ * 空聊天区里那条欢迎消息。
+ *
+ * 只有一处定义：初始状态和 `clearMessages()` 曾经写着两句不同的话，而"新建会话"现在有三个
+ * 入口都会走后者 —— 同一个"刚开始"的界面因此有两种样子。
+ */
+function welcomeMessage(): ChatMessage {
+  return {
+    id: "welcome",
+    role: "system",
+    content:
+      "Welcome to Agent IDE. I'm your AI coding assistant. Try selecting code for quick actions, or ask me to build something.",
+    timestamp: Date.now(),
+  };
+}
+
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
   // ========== 初始值 ==========
   state: "idle",
@@ -379,14 +398,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   sessions: [],
   activeSessionId: "",
   sessionWarning: null,
-  messages: [
-    {
-      id: "welcome",
-      role: "system" as const,
-      content: "Welcome to Agent IDE. I'm your AI coding assistant. Try selecting code for quick actions, or ask me to build something.",
-      timestamp: Date.now(),
-    },
-  ],
+  sessionsAreSaved: false,
+  messages: [welcomeMessage()],
+
   activeRole: "coder",
   pipeline: DEFAULT_PIPELINE,
   llmConfigured: false,
@@ -591,6 +605,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
   startNewSession: async () => {
+    // 先问后端，成功了才清界面。反过来的话，后端拒绝（运行还在跑）时界面已经变成一个空的、
+    // 空闲的新会话，而那次运行仍然带着旧上下文在跑 —— 连 Stop 按钮都跟着消失了。
+    if (isTauriRuntime()) {
+      try {
+        const list = normalizeAgentSessionList(await invoke("start_new_agent_session"));
+        set({
+          sessions: list.sessions,
+          activeSessionId: list.activeId,
+          sessionWarning: list.warning,
+          sessionsAreSaved: list.sessionsAreSaved,
+        });
+      } catch (err: unknown) {
+        // 拒绝要说出来：清了界面却没清上下文，这件事在界面上完全看不出来
+        set({ error: `Could not start a new session: ${String(err)}` });
+        throw err;
+      }
+    }
     clearPersistedAgentSession();
     set({
       state: "idle",
@@ -607,24 +638,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       agentRunId: null,
       restoredSession: null,
       conversationTurns: [],
+      messages: [welcomeMessage()],
     });
-    get().clearMessages();
-    if (!isTauriRuntime()) return;
-    try {
-      // 后端的对话历史是下一条提问的上下文来源，不清它就等于"看起来重新开始、实际还在
-      // 接着上一个任务聊"。清不掉要说出来，因为这件事在界面上完全看不出来。
-      // 返回的是新列表：刚被换下来的那个会话此刻就该出现在历史里。
-      const list = normalizeAgentSessionList(await invoke("start_new_agent_session"));
-      set({
-        sessions: list.sessions,
-        activeSessionId: list.activeId,
-        sessionWarning: list.warning,
-      });
-    } catch (err: unknown) {
-      set({
-        error: `Cleared this view, but the backend still has the previous conversation: ${String(err)}`,
-      });
-    }
   },
   loadSessions: async () => {
     if (!isTauriRuntime()) return;
@@ -634,6 +649,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         sessions: list.sessions,
         activeSessionId: list.activeId,
         sessionWarning: list.warning,
+        sessionsAreSaved: list.sessionsAreSaved,
       });
     } catch (err) {
       // 读不到历史不该让面板炸掉：这是一个列表展示，不是运行的一部分
@@ -654,7 +670,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // 任务标题跟着会话走：留着上一个会话的标题会让面板顶上写着另一件事
       currentTask: { id: detail.id, title: detail.title },
       contextUsage: null,
-      // steps / diffs 不恢复，所以清空而不是留着上一个会话的 —— 见 `resumeSession` 的注释
+      // 计划不恢复，所以清空而不是留着上一个会话的那几步 —— 留着的话 Run/Skip 会打到一个
+      // 后端已经不认识的步骤上。**diffs 刻意保留**：那是真实存在的待审查改动，磁盘上就是
+      // 那样，换会话不该让它们从审查区消失（消失才是这个产品要避免的那种不一致）。
       steps: [],
       pipeline: DEFAULT_PIPELINE,
       sddArtifacts: [],
@@ -666,22 +684,22 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       restoredSession: null,
       conversationTurns: detail.turns,
       activeSessionId: detail.id,
-    });
-    // 聊天区按恢复出来的几轮重建：空着的话用户看不出上下文里到底有什么
-    set({
+      // 聊天区按恢复出来的几轮重建：空着的话用户看不出上下文里到底有什么。
+      // 派生轮（跑某一步产生的）画成 agent 消息而不是 user —— 把 `Ran step: 加测试`
+      // 画成用户消息等于告诉他那句话是他自己打的。
       messages: [
         {
           id: `resumed-${detail.id}`,
           role: "system" as const,
           content:
             `Resumed session "${detail.title}" — ${detail.turns.length} turn(s) of context are back. ` +
-            "File changes and the plan from that session are not restored.",
+            "The plan from that session is not restored, and pending changes in the review area are left as they are.",
           timestamp: Date.now(),
         },
         ...detail.turns.flatMap((turn) => [
           {
             id: `${turn.id}-prompt`,
-            role: "user" as const,
+            role: turn.derived ? ("agent" as const) : ("user" as const),
             content: turn.prompt,
             timestamp: Date.now(),
           },
@@ -706,14 +724,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       sessions: list.sessions,
       activeSessionId: list.activeId,
       sessionWarning: list.warning,
+      sessionsAreSaved: list.sessionsAreSaved,
     });
     // 删掉的是正在用的那个：后端已经换了新会话，界面上那几轮也必须跟着消失，
     // 否则聊天区还列着一段模型此刻根本看不到的历史
     if (wasActive) {
-      set({ conversationTurns: [], currentTask: null });
-      get().clearMessages();
+      set({
+        conversationTurns: [],
+        currentTask: null,
+        messages: [welcomeMessage()],
+      });
     }
   },
+
 
 
   addDiff: (diff) =>
@@ -756,17 +779,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         m.id === id ? { ...m, ...updates } : m
       ),
     })),
-  clearMessages: () =>
-    set({
-      messages: [
-        {
-          id: "welcome",
-          role: "system",
-          content: "Welcome to Agent IDE. I'm your AI coding assistant.",
-          timestamp: Date.now(),
-        },
-      ],
-    }),
   loadConversationTurns: async () => {
     if (!isTauriRuntime()) return;
     try {

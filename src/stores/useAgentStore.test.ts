@@ -439,7 +439,12 @@ describe("session switching", () => {
       conversationTurns: [{ id: "turn-1", prompt: "old task", outcome: "did things" }] as never,
       currentTask: { id: "t1", title: "old", description: "", status: "running" } as never,
     });
-    invokeMock.mockResolvedValueOnce({ activeId: "session-2", sessions: [], warning: null });
+    invokeMock.mockResolvedValueOnce({
+      activeId: "session-2",
+      sessions: [],
+      warning: null,
+      sessionsAreSaved: true,
+    });
 
     await useAgentStore.getState().startNewSession();
 
@@ -450,16 +455,25 @@ describe("session switching", () => {
     expect(useAgentStore.getState().activeSessionId).toBe("session-2");
   });
 
+
   /**
-   * 清不掉后端那半边必须说出来：界面已经空了，而上下文还在，这件事没有任何其他迹象。
+   * 后端拒绝（运行还在跑）时界面**不能**先清空：清了的话用户看到一个空的、空闲的新会话，
+   * 而那次运行还带着旧上下文在跑，连 Stop 按钮都跟着消失了。
    */
-  it("says so when the view was cleared but the backend was not", async () => {
-    invokeMock.mockRejectedValueOnce("no orchestrator");
+  it("keeps the view intact when the backend refuses to switch sessions", async () => {
+    useAgentStore.setState({
+      conversationTurns: [{ id: "turn-1", prompt: "old task", outcome: "did things" }] as never,
+      steps: [{ id: "s1", title: "running step", status: "doing" }] as never,
+    });
+    invokeMock.mockRejectedValueOnce("A run is still in flight.");
 
-    await useAgentStore.getState().startNewSession();
+    await expect(useAgentStore.getState().startNewSession()).rejects.toBeTruthy();
 
-    expect(useAgentStore.getState().error).toContain("previous conversation");
+    expect(useAgentStore.getState().conversationTurns).toHaveLength(1);
+    expect(useAgentStore.getState().steps).toHaveLength(1);
+    expect(useAgentStore.getState().error).toContain("Could not start a new session");
   });
+
 
   /**
    * 恢复一个历史会话只换回上下文。计划和审查区必须清空 —— 留着上一个会话的步骤，
@@ -473,7 +487,10 @@ describe("session switching", () => {
     invokeMock.mockResolvedValueOnce({
       id: "session-old",
       title: "refactor the parser",
-      turns: [{ id: "turn-7", prompt: "refactor the parser", outcome: "2 file(s) applied" }],
+      turns: [
+        { id: "turn-7", prompt: "refactor the parser", outcome: "2 file(s) applied" },
+        { id: "turn-8", prompt: "Ran step: add tests", outcome: "no file changes", derived: true },
+      ],
     });
     // resumeSession 结束时会再拉一次列表
     invokeMock.mockResolvedValueOnce({ activeId: "session-old", sessions: [], warning: null });
@@ -481,11 +498,16 @@ describe("session switching", () => {
     await useAgentStore.getState().resumeSession("session-old");
 
     expect(invokeMock).toHaveBeenCalledWith("resume_agent_session", { sessionId: "session-old" });
-    expect(useAgentStore.getState().conversationTurns).toHaveLength(1);
+    expect(useAgentStore.getState().conversationTurns).toHaveLength(2);
     expect(useAgentStore.getState().steps).toEqual([]);
     expect(useAgentStore.getState().currentTask?.title).toBe("refactor the parser");
     expect(useAgentStore.getState().activeSessionId).toBe("session-old");
+    // 派生轮不能画成用户消息：那等于告诉用户 `Ran step: ...` 是他自己打的
+    const messages = useAgentStore.getState().messages;
+    expect(messages.find((m) => m.id === "turn-7-prompt")?.role).toBe("user");
+    expect(messages.find((m) => m.id === "turn-8-prompt")?.role).toBe("agent");
   });
+
 
   /**
    * 删掉正在用的那个会话之后，界面上那几轮必须跟着消失：后端已经换了新会话，

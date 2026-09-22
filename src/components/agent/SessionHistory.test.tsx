@@ -14,10 +14,13 @@ function seed(overrides: Parameters<typeof useAgentStore.setState>[0]) {
     sessions: [],
     activeSessionId: "",
     sessionWarning: null,
+    sessionsAreSaved: true,
     isStreaming: false,
+    loadSessions: async () => undefined,
     ...(overrides as object),
   } as never);
 }
+
 
 describe("SessionHistory", () => {
   /**
@@ -82,7 +85,33 @@ describe("SessionHistory", () => {
 
     expect(screen.getByText(/permission denied/)).toBeDefined();
   });
+
+  /**
+   * "还没聊过"和"这个环境根本不保存"在屏幕上一样是一个空列表，而后者意味着用户刚才那一问
+   * 不会被记住。空状态必须说清是哪一种。
+   */
+  it("says why the list is empty when nothing can be saved", () => {
+    seed({ sessionsAreSaved: false });
+
+    render(<SessionHistory />);
+
+    expect(screen.getByText(/not available in the browser preview|Open a workspace folder/)).toBeDefined();
+  });
+
+  /** 新建会话被拒绝（运行还在跑）时，这个面板也要看得见那句话。 */
+  it("shows the refusal when starting a new session is rejected", async () => {
+    const startNewSession = vi.fn().mockRejectedValue("A run is still in flight.");
+    seed({ startNewSession });
+
+    render(<SessionHistory />);
+    fireEvent.click(screen.getByTestId("session-new"));
+
+    await vi.waitFor(() => {
+      expect(screen.getByText(/still in flight/)).toBeDefined();
+    });
+  });
 });
+
 
 describe("formatRelativeTime", () => {
   /** 0 是"后端没给时间戳"，不能显示成 1970 年。 */

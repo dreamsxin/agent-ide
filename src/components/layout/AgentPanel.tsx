@@ -121,7 +121,10 @@ export default function AgentPanel() {
           active={false}
           icon={Plus}
           label="New session"
-          onClick={() => void startNewSession()}
+          onClick={() => {
+            // 被拒绝时错误已经进 store.error，Task / Chat 视图上的错误条会显示
+            void startNewSession().catch(() => undefined);
+          }}
           testId="agent-tab-new-session"
         />
         <UtilityButton

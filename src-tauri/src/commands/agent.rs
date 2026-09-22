@@ -451,9 +451,9 @@ pub async fn send_agent_prompt(
         orch.allow_file_create = request.allow_file_create;
         orch.start_usage_accounting(usage_meter.clone());
         // 历史必须和抢执行权在**同一个**临界区里取。`truncate_agent_conversation` /
-        // `clear_agent_conversation` 不需要执行权就能改历史，所以只要这两件事分开，
-        // 用户点了"切掉这一轮"之后启动的这次运行仍然会把那几轮发出去 —— 界面上
-        // 已经没有了，模型还在看着。
+        // `start_new_agent_session` / `resume_agent_session` / `delete_agent_session` 都不需要
+        // 执行权就能改历史，所以只要这两件事分开，用户点了"切掉这一轮"之后启动的这次运行
+        // 仍然会把那几轮发出去 —— 界面上已经没有了，模型还在看着。
         (lease, orch.conversation_digest())
     };
     let claim = lease.claim;
@@ -2028,6 +2028,49 @@ mod tests {
         assert_eq!(payload["peakTotalTokens"], 12_500);
     }
 
+    /// 会话列表的键名也是驼峰序列化出来的，前端 `normalizeAgentSessionList` 按名字取。
+    ///
+    /// 少了 `#[serde(rename_all)]`，每一行都会渲染成 "unknown time · 0 turns"、没有一行被标成
+    /// current，而五条验证命令全绿 —— 和 `agent-context-usage` 当初那个缺陷一模一样，所以这里
+    /// 同样按名字钉住。
+    #[test]
+    fn the_session_list_reaches_the_frontend_with_the_keys_it_expects() {
+        let list = AgentSessionList {
+            active_id: "session-1".to_string(),
+            sessions: vec![AgentSessionSummary {
+                id: "session-1".to_string(),
+                title: "fix the parser".to_string(),
+                updated_at: 1_700_000_000_000,
+                turn_count: 3,
+                last_outcome: "2 file(s) applied".to_string(),
+            }],
+            warning: None,
+            sessions_are_saved: true,
+        };
+
+        let payload = serde_json::to_value(&list).expect("serialize");
+        assert_eq!(payload["activeId"], "session-1");
+        assert_eq!(payload["sessionsAreSaved"], true);
+        assert_eq!(payload["sessions"][0]["updatedAt"], 1_700_000_000_000u64);
+        assert_eq!(payload["sessions"][0]["turnCount"], 3);
+        assert_eq!(payload["sessions"][0]["lastOutcome"], "2 file(s) applied");
+
+        // 恢复的返回值同理：`turns` 里每一轮的键名是前端重建聊天区的依据
+        let detail = AgentSessionDetail {
+            id: "session-1".to_string(),
+            title: "fix the parser".to_string(),
+            turns: vec![crate::agent::orchestrator::ConversationTurn {
+                id: "turn-1".to_string(),
+                prompt: "fix the parser".to_string(),
+                outcome: "no file changes produced".to_string(),
+                derived: true,
+            }],
+        };
+        let payload = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(payload["turns"][0]["id"], "turn-1");
+        assert_eq!(payload["turns"][0]["derived"], true);
+    }
+
     fn test_approval_gate() -> crate::agent::approval::ApprovalGate {
         crate::agent::approval::ApprovalGate::new(
             crate::agent::approval::ApprovalRegistry::new(),
@@ -3097,6 +3140,11 @@ pub struct AgentSessionList {
     pub active_id: String,
     pub sessions: Vec<AgentSessionSummary>,
     pub warning: Option<String>,
+    /// 这个环境此刻到底会不会存会话。
+    ///
+    /// 没打开过工作区时一条都存不下来（会话按工作区分组），而那时列表空着和"还没聊过"长得
+    /// 一模一样。界面要照这个标志说清是哪一种，不然用户会以为自己刚才那一问被记住了。
+    pub sessions_are_saved: bool,
 }
 
 /// 恢复一个历史会话之后界面需要知道的东西。
@@ -3112,8 +3160,13 @@ pub struct AgentSessionDetail {
 ///
 /// 三个命令（列、新建、删除）都返回同一份形状，所以只有一处拼装：各自拼一遍的话，"哪个是
 /// 当前会话"在不同入口回来的答案可以不一样，而界面的高亮就是照它画的。
+///
+/// 读盘在持锁期间同步发生。没有跨 `await` 持锁，所以架构规则没有被破；代价是别的命令这段
+/// 时间要排队等一次文件读，而这个文件最多 50 条会话。
 fn session_list(orch: &crate::agent::orchestrator::AgentOrchestrator) -> AgentSessionList {
-    let sessions = crate::agent::session_store::list_for_current_workspace()
+    let listed = crate::agent::session_store::list_for_current_workspace();
+    let sessions = listed
+        .sessions
         .into_iter()
         .map(|session| AgentSessionSummary {
             id: session.id,
@@ -3130,7 +3183,9 @@ fn session_list(orch: &crate::agent::orchestrator::AgentOrchestrator) -> AgentSe
     AgentSessionList {
         active_id: orch.session_id.clone(),
         sessions,
-        warning: orch.session_persist_error.clone(),
+        // 写失败和读失败都要说，而且写失败更急：它意味着**此刻**这一轮存不下来
+        warning: orch.session_persist_error.clone().or(listed.warning),
+        sessions_are_saved: crate::services::workspace::current_workspace_key().is_some(),
     }
 }
 
@@ -3152,7 +3207,15 @@ pub async fn resume_agent_session(
     agent_state: State<'_, AgentGlobalState>,
     session_id: String,
 ) -> Result<AgentSessionDetail, String> {
+    // "读不出来"和"没有这个会话"要分开说：把前者说成后者，用户会以为是自己删过它
     let stored = crate::agent::session_store::find(&session_id)
+        .map_err(|reason| {
+            format!(
+                "The session history file could not be read ({}), so that session cannot be \
+                 opened.",
+                reason
+            )
+        })?
         .ok_or_else(|| format!("That session is no longer on disk ({}).", session_id))?;
     let title = stored.title.clone();
     let mut orch = agent_state.orchestrator.lock().await;
@@ -3169,6 +3232,9 @@ pub async fn resume_agent_session(
 
 /// 删掉一个历史会话，返回删完之后的列表。
 ///
+/// 先删磁盘再动内存：反过来的话，删除失败（文件坏了、只读）会留下"上下文已经清空、会话
+/// 却还在磁盘上"的状态 —— 界面收到报错、以为什么都没发生，而模型此刻已经看不到那几轮了。
+///
 /// 删的是**当前**这个会话时要顺带换掉 id：不换的话下一轮对话会把刚删掉的那一行原样写回来，
 /// 表现为"删了没反应"。
 #[tauri::command]
@@ -3177,12 +3243,13 @@ pub async fn delete_agent_session(
     session_id: String,
 ) -> Result<AgentSessionList, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    if orch.session_id == session_id {
-        if orch.run_in_flight() {
-            return Err(RUN_IN_FLIGHT_SESSION_SWITCH.to_string());
-        }
-        orch.start_new_session();
+    let deleting_current = orch.session_id == session_id;
+    if deleting_current && orch.run_in_flight() {
+        return Err(RUN_IN_FLIGHT_SESSION_SWITCH.to_string());
     }
     crate::agent::session_store::remove(&session_id)?;
+    if deleting_current {
+        orch.start_new_session();
+    }
     Ok(session_list(&orch))
 }

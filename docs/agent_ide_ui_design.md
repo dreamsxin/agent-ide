@@ -327,7 +327,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 ### 7.4 Container Components
 
 - **Editor Container**: Tabs / Split / Minimap / Overlay layers
-- **Agent Panel**: Tabs: Chat | Tasks | Diff
+- **Agent Panel**: Primary views Task | Plan | Changes, plus utility entries New session, Session history (`sessions`), Pipeline and Settings
 - **Bottom Panel**: Terminal / Logs / Tests / Actions
 - **Explorer Panel**
 

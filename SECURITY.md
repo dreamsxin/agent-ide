@@ -31,7 +31,9 @@ Surfaces that do **not** fully enforce it:
 - **Language servers.** `find_language_server` prefers `<workspace_root>/node_modules/.bin/...` before anything on `PATH`. Opening an untrusted repository therefore executes a binary that repository supplies. There is no signature check.
 - **MCP tools.** See the MCP section — entirely unchecked.
 - **`save_workspace_path`** accepts any canonicalizable directory, so the boundary itself is caller-defined. This is by design.
-- Config files under `~/.agent-ide` (`workspace.json`, `config.json`, `mcp.json`) are outside the boundary by design.
+- Config files under `~/.agent-ide` (`workspace.json`, `config.json`, `mcp.json`, `sessions.json`) are outside the boundary by design.
+- **`sessions.json` holds conversation text in plaintext.** Each saved session keeps up to 6 turns, each carrying the user's prompt truncated to 400 characters plus an outcome string that names changed files. It is grouped by workspace, capped at 50 sessions, and has no age bound and no file-permission hardening beyond whatever the home directory provides — so a prompt that contained a secret stays on disk until the cap evicts it or the user deletes the session from the history panel. Written via temp file + rename; there is no cross-process lock, so two app instances sharing the same home directory overwrite each other's session list (last writer wins), and an unreadable file is moved aside rather than merged.
+
 
 Path traversal protection:
 

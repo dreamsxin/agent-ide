@@ -127,7 +127,10 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
               </div>
             </div>
             <button
-              onClick={() => void startNewSession()}
+              onClick={() => {
+                // 拒绝（运行还在跑）已经写进 store.error，下面那块错误条会显示它
+                void startNewSession().catch(() => undefined);
+              }}
               title="Starts a new session: this view and the conversation history the next prompt would inherit are cleared. The old session stays in the session history."
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] hover:bg-surface-border/30"
             >

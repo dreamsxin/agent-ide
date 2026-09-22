@@ -292,7 +292,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         group: "Agent",
         keywords: ["new", "clear", "reset", "conversation", "context", "session"],
         run: () => {
-          void startNewSession();
+          // 被拒绝时错误已经进 store.error，Agent 面板上的错误条会显示
+          void startNewSession().catch(() => undefined);
         },
       },
       // Pipeline 和 Settings 此前只有 Agent 面板上两个 8px 宽的纯图标按钮可以进，

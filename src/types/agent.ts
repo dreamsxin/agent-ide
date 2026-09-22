@@ -560,7 +560,15 @@ export interface ConversationTurn {
   id: string;
   prompt: string;
   outcome: string;
+  /**
+   * 这一轮是从一次步骤执行派生出来的，不是用户自己提的那一问。
+   *
+   * 恢复历史会话时要靠它区分说话人：把 `Ran step: 加测试` 画成一条用户消息，等于告诉用户
+   * 那句话是他自己打的。
+   */
+  derived?: boolean;
 }
+
 
 /**
  * 历史会话列表里的一行。
@@ -584,12 +592,14 @@ export interface AgentSessionList {
   activeId: string;
   sessions: AgentSessionSummary[];
   /**
-   * 会话历史此刻写不进磁盘的原因。
+   * 会话历史此刻写不进磁盘、或者读不出来的原因。
    *
    * 查历史的地方正是该说这句话的地方：写失败在界面上没有任何其他症状，用户会在下一次打开时
-   * 才发现历史里什么都没有。
+   * 才发现历史里什么都没有；读失败则会让"还没聊过"和"那几十条读不出来"长得一模一样。
    */
   warning: string | null;
+  /** 这个环境此刻会不会存会话（没打开工作区时一条都存不下来） */
+  sessionsAreSaved: boolean;
 }
 
 /** 恢复一个历史会话之后后端告诉界面的东西 */
@@ -601,12 +611,13 @@ export interface AgentSessionDetail {
 
 function normalizeConversationTurn(value: unknown): ConversationTurn | null {
   if (!value || typeof value !== "object") return null;
-  const { id, prompt, outcome } = value as Record<string, unknown>;
+  const { id, prompt, outcome, derived } = value as Record<string, unknown>;
   if (typeof id !== "string" || id === "") return null;
   return {
     id,
     prompt: typeof prompt === "string" ? prompt : "",
     outcome: typeof outcome === "string" ? outcome : "",
+    derived: derived === true,
   };
 }
 
@@ -618,9 +629,14 @@ function normalizeConversationTurn(value: unknown): ConversationTurn | null {
  * 了就报错的列表项。
  */
 export function normalizeAgentSessionList(value: unknown): AgentSessionList {
-  const empty: AgentSessionList = { activeId: "", sessions: [], warning: null };
+  const empty: AgentSessionList = {
+    activeId: "",
+    sessions: [],
+    warning: null,
+    sessionsAreSaved: false,
+  };
   if (!value || typeof value !== "object") return empty;
-  const { activeId, sessions, warning } = value as Record<string, unknown>;
+  const { activeId, sessions, warning, sessionsAreSaved } = value as Record<string, unknown>;
   const rows = Array.isArray(sessions) ? sessions : [];
   return {
     activeId: typeof activeId === "string" ? activeId : "",
@@ -639,8 +655,11 @@ export function normalizeAgentSessionList(value: unknown): AgentSessionList {
       ];
     }),
     warning: typeof warning === "string" && warning.trim() !== "" ? warning : null,
+    // 缺这个字段时按"存不下来"算：那一侧的话术是"这里不会保存"，比反过来谎称存好了安全
+    sessionsAreSaved: sessionsAreSaved === true,
   };
 }
+
 
 /** 恢复结果的归一化。没有 id 就当没恢复成功 —— 那时界面不该把聊天区换掉。 */
 export function normalizeAgentSessionDetail(value: unknown): AgentSessionDetail | null {

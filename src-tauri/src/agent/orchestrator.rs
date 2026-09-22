@@ -300,9 +300,12 @@ const MAX_CONVERSATION_TURNS: usize = 6;
 const MAX_TURN_PROMPT_CHARS: usize = 400;
 const MAX_TURN_OUTCOME_CHARS: usize = 300;
 
-/// 会话标题的字符上限。57 + "..." = 60，和前端 `deriveTaskTitle` 同一条规则 —— 两边不一致
-/// 的话，历史列表里的标题和任务栏上的标题会在同一个会话上显示成两句不同的话。
-const MAX_SESSION_TITLE_CHARS: usize = 57;
+/// 会话标题的字符上限：超过 60 个字符才截，截到 57 再加 "..."。
+///
+/// 和前端 `deriveTaskTitle` 是**同一条**规则（同样的边界、同样把连续空白压成一个空格）：两边
+/// 不一致的话，同一个会话在历史列表里和在任务栏上会显示成两句不同的话。
+const MAX_SESSION_TITLE_CHARS: usize = 60;
+const SESSION_TITLE_TRUNCATE_AT: usize = 57;
 
 /// 还没有任何用户提问时会话叫什么。
 ///
@@ -315,17 +318,23 @@ fn new_session_id() -> String {
 }
 
 /// 标题取第一行非空文本：多行提问的第二行往往是粘贴进来的报错或代码，拿它当标题反而认不出
-/// 是哪次对话。
+/// 是哪次对话。连续空白压成一个空格，和 `deriveTaskTitle` 一致。
 fn session_title_from(prompt: &str) -> String {
     let first_line = prompt
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("");
-    if first_line.is_empty() {
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
         return UNTITLED_SESSION.to_string();
     }
-    summarize_text(first_line, MAX_SESSION_TITLE_CHARS)
+    if collapsed.chars().count() <= MAX_SESSION_TITLE_CHARS {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed.chars().take(SESSION_TITLE_TRUNCATE_AT).collect();
+    truncated.push_str("...");
+    truncated
 }
 
 /// 一次 pipeline 运行的**本地**状态。
@@ -1086,11 +1095,15 @@ impl AgentOrchestrator {
             .rev()
             .find(|turn| turn.prompt == asked)
         {
-            Some(turn) => turn.outcome = outcome,
+            // 结果改了也要重新落盘：不然磁盘上那一轮的结果永远停在暂停那一刻。
+            // 只在这条分支落盘 —— 另一条走 `push_turn`，那里已经写过了，写两遍就是
+            // 两次完整的读-改-写，而且是在持锁期间。
+            Some(turn) => {
+                turn.outcome = outcome;
+                self.persist_session();
+            }
             None => self.push_turn(prompt, false, note),
         }
-        // 结果改了也要重新落盘：不然磁盘上那一轮的结果永远停在暂停那一刻
-        self.persist_session();
     }
 
     /// 用户自己提的最后一问，给 verify / repair 当"原始任务描述"的兜底。
@@ -1165,14 +1178,20 @@ impl AgentOrchestrator {
     ///
     /// 失败只记在 `session_persist_error` 上而不是往上抛：调用方是"记一轮对话"，而那一轮
     /// 已经发生了，不能因为写盘失败就假装没发生。这句话由 `list_agent_sessions` 带给界面。
+    ///
+    /// 没有工作区键也算失败，不是"无事发生"：那时这一轮确实没有被记住，而静默跳过和"存好了"
+    /// 在界面上一模一样 —— 用户会在下次打开时才发现历史一直是空的。`external_log` 在同一种
+    /// 情况下也是报错。
     fn persist_session(&mut self) {
         let outcome = if self.conversation.is_empty() {
             crate::agent::session_store::remove(&self.session_id)
         } else {
             match self.session_snapshot() {
                 Some(snapshot) => crate::agent::session_store::upsert(&snapshot),
-                // 还没选过工作区：没有分组的键，写进去也读不回来
-                None => Ok(()),
+                None => Err(
+                    "no workspace has been opened yet, so this conversation is not being saved"
+                        .to_string(),
+                ),
             }
         };
         self.session_persist_error = outcome.err();
@@ -1189,6 +1208,9 @@ impl AgentOrchestrator {
         self.session_id = new_session_id();
         self.session_created_at = crate::agent::session_store::now_ms();
         self.session_title = None;
+        // 上一个会话的写入失败不能挂在这个身上：它一轮都还没写过，而那句警告会让人以为
+        // 现在这个也存不下来
+        self.session_persist_error = None;
         // 刻意不在这里落盘：旧会话每记一轮都已经写过，而新会话一轮都还没有
     }
 
@@ -1206,6 +1228,8 @@ impl AgentOrchestrator {
         self.session_title = Some(stored.title);
         self.next_turn_id = stored.next_turn_id.max(1);
         self.conversation = stored.turns;
+        // 上一个会话的写入失败和这个会话无关，见 `start_new_session`
+        self.session_persist_error = None;
     }
 
     /// 换 run id。**不**授予执行权 —— 那是 `try_begin_run` 的事。
@@ -4530,30 +4554,63 @@ mod tests {
         );
     }
 
+    /// 标题必须和前端 `deriveTaskTitle` 同一条规则。
+    ///
+    /// 两边不一致的后果是同一个会话在历史列表里和在任务栏上显示成两句不同的话 —— 一处写着
+    /// `fix the parser`，另一处写着 `fix   the parser...`，而用户没有任何理由知道那是同一个。
+    #[test]
+    fn the_session_title_follows_the_same_rule_as_the_task_title() {
+        // 连续空白压成一个空格
+        assert_eq!(session_title_from("fix   the    parser"), "fix the parser");
+        // 60 个字符正好不截
+        let exactly_sixty = "a".repeat(60);
+        assert_eq!(session_title_from(&exactly_sixty), exactly_sixty);
+        // 61 个才截，截到 57 加 "..."
+        let sixty_one = "a".repeat(61);
+        let truncated = session_title_from(&sixty_one);
+        assert_eq!(truncated.chars().count(), 60);
+        assert!(truncated.ends_with("..."));
+        // 空提问要有个名字，而不是一片空白让人以为渲染坏了
+        assert_eq!(session_title_from("   \n  "), UNTITLED_SESSION);
+    }
+
+    /// 运行途中换会话会把这一轮历史记到别的会话里：用户回看三天前那次对话，会在末尾
+    /// 看到今天这一问。三个换会话的命令都靠这个判据守门。
+    #[test]
+    fn a_run_in_flight_is_visible_so_session_switching_can_be_refused() {
+        let mut orchestrator = AgentOrchestrator::new();
+        assert!(!orchestrator.run_in_flight());
+
+        let lease = orchestrator
+            .try_begin_run(Some("run-1".to_string()), &test_permissions())
+            .expect("空闲时应当抢到执行权");
+        assert!(orchestrator.run_in_flight());
+
+        orchestrator.finish_run(lease.claim);
+        assert!(!orchestrator.run_in_flight());
+    }
+
     /// 恢复历史会话必须把编号接着发下去：从 1 重发的话新记的一轮会和恢复出来的某一轮撞 id，
     /// 用户点第 5 条、切掉的是第 1 条。
+    ///
+    /// 记录是手写的而不是 `session_snapshot()` 取的：快照要有工作区键才拿得到，而这个断言
+    /// 和有没有工作区无关 —— 依赖那个会让测试随环境换一份 fixture。
     #[test]
     fn resuming_a_session_keeps_turn_ids_unique() {
         let mut orchestrator = AgentOrchestrator::new();
         orchestrator.record_conversation_turn("older ask");
         orchestrator.record_conversation_turn("newer ask");
-        let stored = orchestrator.session_snapshot();
+        let stored = crate::agent::session_store::StoredSession {
+            id: "session-test".to_string(),
+            workspace: "C:\\work\\project".to_string(),
+            title: "older ask".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            next_turn_id: orchestrator.next_turn_id,
+            turns: orchestrator.conversation.clone(),
+        };
 
         orchestrator.start_new_session();
-        let stored = match stored {
-            Some(stored) => stored,
-            // 没有保存过工作区时 `session_snapshot` 返回 None（没有分组的键），
-            // 那种环境下这个断言无从表达 —— 自己造一份等价的记录继续测。
-            None => crate::agent::session_store::StoredSession {
-                id: "session-test".to_string(),
-                workspace: "C:\\work\\project".to_string(),
-                title: "older ask".to_string(),
-                created_at: 1,
-                updated_at: 2,
-                next_turn_id: 3,
-                turns: orchestrator.conversation.clone(),
-            },
-        };
         orchestrator.resume_session(stored);
         let resumed_ids: Vec<String> = orchestrator
             .conversation
