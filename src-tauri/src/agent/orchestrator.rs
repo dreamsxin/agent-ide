@@ -142,6 +142,12 @@ pub struct AgentOrchestrator {
     /// 记下来而不是每次从 `conversation` 现算：头部淘汰会把第一轮挤掉，现算的话标题会随着
     /// 聊天推进悄悄变成别的东西 —— 历史列表里同一个会话昨天叫 A 今天叫 B。
     session_title: Option<String>,
+    /// 这个标题是用户自己起的，不能被自动推导覆盖。
+    ///
+    /// 独立一个标记而不是"标题非空就不再推导"：那两件事只在今天等价 —— 第一轮之后标题一定
+    /// 非空，而改名是发生在第一轮**之后**的。真正要守的是"人定的名字不会被机器改掉"，
+    /// 所以那句话要被显式记下来，也要跟着会话落盘。
+    session_title_is_custom: bool,
     /// 上一次落盘失败的原因。`list_agent_sessions` 会把它带给界面。
     ///
     /// 不静默吞掉：写不进去意味着此刻这一轮对话不会被记住，而这件事在界面上完全看不出来 ——
@@ -312,6 +318,18 @@ const SESSION_TITLE_TRUNCATE_AT: usize = 57;
 /// 有这一行是因为标题来自第一轮用户提问，而"跑了一个计划步骤"这类派生轮不当标题 —— 那种会话
 /// 在列表里得有个名字，而不是一片空白让人以为渲染坏了。
 const UNTITLED_SESSION: &str = "Untitled session";
+
+/// 把用户手打的任务名收成能存的标题。空名字是错误。
+///
+/// 和自动推导共用 `session_title_from`：两条路产出的标题要遵守同一个长度上限，否则历史列表
+/// 的行会因为一个手打的长名字而变形。命令层给磁盘上的另一个会话改名时也调它，这样"当前会话"
+/// 和"别的会话"不会有两套规则。
+pub fn normalized_session_title(title: &str) -> Result<String, String> {
+    if title.trim().is_empty() {
+        return Err("A task name cannot be empty.".to_string());
+    }
+    Ok(session_title_from(title))
+}
 
 fn new_session_id() -> String {
     format!("session-{}", uuid::Uuid::new_v4())
@@ -670,6 +688,7 @@ impl AgentOrchestrator {
             session_id: new_session_id(),
             session_created_at: crate::agent::session_store::now_ms(),
             session_title: None,
+            session_title_is_custom: false,
             session_persist_error: None,
             undo_stack: Vec::new(),
             active_claim: None,
@@ -1163,6 +1182,7 @@ impl AgentOrchestrator {
                 .session_title
                 .clone()
                 .unwrap_or_else(|| UNTITLED_SESSION.to_string()),
+            title_is_custom: self.session_title_is_custom,
             created_at: self.session_created_at,
             updated_at: crate::agent::session_store::now_ms(),
             next_turn_id: self.next_turn_id,
@@ -1208,6 +1228,7 @@ impl AgentOrchestrator {
         self.session_id = new_session_id();
         self.session_created_at = crate::agent::session_store::now_ms();
         self.session_title = None;
+        self.session_title_is_custom = false;
         // 上一个会话的写入失败不能挂在这个身上：它一轮都还没写过，而那句警告会让人以为
         // 现在这个也存不下来
         self.session_persist_error = None;
@@ -1226,10 +1247,62 @@ impl AgentOrchestrator {
         self.session_id = stored.id;
         self.session_created_at = stored.created_at;
         self.session_title = Some(stored.title);
+        self.session_title_is_custom = stored.title_is_custom;
         self.next_turn_id = stored.next_turn_id.max(1);
         self.conversation = stored.turns;
         // 上一个会话的写入失败和这个会话无关，见 `start_new_session`
         self.session_persist_error = None;
+    }
+
+    /// 给当前会话改名，并立刻落盘。
+    ///
+    /// 名字归一化和自动推导用同一套规则（折叠空白、超长截断），所以列表的行高不会因为一个
+    /// 手打的长标题而变形；界面上的输入框也按同一个上限限长，用户看得见这条边界。
+    ///
+    /// 空名字是错误而不是"恢复自动标题"：后者要靠猜用户的意图，而两种解释的结果在屏幕上
+    /// 完全不同 —— 他会以为改名没生效。
+    ///
+    /// 记下"这是人起的名字"：否则下一次推导（比如恢复之后的第一轮）会把它盖回去。
+    pub fn rename_session(&mut self, title: &str) -> Result<String, String> {
+        let normalized = normalized_session_title(title)?;
+        self.session_title = Some(normalized.clone());
+        self.session_title_is_custom = true;
+        self.persist_session();
+        match &self.session_persist_error {
+            // 写盘失败时不能只回一个新名字：那在界面上和"改好了"一模一样，而下次打开
+            // 看到的还是旧名字
+            Some(error) => Err(format!("The new name was not saved: {}", error)),
+            None => Ok(normalized),
+        }
+    }
+
+    /// 从一个历史会话分叉出一个新会话：同样的上下文，新的 id 和标题。
+    ///
+    /// 用途是"同一份上下文试另一条路"：直接恢复那个会话的话，接下来的每一轮都会写进它，
+    /// 原来那次记录就被改写了 —— 而用户要的恰恰是留着原来那次。
+    ///
+    /// 关系写在标题里（`Fork of X`）而不是存一个 `parent_id` 字段：界面上唯一需要回答的问题
+    /// 是"这是从哪来的"，而标题已经回答了它。存一个没人读的字段只会在下次改结构时挡路。
+    ///
+    /// 立刻落盘，不等第一轮：分叉出来的会话在列表里必须马上看得见，否则用户会以为没成功。
+    pub fn fork_session(
+        &mut self,
+        stored: crate::agent::session_store::StoredSession,
+    ) -> Result<(), String> {
+        self.session_id = new_session_id();
+        self.session_created_at = crate::agent::session_store::now_ms();
+        self.session_title = Some(session_title_from(&format!("Fork of {}", stored.title)));
+        // 分叉出来的名字是机器起的，所以不算"人定的名字"：用户随后改名时不会被任何自动
+        // 推导挡住，而第一轮提问也不该把 `Fork of …` 换成那句话（标题已经非空）
+        self.session_title_is_custom = false;
+        self.next_turn_id = stored.next_turn_id.max(1);
+        self.conversation = stored.turns;
+        self.session_persist_error = None;
+        self.persist_session();
+        match &self.session_persist_error {
+            Some(error) => Err(format!("The forked task was not saved: {}", error)),
+            None => Ok(()),
+        }
     }
 
     /// 换 run id。**不**授予执行权 —— 那是 `try_begin_run` 的事。
@@ -4237,6 +4310,80 @@ mod tests {
     /// 续跑必须把暂停前工具**实际返回的内容**带回请求里。
     ///
     /// 在此之前跨阶段只传扁平文本，而扁平文本里从来没有工具返回值 ——
+    /// 人起的名字不能被机器改回去。
+    ///
+    /// 标题本来是"第一句话推出来的"，而推导的触发条件是"标题为空"。改名之后标题非空，所以
+    /// 今天两件事恰好等价 —— 这条测试钉的是那个**意图**（人定的名字不会被覆盖），而不是
+    /// 那个巧合：恢复、分叉、继续对话都不该把它换掉。
+    #[test]
+    fn a_renamed_task_keeps_its_name_through_the_next_turn() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("fix the flaky integration test");
+
+        let renamed = orchestrator
+            .rename_session("  Flaky   CI  ")
+            .expect("renaming a saved task succeeds");
+        // 空白折叠和自动推导同一套规则，所以列表的行不会因为手打的空格而歪掉
+        assert_eq!(renamed, "Flaky CI");
+
+        orchestrator.record_conversation_turn("now update the docs");
+        let snapshot = orchestrator
+            .session_snapshot()
+            .expect("a workspace is open");
+        assert_eq!(snapshot.title, "Flaky CI");
+        assert!(snapshot.title_is_custom);
+        // 盘上也得是这个名字，否则下次打开看到的还是旧的
+        let stored = crate::agent::session_store::find(&orchestrator.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.title, "Flaky CI");
+        assert!(stored.title_is_custom);
+
+        // 空名字是错误，而不是"恢复成自动标题"：后者要靠猜意图，而两种解释在屏幕上完全不同
+        assert!(orchestrator.rename_session("   ").is_err());
+        assert_eq!(
+            orchestrator.session_snapshot().unwrap().title,
+            "Flaky CI",
+            "失败的改名不该留下半个结果"
+        );
+    }
+
+    /// 分叉留着原来那次记录 —— 那正是它和"恢复"的全部区别。
+    ///
+    /// 恢复之后的每一轮都会写进原来那一行，也就是把它改写掉；而用户说"从这儿分出去试另一条
+    /// 路"时，要的恰恰是回头还能看到原来那次。
+    #[test]
+    fn forking_a_task_leaves_the_original_row_alone() {
+        let _guard = workspace::env_test_guard();
+        let _env = TestEnv::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("design the cache layer");
+        let original_id = orchestrator.session_id.clone();
+        let original = crate::agent::session_store::find(&original_id)
+            .unwrap()
+            .expect("the first turn wrote a row");
+
+        orchestrator
+            .fork_session(original.clone())
+            .expect("the fork is saved right away");
+
+        assert_ne!(orchestrator.session_id, original_id);
+        // 上下文整份带过来：分叉的意义就是"同一份上下文"
+        assert_eq!(orchestrator.conversation, original.turns);
+        let fork = crate::agent::session_store::find(&orchestrator.session_id)
+            .unwrap()
+            .expect("the fork is on disk before the first new turn");
+        assert!(fork.title.starts_with("Fork of"), "{}", fork.title);
+        // 原来那一行一个字都没动
+        let after = crate::agent::session_store::find(&original_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.turns, original.turns);
+        assert_eq!(after.title, original.title);
+    }
+
     /// 下一个 stage 只能看到模型对"我跑了测试"的转述，而转述正是最不该被信任的部分。
     /// 顺带钉住协议约束：`tool` 消息前面必须紧跟发起它的 assistant 调用，
     /// 少了配对整个请求会被供应商拒掉。
@@ -4710,6 +4857,7 @@ mod tests {
             id: "session-test".to_string(),
             workspace: "C:\\work\\project".to_string(),
             title: "older ask".to_string(),
+            title_is_custom: false,
             created_at: 1,
             updated_at: 2,
             next_turn_id: orchestrator.next_turn_id,

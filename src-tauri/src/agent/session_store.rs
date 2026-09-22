@@ -38,8 +38,15 @@ pub struct StoredSession {
     pub id: String,
     /// 这个会话属于哪个工作区。列表按它过滤 —— 另一个项目的对话在这里只是噪音。
     pub workspace: String,
-    /// 会话标题。取第一轮用户提问，和界面上的任务标题同一套规则。
+    /// 会话标题。默认取第一轮用户提问，和界面上的任务标题同一套规则。
     pub title: String,
+    /// 这个标题是用户自己起的。
+    ///
+    /// 要存下来，否则恢复一个改过名的会话之后，它就分不清"标题是人定的"和"标题是第一句
+    /// 话推出来的"，而只有后者才允许被覆盖。`serde(default)` 是为了读得懂改这个字段之前
+    /// 写下的那些行 —— 老行没有这个键，读成 false（推导出来的）正是它们的真实情况。
+    #[serde(default)]
+    pub title_is_custom: bool,
     pub created_at: u64,
     pub updated_at: u64,
     pub next_turn_id: u64,
@@ -177,6 +184,24 @@ pub fn upsert(session: &StoredSession) -> Result<(), String> {
     write_all(&sessions)
 }
 
+/// 给磁盘上某个会话改名，返回是否真的找到了它。
+///
+/// 只改标题和"这是人起的名字"这个标记，**不动 `updated_at`**：列表按活动时间排序，改个名字
+/// 不该把一个三天前的任务顶到最前面 —— 那会让"最近在做什么"这件事变得不可信。
+///
+/// 当前会话的改名不走这里而走 orchestrator：它内存里那份标题也要跟着变，否则下一轮对话会把
+/// 旧标题原样写回来，表现为"改了又变回去"。
+pub fn rename(id: &str, title: &str) -> Result<bool, String> {
+    let mut sessions = read_all()?;
+    let Some(session) = sessions.iter_mut().find(|session| session.id == id) else {
+        return Ok(false);
+    };
+    session.title = title.to_string();
+    session.title_is_custom = true;
+    write_all(&sessions)?;
+    Ok(true)
+}
+
 /// 删掉一个会话。不存在也算成功 —— 用户要的结果（它不在列表里）已经成立。
 pub fn remove(id: &str) -> Result<(), String> {
     let mut sessions = read_all()?;
@@ -229,6 +254,7 @@ mod tests {
             id: id.to_string(),
             workspace: workspace.to_string(),
             title: format!("title {}", id),
+            title_is_custom: false,
             created_at: 1,
             updated_at,
             next_turn_id: 1,
@@ -324,6 +350,28 @@ mod tests {
         remove("rm-never-existed").unwrap();
 
         assert_eq!(mine("rm-"), vec!["rm-keep"]);
+    }
+
+    /// 改名不该把一个老任务顶到列表最前面。
+    ///
+    /// 列表按活动时间排序，而"最近在做什么"是用户认路的唯一线索：改个名字就重排，那条线索
+    /// 就不可信了。同时钉住"改不存在的会话要说出来"——静默成功会让界面显示一个磁盘上没有的名字。
+    #[test]
+    fn renaming_a_session_keeps_its_place_in_the_list() {
+        let _env = TestEnv::new("C:\\work\\project");
+        upsert(&session("mv-old", "C:\\work\\project", 10)).unwrap();
+        upsert(&session("mv-new", "C:\\work\\project", 20)).unwrap();
+
+        assert!(rename("mv-old", "renamed by hand").unwrap());
+
+        let stored = find("mv-old").unwrap().unwrap();
+        assert_eq!(stored.title, "renamed by hand");
+        assert!(stored.title_is_custom);
+        assert_eq!(stored.updated_at, 10, "改名不该动活动时间");
+        assert_eq!(mine("mv-"), vec!["mv-new", "mv-old"]);
+
+        // 不存在就回 false，让命令层能说"它已经不在盘上了"
+        assert!(!rename("mv-never-existed", "whatever").unwrap());
     }
 
     /// 文件坏了不能当成"空的"直接覆盖，也不能从此**永久**写不进去。

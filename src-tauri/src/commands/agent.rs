@@ -3293,6 +3293,64 @@ pub async fn resume_agent_session(
     })
 }
 
+/// 给一个任务改名，返回改完之后的列表。
+///
+/// 两条路，因为要改的东西不一样：改**当前**会话必须同时改内存里那份标题，否则下一轮对话会把
+/// 旧标题原样写回去，表现为"改了又变回去"；改别的会话只需要动磁盘那一行。
+///
+/// 不检查是否在运行中：改名不动上下文，而一次长跑中间想把这个任务标清楚正是最自然的时刻。
+#[tauri::command]
+pub async fn rename_agent_session(
+    agent_state: State<'_, AgentGlobalState>,
+    session_id: String,
+    title: String,
+) -> Result<AgentSessionList, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    if orch.session_id == session_id {
+        orch.rename_session(&title)?;
+        return Ok(session_list(&orch));
+    }
+    let normalized = crate::agent::orchestrator::normalized_session_title(&title)?;
+    if !crate::agent::session_store::rename(&session_id, &normalized)? {
+        return Err(format!("That task is no longer on disk ({}).", session_id));
+    }
+    Ok(session_list(&orch))
+}
+
+/// 从一个任务分叉出一个新任务：同样的上下文，新的 id 和标题。
+///
+/// 和"回到那个任务"的区别是接下来往哪里写：恢复会把后续每一轮都写进原来那次记录，而分叉
+/// 留着原记录不动 —— 用户想"用同一份上下文试另一条路"时要的正是后者。
+///
+/// 运行中拒绝，理由同恢复：换会话会让正在跑的那一轮把结果记到别人头上。
+#[tauri::command]
+pub async fn fork_agent_session(
+    agent_state: State<'_, AgentGlobalState>,
+    session_id: String,
+) -> Result<AgentSessionDetail, String> {
+    let stored = crate::agent::session_store::find(&session_id)
+        .map_err(|reason| {
+            format!(
+                "The session history file could not be read ({}), so that task cannot be forked.",
+                reason
+            )
+        })?
+        .ok_or_else(|| format!("That task is no longer on disk ({}).", session_id))?;
+    let mut orch = agent_state.orchestrator.lock().await;
+    if orch.run_in_flight() {
+        return Err(RUN_IN_FLIGHT_SESSION_SWITCH.to_string());
+    }
+    orch.fork_session(stored)?;
+    Ok(AgentSessionDetail {
+        id: orch.session_id.clone(),
+        title: orch
+            .session_snapshot()
+            .map(|snapshot| snapshot.title)
+            .unwrap_or_default(),
+        turns: orch.conversation.clone(),
+    })
+}
+
 /// 删掉一个历史会话，返回删完之后的列表。
 ///
 /// 先删磁盘再动内存：反过来的话，删除失败（文件坏了、只读）会留下"上下文已经清空、会话

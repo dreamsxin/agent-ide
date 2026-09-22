@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
-import { History, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, GitBranch, History, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
+
+/** 手打的任务名上限，和后端 `session_title_from` 的截断点一致：界面要让这条边界看得见 */
+const MAX_TASK_NAME_CHARS = 60;
+
 
 /**
  * 历史任务面板：新开一个任务，或回到之前某一次。
@@ -23,8 +27,14 @@ export default function SessionHistory() {
   const startNewSession = useAgentStore((s) => s.startNewSession);
   const resumeSession = useAgentStore((s) => s.resumeSession);
   const deleteSession = useAgentStore((s) => s.deleteSession);
+  const renameSession = useAgentStore((s) => s.renameSession);
+  const forkSession = useAgentStore((s) => s.forkSession);
   const isStreaming = useAgentStore((s) => s.isStreaming);
   const [error, setError] = useState<string | null>(null);
+  // 正在改名的那一行，以及输入到一半的名字。只有一行能处于改名状态：两行同时改的话，
+  // 保存按钮点的是哪一行只能靠猜。
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
 
   // 挂载时读一次，之后每次 streaming 落下沿再读：刚跑完的那一轮此刻才进历史。
   // 挂载那一次不看 `isStreaming` —— 面板在运行途中打开时也必须列出已有的会话，
@@ -95,8 +105,53 @@ export default function SessionHistory() {
           <ul className="divide-y divide-surface-border/60">
             {sessions.map((session) => {
               const active = session.id === activeSessionId;
+              const renaming = renamingId === session.id;
               return (
                 <li key={session.id} className="px-3 py-2">
+                  {renaming ? (
+                    <form
+                      className="flex items-center gap-1.5"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void run(async () => {
+                          await renameSession(session.id, draftName);
+                          setRenamingId(null);
+                        });
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        value={draftName}
+                        maxLength={MAX_TASK_NAME_CHARS}
+                        onChange={(event) => setDraftName(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setRenamingId(null);
+                          }
+                        }}
+                        aria-label={`Rename task ${session.title}`}
+                        className="min-w-0 flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text"
+                      />
+                      <button
+                        type="submit"
+                        // 空名字不提交：后端会拒，而"提交了一个空名字"在界面上看起来像成功
+                        disabled={!draftName.trim()}
+                        aria-label="Save the new name"
+                        className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-accent-blue disabled:opacity-40"
+                      >
+                        <Check aria-hidden="true" className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRenamingId(null)}
+                        aria-label="Keep the old name"
+                        className="rounded p-1 text-surface-muted hover:bg-surface-border/30"
+                      >
+                        <X aria-hidden="true" className="h-3 w-3" />
+                      </button>
+                    </form>
+                  ) : (
                   <div className="flex items-start justify-between gap-2">
                     <button
                       type="button"
@@ -128,16 +183,40 @@ export default function SessionHistory() {
                         </div>
                       )}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void run(() => deleteSession(session.id))}
-                      aria-label={`Delete task ${session.title}`}
-                      title="Delete this task's saved conversation"
-                      className="flex-shrink-0 rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-diff-delete"
-                    >
-                      <Trash2 aria-hidden="true" className="h-3 w-3" />
-                    </button>
+                    <div className="flex flex-shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRenamingId(session.id);
+                          setDraftName(session.title);
+                        }}
+                        aria-label={`Rename task ${session.title}`}
+                        title="Give this task a name of your own"
+                        className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-surface-text"
+                      >
+                        <Pencil aria-hidden="true" className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void run(() => forkSession(session.id))}
+                        aria-label={`Fork task ${session.title}`}
+                        title="Start a new task with the same context. This one is left as it is."
+                        className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-accent-blue"
+                      >
+                        <GitBranch aria-hidden="true" className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void run(() => deleteSession(session.id))}
+                        aria-label={`Delete task ${session.title}`}
+                        title="Delete this task's saved conversation"
+                        className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-diff-delete"
+                      >
+                        <Trash2 aria-hidden="true" className="h-3 w-3" />
+                      </button>
+                    </div>
                   </div>
+                  )}
                 </li>
               );
             })}

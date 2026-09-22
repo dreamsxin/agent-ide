@@ -110,6 +110,86 @@ describe("SessionHistory", () => {
       expect(screen.getByText(/still in flight/)).toBeDefined();
     });
   });
+
+  /**
+   * 改名是就地编辑：点铅笔 → 输入框带着现有名字出现 → 回车保存。
+   *
+   * 输入框预填现有名字而不是空的：多数改名是微调（加一个单词），从空白开始等于每次都要重打。
+   */
+  it("renames a task in place, starting from its current name", async () => {
+    const renameSession = vi.fn().mockResolvedValue(undefined);
+    seed({
+      sessions: [
+        {
+          id: "session-1",
+          title: "refactor the parser",
+          updatedAt: Date.now(),
+          turnCount: 2,
+          lastOutcome: "",
+        },
+      ],
+      activeSessionId: "session-1",
+      renameSession,
+    });
+
+    render(<SessionHistory />);
+    fireEvent.click(screen.getByLabelText("Rename task refactor the parser"));
+    const input = screen.getByLabelText("Rename task refactor the parser") as HTMLInputElement;
+    expect(input.value).toBe("refactor the parser");
+    fireEvent.change(input, { target: { value: "Parser cleanup" } });
+    fireEvent.click(screen.getByLabelText("Save the new name"));
+
+    await vi.waitFor(() => {
+      expect(renameSession).toHaveBeenCalledWith("session-1", "Parser cleanup");
+    });
+    // 保存之后回到普通行，否则那一行会一直停在编辑态
+    await vi.waitFor(() => {
+      expect(screen.getByText("refactor the parser")).toBeDefined();
+    });
+  });
+
+  /** 空名字不送出去：后端会拒，而"提交了一个空名字"在界面上看起来像成功。 */
+  it("does not send an empty name", () => {
+    const renameSession = vi.fn();
+    seed({
+      sessions: [
+        { id: "session-1", title: "older ask", updatedAt: Date.now(), turnCount: 1, lastOutcome: "" },
+      ],
+      renameSession,
+    });
+
+    render(<SessionHistory />);
+    fireEvent.click(screen.getByLabelText("Rename task older ask"));
+    fireEvent.change(screen.getByLabelText("Rename task older ask"), {
+      target: { value: "   " },
+    });
+
+    expect((screen.getByLabelText("Save the new name") as HTMLButtonElement).disabled).toBe(true);
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 分叉和恢复是两个不同的动作，所以是两个不同的控件：恢复会把后续每一轮写进那次记录，
+   * 分叉留着它不动。被拒绝（运行中）时同样要说出来。
+   */
+  it("forks a task through its own control and reports a refusal", async () => {
+    const forkSession = vi.fn().mockRejectedValue("A run is still in flight.");
+    seed({
+      sessions: [
+        { id: "session-1", title: "older ask", updatedAt: Date.now(), turnCount: 1, lastOutcome: "" },
+      ],
+      activeSessionId: "session-2",
+      forkSession,
+    });
+
+    render(<SessionHistory />);
+    fireEvent.click(screen.getByLabelText("Fork task older ask"));
+
+    await vi.waitFor(() => {
+      expect(screen.getByText(/still in flight/)).toBeDefined();
+    });
+    expect(forkSession).toHaveBeenCalledWith("session-1");
+  });
 });
 
 

@@ -198,6 +198,19 @@ interface AgentStore {
    * 显示的和后端实际的不一致，那正是这个产品要避免的。
    */
   resumeSession: (sessionId: string) => Promise<void>;
+  /**
+   * 给一个任务改名。空名字会被后端拒绝 —— 这里不悄悄改成"恢复自动标题"。
+   *
+   * 改的是当前这个时，面板顶上的任务标题也跟着改：同一个任务在两处显示两个名字比不能改名更糟。
+   */
+  renameSession: (sessionId: string, title: string) => Promise<void>;
+  /**
+   * 从一个任务分叉出一个新任务：同样的上下文，新的一行记录。
+   *
+   * 和 `resumeSession` 的区别只在接下来往哪里写 —— 恢复会把后续每一轮写进原来那次记录，
+   * 分叉留着它不动。计划和审查区的处理与恢复完全一致。
+   */
+  forkSession: (sessionId: string) => Promise<void>;
   /** 删掉一个历史会话。删的是当前这个时，后端会顺带换一个新的。 */
   deleteSession: (sessionId: string) => Promise<void>;
 
@@ -722,6 +735,74 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           content:
             `Resumed task "${detail.title}" — ${detail.turns.length} turn(s) of context are back. ` +
             "The plan from that task is not restored, and pending changes in the review area are left as they are.",
+          timestamp: Date.now(),
+        },
+        ...detail.turns.flatMap((turn) => [
+          {
+            id: `${turn.id}-prompt`,
+            role: turn.derived ? ("agent" as const) : ("user" as const),
+            content: turn.prompt,
+            timestamp: Date.now(),
+          },
+          {
+            id: `${turn.id}-outcome`,
+            role: "agent" as const,
+            content: turn.outcome,
+            timestamp: Date.now(),
+          },
+        ]),
+      ],
+    });
+    await get().loadSessions();
+  },
+  renameSession: async (sessionId, title) => {
+    if (!isTauriRuntime()) return;
+    const list = normalizeAgentSessionList(
+      await invoke("rename_agent_session", { sessionId, title })
+    );
+    set({
+      sessions: list.sessions,
+      activeSessionId: list.activeId,
+      sessionWarning: list.warning,
+      sessionsAreSaved: list.sessionsAreSaved,
+    });
+    // 改的是正在用的那个：面板顶上那个任务标题也得跟着改，否则界面上同一个任务有两个名字
+    const renamed = list.sessions.find((session) => session.id === sessionId);
+    if (renamed && get().activeSessionId === sessionId) {
+      set({ currentTask: { id: renamed.id, title: renamed.title } });
+    }
+  },
+  forkSession: async (sessionId) => {
+    if (!isTauriRuntime()) return;
+    const detail = normalizeAgentSessionDetail(
+      await invoke("fork_agent_session", { sessionId })
+    );
+    if (!detail) return;
+    clearPersistedAgentSession();
+    // 分叉之后当前会话就是那个新的：上下文一样，但接下来每一轮都写进新的那一行，原来那次
+    // 记录留在列表里不动。聊天区按带过来的几轮重建，理由同 `resumeSession`。
+    set({
+      state: "idle",
+      currentTask: { id: detail.id, title: detail.title },
+      contextUsage: null,
+      steps: [],
+      pipeline: DEFAULT_PIPELINE,
+      sddArtifacts: [],
+      activeSddArtifact: null,
+      error: null,
+      streamContent: "",
+      isStreaming: false,
+      agentRunId: null,
+      restoredSession: null,
+      conversationTurns: detail.turns,
+      activeSessionId: detail.id,
+      messages: [
+        {
+          id: `forked-${detail.id}`,
+          role: "system" as const,
+          content:
+            `Forked into "${detail.title}" — the same ${detail.turns.length} turn(s) of context, ` +
+            "recorded as a new task. The task you forked from is untouched, and pending changes in the review area are left as they are.",
           timestamp: Date.now(),
         },
         ...detail.turns.flatMap((turn) => [

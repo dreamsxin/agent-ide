@@ -327,7 +327,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 ### 7.4 Container Components
 
 - **Editor Container**: Tabs / Split / Minimap / Overlay layers
-- **Agent Panel**: Primary views Chat | Plan | Changes, plus utility entries New task, Task history (the `sessions` view id), Pipeline and Settings. The user-facing word for a conversation-plus-its-plan is **task**; the code and the IPC commands say `session`.
+- **Agent Panel**: Primary views Chat | Plan | Changes, plus utility entries New task, Task history (the `sessions` view id), Pipeline and Settings. The user-facing word for a conversation-plus-its-plan is **task**; the code and the IPC commands say `session`. Each row in Task history offers four actions: open it (resume its context), rename it in place, fork it (a new task with the same context, leaving this one untouched), and delete it. Renaming does not reorder the list — the order is activity time, which is how a user recognises "the one from this morning".
 - **Bottom Panel**: Terminal / Logs / Tests / Actions
 - **Explorer Panel**
 

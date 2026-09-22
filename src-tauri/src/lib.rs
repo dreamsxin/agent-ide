@@ -94,6 +94,8 @@ pub fn run() {
             commands::agent::start_new_agent_session,
             commands::agent::list_agent_sessions,
             commands::agent::resume_agent_session,
+            commands::agent::rename_agent_session,
+            commands::agent::fork_agent_session,
             commands::agent::delete_agent_session,
             commands::agent::get_agent_conversation,
             commands::agent::truncate_agent_conversation,
