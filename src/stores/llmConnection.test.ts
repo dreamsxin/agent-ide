@@ -70,6 +70,21 @@ describe("llmTargetFingerprint", () => {
     expect(llmTargetFingerprint(rotatedKey)).not.toBe(TARGET);
   });
 
+  /**
+   * 临时换模型也换了目标。
+   *
+   * 不算进指纹的话，状态栏那个绿点会替一个**从未测过**的模型作保 —— 而这个函数存在的
+   * 全部理由就是"上一次的 ok 说的是另一个目标"。
+   */
+  it("临时换模型之后，上一次的验证结果不再作数", () => {
+    const overridden = source({ chatModelOverride: "gpt-4o-mini" });
+
+    expect(llmTargetFingerprint(overridden)).not.toBe(TARGET);
+    // 空白等于没换：清空输入框不该让绿点失效
+    expect(llmTargetFingerprint(source({ chatModelOverride: "   " }))).toBe(TARGET);
+    expect(llmTargetFingerprint(source({ chatModelOverride: null }))).toBe(TARGET);
+  });
+
   it("一个 profile 都匹配不上时用 endpoint/model 兜底，改端点仍然换指纹", () => {
     const base = source({
       llmProfiles: [],

@@ -16,6 +16,8 @@ export interface LlmTargetSource {
   llmEndpoint: string;
   llmModel: string;
   apiKeyMasked: string;
+  /** 这个聊天临时换的模型名（不存 profile）。它也决定"绿点替谁作保" */
+  chatModelOverride?: string | null;
 }
 
 /**
@@ -30,12 +32,15 @@ export interface LlmTargetSource {
 export function llmTargetFingerprint(source: LlmTargetSource): string {
   const id = source.chatProfileId ?? source.activeProfileId;
   const profile = source.llmProfiles.find((item) => item.id === id);
+  // 临时换的模型也算换了目标：这个函数的整条理由就是"上一次的 ok 说的是另一个目标"，
+  // 而覆盖恰恰换掉了模型 —— 不算进来的话，绿点会替一次从未测过的模型作保
+  const model = source.chatModelOverride?.trim() || null;
   if (profile) {
-    return `${profile.id}|${profile.endpoint}|${profile.model}|${profile.api_key_masked}`;
+    return `${profile.id}|${profile.endpoint}|${model ?? profile.model}|${profile.api_key_masked}`;
   }
   // 一个 profile 都没匹配上时（列表为空、或者刚被删掉）仍然要有指纹，否则端点改了
   // 指纹不变，绿点会替新端点作保。
-  return `|${source.llmEndpoint}|${source.llmModel}|${source.apiKeyMasked}`;
+  return `|${source.llmEndpoint}|${model ?? source.llmModel}|${source.apiKeyMasked}`;
 }
 
 export interface LlmIndicator {

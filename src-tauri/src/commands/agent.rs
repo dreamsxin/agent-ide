@@ -92,10 +92,9 @@ impl AgentGlobalState {
     ) -> Result<(LlmClient, Arc<crate::services::llm_client::RunUsageMeter>), String> {
         let mut config = self.get_llm_config(profile_id)?;
         if let Some(model) = model_override.map(str::trim).filter(|m| !m.is_empty()) {
+            // 只改模型名。请求里真正依赖它的是 `output_token_key`（o1/o3/o4/gpt-5 用
+            // `max_completion_tokens`），那个函数读的就是 `config.model`。
             config.model = model.to_string();
-            // `model_type` 是从模型名推出来的（决定输出 token 用哪个键名、走不走 reasoning），
-            // 换了名字必须跟着重算，否则 o3 的请求会带着一个它不认识的 `max_tokens`
-            config.model_type = crate::services::llm_client::ModelType::from_string(model);
         }
         // 配置了本地模型的 profile 在这里就被挡住：进程内推理已经移除，静默降级成
         // 远端调用只会让用户收到一串莫名其妙的 401/404。这是这条路径上唯一的检查点。
@@ -257,10 +256,9 @@ pub struct EstimateContextRequest {
     pub selection: Option<String>,
     #[serde(rename = "profileId")]
     pub profile_id: Option<String>,
-    /// 只换模型名，不换 profile。见 `get_llm_client`：key、endpoint、预算、价格、上限都还是
-    /// 那个 profile 的，所以价格可能对不上 —— 这条覆盖会写进 action log。
-    #[serde(default, rename = "modelOverride")]
-    pub model_override: Option<String>,
+    // 这里**没有** `modelOverride`：估算只用得到 profile 的 `max_context_tokens`，而覆盖
+    // 不带窗口（ROADMAP 145 里"没做"的那条）。留一个读不到的字段，就是前端照发、后端照忽略
+    // 的死参数 —— clippy 的 dead_code 抓到的正是它。
     #[serde(rename = "contextCompression")]
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
@@ -789,9 +787,6 @@ fn publish_tool_writes(
     events.emit_json("agent-state-changed", orch.state_payload());
 }
 
-/// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
-///
-/// 三个命令共九条退出分支以前各抄一遍这段。抄漏确实发生了：`run_agent_step` 的
 /// 这次运行临时换了模型时告诉用户。
 ///
 /// 和项目记忆截断一样在运行**开始前**说：它影响这一次运行报出来的金额和预算，而事后再说
@@ -844,6 +839,9 @@ async fn emit_project_memory_warning(
     );
 }
 
+/// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
+///
+/// 三个命令共九条退出分支以前各抄一遍这段。抄漏确实发生了：`run_agent_step` 的
 /// 取消分支和失败分支都没有记账，于是一个跑到一半被取消的步骤花掉的 token 在
 /// action log 里查不到 —— token 已经花了，取消不退款。
 ///
@@ -1395,6 +1393,15 @@ pub async fn continue_agent_pipeline(
     // 而界面上没有任何提示。
     let (llm, fresh_meter) =
         agent_state.get_llm_client(profile_id.as_deref(), model_override.as_deref())?;
+    // 续跑同样要把"这半段跑在哪个模型上"写进 action log：它是一个独立的 run id，不说的话
+    // 那一半运行的金额没有任何出处
+    emit_model_override_log(
+        &agent_state,
+        &app_handle,
+        profile_id.as_deref(),
+        model_override.as_deref(),
+    )
+    .await;
     // 续跑是一次新的运行：新开关。沿用暂停前那个开关的话，如果当时是被 Stop 停下的，
     // 续跑会一上来就被自己拦住。
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1790,6 +1797,13 @@ pub async fn repair_workspace(
         request.profile_id.as_deref(),
         request.model_override.as_deref(),
     )?;
+    emit_model_override_log(
+        &agent_state,
+        &app_handle,
+        request.profile_id.as_deref(),
+        request.model_override.as_deref(),
+    )
+    .await;
     // 修复也是一次新的运行：新开关，装工具面之前就造好
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 

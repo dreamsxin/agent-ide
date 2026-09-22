@@ -1418,7 +1418,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           activeFileContent: params.activeFileContent ?? null,
           selection: params.selection ?? null,
           profileId: params.profileId ?? get().chatProfileId,
-          modelOverride: get().chatModelOverride,
+          // 估算不发 modelOverride：预算用的是 profile 的窗口，而覆盖不带窗口。发一个
+          // 后端读不到的字段只会让人以为这里也跟着换了模型
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
           ideRuntime: params.ideRuntime ?? null,

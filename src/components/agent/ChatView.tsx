@@ -618,7 +618,9 @@ export default function ChatView() {
             <input
               value={chatModelOverride ?? ""}
               onChange={(event) => setChatModelOverride(event.target.value)}
-              disabled={isSending}
+              // 一个 provider 都没配时和 profile 选择框一起禁用：那时换模型名毫无意义，
+              // 请求连发都发不出去
+              disabled={isSending || llmProfiles.length === 0}
               placeholder={`Model for this chat (default: ${activeProfileModel || "unset"})`}
               aria-label="Model for this chat"
               className="min-w-0 flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"

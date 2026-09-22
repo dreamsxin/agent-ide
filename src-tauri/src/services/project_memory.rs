@@ -162,17 +162,21 @@ pub struct LoadedProjectMemory {
 /// 把"项目记忆被截断"变成一句给用户的话。
 ///
 /// 措辞要说清丢的是**尾部**：那正是用户最后写下的几条规则，也是他最可能以为还生效的那几条。
+/// 说"至多前 N 字节"而不是"前 N 字节"：切口要退回字符边界（最多少 3 字节），而上下文装配
+/// 之后还会按配额把这一节再削一次、甚至整节丢掉 —— 给一个精确数字等于给一个查不实的承诺。
 /// 单独一个纯函数是为了能测，理由同 `history_trim_report`。
 pub fn truncation_report(bytes: usize) -> (String, String) {
     (
         format!(
-            "{} is {} bytes; only the first {} reached the model",
+            "{} is {} bytes; at most the first {} reached the model",
             PROJECT_MEMORY_FILE, bytes, MAX_PROJECT_MEMORY_CHARS
         ),
         format!(
-            "This file is injected into every run, and everything past {} bytes is dropped — the \
-             tail, which is where the most recently added rules are. The Agent did not see them in \
-             this run. Shorten {} (Settings shows its size, and the Agent can tighten it for you).",
+            "This file is injected into every run, and everything past {} bytes is dropped before \
+             the request is even assembled — the tail, which is where the most recently added rules \
+             are. The Agent did not see them in this run, and a tight context budget can trim what \
+             is left even further. Shorten {} (Settings shows its size, and the Agent can tighten it \
+             for you).",
             MAX_PROJECT_MEMORY_CHARS, PROJECT_MEMORY_FILE
         ),
     )

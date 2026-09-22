@@ -2484,14 +2484,21 @@ fn native_tools_schema(extra_tools: &[ToolDefinition]) -> serde_json::Value {
     tools
 }
 
+/// 这个模型的输出上限该用哪个键名。
+///
+/// 只看模型名，不看 provider：OpenAI 的推理系列（o1/o3/o4/gpt-5）只认
+/// `max_completion_tokens`，而同一个模型经 Azure、网关或任何"OpenAI 兼容"端点访问时
+/// provider 往往写的是 `custom` —— 按 provider 判断就会给它发 `max_tokens`，换来一次
+/// 无法自动重试的 400（`unsupported_parameter` 不认这两个键）。临时换模型让这条路
+/// 变得很容易走到：profile 是自建端点，模型换成 o3。
 fn output_token_key(config: &LlmConfig) -> &'static str {
-    let provider = config.provider.to_ascii_lowercase();
     let model = config.model.to_ascii_lowercase();
-    if provider == "openai"
-        && (model.starts_with("o1")
-            || model.starts_with("o3")
-            || model.starts_with("o4")
-            || model.starts_with("gpt-5"))
+    // 前缀可能带命名空间（`openai/o3`、`azure/gpt-5`），所以取最后一段再比
+    let bare = model.rsplit('/').next().unwrap_or(&model);
+    if bare.starts_with("o1")
+        || bare.starts_with("o3")
+        || bare.starts_with("o4")
+        || bare.starts_with("gpt-5")
     {
         "max_completion_tokens"
     } else {
