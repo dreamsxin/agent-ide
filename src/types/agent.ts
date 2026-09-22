@@ -794,6 +794,8 @@ export interface LlmProfile {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  /** 思考档位：off / low / medium / high。空表示不发这个参数，由供应商决定。 */
+  reasoningEffort?: string;
   /** 单次运行的 token 上限；未设置或 0 表示不限制 */
   maxRunTokens?: number;
   /** 每百万 prompt token 的价格，单位微美元（$0.28/M = 280000） */
@@ -851,6 +853,8 @@ export interface SaveLlmProfileRequest {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  /** 思考档位：off / low / medium / high。空表示不发这个参数，由供应商决定。 */
+  reasoningEffort?: string;
   maxRunTokens?: number;
   promptMicrosPerMillion?: number;
   completionMicrosPerMillion?: number;

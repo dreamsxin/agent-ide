@@ -1510,6 +1510,7 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 provider: "openai".to_string(),
                 max_context_tokens: None,
+                reasoning_effort: None,
                 max_output_tokens: None,
                 tool_call_mode: "native".to_string(),
                 model_type: crate::services::llm_client::ModelType::OpenAI,

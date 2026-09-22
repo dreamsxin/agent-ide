@@ -155,6 +155,9 @@ export default function SettingsPanel() {
   const [completionPrice, setCompletionPrice] = useState("");
   const [maxRunSpend, setMaxRunSpend] = useState("");
   const spendCapState = spendCapStatus(promptPrice, completionPrice, maxRunSpend);
+  // 空串 = 不发这个参数（由供应商决定）。存成字符串而不是枚举：档位名是各家自己的词表，
+  // 前端替它收窄只会在下一个新档位出现时变成"设不了"
+  const [reasoningEffort, setReasoningEffort] = useState("");
   const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
   const [saving, setSaving] = useState(false);
   // "已保存"要用后端给的结论，而不是拿掩码串和 "not configured" 比。一份没被开启的明文
@@ -301,6 +304,7 @@ export default function SettingsPanel() {
         maxContextTokens: parseTokenInput(maxContextTokens),
         reservedOutputTokens: parseTokenInput(reservedOutputTokens),
         maxOutputTokens: parseTokenInput(maxOutputTokens),
+        reasoningEffort: reasoningEffort === "" ? undefined : reasoningEffort,
         maxRunTokens: parseTokenInput(maxRunTokens),
         promptMicrosPerMillion: usdToMicros(promptPrice),
         completionMicrosPerMillion: usdToMicros(completionPrice),
@@ -336,6 +340,7 @@ export default function SettingsPanel() {
           maxContextTokens: parseTokenInput(maxContextTokens),
           reservedOutputTokens: parseTokenInput(reservedOutputTokens),
           maxOutputTokens: parseTokenInput(maxOutputTokens),
+          reasoningEffort: reasoningEffort === "" ? undefined : reasoningEffort,
           maxRunTokens: parseTokenInput(maxRunTokens),
           promptMicrosPerMillion: usdToMicros(promptPrice),
           completionMicrosPerMillion: usdToMicros(completionPrice),
@@ -375,6 +380,7 @@ export default function SettingsPanel() {
     setCompletionPrice(microsToUsdInput(profile.completionMicrosPerMillion));
     setMaxRunSpend(microsToUsdInput(profile.maxRunSpendMicros));
     setToolCallMode(profile.toolCallMode ?? "text_protocol");
+    setReasoningEffort(profile.reasoningEffort ?? "");
     setApiKey("");
   }, [llmProfiles]);
 
@@ -758,6 +764,29 @@ export default function SettingsPanel() {
               stored to the millionth of a dollar.
             </>
           )}
+        </div>
+      </div>
+
+      <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">Reasoning Effort</div>
+        <select
+          value={reasoningEffort}
+          onChange={(event) => setReasoningEffort(event.target.value)}
+          className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+        >
+          <option value="">Provider default (do not send)</option>
+          <option value="off">Off — no thinking</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+        <div className="mt-1.5 text-[10px] leading-relaxed text-surface-muted">
+          Sent as <span className="font-mono text-surface-text">reasoning_effort</span> (plus{" "}
+          <span className="font-mono text-surface-text">enable_thinking: false</span> for Off, which is the
+          only spelling some gateways understand). Thinking and the answer share one output budget, so a high
+          tier on a small Max output is how a run comes back empty — raise Max output with it. If the endpoint
+          rejects the field, it is dropped for the rest of the run and the Logs panel says so rather than
+          leaving you to wonder why depth did not change.
         </div>
       </div>
 

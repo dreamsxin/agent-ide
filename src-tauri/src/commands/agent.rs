@@ -776,6 +776,7 @@ fn finish_agent_run(
     emit_tool_degradation_log(orch, events, llm);
     emit_image_degradation_log(orch, events, llm);
     emit_output_clamp_log(orch, events, llm);
+    emit_reasoning_degradation_log(orch, events, llm);
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -2121,6 +2122,7 @@ mod tests {
             model: model.to_string(),
             provider: "openai".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens: None,
             tool_call_mode: "text_protocol".to_string(),
             model_type: crate::services::llm_client::ModelType::OpenAI,
@@ -3296,4 +3298,28 @@ fn emit_output_clamp_log(
         return;
     };
     orch.emit_run_action_log(events, "warn", "output_limit_clamped", &summary, &details);
+}
+
+/// 告诉用户端点拒了思考档位，这次运行是按供应商默认档跑的。
+///
+/// 和其它降级同一个理由：设置里写着 high，而实际不是，界面上却看不出来。措辞和判断在
+/// reasoning_degradation_report 里，那里有测试。
+fn emit_reasoning_degradation_log(
+    orch: &AgentOrchestrator,
+    events: &dyn crate::agent::events::RunEvents,
+    llm: &crate::services::llm_client::LlmClient,
+) {
+    let Some((summary, details)) = crate::services::llm_client::reasoning_degradation_report(
+        llm.reasoning_was_rejected(),
+        llm.requested_reasoning_effort(),
+    ) else {
+        return;
+    };
+    orch.emit_run_action_log(
+        events,
+        "warn",
+        "reasoning_effort_rejected",
+        &summary,
+        &details,
+    );
 }

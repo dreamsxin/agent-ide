@@ -23,6 +23,9 @@ pub struct LlmProfile {
     pub reserved_output_tokens: Option<u32>,
     #[serde(default, rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    /// 思考档位（`low` / `medium` / `high` / `off`）。空表示不发这个参数，由供应商决定。
+    #[serde(default, rename = "reasoningEffort")]
+    pub reasoning_effort: Option<String>,
     /// 单次运行允许消耗的总 token 上限（prompt + completion）。None 表示不限制。
     #[serde(default, rename = "maxRunTokens")]
     pub max_run_tokens: Option<u64>,
@@ -90,6 +93,9 @@ pub struct LlmProfileResponse {
     pub reserved_output_tokens: Option<u32>,
     #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    /// 思考档位（`low` / `medium` / `high` / `off`）。空表示不发这个参数，由供应商决定。
+    #[serde(default, rename = "reasoningEffort")]
+    pub reasoning_effort: Option<String>,
     #[serde(rename = "maxRunTokens")]
     pub max_run_tokens: Option<u64>,
     #[serde(rename = "promptMicrosPerMillion")]
@@ -149,6 +155,9 @@ pub struct SaveLlmProfileRequest {
     pub reserved_output_tokens: Option<u32>,
     #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u32>,
+    /// 思考档位（`low` / `medium` / `high` / `off`）。空表示不发这个参数，由供应商决定。
+    #[serde(default, rename = "reasoningEffort")]
+    pub reasoning_effort: Option<String>,
     #[serde(rename = "maxRunTokens")]
     pub max_run_tokens: Option<u64>,
     #[serde(rename = "promptMicrosPerMillion")]
@@ -228,6 +237,7 @@ impl LlmProfile {
             // 见 `window_limited_output_tokens`。它仍然不会被发给供应商。
             max_context_tokens: self.max_context_tokens,
             max_output_tokens: self.max_output_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
             tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
             model_type,
             local_model_config,
@@ -246,6 +256,7 @@ impl LlmProfile {
             max_context_tokens: self.max_context_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
             max_output_tokens: self.max_output_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
             max_run_tokens: self.max_run_tokens,
             prompt_micros_per_million: self.prompt_micros_per_million,
             completion_micros_per_million: self.completion_micros_per_million,
@@ -434,6 +445,7 @@ fn default_config_from_env() -> LlmProfilesConfig {
             api_key: String::new(),
             model,
             max_context_tokens: None,
+            reasoning_effort: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
             max_run_tokens: None,
@@ -506,6 +518,7 @@ fn parse_llm_profiles_config_with_migration(
         api_key,
         model: parsed.get("model")?.as_str()?.to_string(),
         max_context_tokens: None,
+        reasoning_effort: None,
         reserved_output_tokens: None,
         max_output_tokens: None,
         max_run_tokens: None,
@@ -729,6 +742,7 @@ pub fn save_profile(
         max_context_tokens: request.max_context_tokens,
         reserved_output_tokens: request.reserved_output_tokens,
         max_output_tokens: request.max_output_tokens,
+        reasoning_effort: request.reasoning_effort.clone(),
         max_run_tokens: request.max_run_tokens,
         prompt_micros_per_million: request.prompt_micros_per_million,
         completion_micros_per_million: request.completion_micros_per_million,
@@ -913,6 +927,7 @@ mod tests {
             max_context_tokens: Some(128000),
             reserved_output_tokens: Some(4096),
             max_output_tokens: Some(4096),
+            reasoning_effort: None,
             max_run_tokens: Some(250_000),
             prompt_micros_per_million: None,
             completion_micros_per_million: None,
@@ -1080,6 +1095,7 @@ mod tests {
             api_key: String::new(),
             model: "gpt-4o".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
             max_run_tokens: None,
@@ -1112,6 +1128,7 @@ mod tests {
             api_key: "sk-secret".to_string(),
             model: "gpt-4o".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             reserved_output_tokens: None,
             max_output_tokens: None,
             max_run_tokens: None,

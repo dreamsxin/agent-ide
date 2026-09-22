@@ -2033,6 +2033,7 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         // 空响应那条错误会建议"设一个输出上限"，所以 CLI 这边必须真的有地方设 —— 否则那句
         // 建议指向一个只有桌面端才有的设置，命令行用户照着做不了。没给就仍然由供应商决定。
         max_context_tokens: None,
+        reasoning_effort: None,
         max_output_tokens: std::env::var("LLM_MAX_OUTPUT")
             .ok()
             .and_then(|raw| raw.trim().parse::<u32>().ok())

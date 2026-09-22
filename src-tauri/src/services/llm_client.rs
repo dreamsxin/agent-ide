@@ -279,6 +279,12 @@ pub struct LlmConfig {
     /// 而上限本身是合法的 —— 只是加上这次的提示词就装不下了。见
     /// `window_limited_output_tokens`。
     pub max_context_tokens: Option<u32>,
+    /// 思考档位（`low` / `medium` / `high` / `off`）。`None` 表示不发这个参数，由供应商决定。
+    ///
+    /// 用**档位**而不是 token 预算：供应商暴露出来的就是档位（`reasoning_effort` 一族），而
+    /// "给思考留多少 token"根本不是一个可发送的量 —— 思考和正文共用同一个输出预算，这正是
+    /// 一次 finish_reason=length 空回答的来源（见 ROADMAP 122）。
+    pub reasoning_effort: Option<String>,
     pub tool_call_mode: String,
     pub model_type: ModelType,
     pub local_model_config: Option<LocalModelConfig>,
@@ -293,6 +299,7 @@ impl LlmConfig {
             model,
             provider: "openai".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens: Some(4096),
             tool_call_mode: "native_tools".to_string(),
             model_type: ModelType::OpenAI,
@@ -308,6 +315,7 @@ impl LlmConfig {
             model,
             provider: "deepseek".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens: Some(4096),
             tool_call_mode: "native_tools".to_string(),
             model_type: ModelType::DeepSeek,
@@ -324,6 +332,7 @@ impl LlmConfig {
             model: local_config.name.clone(),
             provider: "local".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens: Some(local_config.max_tokens.max(1)),
             tool_call_mode: "text_protocol".to_string(),
             model_type,
@@ -1067,6 +1076,32 @@ pub struct OutputClamp {
 /// 384000 —— 他会去怀疑模型，而不是去看上下文已经占了多少。
 ///
 /// 措辞放在这里而不是命令层：命令层要 `AppHandle` 才能调用，措辞就没法测。
+/// 思考档位被端点拒掉之后给用户的那句话。没被拒就返回 None。
+///
+/// 必须说出来：设置里写着"high"，而模型从被拒的那一刻起按供应商默认档跑 —— 回答的深浅会变，
+/// 而界面上没有任何其他症状。和 tools 降级、图片降级同一套处理。
+pub fn reasoning_degradation_report(
+    rejected: bool,
+    requested: Option<&str>,
+) -> Option<(String, String)> {
+    if !rejected {
+        return None;
+    }
+    let requested = requested.unwrap_or("a reasoning effort");
+    Some((
+        format!(
+            "This endpoint rejected the reasoning effort setting ({}); it ran at the provider default",
+            requested
+        ),
+        format!(
+            "The request carried reasoning_effort={} (plus enable_thinking for the off tier). The \
+             endpoint refused it, so both keys were dropped and every later request in this run \
+             went without them. Answers may be shallower or deeper than the tier you picked. Set \
+             Reasoning effort back to the provider default to stop sending it.",
+            requested
+        ),
+    ))
+}
 pub fn output_clamp_report(clamps: &[OutputClamp]) -> Option<(String, String)> {
     let smallest = clamps.iter().min_by_key(|clamp| clamp.sent)?;
     let details = format!(
@@ -1121,6 +1156,11 @@ pub struct LlmClient {
     usage_meter: Option<Arc<RunUsageMeter>>,
     /// 供应商明确拒绝过 `tools` 参数：后续请求不再附带，避免每次都白撞一次 400
     tools_rejected: Arc<AtomicBool>,
+    /// 端点拒掉了思考档位参数，之后的请求都不再带它。
+    ///
+    /// 和 `tools_rejected` 同一个理由：降级必须能被说出来。不说的话，用户设了"高强度思考"
+    /// 而模型一直按默认档跑，界面上看不出任何区别。
+    reasoning_rejected: Arc<AtomicBool>,
     /// 本次运行里被摘掉的图片。命令层在运行结束时读它，把降级写进 action log ——
     /// 只在消息文本里写原因等于只告诉模型，用户看到的仍是一次"正常"的运行。
     /// 用 `Arc` 是因为 `LlmClient` 是 `Clone`：真要出现克隆时两份必须记在一处
@@ -1158,6 +1198,7 @@ impl LlmClient {
             extra_tools: Vec::new(),
             usage_meter: None,
             tools_rejected: Arc::new(AtomicBool::new(false)),
+            reasoning_rejected: Arc::new(AtomicBool::new(false)),
             image_drops: Arc::new(Mutex::new(Vec::new())),
             output_clamps: Arc::new(Mutex::new(Vec::new())),
             request_recorder: None,
@@ -1193,6 +1234,14 @@ impl LlmClient {
         }
     }
 
+    /// 这次用的那份配置。命令层写降级日志时要说出"你设的是哪一档"。
+    pub fn requested_reasoning_effort(&self) -> Option<&str> {
+        self.config.reasoning_effort.as_deref()
+    }
+    /// 端点是否拒过思考档位参数。命令层用它写 action log。
+    pub fn reasoning_was_rejected(&self) -> bool {
+        self.reasoning_rejected.load(Ordering::SeqCst)
+    }
     /// 这次运行里被按剩余窗口下调过的输出上限。命令层用它写 action log。
     pub fn output_clamps(&self) -> Vec<OutputClamp> {
         self.output_clamps
@@ -1817,6 +1866,11 @@ impl LlmClient {
             if let Some(parameter) = unsupported_parameter(status, &text) {
                 if !dropped.contains(&parameter) && strip_parameter(&mut body, parameter) {
                     dropped.push(parameter);
+                    if parameter == "reasoning_effort" {
+                        // 档位被端点拒掉之后就不再发了：用户设的"高强度思考"从这一刻起
+                        // 不再生效，而这件事在界面上没有任何其他症状
+                        self.reasoning_rejected.store(true, Ordering::SeqCst);
+                    }
                     if parameter == "tools" {
                         self.tools_rejected.store(true, Ordering::SeqCst);
                     }
@@ -1851,6 +1905,13 @@ fn unsupported_parameter(status: reqwest::StatusCode, text: &str) -> Option<&'st
         return None;
     }
     let lowered = text.to_lowercase();
+    // 思考档位：端点不认时摘掉重试。两个拼法是同一个意图，一起摘（见 `strip_parameter`）。
+    if lowered.contains("reasoning_effort")
+        || lowered.contains("enable_thinking")
+        || lowered.contains("reasoning")
+    {
+        return Some("reasoning_effort");
+    }
     if lowered.contains("stream_options") {
         return Some("stream_options");
     }
@@ -1871,6 +1932,10 @@ fn strip_parameter(body: &mut serde_json::Value, parameter: &str) -> bool {
         return false;
     };
     let mut removed = object.remove(parameter).is_some();
+    if parameter == "reasoning_effort" {
+        // 两个键表达的是同一件事，留下任何一个都会被同一个端点再拒一次
+        removed |= object.remove("enable_thinking").is_some();
+    }
     if parameter == "tools" {
         removed |= object.remove("tool_choice").is_some();
     }
@@ -2145,6 +2210,19 @@ fn build_chat_request(
         if let Some(max_output_tokens) = output_tokens {
             let key = output_token_key(config);
             object.insert(key.to_string(), serde_json::json!(max_output_tokens));
+        }
+        // 思考档位。发的是供应商接口里那个档位字段，不是 token 预算 —— 后者不存在。
+        //
+        // "off" 时多发一个 `enable_thinking: false`：一部分网关只认这个拼法，而"别思考"
+        // 恰好是 `reasoning_effort` 在那些端点上表达不出来的意图。端点不认这两个键时，
+        // 能力协商会把它摘掉重试（见 `unsupported_parameter`），而不是让整次运行失败。
+        if let Some(effort) = config.reasoning_effort.as_deref() {
+            if effort == "off" {
+                object.insert("enable_thinking".to_string(), serde_json::json!(false));
+                object.insert("reasoning_effort".to_string(), serde_json::json!("none"));
+            } else {
+                object.insert("reasoning_effort".to_string(), serde_json::json!(effort));
+            }
         }
         if config.tool_call_mode == "native_tools" && include_tools {
             object.insert("tools".to_string(), native_tools_schema(extra_tools));
@@ -2556,6 +2634,7 @@ mod image_wire_tests {
             model: model.to_string(),
             provider: "openai".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens: None,
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::OpenAI,
@@ -2763,6 +2842,7 @@ mod tests {
             model: model.to_string(),
             provider: provider.to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens,
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::OpenAI,
@@ -3058,6 +3138,7 @@ mod tests {
             model: model.to_string(),
             provider: provider.to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens,
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::from_string(provider),
@@ -3644,6 +3725,7 @@ mod tests {
             model: "deepseek-v4-flash".to_string(),
             provider: "deepseek".to_string(),
             max_context_tokens: None,
+            reasoning_effort: None,
             max_output_tokens: Some(64),
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::DeepSeek,
@@ -3730,5 +3812,73 @@ mod tests {
         assert!(details.contains("2 time(s)"), "{}", details);
         // 下一步做什么
         assert!(details.contains("Shorten the context"), "{}", details);
+    }
+
+    /// 思考档位要真的出现在请求体里，而 "off" 要用两种拼法表达同一件事。
+    ///
+    /// 只发 `reasoning_effort` 的话，一部分只认 `enable_thinking` 的网关上"别思考"根本表达不
+    /// 出来；而非 off 的档位多发一个布尔值只会制造歧义，所以只在 off 那一档发。
+    #[test]
+    fn the_reasoning_tier_reaches_the_request_body() {
+        let mut cfg = config("deepseek", "deepseek-reasoner", None);
+
+        cfg.reasoning_effort = Some("high".to_string());
+        let body = build_chat_request(&cfg, vec![ChatMessage::user("hi")], false, &[], false);
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("enable_thinking").is_none(), "{}", body);
+
+        cfg.reasoning_effort = Some("off".to_string());
+        let body = build_chat_request(&cfg, vec![ChatMessage::user("hi")], false, &[], false);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["enable_thinking"], false);
+
+        // 没设就一个键都不发：由供应商决定，而不是我们替它选一个默认档
+        cfg.reasoning_effort = None;
+        let body = build_chat_request(&cfg, vec![ChatMessage::user("hi")], false, &[], false);
+        assert!(body.get("reasoning_effort").is_none(), "{}", body);
+        assert!(body.get("enable_thinking").is_none(), "{}", body);
+    }
+
+    /// 端点拒了档位参数时要认出来、把两个键一起摘掉，然后重试 —— 而不是让整次运行失败。
+    #[test]
+    fn a_refused_reasoning_tier_is_recognised_and_both_keys_are_dropped() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+        assert_eq!(
+            unsupported_parameter(status, "Unrecognized request argument: reasoning_effort"),
+            Some("reasoning_effort")
+        );
+        // 另一种拼法也要认，否则只认一半的端点上会一直失败
+        assert_eq!(
+            unsupported_parameter(status, "enable_thinking is not supported"),
+            Some("reasoning_effort")
+        );
+        // 200 不是拒绝：别把成功的请求当成不支持，那会静默降级
+        assert_eq!(
+            unsupported_parameter(reqwest::StatusCode::OK, "reasoning_effort"),
+            None
+        );
+
+        let mut body = serde_json::json!({
+            "model": "m",
+            "reasoning_effort": "none",
+            "enable_thinking": false,
+        });
+        assert!(strip_parameter(&mut body, "reasoning_effort"));
+        // 留下任何一个都会被同一个端点再拒一次
+        assert!(body.get("reasoning_effort").is_none(), "{}", body);
+        assert!(body.get("enable_thinking").is_none(), "{}", body);
+    }
+
+    /// 降级必须说得出"你设的是哪一档、现在按什么跑、怎么停掉"。
+    #[test]
+    fn the_reasoning_degradation_report_names_the_tier_and_the_way_out() {
+        assert!(reasoning_degradation_report(false, Some("high")).is_none());
+
+        let (summary, details) = reasoning_degradation_report(true, Some("high")).expect("report");
+        assert!(summary.contains("high"), "{}", summary);
+        assert!(summary.contains("provider default"), "{}", summary);
+        assert!(details.contains("reasoning_effort=high"), "{}", details);
+        // 下一步：怎么让它别再发
+        assert!(details.contains("Reasoning effort"), "{}", details);
     }
 }
