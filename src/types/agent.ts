@@ -43,12 +43,20 @@ export type IdeMode = "code" | "plan";
  */
 export interface RunUsage {
   totalTokens: number;
+  /**
+   * `totalTokens` 里花在思考上的那部分（推理模型的 reasoning tokens）。
+   *
+   * **不要和 totalTokens 相加**：它已经含在里面。单独有它是因为"一次 finish_reason=length
+   * 的空回答同样按 completion 计费" —— 没有这个数字，账单上那一笔看起来像记错了。
+   */
+  reasoningTokens: number;
   maxTotalTokens: number | null;
   spendMicros: number | null;
   maxSpendMicros: number | null;
   calls: number;
   reportedCalls: number;
 }
+
 
 /** 事件里的 usage 字段收敛成 `RunUsage`，非法或缺失时返回 null */
 /**
@@ -83,7 +91,9 @@ export function normalizeRunUsage(value: unknown): RunUsage | null {
   };
   return {
     totalTokens: count("totalTokens"),
+    reasoningTokens: count("reasoningTokens"),
     maxTotalTokens: optional("maxTotalTokens"),
+
     spendMicros: optional("spendMicros"),
     maxSpendMicros: optional("maxSpendMicros"),
     calls: count("calls"),
@@ -134,11 +144,19 @@ export function describeRunUsage(
       ? ` Only ${usage.reportedCalls} of ${usage.calls} calls reported usage, so this is a lower bound and the per-run cap undercounts.`
       : "";
   const cost = spend ? `, estimated ${spend}` : ", cost not computable (no pricing configured)";
+  // 思考 token 只进悬浮详情：状态栏那一格放不下第三个数字，而这条信息要回答的是
+  // "为什么花了这么多却没拿到东西"，那是事后复盘的问题，不是实时监看的问题。
+  // 明说它已经含在总数里，否则读起来像是又多花了一笔。
+  const reasoning =
+    usage.reasoningTokens > 0
+      ? ` ${usage.reasoningTokens} of those tokens were reasoning (already inside the total).`
+      : "";
   return {
     label,
-    detail: `${usage.totalTokens} tokens${cost} (${parts.join(", ")}).${partial}`,
+    detail: `${usage.totalTokens} tokens${cost} (${parts.join(", ")}).${reasoning}${partial}`,
   };
 }
+
 
 
 /**

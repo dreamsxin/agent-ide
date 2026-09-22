@@ -2019,6 +2019,7 @@ mod tests {
             prompt_tokens: Some(12_000),
             completion_tokens: Some(500),
             total_tokens: None,
+            ..Default::default()
         }));
         emit_usage_action_log(&orch, &events, &meter);
         let payload = events

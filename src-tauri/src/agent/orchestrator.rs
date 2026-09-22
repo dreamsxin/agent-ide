@@ -2250,6 +2250,8 @@ impl AgentOrchestrator {
                 let snapshot = meter.snapshot();
                 serde_json::json!({
                     "totalTokens": snapshot.total_tokens,
+                    // 思考 token：已经含在 total 里，前端只在悬浮详情里点明，不参与相加
+                    "reasoningTokens": snapshot.reasoning_tokens,
                     "maxTotalTokens": snapshot.max_total_tokens,
                     "spendMicros": snapshot.spend_micros,
                     "maxSpendMicros": snapshot.max_spend_micros,
@@ -4391,6 +4393,7 @@ mod tests {
             prompt_tokens: Some(60),
             completion_tokens: Some(10),
             total_tokens: None,
+            ..Default::default()
         }));
 
         // 恢复时 run id 会重新写入，但额度必须接着算
@@ -4404,6 +4407,7 @@ mod tests {
             prompt_tokens: Some(40),
             completion_tokens: None,
             total_tokens: None,
+            ..Default::default()
         }));
         // 续跑的消耗算在同一个额度里，因此这里已经越线
         assert!(resumed.check_budget().is_err());
@@ -4954,6 +4958,7 @@ mod tests {
             prompt_tokens: Some(1_000),
             completion_tokens: Some(500),
             total_tokens: None,
+            ..Default::default()
         }));
         orchestrator.start_usage_accounting(priced);
 
@@ -4970,6 +4975,7 @@ mod tests {
             prompt_tokens: Some(1_000),
             completion_tokens: Some(500),
             total_tokens: None,
+            ..Default::default()
         }));
         orchestrator.start_usage_accounting(unpriced);
 

@@ -121,6 +121,7 @@ describe("run usage", () => {
   function usage(overrides: Partial<RunUsage> = {}): RunUsage {
     return {
       totalTokens: 1_500,
+      reasoningTokens: 0,
       maxTotalTokens: null,
       spendMicros: 2_000,
       maxSpendMicros: null,
@@ -129,6 +130,7 @@ describe("run usage", () => {
       ...overrides,
     };
   }
+
 
   /**
    * 状态栏和 action log 里的同一笔花费必须是同一个字符串，所以这里的格式化
@@ -174,7 +176,28 @@ describe("run usage", () => {
     expect(described?.label).toBe("1500 tok");
     expect(described?.detail).toContain("not computable");
   });
+
+  /**
+   * 推理模型上"花了钱、正文是空的"没有别的解释入口。思考 token 只进悬浮详情（24px 的
+   * 状态栏放不下第三个数字），而且必须点明它已经含在总数里 —— 否则读起来像又多花了一笔。
+   */
+  it("names reasoning tokens in the detail without adding them to the total", () => {
+    const described = describeRunUsage(
+      usage({ totalTokens: 5_096, reasoningTokens: 3_900 }),
+      formatMicrosUsd
+    );
+
+    expect(described?.label).toBe("5096 tok · $0.0020");
+    expect(described?.detail).toContain("3900 of those tokens were reasoning");
+    expect(described?.detail).toContain("already inside the total");
+  });
+
+  /** 非推理模型上恒为 0 的一句是噪音 */
+  it("says nothing about reasoning when there was none", () => {
+    expect(describeRunUsage(usage(), formatMicrosUsd)?.detail).not.toContain("reasoning");
+  });
 });
+
 
 describe("normalizeRunUsage", () => {
   it("returns null for anything that is not a usage object", () => {
@@ -192,11 +215,13 @@ describe("normalizeRunUsage", () => {
 
     expect(normalized).toEqual({
       totalTokens: 10,
+      reasoningTokens: 0,
       maxTotalTokens: null,
       spendMicros: null,
       maxSpendMicros: null,
       calls: 0,
       reportedCalls: 0,
+
     });
   });
 

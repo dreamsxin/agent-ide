@@ -521,6 +521,19 @@ pub struct LlmUsage {
     pub completion_tokens: Option<u64>,
     #[serde(default, rename = "total_tokens")]
     pub total_tokens: Option<u64>,
+    /// OpenAI / DeepSeek 把思考 token 放在这里，**已经包含在 `completion_tokens` 里**。
+    #[serde(default, rename = "completion_tokens_details")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+    /// 少数网关直接给在顶层，见 `reasoning_tokens()`
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+}
+
+/// `completion_tokens` 的细分。只取思考那一项：它是"钱花了、正文却可能是空的"唯一的解释。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl LlmUsage {
@@ -535,6 +548,18 @@ impl LlmUsage {
                 Some(prompt.unwrap_or_default() + completion.unwrap_or_default())
             }
         }
+    }
+
+    /// 这次回答里有多少 token 花在思考上。
+    ///
+    /// 嵌套字段优先、顶层兜底：两种拼法都在野生端点上出现过，而"只认一种"的后果是一次
+    /// 14 000 字思考的空回答显示成 0 —— 那恰好是这个数字唯一有用的时刻。
+    ///
+    /// **不加进总数**：它已经算在 `completion_tokens` 里，再加一遍就是重复计费。
+    pub fn reasoning_tokens(&self) -> Option<u64> {
+        self.completion_tokens_details
+            .and_then(|details| details.reasoning_tokens)
+            .or(self.reasoning_tokens)
     }
 
     fn is_empty(&self) -> bool {
@@ -576,6 +601,11 @@ impl TokenPricing {
 pub struct RunUsageMeter {
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
+    /// `completion_tokens` 里花在思考上的那部分，**不额外计入总数**。
+    ///
+    /// 单独记是因为它解释了一类否则无从解释的账：一次 finish_reason=length 的空回答同样
+    /// 按 completion 计费，而界面上"花了钱、什么都没拿到"看起来像记账错了。
+    reasoning_tokens: AtomicU64,
     /// 这次运行里**最大**的那次请求的输入 / 输入+输出 token。
     ///
     /// 为什么是最大值而不是最后一次：占用问的是"窗口最满的时候有多满"。累加是花费；
@@ -612,6 +642,8 @@ pub struct RunUsageSnapshot {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// `completion_tokens` 里花在思考上的那部分，已经含在上面两个数里
+    pub reasoning_tokens: u64,
     /// 最大那次请求的输入 / 输入+输出 token，见 `RunUsageMeter`
     pub peak_prompt_tokens: u64,
     pub peak_total_tokens: u64,
@@ -694,9 +726,20 @@ impl RunUsageSnapshot {
             None => "not set".to_string(),
         };
         format!(
-            "Prompt tokens: {}\nCompletion tokens: {}\nCalls with reported usage: {} of {}\nPer-run cap: {}\nEstimated spend: {}\nPer-run spend cap: {}",
+            "Prompt tokens: {}\nCompletion tokens: {}{}\nCalls with reported usage: {} of {}\nPer-run cap: {}\nEstimated spend: {}\nPer-run spend cap: {}",
             self.prompt_tokens,
             self.completion_tokens,
+            // 只在真有思考 token 时加这一句：非推理模型上恒为 0 的一行是噪音，而推理模型上
+            // 它是"钱花了、正文是空的"唯一的解释。措辞点明它已经含在 completion 里，否则
+            // 读起来像是又多花了一笔。
+            if self.reasoning_tokens > 0 {
+                format!(
+                    " (of which {} reasoning, already counted in completion)",
+                    self.reasoning_tokens
+                )
+            } else {
+                String::new()
+            },
             self.reported_calls,
             self.calls,
             cap,
@@ -771,6 +814,11 @@ impl RunUsageMeter {
         self.prompt_tokens.fetch_add(prompt, Ordering::SeqCst);
         self.completion_tokens
             .fetch_add(completion, Ordering::SeqCst);
+        // 思考 token 单独累加，但**不**进 total：它已经在 completion 里，加两遍就是假账
+        self.reasoning_tokens.fetch_add(
+            usage.reasoning_tokens().unwrap_or_default(),
+            Ordering::SeqCst,
+        );
         // 取最大值，见 `peak_prompt_tokens`
         self.peak_prompt_tokens.fetch_max(prompt, Ordering::SeqCst);
         self.peak_total_tokens
@@ -784,6 +832,7 @@ impl RunUsageMeter {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            reasoning_tokens: self.reasoning_tokens.load(Ordering::SeqCst),
             peak_prompt_tokens: self.peak_prompt_tokens.load(Ordering::SeqCst),
             peak_total_tokens: self.peak_total_tokens.load(Ordering::SeqCst),
             calls: self.calls.load(Ordering::SeqCst),
@@ -2644,7 +2693,53 @@ mod tests {
         );
     }
 
-    /// 只有"可能被截断"时才谈输出上限。`stop` 之后劝人改上限是把用户送去改一个无关的设置。
+    /// 思考 token 必须**被看见**，但**不能**被重复计入。
+    ///
+    /// 两件事同样重要：一次 `finish_reason=length` 的空回答照样按 completion 计费，没有这个
+    /// 数字那笔账就无从解释；而把它再加到总数上会让 per-run 上限提前触发、花费也虚高。
+    #[test]
+    fn reasoning_tokens_are_visible_without_being_counted_twice() {
+        // DeepSeek / OpenAI 的嵌套形状
+        let nested: LlmUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":4096,"total_tokens":5096,
+                "completion_tokens_details":{"reasoning_tokens":3900}}"#,
+        )
+        .expect("parse nested usage");
+        assert_eq!(nested.reasoning_tokens(), Some(3900));
+
+        // 少数网关给在顶层；两种拼法都得认，否则那个数字恰好在最需要时显示成 0
+        let flat: LlmUsage =
+            serde_json::from_str(r#"{"completion_tokens":80,"reasoning_tokens":64}"#)
+                .expect("parse flat usage");
+        assert_eq!(flat.reasoning_tokens(), Some(64));
+
+        let meter = RunUsageMeter::new(None);
+        meter.record_call();
+        meter.record_usage(Some(&nested));
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.reasoning_tokens, 3900);
+        // 总数仍然只是 prompt + completion
+        assert_eq!(snapshot.total_tokens, 1000 + 4096);
+
+        let details = snapshot.action_log_details();
+        assert!(details.contains("3900 reasoning"), "{}", details);
+        assert!(
+            details.contains("already counted in completion"),
+            "读起来不能像是又多花了一笔：{}",
+            details
+        );
+
+        // 非推理模型上那一行是噪音，不该出现
+        let plain = RunUsageMeter::new(None);
+        plain.record_call();
+        plain.record_usage(Some(&LlmUsage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            ..Default::default()
+        }));
+        assert!(!plain.snapshot().action_log_details().contains("reasoning"));
+    }
+
     #[test]
     fn only_a_possibly_truncated_finish_reason_blames_the_output_limit() {
         assert!(finish_reason_is_truncation(Some("length")));
@@ -2836,6 +2931,7 @@ mod tests {
             prompt_tokens: Some(30),
             completion_tokens: Some(12),
             total_tokens: None,
+            ..Default::default()
         };
         assert_eq!(split.resolved_total(), Some(42));
 
@@ -2854,6 +2950,7 @@ mod tests {
             prompt_tokens: Some(40),
             completion_tokens: Some(20),
             total_tokens: Some(60),
+            ..Default::default()
         }));
 
         // 还没到上限：下一次调用要放行
@@ -2863,6 +2960,7 @@ mod tests {
             prompt_tokens: Some(30),
             completion_tokens: Some(15),
             total_tokens: None,
+            ..Default::default()
         }));
 
         let snapshot = meter.snapshot();
@@ -2897,6 +2995,7 @@ mod tests {
             prompt_tokens: Some(7),
             completion_tokens: None,
             total_tokens: None,
+            ..Default::default()
         }));
         let reported = meter.snapshot().context_meter().expect("meter");
         assert_eq!(reported.peak_total_tokens, 7);
@@ -2931,6 +3030,7 @@ mod tests {
             prompt_tokens: Some(u32::MAX as u64),
             completion_tokens: Some(1),
             total_tokens: None,
+            ..Default::default()
         }));
 
         assert!(meter.check_budget().is_ok());
@@ -2954,6 +3054,7 @@ mod tests {
             prompt_tokens: Some(2_000_000),
             completion_tokens: Some(1_100_000),
             total_tokens: None,
+            ..Default::default()
         }));
 
         // 0.28*2.0 + 0.42*1.1 = $1.022 > $1.00
@@ -2977,6 +3078,7 @@ mod tests {
             prompt_tokens: Some(500),
             completion_tokens: Some(500),
             total_tokens: None,
+            ..Default::default()
         }));
 
         let snapshot = meter.snapshot();

@@ -604,7 +604,15 @@ export default function ChatView() {
           </select>
         </div>
         {(selectedProfile?.effectiveInputTokens !== undefined || contextEstimate) && (
-          <div className="mb-1.5 px-0.5 text-[10px] text-surface-muted">
+          // 这个数字只覆盖**打包进去的那几节上下文**：系统提示词、工具 schema、逐阶段累积的
+          // 消息都不在里面，所以真实请求一定比它大。悬浮里说清漏了什么 —— 一个看起来"离
+          // 预算还很远"的数字，配上一次因为超长而被截断的运行，就是这个产品最该避免的那种
+          // 虚假信心。真正把它们算进来要另一条路（见 ROADMAP 119），不是改这一行文案。
+          <div
+            className="mb-1.5 px-0.5 text-[10px] text-surface-muted"
+            title="Counts only the context sections listed below. The real request also carries the system prompt, the tool schemas and, inside a pipeline, the messages accumulated by earlier stages — so it is always larger than this. The measured row below (when present) is the provider's own count for the whole request."
+          >
+
             Estimated input budget:{" "}
             <span className="font-mono text-surface-text">
               {(contextEstimate?.inputBudgetTokens ?? selectedProfile?.effectiveInputTokens ?? 0).toLocaleString()}

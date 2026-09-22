@@ -1709,6 +1709,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Still open: `finish_reason` and `reasoning_chars` are accumulated across choices rather than per `index` (latent — nothing in the repo sends `n>1`); `LlmUsage` still drops `completion_tokens_details.reasoning_tokens`; no per-model registry, no thinking-budget parameter, no truncation recovery.
    - Rust 473 → 475; frontend unchanged.
 
+124. **Reasoning tokens were invisible, so an empty answer looked like a billing error (2026-09-22)**
+   Follow-on from 122/123, which left this as the open item: the truncated-empty failure charges completion tokens like any other answer, and nothing in the product could say how many of them went into thinking.
+   - **`LlmUsage` silently dropped the field.** OpenAI/DeepSeek report `completion_tokens_details.reasoning_tokens`; a few gateways put `reasoning_tokens` at the top level. Serde discarded both, so the only trace of a 14 710-character thinking block was a character count inside an error string. `reasoning_tokens()` now reads the nested field first and falls back to the flat one — recognising only one spelling would show 0 at exactly the moment the number matters.
+   - **It is a breakdown, not an addition.** Providers already count reasoning inside `completion_tokens`, so the meter accumulates it separately and `total_tokens` stays `prompt + completion`. Adding it would trip the per-run token cap early and inflate the spend estimate — a cap that fires on a doubled count is worse than no cap, because the user cannot tell which number is wrong. The test asserts both halves: the number is visible *and* the total did not move.
+   - **Where it surfaces, and where it deliberately does not.** The `run_token_usage` action-log detail gains "(of which N reasoning, already counted in completion)" and the status-bar hover gains one sentence; the 24px status-bar label is untouched, because a third number there would crowd out the two that need watching live. The line only appears when N > 0 — on a non-reasoning model a permanent `reasoning: 0` is noise. Both wordings say "already counted", since the obvious misreading is "I was charged twice".
+   - **The estimate row now admits what it leaves out.** `estimate_agent_context` measures the assembled *context block* only: the system prompt, the tool schemas and, inside a pipeline, the messages accumulated by earlier stages are all absent, so the real request is always larger. The row is labelled "selected context", which was accurate but easy to read as "the request"; a tooltip now names the three missing parts and points at the measured row as the number that covers everything. Counting them for real is still open (119) and needs a different path — the role prompt, `output_rules` and the tool definitions are reachable, but MCP tools depend on which servers are connected, so a number that changes with server state would need its own explanation.
+   - Still open: `reasoning_tokens` is not priced separately (some providers bill thinking at the completion rate, others differently — pretending to know would be a fabricated cost); the estimate still does not include the request overhead; `finish_reason` / `reasoning_chars` remain accumulated across choices rather than per `index`.
+   - Rust 475 → 476; frontend 244 → 246.
+
+
 
 
 
