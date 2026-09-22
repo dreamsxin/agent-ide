@@ -214,8 +214,8 @@ pub struct WorkspaceToolPermissions {
 ///
 /// 点击的坐标只在**某一张具体的图**上有意义，所以这一帧要把三样东西钉在一起：哪个窗口
 /// （句柄 + pid，和截图用的是同一套身份）、多大（尺寸变了坐标就失效）、以及一个 id 让模型
-/// 说得出"我说的是那一张"。RefImpl 的 CUA 契约里把截图做成 `image` + `image_ref` 一对，
-/// 是同一个想法 —— 这是那份契约里唯一值得照搬的部分。
+/// 说得出"我说的是那一张"。把图和它定义的坐标系绑成一对，是这三样里最容易漏掉的一样：
+/// 少了它，模型报的坐标就只能靠"当前窗口"这种会变的东西去解释。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureFrame {
     pub id: String,
