@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
+import { formatTokenCount, parseTokenInput } from "../../utils/tokenInput";
 import {
   llmConnectionCheckedAt,
   llmConnectionIndicator,
@@ -268,10 +269,10 @@ export default function SettingsPanel() {
         endpoint: endpoint.trim(),
         apiKey: apiKey.trim() || undefined,
         model: model.trim(),
-        maxContextTokens: inputToNumber(maxContextTokens),
-        reservedOutputTokens: inputToNumber(reservedOutputTokens),
-        maxOutputTokens: inputToNumber(maxOutputTokens),
-        maxRunTokens: inputToNumber(maxRunTokens),
+        maxContextTokens: parseTokenInput(maxContextTokens),
+        reservedOutputTokens: parseTokenInput(reservedOutputTokens),
+        maxOutputTokens: parseTokenInput(maxOutputTokens),
+        maxRunTokens: parseTokenInput(maxRunTokens),
         promptMicrosPerMillion: usdToMicros(promptPrice),
         completionMicrosPerMillion: usdToMicros(completionPrice),
         maxRunSpendMicros: usdToMicros(maxRunSpend),
@@ -303,10 +304,10 @@ export default function SettingsPanel() {
           endpoint: endpoint.trim(),
           apiKey: apiKey.trim(),
           model: model.trim(),
-          maxContextTokens: inputToNumber(maxContextTokens),
-          reservedOutputTokens: inputToNumber(reservedOutputTokens),
-          maxOutputTokens: inputToNumber(maxOutputTokens),
-          maxRunTokens: inputToNumber(maxRunTokens),
+          maxContextTokens: parseTokenInput(maxContextTokens),
+          reservedOutputTokens: parseTokenInput(reservedOutputTokens),
+          maxOutputTokens: parseTokenInput(maxOutputTokens),
+          maxRunTokens: parseTokenInput(maxRunTokens),
           promptMicrosPerMillion: usdToMicros(promptPrice),
           completionMicrosPerMillion: usdToMicros(completionPrice),
           maxRunSpendMicros: usdToMicros(maxRunSpend),
@@ -585,43 +586,54 @@ export default function SettingsPanel() {
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Context Budget Estimate
+          Context Budget — all four are <span className="text-surface-text">token counts</span>
         </div>
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
             label="Max context"
+            title="The model's context window, from its documentation. Used for budgeting only — it is never sent to the provider."
             value={maxContextTokens}
             onChange={setMaxContextTokens}
-            placeholder="128000"
+            placeholder="128k"
+            unit="tokens"
           />
           <BudgetInput
             label="Reserved output"
+            title="How much of the window to keep free for the answer when estimating how much context fits. Budgeting only."
             value={reservedOutputTokens}
             onChange={setReservedOutputTokens}
-            placeholder="4096"
+            placeholder="4k"
+            unit="tokens"
           />
           <BudgetInput
             label="Max output"
+            title="The output limit actually sent to the provider. Empty means the provider picks one, which is often only a few thousand tokens."
             value={maxOutputTokens}
             onChange={setMaxOutputTokens}
             placeholder="provider default"
+            unit="tokens"
           />
 
           <BudgetInput
             label="Per-run cap"
+            title="Stops a run once the provider-reported total for that run reaches this. Empty means no limit."
             value={maxRunTokens}
             onChange={setMaxRunTokens}
             placeholder="no limit"
+            unit="tokens"
           />
         </div>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
           Effective input estimate:{" "}
           <span className="font-mono text-surface-text">
             {formatTokenBudget(estimateInputTokens(maxContextTokens, reservedOutputTokens, maxOutputTokens))}
-          </span>
-          . This is model metadata for budgeting; current context modes still control compression strategy.
-          Per-run cap stops a run once the provider-reported total tokens reach it; leave it empty for no limit.
-          {" "}
+          </span>{" "}
+          tokens (max context − reserved output − 512). You can type{" "}
+          <span className="font-mono text-surface-text">128k</span> or{" "}
+          <span className="font-mono text-surface-text">1m</span>; the number under each box is what was
+          understood. This is model metadata for budgeting; current context modes still control compression
+          strategy. Per-run cap stops a run once the provider-reported total tokens reach it; leave it empty
+          for no limit.{" "}
           <span className="text-surface-text">
             Max output is the only one of these that is sent to the provider.
           </span>{" "}
@@ -629,37 +641,43 @@ export default function SettingsPanel() {
           reasoning model can spend all of that on thinking and return an empty answer — raise it for those.
           Clearing the box does not mean "no limit": the provider then picks one, usually a few thousand tokens.
         </div>
-
-
       </div>
+
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Per-Run Spend Cap
+          Per-Run Spend Cap — in <span className="text-surface-text">US dollars</span>
         </div>
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
             label="Input $/M tokens"
+            title="Price per million input tokens, in dollars, from the provider's pricing page."
             value={promptPrice}
             onChange={setPromptPrice}
             placeholder="0.28"
+            unit="usd"
             step="0.000001"
           />
           <BudgetInput
             label="Output $/M tokens"
+            title="Price per million output tokens, in dollars."
             value={completionPrice}
             onChange={setCompletionPrice}
             placeholder="0.42"
+            unit="usd"
             step="0.000001"
           />
           <BudgetInput
             label="Spend cap $"
+            title="Stops a run once its estimated cost reaches this many dollars. Empty means no limit."
             value={maxRunSpend}
             onChange={setMaxRunSpend}
             placeholder="no limit"
+            unit="usd"
             step="0.01"
           />
         </div>
+
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
           {spendCapState === "active" ? (
             <>
@@ -1007,51 +1025,87 @@ export default function SettingsPanel() {
   );
 }
 
+/**
+ * 预算类输入框。
+ *
+ * token 字段用**文本**框而不是 `type="number"`：数字框里打不出 `128k`，也打不出粘贴过来的
+ * `128,000` —— 浏览器直接拒收。而这个面板上唯一真正的失误是数零：128000 和 1280000 在 11px
+ * 的框里几乎一样，后者会让预算估算差一个数量级。所以允许简写，并且把解析结果回显在框下面 ——
+ * 用户要能确认"我打的这串被认成了什么"。
+ *
+ * 金额字段仍然是数字框：`$/M` 价格要小数步进，而美元没有 `k` 这种写法。
+ */
 function BudgetInput({
   label,
+  title,
   value,
   onChange,
   placeholder,
+  unit,
   step,
 }: {
   label: string;
+  /** 这一格到底是什么意思。三列 10px 的标签放不下解释，但它必须能查到 */
+  title: string;
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
+  unit: "tokens" | "usd";
   /** 金额字段要用小数步进，默认的 1 会让浏览器拒绝 "0.28" */
   step?: string;
 }) {
+  const parsed = unit === "tokens" ? parseTokenInput(value) : undefined;
   return (
-    <label className="min-w-0">
+    <label className="min-w-0" title={title}>
       <span className="mb-1 block truncate text-[10px] text-surface-muted">{label}</span>
-      <input
-        type="number"
-        min={0}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
-      />
+      {unit === "tokens" ? (
+        <>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder={placeholder}
+            className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+          />
+          {/* 回显：空输入时不显示，否则每个框下面都挂着一句 "not set" 纯属噪音 */}
+          {value.trim() !== "" && (
+            <span
+              className={`mt-0.5 block truncate font-mono text-[9px] ${
+                parsed === undefined ? "text-diff-remove" : "text-surface-muted"
+              }`}
+            >
+              {formatTokenCount(parsed)}
+            </span>
+          )}
+        </>
+      ) : (
+        <input
+          type="number"
+          min={0}
+          step={step}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+        />
+      )}
     </label>
   );
-}
-
-function inputToNumber(value: string) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }
 
 function numberToInput(value?: number) {
   return value ? String(value) : "";
 }
 
+
 function estimateInputTokens(maxContext: string, reservedOutput: string, maxOutput: string) {
-  const context = inputToNumber(maxContext);
+  const context = parseTokenInput(maxContext);
   if (!context) return undefined;
-  const reserved = inputToNumber(reservedOutput) ?? inputToNumber(maxOutput) ?? 4096;
+  const reserved = parseTokenInput(reservedOutput) ?? parseTokenInput(maxOutput) ?? 4096;
   return Math.max(0, context - reserved - 512);
 }
+
 
 function formatTokenBudget(value?: number) {
   if (value === undefined) return "not set";

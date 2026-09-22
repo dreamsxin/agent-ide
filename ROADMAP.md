@@ -1731,6 +1731,18 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Left as noted: the caveat is a `title` attribute on a non-focusable `<div>`, consistent with the rest of this file but unreachable by keyboard — the row is display-only, and a focusable annotation pattern would be a separate change across every row that has one.
    - Rust 476 → 478; frontend unchanged.
 
+126. **The budget inputs never said "tokens", and the box would not accept how people write large numbers (2026-09-22)**
+   Reported as *配置 Context Budget Estimate 单位是什么，用户输入不够友好*. Both halves were true: the section was titled "Context Budget Estimate" and the four fields were labelled `Max context / Reserved output / Max output / Per-run cap` with the unit stated **nowhere** — the only clue was a placeholder like `128000`, and the sibling section next to it is in dollars, so guessing was not safe.
+   - **The unit is now in the section headers**, where it covers every field at once: "Context Budget — all four are token counts" and "Per-Run Spend Cap — in US dollars". Per-field labels stay short because the grid is three 10px columns; each one gained a `title` saying what it actually controls, which the long prose paragraph below could not do per-field.
+   - **`type="number"` was the unfriendly part, not the labels.** A number input refuses letters and commas, so `128k` and a pasted `128,000` are both untypeable — the only way to enter a window was to count zeros, and `128000` vs `1280000` are nearly identical at 11px while differing by an order of magnitude in every budget line that reads them. The token fields are text + `inputMode="numeric"` now, parsed by `parseTokenInput` (`k`/`m` suffixes, grouping characters ignored).
+   - **Each token box echoes what was understood**, in monospace under the field, turning red when the text parses to nothing. That is the point of allowing shorthand: the user has to be able to confirm that `128k` became 128,000 without trusting the parser blindly. Empty input shows no echo — four permanent "not set" lines would be noise.
+   - **`0` reads as "not set" now, because that is what the backend does.** `inputToNumber` already discarded it; the echo makes the behaviour visible instead of leaving the user believing they had set a cap of zero.
+   - **The effective-input line states its own arithmetic** ("max context − reserved output − 512") and the unit, so the number is checkable rather than magic.
+   - Money fields stay `type="number"` with decimal steps: `$/M` prices need `0.000001` granularity and nobody writes dollars as `1.5k`. `inputToNumber` is deleted rather than kept for them — `usdToMicros` already owns that parsing.
+   - Not done: no per-model window lookup that could fill Max context in for you (same missing registry as 122), and no validation that Reserved output < Max context — the estimate already clamps at 0, and an inline error for an impossible pair is a bigger design question than this round.
+   - Rust unchanged; frontend 246 → 252 across 29 files (`src/utils/tokenInput.test.ts`).
+
+
 
 
 
