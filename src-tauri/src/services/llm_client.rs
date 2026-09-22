@@ -1070,6 +1070,42 @@ pub struct OutputClamp {
     pub sent: u32,
 }
 
+/// 工具回合里为了装进窗口而丢掉的一段历史。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryTrim {
+    /// 丢掉的消息条数（assistant 的工具调用 + 它的结果按组一起丢）
+    pub dropped_messages: usize,
+    /// 修剪前这次请求估算的提示词 token
+    pub estimated_tokens: u32,
+    /// 这次请求允许的提示词 token
+    pub budget_tokens: u32,
+}
+
+/// 把"工具回合中途丢过历史"变成一句给用户的话。没丢过就返回 None。
+///
+/// 必须说出来，而且不能只写进发给模型的那条系统提示：模型知道少了一段，用户只会看到一次
+/// 看起来正常、却把前面读过的文件又读一遍（或者干脆忘了结论）的运行。
+pub fn history_trim_report(trims: &[HistoryTrim]) -> Option<(String, String)> {
+    let worst = trims.iter().max_by_key(|trim| trim.estimated_tokens)?;
+    let dropped: usize = trims.iter().map(|trim| trim.dropped_messages).sum();
+    Some((
+        format!(
+            "Dropped {} earlier tool exchange(s) mid-run to keep the request inside the context window",
+            dropped
+        ),
+        format!(
+            "A tool loop re-sends every earlier round, so a long one grows past the window: the \
+             biggest request in this run estimated {} prompt token(s) against a budget of {}. The \
+             oldest exchanges were dropped {} time(s), newest kept, and the model was told in the \
+             transcript that they are missing. Tool results are the bulk of it — reading fewer or \
+             smaller files, or raising Max context if the model's window is larger, avoids it.",
+            worst.estimated_tokens,
+            worst.budget_tokens,
+            trims.len()
+        ),
+    ))
+}
+
 /// 把"这次没按你设的上限发"变成一句给用户的话。没下调过就返回 None。
 ///
 /// 必须说出来：不说的话，用户看到的是一次比预期短的回答，而设置里那个数字还明明白白写着
@@ -1168,6 +1204,9 @@ pub struct LlmClient {
     /// 本次运行里按剩余窗口下调过的输出上限。和 `image_drops` 同理：不说出来，用户只会看到
     /// 一次比预期短的回答，而设置里那个数字还写着原值
     output_clamps: Arc<Mutex<Vec<OutputClamp>>>,
+    /// 本次运行里为了装进窗口而丢掉的历史。和上面两个同一个理由：不说出来，
+    /// 用户只会看到模型把刚读过的文件又读一遍
+    history_trims: Arc<Mutex<Vec<HistoryTrim>>>,
     /// 只在测试里挂上，用来断言提示词的组成
     request_recorder: Option<Arc<RequestRecorder>>,
 }
@@ -1201,6 +1240,7 @@ impl LlmClient {
             reasoning_rejected: Arc::new(AtomicBool::new(false)),
             image_drops: Arc::new(Mutex::new(Vec::new())),
             output_clamps: Arc::new(Mutex::new(Vec::new())),
+            history_trims: Arc::new(Mutex::new(Vec::new())),
             request_recorder: None,
         }
     }
@@ -1248,6 +1288,46 @@ impl LlmClient {
             .lock()
             .map(|clamps| clamps.clone())
             .unwrap_or_default()
+    }
+
+    /// 这次运行里为了装进窗口丢掉的历史。命令层用它写 action log。
+    pub fn history_trims(&self) -> Vec<HistoryTrim> {
+        self.history_trims
+            .lock()
+            .map(|trims| trims.clone())
+            .unwrap_or_default()
+    }
+
+    /// 让执行器把它在工具回合里做的历史修剪记到同一个账上。
+    ///
+    /// 修剪发生在执行器那边（只有它知道哪些消息是循环长出来的），但汇报渠道必须和图片降级、
+    /// 输出夹紧是同一条：用户找"这次运行被削了什么"只应该有一个地方。
+    pub fn note_history_trim(&self, trim: HistoryTrim) {
+        if trim.dropped_messages == 0 {
+            return;
+        }
+        if let Ok(mut trims) = self.history_trims.lock() {
+            trims.push(trim);
+        }
+    }
+
+    /// 这次请求的提示词最多能占多少 token；窗口未知返回 `None`。
+    ///
+    /// 留出的那一份是输出：窗口是输入和输出共用的，不减掉输出就等于算出一个发得出去、
+    /// 但一定没地方写回答的预算。用户没设 Max output 时按默认预留量算。
+    ///
+    /// 窗口未知不猜（和 `window_limited_output_tokens` 同一条规矩）：按猜出来的窗口丢历史，
+    /// 比让供应商明确拒绝更难查。
+    pub fn prompt_token_budget(&self) -> Option<u32> {
+        let window = self.config.max_context_tokens?;
+        let reserved = self
+            .config
+            .max_output_tokens
+            .unwrap_or(crate::services::context::DEFAULT_RESERVED_OUTPUT_TOKENS);
+        let budget = window
+            .saturating_sub(reserved)
+            .saturating_sub(REQUEST_WINDOW_MARGIN_TOKENS);
+        (budget > 0).then_some(budget)
     }
 
     /// 发请求前记一笔"这次没按你设的上限发"。
@@ -3746,6 +3826,66 @@ mod tests {
 
         assert!(!response.trim().is_empty());
         assert_eq!(rx.recv().await.as_deref(), Some(response.as_str()));
+    }
+
+    /// 提示词预算要把输出那一份先扣掉，而窗口未知时一个数字都不给。
+    ///
+    /// 窗口是输入输出共用的：不减输出就会算出一个"发得出去、但没地方写回答"的预算，
+    /// 而那种失败看起来就像模型自己停了。
+    #[test]
+    fn the_prompt_budget_reserves_room_for_the_answer() {
+        let mut cfg = config("deepseek", "deepseek-chat", Some(8_000));
+        cfg.max_context_tokens = Some(100_000);
+        // 100 000 − 8 000（用户设的 Max output）− 1 024 余量
+        assert_eq!(
+            LlmClient::new(cfg.clone()).prompt_token_budget(),
+            Some(90_976)
+        );
+
+        // 没设 Max output 时按默认预留量，而不是当成 0
+        cfg.max_output_tokens = None;
+        assert_eq!(
+            LlmClient::new(cfg.clone()).prompt_token_budget(),
+            Some(100_000 - 4_096 - 1_024)
+        );
+
+        // 窗口未知：不猜。猜出来的窗口会把模型刚读到的东西丢掉
+        cfg.max_context_tokens = None;
+        assert_eq!(LlmClient::new(cfg.clone()).prompt_token_budget(), None);
+
+        // 窗口比预留量还小时也不给数字，否则预算会是 0，等于"每一轮都重裁一遍"
+        cfg.max_context_tokens = Some(1_000);
+        assert_eq!(LlmClient::new(cfg).prompt_token_budget(), None);
+    }
+
+    /// 修剪过历史要说出来，而且要说清丢了多少、当时估了多少。
+    #[test]
+    fn a_trimmed_history_is_reported_with_the_numbers() {
+        assert!(history_trim_report(&[]).is_none());
+
+        let (summary, details) = history_trim_report(&[
+            HistoryTrim {
+                dropped_messages: 2,
+                estimated_tokens: 130_000,
+                budget_tokens: 120_000,
+            },
+            HistoryTrim {
+                dropped_messages: 4,
+                estimated_tokens: 150_000,
+                budget_tokens: 120_000,
+            },
+        ])
+        .expect("two trims produce a report");
+
+        // 总数是丢弃量的和，明细引用的是最严重那一次，不是最后一次
+        assert!(
+            summary.contains("6 earlier tool exchange(s)"),
+            "{}",
+            summary
+        );
+        assert!(details.contains("150000"), "{}", details);
+        assert!(details.contains("120000"), "{}", details);
+        assert!(details.contains("2 time(s)"), "{}", details);
     }
 
     /// 输出上限要按"这一次还剩多少"夹一次。

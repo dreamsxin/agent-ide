@@ -775,6 +775,7 @@ fn finish_agent_run(
     // 运行最后失败或被取消并不会把它取消掉，而失败的那次运行恰恰最需要这条线索。
     emit_tool_degradation_log(orch, events, llm);
     emit_image_degradation_log(orch, events, llm);
+    emit_history_trim_log(orch, events, llm);
     emit_output_clamp_log(orch, events, llm);
     emit_reasoning_degradation_log(orch, events, llm);
 }
@@ -817,6 +818,23 @@ fn emit_image_degradation_log(
         return;
     };
     orch.emit_run_action_log(events, "warn", "image_input_degraded", &summary, &details);
+}
+
+/// 工具回合里丢掉历史时告诉用户。
+///
+/// 和图片降级同一个理由：丢弃只写进了发给模型的那条系统提示，用户看到的是一次正常完成、
+/// 却把刚读过的文件又读一遍的运行 —— 而真正的原因是这次请求已经顶到窗口了。
+fn emit_history_trim_log(
+    orch: &AgentOrchestrator,
+    events: &dyn crate::agent::events::RunEvents,
+    llm: &crate::services::llm_client::LlmClient,
+) {
+    let Some((summary, details)) =
+        crate::services::llm_client::history_trim_report(&llm.history_trims())
+    else {
+        return;
+    };
+    orch.emit_run_action_log(events, "warn", "history_trimmed", &summary, &details);
 }
 
 /// 把本次运行的 token 用量写进 action log。措辞和分支判断在

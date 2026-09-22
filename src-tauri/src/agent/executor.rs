@@ -1,7 +1,9 @@
 use crate::agent::multi_agent::AgentRole;
 use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff, SddArtifact};
+use crate::services::context::estimate_tokens_for_text;
 use crate::services::llm_client::{
-    synthesize_agent_changes_block, ChatMessage, LlmClient, LlmStreamOutput, LlmToolCall,
+    synthesize_agent_changes_block, ChatMessage, HistoryTrim, LlmClient, LlmStreamOutput,
+    LlmToolCall,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -92,6 +94,14 @@ async fn stream_with_tool_loop(
     let mut pending_images: Vec<crate::services::images::ImagePart> = Vec::new();
 
     for iteration in 0..=MAX_TOOL_ITERATIONS {
+        // 每一轮都把之前所有消息重发一遍，所以要在发之前看它还装不装得下。窗口未知时
+        // `prompt_token_budget()` 返回 None —— 那种情况下不动历史，让供应商去拒绝，
+        // 而不是按一个猜出来的窗口丢掉模型刚读到的东西。
+        if let Some(budget) = llm.prompt_token_budget() {
+            if let Some(trim) = trim_tool_loop_history(&mut messages, prompt_len, budget) {
+                llm.note_history_trim(trim);
+            }
+        }
         let output = match llm
             .stream_chat_with_tools(messages.clone(), cancel_flag.clone(), tx.clone())
             .await
@@ -395,12 +405,83 @@ fn bound_transcript_with_limits(
     let mut result: Vec<ChatMessage> = Vec::new();
     if omitted > 0 {
         result.push(ChatMessage::system(format!(
-            "[agent-ide] {} earlier exchange(s) from previous stages were omitted to fit the context budget. Do not assume work you cannot see here was done.",
+            "[agent-ide] {} earlier exchange(s) were omitted to fit the context budget. Do not assume work you cannot see here was done; re-read a file if you need it again.",
             omitted
         )));
     }
     result.extend(kept.into_iter().flatten());
     result
+}
+
+/// 工具回合里，循环长出来的那段历史至少要留下的字符数。
+///
+/// 预算算下来是 0 的时候也不能真的裁到 0：`bound_transcript_with_limits` 无论如何都会留下
+/// 最近一组，留一条被砍到只剩开头的工具结果，比留一条完整的更没用 —— 模型会照着半句话继续。
+const MIN_TOOL_LOOP_HISTORY_CHARS: usize = 2_000;
+
+/// 把工具回合里长出来的历史裁进这次请求的 token 预算。
+///
+/// 为什么需要：一次工具回合最多 12 轮，**每一轮都把之前所有消息重发一遍**，而工具结果是
+/// 大头（一次 `workspace_read_file` 就能带回 64 KB）。读六个大文件就能把 128k 的窗口顶满，
+/// 结果是供应商直接拒掉整个请求 —— 前面几轮已经花掉的钱和已经落盘的写入，一起变成一句
+/// "context length exceeded"。裁掉最旧的几组，是这条路上唯一能让运行继续的做法。
+///
+/// `prompt_len` 之前的消息不动：那是调用方装配好的提示词（系统提示、项目上下文、上游
+/// stage 的历史），它们各自有自己的预算，在这里再裁一遍等于两套规则打架。
+///
+/// 纯函数 + 显式预算，因为这里唯一容易错的是"裁多少"：让它依赖 `LlmClient` 就没法测边界。
+fn trim_tool_loop_history(
+    messages: &mut Vec<ChatMessage>,
+    prompt_len: usize,
+    budget_tokens: u32,
+) -> Option<HistoryTrim> {
+    if messages.len() <= prompt_len {
+        return None;
+    }
+    let tokens_of = |slice: &[ChatMessage]| -> usize {
+        slice
+            .iter()
+            .map(|message| estimate_tokens_for_text(&message.content))
+            .sum()
+    };
+    let fixed_tokens = tokens_of(&messages[..prompt_len]);
+    let history_tokens = tokens_of(&messages[prompt_len..]);
+    let budget = budget_tokens as usize;
+    if fixed_tokens + history_tokens <= budget {
+        return None;
+    }
+
+    // token → 字符按同一个估算器的实际比例换算。直接把 token 差当字符差会在中文历史上
+    // 砍过头（那里 1 字符≈1 token），而按 4:1 硬换又会在 ASCII 上裁不够。
+    let allowed_tokens = budget.saturating_sub(fixed_tokens);
+    let history_chars: usize = messages[prompt_len..]
+        .iter()
+        .map(|message| message.content.chars().count())
+        .sum();
+    let allowed_chars = history_chars
+        .saturating_mul(allowed_tokens)
+        .checked_div(history_tokens.max(1))
+        .unwrap_or(0)
+        .max(MIN_TOOL_LOOP_HISTORY_CHARS);
+
+    let before = messages.len() - prompt_len;
+    let kept = bound_transcript_with_limits(
+        &messages[prompt_len..],
+        MAX_CARRIED_MESSAGE_CHARS,
+        allowed_chars,
+    );
+    messages.truncate(prompt_len);
+    messages.extend(kept);
+    // 声明式的那条系统消息也算进 `kept`，所以"丢了几条"要按组数之差算，不能按长度之差
+    let dropped = before.saturating_sub(messages.len() - prompt_len);
+    if dropped == 0 {
+        return None;
+    }
+    Some(HistoryTrim {
+        dropped_messages: dropped,
+        estimated_tokens: (fixed_tokens + history_tokens).min(u32::MAX as usize) as u32,
+        budget_tokens,
+    })
 }
 
 pub async fn execute_stage(
@@ -1290,6 +1371,76 @@ mod tests {
             "{}",
             bounded[0].content
         );
+    }
+
+    /// 工具回合里长出来的历史顶到窗口时：裁旧的、留最近的、把丢弃说出来，并且**不动**
+    /// 调用方装配的提示词 —— 系统提示和项目上下文各有自己的预算，在这里再裁一遍是两套规则打架。
+    #[test]
+    fn a_long_tool_loop_trims_its_own_history_and_keeps_the_prompt() {
+        let prompt = vec![
+            ChatMessage::system("system prompt".to_string()),
+            ChatMessage::user("the task".to_string()),
+        ];
+        let mut messages = prompt.clone();
+        // 每组 ≈ 一次工具调用 + 一份 4 000 字符的结果（一次 read_file 就这个量级）
+        for index in 0..6 {
+            messages.push(ChatMessage::assistant(format!("call {}", index)));
+            messages.push(ChatMessage::tool_result(
+                format!("call-{}", index),
+                format!("result {} ", index).repeat(400),
+            ));
+        }
+        let before = messages.len();
+
+        let trim = trim_tool_loop_history(&mut messages, prompt.len(), 1_000)
+            .expect("a 6-round loop of 4 000-char results does not fit 1 000 tokens");
+
+        // 提示词原样留着
+        assert_eq!(messages[0].content, "system prompt");
+        assert_eq!(messages[1].content, "the task");
+        // 最近一轮必须完整留下：留半句话比留一条完整历史更糟
+        let last = messages.last().expect("something is kept");
+        assert!(last.content.starts_with("result 5"), "{}", last.content);
+        assert!(messages.len() < before, "nothing was dropped");
+        assert_eq!(trim.budget_tokens, 1_000);
+        assert!(trim.estimated_tokens > 1_000, "{:?}", trim);
+        // 丢弃必须写进历史本身，否则模型会把节选当完整历史
+        let note = messages
+            .iter()
+            .find(|message| message.content.contains("earlier exchange(s) were omitted"))
+            .expect("the omission is stated");
+        assert_eq!(note.role, "system");
+    }
+
+    /// 装得下就一个字都不要动。
+    ///
+    /// 这条钉的是"修剪只在超预算时发生"：无条件裁一刀会把短对话里最有用的工具结果也砍掉，
+    /// 而那正是模型下一步要引用的东西。
+    #[test]
+    fn a_short_tool_loop_is_left_alone() {
+        let mut messages = vec![
+            ChatMessage::system("system prompt".to_string()),
+            ChatMessage::user("the task".to_string()),
+            ChatMessage::assistant("call".to_string()),
+            ChatMessage::tool_result("call-0".to_string(), "short result".to_string()),
+        ];
+        let before = messages.clone();
+
+        assert!(trim_tool_loop_history(&mut messages, 2, 100_000).is_none());
+        assert_eq!(messages.len(), before.len());
+        assert_eq!(messages[3].content, before[3].content);
+    }
+
+    /// 还没长出历史的那一轮（循环的第一次请求）不该被当成需要修剪。
+    #[test]
+    fn the_first_round_has_no_history_to_trim() {
+        let mut messages = vec![
+            ChatMessage::system("a".repeat(40_000)),
+            ChatMessage::user("b".repeat(40_000)),
+        ];
+        // 提示词自己就超预算，但它不属于这里的职责
+        assert!(trim_tool_loop_history(&mut messages, 2, 100).is_none());
+        assert_eq!(messages.len(), 2);
     }
 
     /// 单条消息也要有上限，否则一个几十万字符的输出能独自撑爆请求。

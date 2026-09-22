@@ -1465,6 +1465,12 @@ async fn execute_steps(
     {
         eprintln!("warning: {}\n{}", summary, details);
     }
+    // 历史修剪走同一条路：CLI 没有 action log，而"模型忘了前面读过什么"在这里同样需要解释
+    if let Some((summary, details)) =
+        crate::services::llm_client::history_trim_report(&llm.history_trims())
+    {
+        eprintln!("warning: {}\n{}", summary, details);
+    }
 
     Ok(results
         .into_iter()
