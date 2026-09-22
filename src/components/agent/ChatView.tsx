@@ -670,6 +670,16 @@ export default function ChatView() {
             {contextEstimate?.trimmed ? (
               <span className="text-diff-remove"> · trimmed</span>
             ) : null}
+            {/*
+              漏了什么要**显示出来**，不能只放在上面那个 title 悬浮里：不悬浮的人看不到，
+              而这个数字恰恰是他拿去调 Max context 的那个。名单由后端给（`notCounted`），
+              因为只有装配请求的那一侧知道漏了什么 —— 前端写死的那份迟早和代码说的不是一件事。
+            */}
+            {contextEstimate?.notCounted?.length ? (
+              <div className="mt-0.5 text-[10px] text-surface-muted">
+                Not counted: {contextEstimate.notCounted.join(", ")} — the real request is larger.
+              </div>
+            ) : null}
           </div>
         )}
         {/*

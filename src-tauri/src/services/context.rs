@@ -89,6 +89,26 @@ pub struct ContextEstimateResponse {
     #[serde(rename = "inputBudgetTokens")]
     pub input_budget_tokens: Option<usize>,
     pub trimmed: bool,
+    /// 这个估算**没有**算进去的那几部分。
+    ///
+    /// 估算只覆盖上下文包（项目记忆、文件、diff、目录树、对话摘要），而真正发出去的请求还有
+    /// 系统提示、输出规则、工具 schema、待审 diff 摘要和用户这一句 prompt。以前界面上只有一个
+    /// 数字，用户拿它去调 Max context —— 而真实请求比它大出几千 token，于是"算得刚好"照样 400。
+    ///
+    /// 不去猜那几部分的大小：系统提示按路径不同（planner / executor / 各 role），工具 schema
+    /// 取决于这次运行的权限，prompt 还没打完。猜一个数会把一个诚实的缺口换成一个假的总数。
+    #[serde(rename = "notCounted")]
+    pub not_counted: Vec<String>,
+}
+
+/// 估算没覆盖的那几部分，措辞按"发出去时还会加上什么"来写。
+pub fn estimate_omissions() -> Vec<String> {
+    vec![
+        "the role's system prompt and output rules".to_string(),
+        "the tool schemas attached for this run".to_string(),
+        "the pending-diff summary".to_string(),
+        "your prompt itself".to_string(),
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -575,6 +595,7 @@ fn build_context_with_estimate(
         estimated_tokens: estimate_tokens_for_text(&output),
         input_budget_tokens,
         trimmed: final_chars < raw_chars,
+        not_counted: estimate_omissions(),
     };
 
     (output, response)
@@ -865,6 +886,31 @@ mod tests {
     ///
     /// 拼在提示词里的话，估算面板报的 token 数不含它、预算裁剪也保护不到它 —— 而这块
     /// 最大能有上万字符，等于用户看不见也管不到的一大截。
+    /// 估算必须自己说清它没算什么。
+    ///
+    /// 这个数字是用户拿去调 Max context 的那个。只报"选中的上下文有多大"、不报"发出去时还会
+    /// 加上什么"，就会出现"看着离预算还很远，却因为超长被截断"的运行 —— 正是这个产品最该避免
+    /// 的那种虚假信心。名单由这一侧出，因为漏了什么只有装配请求的这一侧知道。
+    #[test]
+    fn the_estimate_says_what_it_did_not_count() {
+        let omissions = estimate_omissions();
+        let joined = omissions.join(" | ");
+
+        // 四个真正的缺口都要点名，不能只含糊说一句"还有别的"
+        assert!(joined.contains("system prompt"), "{}", joined);
+        assert!(joined.contains("tool schemas"), "{}", joined);
+        assert!(joined.contains("pending-diff"), "{}", joined);
+        assert!(joined.contains("your prompt"), "{}", joined);
+
+        // 估算返回值里也要带着它：只放在悬浮提示里的话，不悬浮的人看不到
+        let ctx = sample_context("const a = 1;");
+        let estimate = ctx.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            None,
+        ));
+        assert_eq!(estimate.not_counted, omissions);
+    }
+
     #[test]
     fn ide_runtime_is_an_estimated_and_budgeted_section() {
         let mut context = sample_context("const a = 1;\n");

@@ -922,6 +922,13 @@ export interface ContextEstimateResponse {
   estimatedTokens: number;
   inputBudgetTokens?: number | null;
   trimmed: boolean;
+  /**
+   * 这个估算没算进去的那几部分，由后端给。
+   *
+   * 由后端给而不是前端写死：漏了什么只有装配请求的那一侧知道，而这段话以前是手写在一个
+   * `title` 悬浮提示里的 —— 提示会和代码各自漂移，而且不悬浮的人根本看不到。
+   */
+  notCounted?: string[];
 }
 
 export interface SaveLlmProfileRequest {

@@ -20,8 +20,10 @@ npx tsc --noEmit
 npm test
 ```
 
-- `cargo fmt --check` is in CI but was missing here, which is how ~15 files drifted
-  while every local check stayed green. It is first because it is the cheapest.
+- Run each gate **exactly as written**; no pipe may swallow a warning.
+  `cargo fmt --check` was once absent locally and ~15 files drifted while every check
+  stayed green; later, dropping `-D warnings` and grepping clippy for `^error` hid a
+  `dead_code` failure that then shipped.
 - `cargo test --lib` is the suite. `cargo test --bin agent_cli` runs **zero** tests.
 - PowerShell: no `cat <<'EOF'` heredocs; chain with `;`. Multi-line commit message →
   temp file + `git commit -F`.

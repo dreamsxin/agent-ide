@@ -1946,6 +1946,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Also: both commits had spliced a new function into the middle of `finish_agent_run`'s doc comment (cutting a sentence in half and re-attaching the rest to the wrong function); the override input is now disabled when no provider is configured, like the profile select next to it; and a stray whitespace regression in SECURITY.md is repaired.
    - Still open, recorded rather than half-done: an override is not validated against the selected profile the way `chatProfileId` is (`resolveChatProfileId`), and it survives "New task". Both are visible in the input, so nothing is hidden.
    - Rust 520 unchanged (519 passing, 1 ignored); frontend 288 → 289.
+147. **The context estimate now names what it leaves out, on screen (2026-09-22)**
+   Closes the omission recorded in 119 and deferred again in this session's earlier round. The estimate covers the context bundle only; the request that goes out also carries the system prompt and output rules, the tool schemas, the pending-diff summary and the user's own prompt. The consequence is the failure this product exists to prevent in miniature: a number that looks comfortably inside the budget, next to a run that was truncated for being too long.
+   - **The list comes from the backend** (`estimate_omissions`, surfaced as `notCounted` on the estimate response), because what was left out is only knowable on the side that assembles the request. It had been a hand-written sentence in a `title` tooltip in `ChatView` — two copies of one fact, free to drift.
+   - **And it is rendered on screen, not only on hover.** A tooltip is invisible to anyone not hovering, which is the same defect as a marker only the model can see. The tooltip stays for the longer explanation (pipeline-accumulated messages, why the measured row is not comparable).
+   - **Not taken: guessing the missing sizes.** The system prompt differs per path and role, the tool schemas depend on the run's permissions, and the prompt is not typed yet. A guessed total would replace an honest gap with a false number — the same trade rejected for the model-override window.
+   - `AGENTS.md` gains the lesson from 146, and loses a sentence to pay for it: run each gate exactly as written, no pipe that can swallow a warning. Measured at 7 496 bytes, inside its own 7 500 target.
+   - Rust 520 → 521 (520 passing, 1 ignored); frontend unchanged.
 
 
 
