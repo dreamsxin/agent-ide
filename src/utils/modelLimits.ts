@@ -28,13 +28,23 @@ const RULES: Rule[] = [
   { pattern: /gpt-(?:6|5)/, limits: { contextWindow: 1_050_000, maxOutput: 128_000 } },
   { pattern: /gpt-4\.1/, limits: { contextWindow: 1_000_000, maxOutput: 32_768 } },
   { pattern: /gpt-4o/, limits: { contextWindow: 128_000, maxOutput: 16_384 } },
+  // 老一代仍然挂在预设的下拉里。不给它们规则的后果是选中就把两个框清空 —— 那比给一个
+  // 保守的旧数字更糟：估算变成 unknown，而 Max output 干脆不发了。
+  { pattern: /gpt-4-turbo/, limits: { contextWindow: 128_000, maxOutput: 4_096 } },
+  { pattern: /gpt-4-32k/, limits: { contextWindow: 32_768, maxOutput: 4_096 } },
+  { pattern: /gpt-3\.5-turbo|gpt-35-turbo/, limits: { contextWindow: 16_385, maxOutput: 4_096 } },
+  { pattern: /gpt-4/, limits: { contextWindow: 8_192, maxOutput: 4_096 } },
 
   // Anthropic：4.5 haiku 和 3.x 系列的输出上限远低于 5.x
   { pattern: /claude-(?:fable|mythos|opus|sonnet)-5/, limits: { contextWindow: 1_000_000, maxOutput: 128_000 } },
   { pattern: /claude-haiku-4[.\-]5/, limits: { contextWindow: 200_000, maxOutput: 64_000 } },
-  { pattern: /claude-(?:opus|sonnet)-4/, limits: { contextWindow: 200_000, maxOutput: 64_000 } },
+  // opus-4 的输出上限只有 sonnet-4 的一半，必须单独一条 —— 合在一起就是这张表本来要消灭的
+  // 那个错误，而且 Max output 会真的发出去，多填一倍换来的是一次 400
+  { pattern: /claude-opus-4/, limits: { contextWindow: 200_000, maxOutput: 32_000 } },
+  { pattern: /claude-sonnet-4/, limits: { contextWindow: 200_000, maxOutput: 64_000 } },
   { pattern: /claude-3-5-sonnet/, limits: { contextWindow: 200_000, maxOutput: 8_192 } },
   { pattern: /claude-3-(?:opus|sonnet|haiku)/, limits: { contextWindow: 200_000, maxOutput: 4_096 } },
+
 
   // DeepSeek：V4 一代是百万窗口，旧的别名仍然是 128k
   { pattern: /deepseek-v4/, limits: { contextWindow: 1_000_000, maxOutput: 384_000 } },

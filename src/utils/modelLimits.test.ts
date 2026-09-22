@@ -18,7 +18,22 @@ describe("modelLimits", () => {
     expect(modelLimits("gpt-5.4-mini")?.contextWindow).toBe(400_000);
     expect(modelLimits("gpt-5.4")?.contextWindow).toBe(1_050_000);
     expect(modelLimits("gpt-4o-mini")?.contextWindow).toBe(128_000);
+    // 老一代要拿到自己的值，而不是被 `gpt-4` 那条笼统规则或 4o 的值盖掉
+    expect(modelLimits("gpt-4-turbo")).toEqual({ contextWindow: 128_000, maxOutput: 4_096 });
+    expect(modelLimits("gpt-4-32k")?.contextWindow).toBe(32_768);
+    expect(modelLimits("gpt-4")?.contextWindow).toBe(8_192);
+    expect(modelLimits("gpt-35-turbo")?.contextWindow).toBe(16_385);
   });
+
+  /**
+   * opus-4 的输出上限只有 sonnet-4 的一半。合成一条规则就是这张表本来要消灭的那个错误，
+   * 而 Max output 会真的发出去 —— 多填一倍换来的是一次 400。
+   */
+  it("does not give opus-4 the sonnet-4 output cap", () => {
+    expect(modelLimits("claude-opus-4-1")?.maxOutput).toBe(32_000);
+    expect(modelLimits("claude-sonnet-4-5")?.maxOutput).toBe(64_000);
+  });
+
 
   /**
    * 网关普遍在 id 前面挂一段自己的命名空间，大小写也不统一。只做全等匹配等于对网关用户

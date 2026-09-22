@@ -613,10 +613,14 @@ export default function ChatView() {
             title="Counts only the context sections listed below. The real request also carries the system prompt, the tool schemas, your own prompt, the pending diffs sent for review, and — inside a pipeline — the messages earlier stages accumulated, so it is always larger than this. The measured row below, when present, is not comparable: that is the provider's count for the largest single call of the last run, and it includes the model's output."
           >
             Estimated input budget:{" "}
-
             <span className="font-mono text-surface-text">
-              {(contextEstimate?.inputBudgetTokens ?? selectedProfile?.effectiveInputTokens ?? 0).toLocaleString()}
+              {/* 两个都没有就是"不知道窗口"，不能显示 0 —— 那是一个看着精确的假数字，
+                  而设置面板对同一份配置显示的是 unknown（见 utils/contextBudget.ts） */}
+              {contextEstimate?.inputBudgetTokens?.toLocaleString() ??
+                selectedProfile?.effectiveInputTokens?.toLocaleString() ??
+                "unknown"}
             </span>{" "}
+
             tokens · selected context{" "}
             <span className="font-mono text-surface-text">
               {estimatedSelectedTokens.toLocaleString()}

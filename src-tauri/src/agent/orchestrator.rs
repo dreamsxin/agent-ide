@@ -1599,6 +1599,14 @@ impl AgentOrchestrator {
     ) -> Result<(), String> {
         use crate::agent::state_machine::AgentEvent;
 
+        // 取消必须在**改任何状态之前**判。阶段执行期间不持锁，所以 Stop 可能正好落在"响应
+        // 已经全部到达"和"拿到锁准备落地"之间。以前这里靠"步骤还在不在"当取消判据（stop_agent
+        // 会清空计划），而计划不再被清空之后那个判据永远为真 —— 一次被取消的阶段会照样把
+        // status 写成 done、把 diff 塞进审查区，而界面上那一步显示的是"已停止"。
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        // 步骤被切掉（切上下文、删会话）也按取消处理：没有地方记这次结果了
         let Some(step_index) = self.steps.iter().position(|step| step.id == step_id) else {
             return Err(CANCELLED_ERROR.to_string());
         };
@@ -2417,7 +2425,12 @@ impl AgentOrchestrator {
     }
 
     fn ensure_stage_step(&mut self, stage: &PipelineStage) -> usize {
+        // 复用同名步骤时要**重置**它：Stop 之后计划留着（见 note_run_stopped），下一次
+        // 跑同一个阶段如果直接接着写，那一步会带着上一轮的响应摘录和"Stopped by you."继续
+        // 追加 —— 日志越攒越长，而且读起来像这一轮又被停了一次。
         if let Some(index) = self.steps.iter().position(|step| step.title == stage.name) {
+            self.steps[index].status = "todo".to_string();
+            self.steps[index].logs.clear();
             return index;
         }
 
@@ -2623,6 +2636,13 @@ impl AgentOrchestrator {
     }
 
     /// 还有未决 hunk、因而值得批量处理的 diff：(id, file)
+    /// 此刻真正在等审查的改动条数。
+    ///
+    /// diffs 里还有 applied / rejected / reverted 的记录，直接数它会把"已经处理完的"也算
+    /// 进去 —— Stop 的那条日志曾经因此报"还有 3 条待审查"，而审查区其实是空的。
+    pub fn reviewable_diff_count(&self) -> usize {
+        self.reviewable_diff_targets().len()
+    }
     fn reviewable_diff_targets(&self) -> Vec<(String, String)> {
         self.diffs
             .iter()
@@ -5247,10 +5267,11 @@ mod tests {
         assert!(!next.cancel.load(Ordering::SeqCst));
     }
 
-    /// 阶段执行期间用户点了 Stop：结果不能再往一份已经不存在的计划里落地。
+    /// 阶段跑完的瞬间用户点了 Stop：结果一点都不能落地。
     ///
-    /// `stop_agent` 会清空 `steps`。驱动器在模型调用期间不持锁，所以这件事真的
-    /// 会发生 —— 按下标写回去就是越界 panic，把整个后端带走。
+    /// 这个测试原来靠 `orchestrator.steps.clear()` 模拟 Stop —— 那是 `stop_agent` 以前的
+    /// 行为。计划不再被清空之后（Stop 保留产出），那个前提就假了，而测试仍然是绿的：真正
+    /// 的取消判据变成了取消开关本身，所以这里也必须照真实路径来 —— 标记步骤 + 拉开关。
     #[test]
     fn a_stage_finishing_after_stop_lands_nothing() {
         let _guard = workspace::env_test_guard();
@@ -5276,8 +5297,9 @@ mod tests {
             panic!("这个阶段没有配置 pause_before，应当可以执行");
         };
 
-        // 用户按了 Stop
-        orchestrator.steps.clear();
+        // 用户按了 Stop：开关拉开，计划**留着**（那一步被标成停止）
+        let cancel = Arc::new(AtomicBool::new(true));
+        orchestrator.note_run_stopped(&events);
 
         let landed = orchestrator.record_stage_outcome(
             &mut run,
@@ -5290,13 +5312,20 @@ mod tests {
                     "done".to_string(),
                 )],
             }),
-            &Arc::new(AtomicBool::new(false)),
+            &cancel,
             &events,
         );
 
         assert_eq!(landed.err().as_deref(), Some(CANCELLED_ERROR));
         assert!(orchestrator.diffs.is_empty(), "被停掉的阶段不该留下 diff");
         assert!(run.transcript.is_empty(), "被停掉的阶段不该续写线程");
+        // 那一步必须停在"已停止"，不能被这次落地改回 done —— 界面显示的和后端记的必须一致
+        let step = orchestrator
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .expect("计划留着");
+        assert_eq!(step.status, "error");
     }
 
     /// 暂停快照要能原样恢复历史。恢复的是真实消息线程而不是扁平文本：

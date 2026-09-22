@@ -385,24 +385,11 @@ pub const DEFAULT_RESERVED_OUTPUT_TOKENS: u32 = 4_096;
 /// ROADMAP 119/124），所以从窗口里先扣掉一截，别把预算算得比实际宽。
 pub const CONTEXT_ASSEMBLY_HEADROOM_TOKENS: u32 = 512;
 
-/// 没填"上下文窗口"时，**估算**按多少算。
-///
-/// 128k 是当前各家最常见的下限，而估低是安全的方向：预算显得更紧，提示会更早出现，不会反过来
-/// 让人以为还有余量。
-///
-/// 刻意不做 per-model 表：各家的窗口和输出上限这一年改过多次，公开资料之间也互相矛盾（同一个
-/// 模型能查到 128k 和 1M 两种说法），写死一张表等于把一份很快就错的数据钉进仓库 —— 而一个错的
-/// 窗口比没有窗口更糟，它让百分比看起来可信。要真正做对得去问端点自己（有些 API 会在模型列表
-/// 里给 `context_length`），那是另一件事。
-///
-/// 只影响**估算**：真实请求发出去的输出上限仍然只看 Max output，空着就是供应商自己的默认。
-pub const ASSUMED_MAX_CONTEXT_TOKENS: u32 = 128_000;
-
 /// 上下文装配能用的输入预算。
 ///
-/// 窗口没设时返回 `None`，**不**套用假定值：这个数字会变成装配器的字符上限，按一个猜出来的
-/// 窗口去裁用户的上下文，比不裁更糟。假定值只用在界面上那行估算里（见
-/// `LlmProfile::effective_input_tokens`）。
+/// 窗口没设时返回 `None`：这个数字会变成装配器的字符上限，按一个猜出来的窗口去裁用户的
+/// 上下文，比不裁更糟。界面上那行估算在窗口未知时退回按**模型**查表（前端
+/// `utils/modelLimits.ts`），查不到就显示 unknown —— 不猜。
 pub fn estimated_input_tokens_from_budget(budget: &ContextBudget) -> Option<usize> {
     let max_context = budget.max_context_tokens?;
     let reserved = budget

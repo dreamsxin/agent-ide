@@ -249,18 +249,17 @@ export default function SettingsPanel() {
       const after = modelLimits(next);
       setModel(next);
       setMaxContextTokens((current) =>
-        current.trim() === "" || parseTokenInput(current) === before?.contextWindow
+        shouldAdoptModelLimit(current, before?.contextWindow)
           ? numberToInput(after?.contextWindow)
           : current
       );
       setMaxOutputTokens((current) =>
-        current.trim() === "" || parseTokenInput(current) === before?.maxOutput
-          ? numberToInput(after?.maxOutput)
-          : current
+        shouldAdoptModelLimit(current, before?.maxOutput) ? numberToInput(after?.maxOutput) : current
       );
     },
     [model]
   );
+
 
 
   // 保存
@@ -1158,6 +1157,23 @@ function BudgetInput({
 function numberToInput(value?: number) {
   return value ? String(value) : "";
 }
+
+/**
+ * 换模型时这个框该不该跟着改。
+ *
+ * 只有两种情况算"可以改"：框是空的，或者里面**正好是上一个模型那一档**（说明它是上次自动填
+ * 的，不是人填的）。
+ *
+ * 关键在于"解析得出来"这一条：`parseTokenInput` 对 `abc`、`128kb`、`0` 都返回 `undefined`，
+ * 而上一个模型不认识时 `previous` 也是 `undefined` —— 两个 undefined 相等，于是用户手打的
+ * 那串文字会被一次换模型悄悄替换掉。
+ */
+function shouldAdoptModelLimit(current: string, previous: number | undefined): boolean {
+  if (current.trim() === "") return true;
+  const parsed = parseTokenInput(current);
+  return parsed !== undefined && parsed === previous;
+}
+
 
 
 
