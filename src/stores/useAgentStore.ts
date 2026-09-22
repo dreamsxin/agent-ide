@@ -912,11 +912,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => {
       if (s.pendingQuestion && s.pendingQuestion.id !== question.id) {
         // 同 `requestConfirm`：后端能同时挂多条，这里只有一个槽。被顶掉的那条在后端还
-        // 挂着而用户再也看不到，只能白等到超时。
+        // 挂着而用户再也看不到，只能白等到超时 —— 所以这句话要进界面，不能只进 console：
+        // "运行卡了两分钟"在屏幕上必须有解释。
         console.warn(
           "[AgentStore] replacing a pending question that was never answered:",
           s.pendingQuestion.id
         );
+        return {
+          pendingQuestion: question,
+          error: `A second question replaced one you never answered ("${s.pendingQuestion.question}") — the Agent will wait it out and continue on its own judgment.`,
+        };
       }
       return { pendingQuestion: question };
     }),

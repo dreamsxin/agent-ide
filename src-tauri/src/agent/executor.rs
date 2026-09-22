@@ -172,11 +172,28 @@ async fn stream_with_tool_loop(
             });
         }
 
-        // 保留本轮文本输出，模型可能同时给出解释和工具调用
-        merged.push_str(&output.content);
+        // 保留本轮文本输出，模型可能同时给出解释和工具调用。
+        //
+        // 输出协议的调用（`emit_agent_changes` / `emit_sdd_draft`）在中途的回合里也要
+        // 立刻合成进文本：它们不由 invoker 执行，而 `merge_tool_call_output` 只在最后
+        // 一轮跑 —— 于是"这一轮既提交了 diff 又调了一个工具"会把整段 diff 丢掉。
+        merged.push_str(&merge_tool_call_output(LlmStreamOutput {
+            content: output.content.clone(),
+            tool_calls: output
+                .tool_calls
+                .iter()
+                .filter(|call| !external.iter().any(|done| done.id == call.id))
+                .cloned()
+                .collect(),
+            usage: None,
+        }));
+        // 只重放**会被回答**的调用。带 `tool_calls` 的 assistant 消息后面必须紧跟每一个
+        // 调用的 `tool` 结果，而输出协议那几个不会有结果 —— 一并重放的话下一次请求会被
+        // 供应商整体拒掉（"tool_calls must be followed by tool messages"），而这一轮
+        // 已经做过的事全部作废。
         messages.push(ChatMessage::assistant_tool_calls(
             output.content.clone(),
-            &output.tool_calls,
+            &external,
         ));
 
         let invoker = invoker.expect("external calls only collected when invoker is present");
@@ -369,6 +386,18 @@ fn bound_transcript_with_limits(
     max_message_chars: usize,
     max_thread_chars: usize,
 ) -> Vec<ChatMessage> {
+    bound_transcript_report(messages, max_message_chars, max_thread_chars).0
+}
+
+/// 同 `bound_transcript_with_limits`，另外返回**丢掉了几组**。
+///
+/// 组数而不是消息条数：一次工具调用和它的结果是一组，那才是给用户看的"一次来回"，而按
+/// 消息条数算还会把声明用的那条系统消息算进去（每次少报一条）。
+fn bound_transcript_report(
+    messages: &[ChatMessage],
+    max_message_chars: usize,
+    max_thread_chars: usize,
+) -> (Vec<ChatMessage>, usize) {
     // 分组：`tool` 消息永远归到前一条 assistant 上，这样丢弃只会按组发生
     let mut groups: Vec<Vec<ChatMessage>> = Vec::new();
     for message in messages {
@@ -387,10 +416,9 @@ fn bound_transcript_with_limits(
     let mut kept: Vec<Vec<ChatMessage>> = Vec::new();
     let mut used = 0usize;
     for group in groups.iter().rev() {
-        let cost: usize = group
-            .iter()
-            .map(|message| message.content.chars().count())
-            .sum();
+        // 按 `message_cost_chars` 算账：工具调用的参数（一次写文件的整份内容）也要计入，
+        // 否则一组"空 content + 8 万字符参数"的写调用会被当成几乎不占地方，预算形同虚设
+        let cost: usize = group.iter().map(message_cost_chars).sum();
         // 最近的一组即使超预算也保留：紧邻的上一步是下一个 stage 最依赖的东西，
         // 一条历史都不给比给一条超长历史更糟
         if !kept.is_empty() && used + cost > max_thread_chars {
@@ -410,7 +438,7 @@ fn bound_transcript_with_limits(
         )));
     }
     result.extend(kept.into_iter().flatten());
-    result
+    (result, omitted)
 }
 
 /// 工具回合里，循环长出来的那段历史至少要留下的字符数。
@@ -419,12 +447,44 @@ fn bound_transcript_with_limits(
 /// 最近一组，留一条被砍到只剩开头的工具结果，比留一条完整的更没用 —— 模型会照着半句话继续。
 const MIN_TOOL_LOOP_HISTORY_CHARS: usize = 2_000;
 
+/// 一条消息在请求里实际占多少字符：`content` 之外还有工具调用的参数。
+///
+/// 只算 `content` 会漏掉最大的那一类 —— `workspace_write_file` 的整份文件内容在
+/// `tool_calls[].arguments` 里，而那条 assistant 消息的 `content` 通常是空串。于是
+/// "连写三个大文件"这种最容易顶爆窗口的运行会被估成 0，一次都不修剪，最后照样吃一个
+/// "context length exceeded"。
+///
+/// 图片不算：视觉 token 各家算法不同，硬猜一个只会把估算变成另一个假数字
+/// （和 `estimated_prompt_tokens` 同一条理由）。
+fn message_cost_chars(message: &ChatMessage) -> usize {
+    let mut chars = message.content.chars().count();
+    if let Some(calls) = &message.tool_calls {
+        for call in calls {
+            chars += call.function.name.chars().count() + call.function.arguments.chars().count();
+        }
+    }
+    chars
+}
+
+/// 同 `message_cost_chars`，但换成 token 估算
+fn message_cost_tokens(message: &ChatMessage) -> usize {
+    let mut tokens = estimate_tokens_for_text(&message.content);
+    if let Some(calls) = &message.tool_calls {
+        for call in calls {
+            tokens += estimate_tokens_for_text(&call.function.name)
+                + estimate_tokens_for_text(&call.function.arguments);
+        }
+    }
+    tokens
+}
+
 /// 把工具回合里长出来的历史裁进这次请求的 token 预算。
 ///
-/// 为什么需要：一次工具回合最多 12 轮，**每一轮都把之前所有消息重发一遍**，而工具结果是
-/// 大头（一次 `workspace_read_file` 就能带回 64 KB）。读六个大文件就能把 128k 的窗口顶满，
-/// 结果是供应商直接拒掉整个请求 —— 前面几轮已经花掉的钱和已经落盘的写入，一起变成一句
-/// "context length exceeded"。裁掉最旧的几组，是这条路上唯一能让运行继续的做法。
+/// 为什么需要：一次工具回合最多 12 轮，**每一轮都把之前所有消息重发一遍**，而工具调用和
+/// 结果是大头（一次 `workspace_read_file` 能带回 64 KB，一次 `workspace_write_file` 能带
+/// 出去同样多）。读写几个大文件就能把 128k 的窗口顶满，结果是供应商拒掉整个请求 ——
+/// 前面几轮已经花掉的钱和已经落盘的写入，一起变成一句 "context length exceeded"。
+/// 裁掉最旧的几组，是这条路上唯一能让运行继续的做法。
 ///
 /// `prompt_len` 之前的消息不动：那是调用方装配好的提示词（系统提示、项目上下文、上游
 /// stage 的历史），它们各自有自己的预算，在这里再裁一遍等于两套规则打架。
@@ -438,47 +498,50 @@ fn trim_tool_loop_history(
     if messages.len() <= prompt_len {
         return None;
     }
-    let tokens_of = |slice: &[ChatMessage]| -> usize {
-        slice
-            .iter()
-            .map(|message| estimate_tokens_for_text(&message.content))
-            .sum()
-    };
+    let tokens_of =
+        |slice: &[ChatMessage]| -> usize { slice.iter().map(message_cost_tokens).sum() };
     let fixed_tokens = tokens_of(&messages[..prompt_len]);
     let history_tokens = tokens_of(&messages[prompt_len..]);
     let budget = budget_tokens as usize;
     if fixed_tokens + history_tokens <= budget {
         return None;
     }
+    // 提示词自己就超预算时修剪毫无意义：历史砍到只剩最近一组，请求照样装不下，而每一轮
+    // 都会再砍一次、再记一条警告。这种情况让供应商明确拒绝 —— 和"窗口未知时不动手"
+    // 同一条理由：按一个帮不上忙的判断去丢历史，比一次说得清的失败更难查。
+    if fixed_tokens >= budget {
+        return None;
+    }
 
     // token → 字符按同一个估算器的实际比例换算。直接把 token 差当字符差会在中文历史上
     // 砍过头（那里 1 字符≈1 token），而按 4:1 硬换又会在 ASCII 上裁不够。
-    let allowed_tokens = budget.saturating_sub(fixed_tokens);
-    let history_chars: usize = messages[prompt_len..]
-        .iter()
-        .map(|message| message.content.chars().count())
-        .sum();
+    let allowed_tokens = budget - fixed_tokens;
+    let history_chars: usize = messages[prompt_len..].iter().map(message_cost_chars).sum();
     let allowed_chars = history_chars
         .saturating_mul(allowed_tokens)
         .checked_div(history_tokens.max(1))
         .unwrap_or(0)
         .max(MIN_TOOL_LOOP_HISTORY_CHARS);
 
-    let before = messages.len() - prompt_len;
-    let kept = bound_transcript_with_limits(
+    let (kept, dropped_exchanges) = bound_transcript_report(
         &messages[prompt_len..],
         MAX_CARRIED_MESSAGE_CHARS,
         allowed_chars,
     );
+    let kept_chars: usize = kept.iter().map(message_cost_chars).sum();
     messages.truncate(prompt_len);
     messages.extend(kept);
-    // 声明式的那条系统消息也算进 `kept`，所以"丢了几条"要按组数之差算，不能按长度之差
-    let dropped = before.saturating_sub(messages.len() - prompt_len);
-    if dropped == 0 {
+
+    // 丢弃量按**组**算（一次工具调用 + 它的结果是一组），因为那才是给用户看的"一次来回"；
+    // 按消息条数算还会把声明用的那条系统消息算进去，于是每次都少报一条。
+    let removed_chars = history_chars.saturating_sub(kept_chars);
+    if dropped_exchanges == 0 && removed_chars == 0 {
+        // 一个字都没少：再报一次也没有新信息，而每轮报一次会把 action log 灌满
         return None;
     }
     Some(HistoryTrim {
-        dropped_messages: dropped,
+        dropped_exchanges,
+        removed_chars,
         estimated_tokens: (fixed_tokens + history_tokens).min(u32::MAX as usize) as u32,
         budget_tokens,
     })
@@ -1404,12 +1467,77 @@ mod tests {
         assert!(messages.len() < before, "nothing was dropped");
         assert_eq!(trim.budget_tokens, 1_000);
         assert!(trim.estimated_tokens > 1_000, "{:?}", trim);
+        // 真正要保证的是"下一次请求变小了"，而不只是"少了几条消息"：按组丢弃之后，
+        // 留下的历史加上提示词必须真的进了预算之内
+        let cost: usize = messages.iter().map(message_cost_tokens).sum();
+        assert!(
+            cost <= 1_000,
+            "trimmed request is still over budget: {}",
+            cost
+        );
+        // 丢弃量按组算：6 组里留 1 组 ⇒ 丢 5 组。按消息条数算会被那条声明消息带偏
+        assert_eq!(trim.dropped_exchanges, 5, "{:?}", trim);
+        assert!(trim.removed_chars > 0, "{:?}", trim);
         // 丢弃必须写进历史本身，否则模型会把节选当完整历史
         let note = messages
             .iter()
             .find(|message| message.content.contains("earlier exchange(s) were omitted"))
             .expect("the omission is stated");
         assert_eq!(note.role, "system");
+    }
+
+    /// 工具调用的参数也要算进预算。
+    ///
+    /// `workspace_write_file` 把整份文件放在 `tool_calls[].arguments` 里，那条 assistant
+    /// 消息的 `content` 是空串。只算 content 的话，"连写三个大文件"会被估成 0 —— 一次都
+    /// 不修剪，最后照样吃一个 "context length exceeded"，而这个函数存在的理由正是它。
+    #[test]
+    fn a_write_heavy_loop_is_measured_by_its_arguments() {
+        let prompt = vec![ChatMessage::system("system prompt".to_string())];
+        let mut messages = prompt.clone();
+        for index in 0..4 {
+            messages.push(ChatMessage::assistant_tool_calls(
+                String::new(),
+                &[crate::services::llm_client::LlmToolCall {
+                    id: format!("call-{}", index),
+                    name: "workspace_write_file".to_string(),
+                    arguments: format!(
+                        "{{\"path\":\"a{}.ts\",\"content\":\"{}\"}}",
+                        index,
+                        "x".repeat(8_000)
+                    ),
+                }],
+            ));
+            messages.push(ChatMessage::tool_result(
+                format!("call-{}", index),
+                "Wrote 8000 bytes".to_string(),
+            ));
+        }
+
+        let trim = trim_tool_loop_history(&mut messages, prompt.len(), 1_000)
+            .expect("four 8 000-char write calls do not fit 1 000 tokens");
+
+        assert!(trim.dropped_exchanges > 0, "{:?}", trim);
+        assert!(trim.estimated_tokens > 1_000, "{:?}", trim);
+    }
+
+    /// 提示词自己就超预算时不动历史。
+    ///
+    /// 砍掉全部历史也装不下，而每一轮都会再砍一次并记一条警告：一个帮不上忙的动作重复
+    /// 十二次，只会把 action log 灌满，还让人以为问题在历史上。
+    #[test]
+    fn a_prompt_that_alone_exceeds_the_budget_is_left_to_the_provider() {
+        let prompt = vec![ChatMessage::user("p".repeat(40_000))];
+        let mut messages = prompt.clone();
+        messages.push(ChatMessage::assistant("call".to_string()));
+        messages.push(ChatMessage::tool_result(
+            "call-0".to_string(),
+            "r".repeat(4_000),
+        ));
+        let before = messages.len();
+
+        assert!(trim_tool_loop_history(&mut messages, prompt.len(), 1_000).is_none());
+        assert_eq!(messages.len(), before, "history was destroyed for nothing");
     }
 
     /// 装得下就一个字都不要动。

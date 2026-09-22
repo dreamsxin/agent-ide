@@ -89,6 +89,10 @@ Known limitations:
 
 ## Built-in Workspace Tools
 
+## Built-in Workspace Tools
+
+Two of the advertised tools are not workspace access at all but the **output protocol**: `emit_agent_changes` and `emit_sdd_draft` go out with every native-tools request, carry no authority and are never executed — their arguments are synthesized back into the text the diff parser reads, so whatever they contain still has to pass through the review area to reach disk.
+
 The Agent has six built-in read-only tools — `workspace_read_file`, `workspace_search_text`, `workspace_glob`, `workspace_grep`, `workspace_list_files`, `workspace_read_image` — so it can decide what to read instead of relying only on the pre-assembled context bundle. Unlike MCP tools, these are constrained:
 
 - Path-taking tools (`workspace_read_file`, `workspace_read_image`) resolve through `resolve_existing`, so they cannot reach outside the workspace. The three search tools take no path: they are confined by walking from the workspace root, and **symlinks are skipped entirely** — a committed `notes.txt -> ~/.ssh/id_rsa` is a regular file to `read_to_string` and its reported path still looks in-workspace, so the only safe answer is not to follow it.

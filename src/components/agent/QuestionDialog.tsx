@@ -15,9 +15,15 @@ import { useAgentStore } from "../../stores/useAgentStore";
  */
 export default function QuestionDialog() {
   const pendingQuestion = useAgentStore((s) => s.pendingQuestion);
+  const pendingConfirm = useAgentStore((s) => s.pendingConfirm);
   const answerQuestion = useAgentStore((s) => s.answerQuestion);
   const dismissQuestion = useAgentStore((s) => s.dismissQuestion);
   const [custom, setCustom] = useState("");
+
+  // 批准框优先：两个框都是 `fixed inset-0 z-50`，同时挂出来会叠成两层遮罩，而且两个
+  // Esc 监听器都在 window 上 —— 按一次 Esc 会同时"不回答这道题"和"拒绝那次授权"，
+  // 也就是一次按键否掉了一件用户还没读过的动作。有副作用的那个先问。
+  const visible = pendingQuestion && !pendingConfirm;
 
   // 换了一道题就清掉上一道题里写了一半的答案：留着它等于把上一个问题的回答提交给
   // 这一个问题
@@ -26,7 +32,7 @@ export default function QuestionDialog() {
   }, [pendingQuestion?.id]);
 
   useEffect(() => {
-    if (!pendingQuestion) {
+    if (!visible) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -37,9 +43,9 @@ export default function QuestionDialog() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pendingQuestion, dismissQuestion]);
+  }, [visible, dismissQuestion]);
 
-  if (!pendingQuestion) {
+  if (!pendingQuestion || !visible) {
     return null;
   }
 
@@ -66,11 +72,9 @@ export default function QuestionDialog() {
         <div className="px-4 py-3">
           <p className="text-xs text-surface-text leading-relaxed">{pendingQuestion.question}</p>
           <div className="mt-3 flex flex-col gap-1.5">
-            {pendingQuestion.options.map((option, index) => (
+            {pendingQuestion.options.map((option) => (
               <button
                 key={option}
-                // 焦点落在第一项：它是模型认为最可能的答案，而键盘用户不该先 Tab 过整个列表
-                autoFocus={index === 0}
                 onClick={() => void answerQuestion(option)}
                 className="rounded border border-surface-border px-3 py-1.5 text-left text-xs text-surface-text hover:bg-surface-border/30 transition-colors"
               >
@@ -86,6 +90,10 @@ export default function QuestionDialog() {
             }}
           >
             <input
+              // 焦点落在输入框，不落在任何一个选项上：`ConfirmDialog` 把焦点放在 Deny
+              // 是同一条规矩 —— 一次误按回车不该变成一个被当作用户偏好的答案。空输入
+              // 提交是空操作，所以这里是唯一一个"按下去什么也不会发生"的落点。
+              autoFocus
               value={custom}
               onChange={(event) => setCustom(event.target.value)}
               placeholder="Or type your own answer"

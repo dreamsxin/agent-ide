@@ -353,14 +353,24 @@ describe("approval op types", () => {
 describe("built-in tool documentation", () => {
     /**
      * 工具名不全带 `workspace_` 前缀（`ask_user_question` 问的不是工作区，而是人），
-     * 所以按前缀扫会漏掉新工具 —— 而漏掉的那个正好是没人替它核文档的那个。改成扫
-     * `agent/workspace_tools.rs` 里所有 `pub const … : &str`：那个文件里这种常量只有
-     * 工具名，而多收一个非工具常量的代价仅仅是要在 SECURITY.md 里提它一次。
+     * 所以只按前缀扫会漏掉新工具 —— 而漏掉的那个正好是没人替它核文档的那个。两条一起用：
+     * 全仓扫 `workspace_*`（新文件里加的带前缀工具也跑不掉），外加整份
+     * `workspace_tools.rs`（那里的 `pub const … &str` 只有工具名）。
+     *
+     * 输出协议那两个（`emit_agent_changes` / `emit_sdd_draft`）声明在 `llm_client.rs`、
+     * 每次 native tools 请求都会带上，两种扫法都抓不到，所以显式列进来。
      */
     function builtInToolNames(): string[] {
-        const names = new Set<string>();
-        const source = readFileSync("src-tauri/src/agent/workspace_tools.rs", "utf8");
-        for (const match of source.matchAll(/pub const [A-Z0-9_]+: &str = "([a-z0-9_]+)"/g)) {
+        const names = new Set<string>(["emit_agent_changes", "emit_sdd_draft"]);
+        for (const source of rustSources()) {
+            for (const match of source.matchAll(
+                /pub const [A-Z0-9_]+: &str = "(workspace_[a-z0-9_]+)"/g
+            )) {
+                names.add(match[1]);
+            }
+        }
+        const tools = readFileSync("src-tauri/src/agent/workspace_tools.rs", "utf8");
+        for (const match of tools.matchAll(/pub const [A-Z0-9_]+: &str = "([a-z0-9_]+)"/g)) {
             names.add(match[1]);
         }
         return [...names].sort();

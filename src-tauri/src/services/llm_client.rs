@@ -1070,38 +1070,52 @@ pub struct OutputClamp {
     pub sent: u32,
 }
 
-/// 工具回合里为了装进窗口而丢掉的一段历史。
+/// 工具回合里为了装进窗口而削掉的一段历史。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryTrim {
-    /// 丢掉的消息条数（assistant 的工具调用 + 它的结果按组一起丢）
-    pub dropped_messages: usize,
-    /// 修剪前这次请求估算的提示词 token
+    /// 丢掉的"来回"数：一次工具调用 + 它的结果算一组
+    pub dropped_exchanges: usize,
+    /// 这次修剪一共少发了多少字符（丢掉的组 + 被截短的长结果）
+    pub removed_chars: usize,
+    /// 修剪**前**这次请求估算的提示词 token
     pub estimated_tokens: u32,
     /// 这次请求允许的提示词 token
     pub budget_tokens: u32,
 }
 
-/// 把"工具回合中途丢过历史"变成一句给用户的话。没丢过就返回 None。
+/// 把"工具回合中途削过历史"变成一句给用户的话。没削过就返回 None。
 ///
 /// 必须说出来，而且不能只写进发给模型的那条系统提示：模型知道少了一段，用户只会看到一次
 /// 看起来正常、却把前面读过的文件又读一遍（或者干脆忘了结论）的运行。
+///
+/// 措辞要对得上代码：丢掉的是"组"，而 `estimated_tokens` 是**修剪前**的大小 —— 说成
+/// "这次请求发了 N token"会让用户拿一个从没发出去的数字去调 Max context。
 pub fn history_trim_report(trims: &[HistoryTrim]) -> Option<(String, String)> {
     let worst = trims.iter().max_by_key(|trim| trim.estimated_tokens)?;
-    let dropped: usize = trims.iter().map(|trim| trim.dropped_messages).sum();
-    Some((
+    let dropped: usize = trims.iter().map(|trim| trim.dropped_exchanges).sum();
+    let removed: usize = trims.iter().map(|trim| trim.removed_chars).sum();
+    let summary = if dropped > 0 {
         format!(
             "Dropped {} earlier tool exchange(s) mid-run to keep the request inside the context window",
             dropped
-        ),
+        )
+    } else {
         format!(
-            "A tool loop re-sends every earlier round, so a long one grows past the window: the \
-             biggest request in this run estimated {} prompt token(s) against a budget of {}. The \
-             oldest exchanges were dropped {} time(s), newest kept, and the model was told in the \
-             transcript that they are missing. Tool results are the bulk of it — reading fewer or \
-             smaller files, or raising Max context if the model's window is larger, avoids it.",
-            worst.estimated_tokens,
-            worst.budget_tokens,
-            trims.len()
+            "Shortened {} character(s) of earlier tool output mid-run to keep the request inside the context window",
+            removed
+        )
+    };
+    Some((
+        summary,
+        format!(
+            "A tool loop re-sends every earlier round, so a long one grows past the window: before \
+             trimming, the biggest request in this run would have been {} prompt token(s) against a \
+             budget of {}. The oldest exchanges were dropped or shortened {} time(s) — {} \
+             character(s) in total, newest kept — and the model was told in the transcript that \
+             they are missing. Tool calls and their results are the bulk of it, so reading or \
+             writing fewer and smaller files avoids this; raising Max context helps only if the \
+             model's window is actually larger.",
+            worst.estimated_tokens, worst.budget_tokens, trims.len(), removed
         ),
     ))
 }
@@ -1303,7 +1317,7 @@ impl LlmClient {
     /// 修剪发生在执行器那边（只有它知道哪些消息是循环长出来的），但汇报渠道必须和图片降级、
     /// 输出夹紧是同一条：用户找"这次运行被削了什么"只应该有一个地方。
     pub fn note_history_trim(&self, trim: HistoryTrim) {
-        if trim.dropped_messages == 0 {
+        if trim.dropped_exchanges == 0 && trim.removed_chars == 0 {
             return;
         }
         if let Ok(mut trims) = self.history_trims.lock() {
@@ -1311,13 +1325,18 @@ impl LlmClient {
         }
     }
 
-    /// 这次请求的提示词最多能占多少 token；窗口未知返回 `None`。
+    /// 这次请求的提示词最多能占多少 token；窗口未知、或者算出来的预算小到帮不上忙时
+    /// 返回 `None`。
     ///
     /// 留出的那一份是输出：窗口是输入和输出共用的，不减掉输出就等于算出一个发得出去、
     /// 但一定没地方写回答的预算。用户没设 Max output 时按默认预留量算。
     ///
-    /// 窗口未知不猜（和 `window_limited_output_tokens` 同一条规矩）：按猜出来的窗口丢历史，
-    /// 比让供应商明确拒绝更难查。
+    /// 两种情况都不给数字：
+    /// - **窗口未知**（和 `window_limited_output_tokens` 同一条规矩）：按猜出来的窗口丢历史，
+    ///   比让供应商明确拒绝更难查。
+    /// - **预算小于 `MIN_USEFUL_PROMPT_BUDGET`**：比如 128k 窗口配 126k 的 Max output，
+    ///   剩下不到一千 token。那种预算下每一轮都会把历史砍到最低限，请求照样装不下 ——
+    ///   真正该改的是 Max output，而那件事由输出夹紧那条警告负责说。
     pub fn prompt_token_budget(&self) -> Option<u32> {
         let window = self.config.max_context_tokens?;
         let reserved = self
@@ -1327,7 +1346,7 @@ impl LlmClient {
         let budget = window
             .saturating_sub(reserved)
             .saturating_sub(REQUEST_WINDOW_MARGIN_TOKENS);
-        (budget > 0).then_some(budget)
+        (budget >= MIN_USEFUL_PROMPT_BUDGET).then_some(budget)
     }
 
     /// 发请求前记一笔"这次没按你设的上限发"。
@@ -2328,6 +2347,13 @@ fn estimated_prompt_tokens(messages: &[ChatMessage]) -> u32 {
 ///
 /// 提示词是按字符估的，估低了就会在供应商那边变成一次 400。这个数字是"估偏一点也还发得出去"。
 const REQUEST_WINDOW_MARGIN_TOKENS: u32 = 1_024;
+
+/// 小于这个数的提示词预算不值得据以修剪历史。
+///
+/// 128k 窗口配 126k 的 Max output 会剩下不到一千 token：那种预算下每一轮都会把历史砍到
+/// 最低限，而请求照样装不下 —— 真正该改的是 Max output（输出夹紧那条警告会说）。
+/// 和 `MIN_CLAMPED_OUTPUT_TOKENS` 同一个思路：本地估算不是权威，不拿它做帮不上忙的动作。
+const MIN_USEFUL_PROMPT_BUDGET: u32 = 4_096;
 
 /// 夹到比这个还小就不夹了。
 ///
@@ -3853,7 +3879,13 @@ mod tests {
         cfg.max_context_tokens = None;
         assert_eq!(LlmClient::new(cfg.clone()).prompt_token_budget(), None);
 
-        // 窗口比预留量还小时也不给数字，否则预算会是 0，等于"每一轮都重裁一遍"
+        // 预算小到帮不上忙时也不给数字：128k 窗口配 126k Max output 只剩几百 token，
+        // 那种预算下每轮都会把历史砍到最低限而请求照样装不下
+        cfg.max_context_tokens = Some(128_000);
+        cfg.max_output_tokens = Some(126_000);
+        assert_eq!(LlmClient::new(cfg.clone()).prompt_token_budget(), None);
+
+        // 窗口比预留量还小时同理
         cfg.max_context_tokens = Some(1_000);
         assert_eq!(LlmClient::new(cfg).prompt_token_budget(), None);
     }
@@ -3865,12 +3897,14 @@ mod tests {
 
         let (summary, details) = history_trim_report(&[
             HistoryTrim {
-                dropped_messages: 2,
+                dropped_exchanges: 2,
+                removed_chars: 5_000,
                 estimated_tokens: 130_000,
                 budget_tokens: 120_000,
             },
             HistoryTrim {
-                dropped_messages: 4,
+                dropped_exchanges: 4,
+                removed_chars: 9_000,
                 estimated_tokens: 150_000,
                 budget_tokens: 120_000,
             },
@@ -3886,6 +3920,19 @@ mod tests {
         assert!(details.contains("150000"), "{}", details);
         assert!(details.contains("120000"), "{}", details);
         assert!(details.contains("2 time(s)"), "{}", details);
+        assert!(details.contains("14000"), "{}", details);
+        // 说的必须是"修剪前会有多大"，不能说成"这次请求发了这么多" —— 那个数字从没发出去过
+        assert!(details.contains("before trimming"), "{}", details);
+
+        // 一组都没丢、只把长结果截短了：也要说出来，否则用户只会看到模型忘了刚读过的内容
+        let (shortened, _) = history_trim_report(&[HistoryTrim {
+            dropped_exchanges: 0,
+            removed_chars: 40_000,
+            estimated_tokens: 130_000,
+            budget_tokens: 120_000,
+        }])
+        .expect("a truncation-only trim is still a trim");
+        assert!(shortened.contains("Shortened 40000"), "{}", shortened);
     }
 
     /// 输出上限要按"这一次还剩多少"夹一次。

@@ -21,7 +21,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(true);
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
-  useAgentStore.setState({ pendingQuestion: null, error: null });
+  useAgentStore.setState({ pendingQuestion: null, pendingConfirm: null, error: null });
 });
 
 function question(overrides: Partial<AgentQuestion> = {}): AgentQuestion {
@@ -105,6 +105,47 @@ describe("QuestionDialog", () => {
 
     expect(heard).toBe(false);
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 批准框优先。两个框都是 `fixed inset-0 z-50`、两个 Esc 监听器都挂在 window 上 ——
+   * 同时出现的话，一次 Esc 会既"不回答这道题"又"拒绝那次授权"，也就是一次按键否掉了
+   * 一件用户还没读过的动作。
+   */
+  it("有批准在等时不显示，也不抢 Esc", async () => {
+    useAgentStore.setState({
+      pendingQuestion: question(),
+      pendingConfirm: {
+        id: "req-9",
+        opType: "browser_open",
+        title: "Open a page",
+        description: "The agent wants to open example.com",
+        detail: "",
+      },
+    });
+
+    const { container } = render(<QuestionDialog />);
+    expect(container.firstChild).toBeNull();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await Promise.resolve();
+    expect(invokeMock).not.toHaveBeenCalled();
+    // 那道题还挂着：批准回答完之后它会显示出来
+    expect(useAgentStore.getState().pendingQuestion?.id).toBe("q-1");
+    useAgentStore.setState({ pendingConfirm: null });
+  });
+
+  /** 顶掉一条没人回答的提问要进界面，不能只进 console */
+  it("被顶掉的提问要在界面上留一句", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    useAgentStore.setState({ pendingQuestion: question({ id: "q-1" }), error: null });
+
+    useAgentStore.getState().requestQuestion(question({ id: "q-2" }));
+
+    expect(warn).toHaveBeenCalled();
+    expect(useAgentStore.getState().pendingQuestion?.id).toBe("q-2");
+    expect(useAgentStore.getState().error).toContain("never answered");
+    warn.mockRestore();
   });
 });
 

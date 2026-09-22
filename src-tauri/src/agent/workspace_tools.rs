@@ -1364,6 +1364,13 @@ impl ToolInvoker for WorkspaceToolInvoker {
             other => Err(format!("Unknown workspace tool: {}", other)),
         };
         match &result {
+            // 用户自己写的答案不进记录：模型可以问出任何问题（"用哪个 token？"），而这条
+            // 记录会被当成"这次运行读过什么"的凭据留下来。长度足够回答"他到底答了没有"。
+            Ok(output) if tool_name == ASK_USER_QUESTION => self.log(
+                "success",
+                &format!("{} returned {} chars", tool_name, output.len()),
+                "The answer itself is not recorded.",
+            ),
             Ok(output) => self.log(
                 "success",
                 &format!("{} returned {} chars", tool_name, output.len()),
@@ -1932,6 +1939,14 @@ async fn ask_user_question_tool(
     options: &[String],
     permissions: &WorkspaceToolPermissions,
 ) -> Result<String, String> {
+    // 空问题在这里挡一次，而不是只靠取参数时的 `string_arg`：文档和上面的注释都写着
+    // "空问题会被拒"，而那条规则其实落在三层之外的一个通用取值函数里 —— 那种"别处恰好
+    // 也挡得住"的依赖，下一次改取值方式就会安静失效。
+    if question.trim().is_empty() {
+        return Err(
+            "A question needs text the user can answer without reading the code.".to_string(),
+        );
+    }
     if options.len() < MIN_QUESTION_OPTIONS || options.len() > MAX_QUESTION_OPTIONS {
         return Err(format!(
             "A question needs between {} and {} options; this call had {}. Ask one question with \
@@ -4588,6 +4603,14 @@ mod tests {
                 options
             );
         }
+        // 空问题同理：一个没有问题的选择题在对话框上是几个没有上下文的按钮
+        assert!(ask_user_question_tool(
+            "   ",
+            &["Redis".to_string(), "SQLite".to_string()],
+            &permissions
+        )
+        .await
+        .is_err());
         // 一次都没问出去：错的参数不该打扰用户
         assert!(events
             .payloads_for(crate::agent::approval::QUESTION_REQUESTED_EVENT)
