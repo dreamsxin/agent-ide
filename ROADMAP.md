@@ -1753,6 +1753,17 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Still open: `AgentRunSummary` shows `currentTask.title` while the history row shows the session title, and after Stop the header keeps the stopped task's title next to an empty plan (`stopAgent` clears steps but not `currentTask`); single-step runs and repair never set a title at all. There is still no "past tasks" list distinct from the conversation list, and no rename.
    - Rust unchanged; frontend 252 tests across 29 files (labels only, no new tests — the palette test's two titles were updated).
 
+128. **Stop was throwing away what the run had already produced (2026-09-22)**
+   Went looking at 127's open item "after Stop the header keeps the title next to an empty plan" and found the cause was much worse than a stale label: `stop_agent` ran `orch.steps.clear(); orch.diffs.clear(); orch.sdd_artifacts.clear();` — no comment, no test — and `stopAgent` in the store mirrored the wipe.
+   - **This made the product's core failure reproducible with one click.** Tool writes are published back as `applied` diffs carrying their pre-write content and an undo checkpoint, precisely so a user can see and undo them. Press Stop after the Agent has written a file and the review area empties while the file on disk stays changed — "disk changing while the Diff view stays empty is the failure this product exists to prevent" (AGENTS.md). Proposed-but-unreviewed diffs and a half-written SDD draft went the same way: Stop means "do not do more", not "discard what is done".
+   - **It was also non-deterministic.** A draining run publishes its tool writes on the cancellation path; whether they survived depended on whether that publish landed before or after Stop's `clear()`.
+   - **Now**: `note_run_stopped` marks any `doing` step as `error` with a `Stopped by you.` log line, leaves every other step and all diffs/artifacts alone, and re-emits `agent-plan-ready` — without that the Plan panel keeps spinning on a step whose run is gone, since that event is the only thing it listens to. The command layer then writes an action-log entry naming how many steps were stopped and how many pending changes are still waiting, because "Stop kept your changes" is not visible from an empty status line.
+   - **Why `doing` → `error` and not a new status**: `TaskStep.status` is an unvalidated `String` shared over IPC, and the frontend only styles the five values it knows. Inventing `stopped` would render as an unstyled row on the old renderer; the log line carries the distinction that matters.
+   - The store now keeps `steps` and `diffs` too, and only clears `agentRunId` / `restoredSession` — that run really did end, and reconciliation should not re-adopt it.
+   - Still open from 127: `AgentRunSummary` shows `currentTask.title` while the history row shows the session title, so the two can disagree; single-step runs and repair still set no title; no rename.
+   - Rust 478 → 479; frontend 252 → 253.
+
+
 
 
 

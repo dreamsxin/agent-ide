@@ -878,9 +878,26 @@ pub async fn stop_agent(
     orch.abandon_run();
     orch.state_mgr.set(AgentState::Idle);
     orch.ide_mode = IdeMode::Code;
-    orch.steps.clear();
-    orch.diffs.clear();
-    orch.sdd_artifacts.clear();
+    // 计划、待审查改动、SDD 草稿都**留着**，只把还在转的那一步落成终态。
+    // 理由写在 `note_run_stopped` 上：清掉它们会让"磁盘已经改了、审查区却是空的"成为
+    // 按一次 Stop 就能复现的状态。
+    let stopped_steps = orch.note_run_stopped(&app_handle);
+    if !orch.diffs.is_empty() || stopped_steps > 0 {
+        orch.emit_review_action_log(
+            &app_handle,
+            "info",
+            "run_stopped",
+            &format!(
+                "Stopped the run; {} pending change(s) and the plan are still here",
+                orch.diffs.len()
+            ),
+            &format!(
+                "Steps marked as stopped: {}\nPending changes kept for review: {}\nStop ends the run, not what it already produced.",
+                stopped_steps,
+                orch.diffs.len()
+            ),
+        );
+    }
     Ok("Agent stopped".to_string())
 }
 

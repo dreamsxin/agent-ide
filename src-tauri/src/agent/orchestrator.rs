@@ -2641,6 +2641,34 @@ impl AgentOrchestrator {
         self.record_step_status(step, "doing", log)
     }
 
+    /// 用户按了 Stop：把还在跑的那一步落成终态，并把计划原样广播出去。
+    ///
+    /// **产出一律不丢**。以前 `stop_agent` 会 `steps.clear()` + `diffs.clear()` +
+    /// `sdd_artifacts.clear()`，后果正是这个产品存在要防的那一种：Agent 已经改过文件（工具
+    /// 写入会作为 `applied` diff 连着撤销点回到审查区），用户一按 Stop 审查区就空了，而磁盘
+    /// 是改过的 —— "磁盘变了而 Diff 视图是空的"。待审查的提案和写了一半的 SDD 草稿同理：
+    /// Stop 的意思是"别再往下做"，不是"把已经做完的扔掉"。
+    ///
+    /// 还在跑的那一步必须落地：留着 `doing` 会让计划里那个图标一直转，而运行早就没了。
+    ///
+    /// 返回被标记的步数，好让命令层决定要不要多说一句。
+    pub fn note_run_stopped(&mut self, events: &dyn RunEvents) -> usize {
+        let mut stopped = 0;
+        for step in self.steps.iter_mut() {
+            if step.status == "doing" {
+                step.status = "error".to_string();
+                step.logs.push("Stopped by you.".to_string());
+                stopped += 1;
+            }
+        }
+        // 计划要重发：Plan 面板只认 `agent-plan-ready`，不发的话界面上那一步还在转
+        events.emit_json(
+            "agent-plan-ready",
+            serde_json::to_value(&self.steps).unwrap_or_default(),
+        );
+        stopped
+    }
+
     /// 更新（必要时插入）某个步骤的状态，返回登记后的副本
     pub fn record_step_status(&mut self, step: &TaskStep, status: &str, log: &str) -> TaskStep {
         let mut updated = step.clone();
@@ -3942,6 +3970,50 @@ mod tests {
             scope: None,
             execution_mode: None,
         }
+    }
+
+    /// Stop 结束的是运行，不是已经产出的东西。
+    ///
+    /// 以前 `stop_agent` 把 steps / diffs / SDD 草稿一起清掉，于是按一次 Stop 就能复现这个
+    /// 产品最不该出现的状态：工具已经改过的文件作为 `applied` diff 回到了审查区，Stop 之后
+    /// 审查区空了、磁盘却是改过的。断言落在"产出还在"和"转圈的那一步落地了"上。
+    #[test]
+    fn stopping_a_run_keeps_what_it_already_produced() {
+        use crate::agent::events::RecordingEvents;
+
+        let mut orchestrator = AgentOrchestrator::new();
+        let mut done = make_step("s1");
+        done.status = "done".to_string();
+        let mut running = make_step("s2");
+        running.status = "doing".to_string();
+        let pending = make_step("s3");
+        orchestrator.steps = vec![done, running, pending];
+        orchestrator
+            .diffs
+            .push(make_diff("src/a.ts", "const a = 1;\n", "const a = 2;\n"));
+        let events = RecordingEvents::default();
+
+        let stopped = orchestrator.note_run_stopped(&events);
+
+        assert_eq!(stopped, 1);
+        // 产出不丢
+        assert_eq!(orchestrator.diffs.len(), 1, "待审查改动必须留着");
+        assert_eq!(orchestrator.steps.len(), 3, "计划必须留着");
+        // 已完成 / 未开始的步骤不被 Stop 改写
+        assert_eq!(orchestrator.steps[0].status, "done");
+        assert_eq!(orchestrator.steps[2].status, "todo");
+        // 还在跑的那一步落成终态，并且说清是谁停的
+        assert_eq!(orchestrator.steps[1].status, "error");
+        assert!(orchestrator.steps[1]
+            .logs
+            .iter()
+            .any(|line| line.contains("Stopped by you")));
+        // 不重发计划的话，界面上那一步会一直转
+        assert!(
+            events.names().iter().any(|name| name == "agent-plan-ready"),
+            "{:?}",
+            events.names()
+        );
     }
 
     /// 一个只返回文字、没有产出 diff 的步骤以前会把状态硬置成 WaitingUser，

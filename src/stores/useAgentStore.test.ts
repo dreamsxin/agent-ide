@@ -429,6 +429,31 @@ describe("applyAllDiffs", () => {
   });
 });
 
+describe("stopAgent", () => {
+  /**
+   * Stop 结束的是运行，不是已经产出的东西。以前这里连 steps 和 diffs 一起清：Agent 改过的
+   * 文件还在磁盘上，审查区却空了 —— 那正是这个产品存在要防的那件事，而且按一次 Stop 就能复现。
+   */
+  it("keeps the plan and the pending changes", async () => {
+    useAgentStore.setState({
+      state: "acting",
+      steps: [{ id: "s1", title: "edit a file", status: "doing", logs: [] }] as never,
+      diffs: [{ id: "d1", file: "src/a.ts", hunks: [], status: "pending" }] as never,
+      agentRunId: "run-1",
+    });
+    invokeMock.mockResolvedValueOnce("Agent stopped");
+
+    await useAgentStore.getState().stopAgent();
+
+    expect(invokeMock).toHaveBeenCalledWith("stop_agent");
+    expect(useAgentStore.getState().state).toBe("idle");
+    expect(useAgentStore.getState().steps).toHaveLength(1);
+    expect(useAgentStore.getState().diffs).toHaveLength(1);
+    // run id 要清掉：那次运行确实结束了，后续的协调不该再认它
+    expect(useAgentStore.getState().agentRunId).toBeNull();
+  });
+});
+
 describe("session switching", () => {
   /**
    * "New session" 只清前端的话，下一条提问仍然带着上一个任务的对话摘要进模型上下文 ——

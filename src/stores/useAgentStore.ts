@@ -962,13 +962,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   stopAgent: async () => {
     try {
+      // 计划和待审查改动**留着**：Stop 的意思是"别再往下做"，不是"把已经做完的扔掉"。
+      // 以前这里连 `steps` 和 `diffs` 一起清，于是 Agent 改过的文件还在磁盘上、审查区却
+      // 空了 —— 那正是这个产品存在要防的那件事。后端同样不再清（见 `note_run_stopped`），
+      // 它会把还在转的那一步标成停止并重发计划。
       if (!isTauriRuntime()) {
-        set({ state: "idle", steps: [], diffs: [], agentRunId: null, restoredSession: null });
+        set({ state: "idle", agentRunId: null, restoredSession: null });
         persistAgentSession(get());
         return;
       }
       await invoke("stop_agent");
-      set({ state: "idle", steps: [], diffs: [], agentRunId: null, restoredSession: null });
+      set({ state: "idle", agentRunId: null, restoredSession: null });
       persistAgentSession(get());
     } catch (err: unknown) {
       console.warn("[AgentStore] stop_agent failed:", err);
