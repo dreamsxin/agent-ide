@@ -134,6 +134,13 @@ pub struct AgentContext {
     pub project_tree: Option<String>,
     #[serde(default)]
     pub project_memory: Option<String>,
+    /// 注入时项目记忆被切掉了尾部，以及原文有多大。
+    ///
+    /// 带着这件事一路传到命令层，是因为它只在这里（装配上下文的那一刻）知道，而唯一需要
+    /// 听到它的人在另一端：用户。不传的话，这个事实只能靠在注入文本里搜一句标记来还原 ——
+    /// 也就是只有模型看得见，而用户看到的是"我写的规则 Agent 不照做"。
+    #[serde(default)]
+    pub project_memory_truncated: Option<usize>,
     /// 之前几轮的对话摘要。
     ///
     /// 每次运行原本都是冷启动：跟进一句"再处理下错误分支"没有任何上文，
@@ -162,6 +169,7 @@ impl AgentContext {
             git_diff: None,
             project_tree: None,
             project_memory: None,
+            project_memory_truncated: None,
             conversation: None,
             ide_runtime: None,
         }
@@ -177,9 +185,15 @@ impl AgentContext {
 
     pub fn enrich_from_workspace_with_sources(&mut self, sources: &ContextSourceOptions) {
         if sources.include_project_memory && self.project_memory.is_none() {
-            self.project_memory = crate::services::project_memory::load_project_memory()
+            if let Some(loaded) = crate::services::project_memory::load_project_memory()
                 .ok()
-                .flatten();
+                .flatten()
+            {
+                // 被截断的字节数记在这里而不是只记一个 bool：命令层要把"原文多大"说给用户，
+                // 而那个数字只有这一刻知道 —— 装配之后就只剩下切好的那段文本了
+                self.project_memory_truncated = loaded.truncated.then_some(loaded.bytes);
+                self.project_memory = Some(loaded.text);
+            }
         }
         if sources.include_project_tree && self.project_tree.is_none() {
             self.project_tree = build_project_tree_summary(160, 4).ok();
@@ -841,6 +855,7 @@ mod tests {
             git_diff: None,
             project_tree: None,
             project_memory: None,
+            project_memory_truncated: None,
             conversation: None,
             ide_runtime: None,
         }

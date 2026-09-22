@@ -1918,6 +1918,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **"Sent" was set before sending** and never cleared: with no model configured it stated a falsehood, and it outlived the run it described. It is now set on the promise's success and cleared on the next idle edge.
    - **The draft prompt named the task after itself.** The task title is derived from the prompt's first line, so a task would be called "This workspace has no AGENTS.md yet, so every Agent run here start...". The prompt now opens with `Draft this project's AGENTS.md`.
    - Rust 516 → 517 (516 passing, 1 ignored); frontend 286 → 287.
+144. **The truncated project memory now reaches the user, not just the model (2026-09-22)**
+   Finishing what 142 recorded as deliberately not done. `bound_project_memory` appends a `project memory truncated` marker **into the injected text**, so the only party told was the model; the user saw an Agent that ignored the rules they had just written.
+   - **The fact is carried out of assembly, not recovered from the text.** `load_project_memory` now returns `LoadedProjectMemory { text, bytes, truncated }`, `AgentContext` carries `project_memory_truncated: Option<usize>` (the size on disk), and the command layer emits `project_memory_truncated` through the same action-log channel as the other degradations. Recovering it by substring-matching the prompt would have made the report depend on the exact wording of a marker meant for the model.
+   - **It is reported before the run, not at finish.** Every other degradation is a fact about a request that already went out, so `finish_agent_run` is the right place for them. This one is different: it is known at assembly, and it explains the run that is *about to* happen. If the Agent then ignores the last rules in the file, this warning is the explanation — emitting it after the fact puts it a full turn too late.
+   - Taking the orchestrator lock a second time for the emit is fine and deliberate: `emit_run_action_log` is synchronous, so the lock never spans an `await`.
+   - The CLI prints the same two sentences to stderr, next to the image and history warnings; stdout stays parseable.
+   - The wording lives in `truncation_report`, tested like `history_trim_report`: it names the byte size, the bound, and that the tail *was not seen in this run* — "it was truncated" alone does not tell the user which of their rules went missing.
+   - Rust 517 → 519 (518 passing, 1 ignored); frontend unchanged.
 
 
 

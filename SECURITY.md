@@ -106,6 +106,9 @@ The Agent has six built-in read-only tools — `workspace_read_file`, `workspace
 
 Both degradation warnings — `image_input_degraded` and `tool_capability_degraded` — are emitted from `finish_agent_run`, so they appear on every exit path of a prompt, step or pipeline run including failure and Stop, and `repair_workspace` emits them explicitly because it assembles its own finish sequence. A degradation is a fact about a request that already went out; the run failing afterwards does not undo it, and the failed run is the one that most needs the clue. `agent_cli` has no action log, so it prints the same sentence to **stderr** — stdout carries the JSON/NDJSON a caller parses.
 
+One degradation is reported **before** the run instead of at the end: `project_memory_truncated`. `AGENTS.md` over 8 000 bytes loses its tail at injection, and the tail is where the most recently written rules are — so if the Agent then ignores them, that warning *is* the explanation, and waiting until the run finishes puts it a whole turn too late. The fact is carried out of context assembly on `AgentContext.project_memory_truncated` (the size of the file on disk) rather than recovered by searching the injected text for a marker, because a marker inside the prompt is visible only to the model.
+
+
 A tool loop re-sends every earlier round, so a long one can outgrow the context window mid-run — a handful of 64 KB file reads is enough. Before each request the executor measures the prompt against a budget of `Max context − reserved output − 1 024` (`LlmClient::prompt_token_budget`) and, when it does not fit, drops the **oldest** exchanges from what the loop itself produced: the assembled prompt is never touched, an assistant tool call and its results are dropped together as a group, the most recent group is always kept whole, and the transcript gains a system line stating how many exchanges are missing. With the window unknown nothing is dropped — the provider's refusal is a better answer than a guess. Each trim is reported as a `history_trimmed` warning through the same channel, because the alternative is a run that silently re-reads files it already read.
 
 
@@ -113,7 +116,7 @@ They are advertised when the profile's `toolCallMode` is `native_tools`, which i
 
 ## Asking the User
 
-`ask_user_question` is the one tool that reaches the user instead of the machine. The Agent gives a question and 2–4 short options; the run pauses until the user picks one, types their own answer, or declines.
+`ask_user_question` is the one tool that reaches the user instead of the machine.The Agent gives a question and 2–4 short options; the run pauses until the user picks one, types their own answer, or declines.
 
 - **It authorizes nothing.** The answer is a decision, not a permission — it can never widen what the Agent may do. It rides the same registry, id space and 120 s timeout as the approval gate (`ApprovalGate::ask_question`), so Stop refuses a pending question exactly like a pending approval, and the dialog is always closed when the backend stops waiting.
 - **No answer is never turned into an answer.** A timeout or an unattended run returns a success result that says nobody answered and instructs the model to state which option it assumed; dismissing the question is an error result. An invented answer would be carried through the rest of the run as the user's stated preference, which is worse than no answer at all.

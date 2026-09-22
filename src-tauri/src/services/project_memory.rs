@@ -133,14 +133,49 @@ pub fn draft_project_memory_prompt(exists: bool, bytes: usize) -> String {
 ///
 /// Returns `Ok(None)` when the file does not exist. Content is trimmed and
 /// bounded so it stays predictable inside context budget packing.
-pub fn load_project_memory() -> Result<Option<String>, String> {
+///
+/// 返回的是文本**加上"被截断了没有"**：只回一个 `String` 的时候，这件事只能靠在注入文本里
+/// 搜一句标记才能知道，于是它实际上只有模型看得见 —— 而用户看到的是"规则写了但 Agent 不照做"。
+pub fn load_project_memory() -> Result<Option<LoadedProjectMemory>, String> {
     let path = project_memory_path()?;
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(format!("Read {}: {}", path.display(), err)),
     };
-    Ok(Some(bound_project_memory(&content)))
+    let bytes = content.trim().len();
+    Ok(Some(LoadedProjectMemory {
+        text: bound_project_memory(&content),
+        bytes,
+        truncated: bytes > MAX_PROJECT_MEMORY_CHARS,
+    }))
+}
+
+/// 读出来的项目记忆：进提示词的那段文本，外加"原文多大、被切了没有"。
+pub struct LoadedProjectMemory {
+    pub text: String,
+    /// 磁盘上 trim 之后的字节数
+    pub bytes: usize,
+    pub truncated: bool,
+}
+
+/// 把"项目记忆被截断"变成一句给用户的话。
+///
+/// 措辞要说清丢的是**尾部**：那正是用户最后写下的几条规则，也是他最可能以为还生效的那几条。
+/// 单独一个纯函数是为了能测，理由同 `history_trim_report`。
+pub fn truncation_report(bytes: usize) -> (String, String) {
+    (
+        format!(
+            "{} is {} bytes; only the first {} reached the model",
+            PROJECT_MEMORY_FILE, bytes, MAX_PROJECT_MEMORY_CHARS
+        ),
+        format!(
+            "This file is injected into every run, and everything past {} bytes is dropped — the \
+             tail, which is where the most recently added rules are. The Agent did not see them in \
+             this run. Shorten {} (Settings shows its size, and the Agent can tighten it for you).",
+            MAX_PROJECT_MEMORY_CHARS, PROJECT_MEMORY_FILE
+        ),
+    )
 }
 
 pub fn bound_project_memory(content: &str) -> String {
@@ -209,9 +244,57 @@ mod tests {
 
         let memory = load_project_memory().unwrap().expect("project memory");
 
-        assert!(memory.contains("Always run cargo test."));
+        assert!(memory.text.contains("Always run cargo test."));
+        assert!(!memory.truncated);
+        assert_eq!(memory.bytes, "# Rules\n\nAlways run cargo test.".len());
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// 截断这件事必须能被调用方看见，而不只是藏在注入文本里的一句标记。
+    ///
+    /// 只回一个 `String` 的时候，唯一能还原它的办法是搜那句标记 —— 于是实际上只有模型看得见，
+    /// 用户看到的是"我写的规则 Agent 不照做"。
+    #[test]
+    fn load_project_memory_says_when_it_had_to_cut_the_tail() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let temp = std::env::temp_dir().join(format!("agent-ide-memory-cut-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_var("AGENT_IDE_CONFIG_DIR", temp.join("config"));
+        crate::services::workspace::save_workspace_path(temp.to_string_lossy().as_ref()).unwrap();
+        std::fs::write(
+            temp.join(PROJECT_MEMORY_FILE),
+            "x".repeat(MAX_PROJECT_MEMORY_CHARS + 300),
+        )
+        .unwrap();
+
+        let memory = load_project_memory().unwrap().expect("project memory");
+
+        assert!(memory.truncated);
+        assert_eq!(memory.bytes, MAX_PROJECT_MEMORY_CHARS + 300);
+        assert!(memory.text.contains("project memory truncated"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// 那句话要说清丢的是**尾部**，也要给出原文多大 —— 用户只有这两个数字能据以行动。
+    #[test]
+    fn the_truncation_report_names_the_tail_and_the_size() {
+        let (summary, details) = truncation_report(9_200);
+
+        assert!(summary.contains("9200"), "{}", summary);
+        assert!(
+            summary.contains(&MAX_PROJECT_MEMORY_CHARS.to_string()),
+            "{}",
+            summary
+        );
+        assert!(details.contains("tail"), "{}", details);
+        // 不能只说"被截断了"：要说这一次运行里模型没看到它们
+        assert!(
+            details.contains("did not see them in this run"),
+            "{}",
+            details
+        );
     }
 
     #[test]

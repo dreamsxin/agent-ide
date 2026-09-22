@@ -470,6 +470,7 @@ pub async fn send_agent_prompt(
         conversation,
     );
     context.enrich_from_workspace_with_sources(&context_sources);
+    emit_project_memory_warning(&agent_state.orchestrator, &app_handle, &context).await;
 
     let prompt_for_history = request.prompt.clone();
     let outcome = crate::agent::orchestrator::drive_run(
@@ -753,6 +754,32 @@ fn publish_tool_writes(
 /// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
 ///
 /// 三个命令共九条退出分支以前各抄一遍这段。抄漏确实发生了：`run_agent_step` 的
+/// 项目记忆被截断时告诉用户。
+///
+/// 为什么在运行**开始前**说，而不是等 `finish_agent_run`：这件事在装配上下文的那一刻才知道，
+/// 而它影响的正是即将开始的这一次运行 —— 如果这次运行"没照规矩做"，这条警告就是原因本身，
+/// 等结束再说已经晚了一整轮。
+///
+/// 为它再取一次锁是值得的：`emit_run_action_log` 是同步的，锁不跨 await。
+async fn emit_project_memory_warning(
+    orchestrator: &tokio::sync::Mutex<crate::agent::orchestrator::AgentOrchestrator>,
+    events: &dyn crate::agent::events::RunEvents,
+    context: &crate::services::context::AgentContext,
+) {
+    let Some(bytes) = context.project_memory_truncated else {
+        return;
+    };
+    let (summary, details) = crate::services::project_memory::truncation_report(bytes);
+    let orch = orchestrator.lock().await;
+    orch.emit_run_action_log(
+        events,
+        "warn",
+        "project_memory_truncated",
+        &summary,
+        &details,
+    );
+}
+
 /// 取消分支和失败分支都没有记账，于是一个跑到一半被取消的步骤花掉的 token 在
 /// action log 里查不到 —— token 已经花了，取消不退款。
 ///
@@ -1151,6 +1178,7 @@ pub async fn run_agent_step(
         conversation,
     );
     context.enrich_from_workspace_with_sources(&context_sources);
+    emit_project_memory_warning(&agent_state.orchestrator, &app_handle, &context).await;
     let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
         compression.clone(),
         context_budget,
@@ -2007,6 +2035,7 @@ fn build_agent_context(
         git_diff: None,
         project_tree: None,
         project_memory: None,
+        project_memory_truncated: None,
         conversation,
         ide_runtime,
     }

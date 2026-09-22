@@ -811,6 +811,13 @@ async fn run_agent_command(
 
     let mut context = build_workspace_context(&workspace_path, &args.include);
     context.enrich_from_workspace_with_sources(&source_options(&args.include));
+    // 项目记忆被切掉尾部时说一句。CLI 没有 action log，而这件事影响的正是这一次运行 ——
+    // 用户会看到 Agent 不照最后写下的那几条规矩做，却查不到原因。stdout 留给要被解析的
+    // JSON/NDJSON，所以走 stderr（同图片降级、历史修剪）
+    if let Some(bytes) = context.project_memory_truncated {
+        let (summary, details) = crate::services::project_memory::truncation_report(bytes);
+        eprintln!("warning: {}\n{}", summary, details);
+    }
     let context_options = ContextBuildOptions::new(args.context_mode.into(), None);
     let context_text = context.to_prompt_context_with_options(&context_options);
     let context_estimate = context.estimate_prompt_context(&context_options);
