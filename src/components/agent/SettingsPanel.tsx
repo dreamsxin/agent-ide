@@ -3,11 +3,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
 import { formatTokenCount, parseTokenInput } from "../../utils/tokenInput";
-import {
-  ASSUMED_MAX_CONTEXT_TOKENS,
-  DEFAULT_RESERVED_OUTPUT_TOKENS,
-  estimateInputTokens,
-} from "../../utils/contextBudget";
+import { estimateInputTokens } from "../../utils/contextBudget";
 import {
   llmConnectionCheckedAt,
   llmConnectionIndicator,
@@ -98,7 +94,9 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://api.deepseek.com",
     defaultModel: "deepseek-chat",
     models: ["deepseek-chat", "deepseek-v4-flash"],
-    defaultMaxContextTokens: 64000,
+    // 128k 是这一家公开资料里出现过的**最小**窗口（V3.x 一代）；新一代标着 1M。预设只给
+    // 保守下限，真实窗口由用户按自己那个模型的文档填 —— 猜大了会让估算显得还有余量。
+    defaultMaxContextTokens: 128000,
     defaultReservedOutputTokens: 4096,
     defaultMaxOutputTokens: 4096,
   },
@@ -395,6 +393,17 @@ export default function SettingsPanel() {
   }, [deleteLlmProfile, profileId]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
+  // 窗口用填的那个；没填就退回**这个预设带的**窗口，而不是一个全局假定值。
+  // 全局常量在"各家已经 200k~1M"的今天多数情况下偏小，会让估算变成假警报；预设里的值至少
+  // 跟着用户选的那一家走，而且它就显示在上面那个框里，看得见也改得动。
+  const windowForEstimate = parseTokenInput(maxContextTokens) ?? preset?.defaultMaxContextTokens;
+  const inputBudget = estimateInputTokens(
+    windowForEstimate,
+    parseTokenInput(reservedOutputTokens),
+    parseTokenInput(maxOutputTokens)
+  );
+  const windowIsFromPreset =
+    parseTokenInput(maxContextTokens) === undefined && windowForEstimate !== undefined;
   const connectionState = llmConnectionIndicator(llmConnection, llmTarget);
   const connectionCheckedAt = llmConnectionCheckedAt(llmConnection, llmTarget);
 
@@ -597,10 +606,10 @@ export default function SettingsPanel() {
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
             label="Max context"
-            title="The model's context window, from its documentation. Empty means the estimate assumes 128,000. Budgeting only — never sent to the provider."
+            title="The model's context window, from its documentation. Empty falls back to the provider preset's floor; windows now run from 128k to 1M, so set it if yours is bigger. Budgeting only — never sent to the provider."
             value={maxContextTokens}
             onChange={setMaxContextTokens}
-            placeholder="128k assumed"
+            placeholder="from preset"
             unit="tokens"
           />
           <BudgetInput
@@ -632,32 +641,37 @@ export default function SettingsPanel() {
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
           Effective input estimate:{" "}
           <span className="font-mono text-surface-text">
-            {formatTokenCount(
-              estimateInputTokens(
-                parseTokenInput(maxContextTokens),
-                parseTokenInput(reservedOutputTokens),
-                parseTokenInput(maxOutputTokens)
-              )
-            )}
+            {inputBudget === undefined ? "unknown" : inputBudget.toLocaleString()}
           </span>{" "}
-          tokens (max context − reserved output − 512). You can type{" "}
-          <span className="font-mono text-surface-text">128k</span> or{" "}
+          {inputBudget === undefined ? (
+            <>
+              — fill in Max context (your model&apos;s window, from its docs) and this becomes max context −
+              reserved output − 512.
+            </>
+          ) : (
+            <>
+              tokens (max context − reserved output − 512)
+              {windowIsFromPreset
+                ? `, using the ${preset?.label ?? "provider"} preset's ${windowForEstimate?.toLocaleString()}-token window because Max context is empty.`
+                : "."}
+            </>
+          )}{" "}
+          You can type <span className="font-mono text-surface-text">128k</span> or{" "}
           <span className="font-mono text-surface-text">1m</span>; the number under each box is what was
           understood.{" "}
           <span className="text-surface-text">
-            You only need to touch these when your model differs from the assumptions
+            Set Max context when your model differs from the preset
           </span>{" "}
-          — with all of them empty the estimate assumes a {ASSUMED_MAX_CONTEXT_TOKENS.toLocaleString()}
-          -token window and reserves {DEFAULT_RESERVED_OUTPUT_TOKENS.toLocaleString()} for the answer, and
-          nothing is sent to the provider. There is no per-model table on purpose: the vendors change these
-          numbers faster than this app ships, and a wrong window is worse than an assumed one because the
-          percentage looks trustworthy.{" "}
+          — windows now run from 128k to 1M, and the preset numbers are conservative floors, not lookups.
+          There is no per-model table on purpose: the vendors move these faster than this app ships, and a
+          wrong window is worse than an empty one because the percentage beside it looks trustworthy.{" "}
           <span className="text-surface-text">
             Max output is the only one of these that reaches the provider.
           </span>{" "}
-          Picking a provider preset fills it in (4096 for OpenAI/Azure/DeepSeek, 8192 for Anthropic), and a
-          reasoning model can spend all of that on thinking and return an empty answer — raise it for those.
+          Picking a preset fills it in, and a reasoning model can spend all of it on thinking and return an
+          empty answer — raise it for those.
         </div>
+
       </div>
 
 

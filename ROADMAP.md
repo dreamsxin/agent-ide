@@ -1773,6 +1773,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Section header now says all four are optional, and each field's tooltip says what happens when it is empty.
    - Rust 479 → 480; frontend 253 → 258 (`src/utils/contextBudget.test.ts`).
 
+130. **Correction to 129: a global "assumed 128k" was the wrong shape (2026-09-22)**
+   Challenged in one line — *现在都是百万 token 了，你确定 128k* — and the challenge is right. 129's own justification ("128k is the common floor, and assuming low is safe") does not survive contact with the current field: flagship windows are 200k to 1M, so a fixed 128k is wrong most of the time, and wrong *low*. That does not fail safe: it makes the estimate cry wolf, claiming the budget is ~123k when the model actually has a million. A false alarm costs the same trust as false confidence — the user starts ignoring the row, or trims context that never needed trimming.
+   - **`ASSUMED_MAX_CONTEXT_TOKENS` is gone.** `effective_input_tokens` returns `Option<u32>` again and the row reads "unknown" with a one-line instruction, because "we do not know your model's window" is the true statement. (129 turned that Option into a `u32` to avoid an Option that is never `None`; now it legitimately can be, so it is back.)
+   - **The fallback is the preset the user already picked, not a constant.** `defaultMaxContextTokens` already exists per provider preset (openai/azure 128k, anthropic 200k, deepseek, local) and is already written into the visible box when you select a preset — so for preset users nothing was ever missing, which is also why the global assumption was solving a problem that barely existed. When Max context is empty the estimate now borrows that preset's number **and says so in the sentence**, naming the preset and the figure, so an inherited number can never be mistaken for a measured one.
+   - **The preset numbers are labelled as conservative floors, not lookups**, in the copy and in the field tooltip. DeepSeek's 64,000 was not a floor of anything — no source I found lists it — so it moved to 128,000, the smallest window that family's public docs actually mention. Where the vendor now ships 1M, the user sets it; the box is right there.
+   - **Still no per-model table, for the reason 129 gave and this round re-confirmed**: the sources contradict each other for the same model names, so a table would be wrong on arrival. The difference is that a *preset floor the user can see and edit* does not pretend otherwise, while a hidden global constant did.
+   - Rust 480 (test rewritten, count unchanged); frontend 258 → 259.
+
+
 
 
 

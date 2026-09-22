@@ -99,9 +99,9 @@ pub struct LlmProfileResponse {
     #[serde(rename = "maxRunSpendMicros")]
     pub max_run_spend_micros: Option<u64>,
     #[serde(rename = "effectiveInputTokens")]
-    /// 界面上那行估算。**总是有值**：三个预算字段都空着时按假定窗口和默认预留算，
-    /// 见 `LlmProfile::effective_input_tokens`。
-    pub effective_input_tokens: u32,
+    /// 界面上那行估算。窗口没填就是 `None` —— 见 `LlmProfile::effective_input_tokens`，
+    /// 那里解释了为什么不猜一个窗口。
+    pub effective_input_tokens: Option<u32>,
     #[serde(rename = "toolCallMode")]
     pub tool_call_mode: String,
     #[serde(rename = "modelType")]
@@ -265,22 +265,24 @@ impl LlmProfile {
 
     /// 界面上那行"有效输入预算"。
     ///
-    /// 三个字段都没填也给得出数字：窗口按 `ASSUMED_MAX_CONTEXT_TOKENS` 算、预留输出按
-    /// `DEFAULT_RESERVED_OUTPUT_TOKENS` 算。以前窗口没填就返回 `None`，界面显示 "not set"，
-    /// 于是这三个框看起来像"不填就不能用" —— 而实际上后两个一直有默认、Max output 还会被
-    /// 供应商预设填上。假定值只影响这一行估算，不影响发出去的请求，也不影响装配器裁不裁
-    /// （见 `estimated_input_tokens_from_budget`）。
-    pub fn effective_input_tokens(&self) -> u32 {
-        let max_context = self
-            .max_context_tokens
-            .unwrap_or(crate::services::context::ASSUMED_MAX_CONTEXT_TOKENS);
+    /// 窗口没填就是 `None` —— **不猜**。曾经这里套一个"假定 128k"，而现在各家主力模型是
+    /// 200k 到 1M，一个全局常量因此在多数情况下都是错的：预算看着只有十几万，实际有一百万，
+    /// 于是这一行开始制造假警报，和它本来要防的假信心一样坏。窗口未知时正确的显示是"未知"，
+    /// 界面会退回到它自己知道的东西（供应商预设里的窗口，见 `contextBudget.ts`）。
+    ///
+    /// 预留输出仍然有默认（`DEFAULT_RESERVED_OUTPUT_TOKENS`），它和模型无关，只是"给回答
+    /// 留多少"的一个策略值。
+    pub fn effective_input_tokens(&self) -> Option<u32> {
+        let max_context = self.max_context_tokens?;
         let reserved = self
             .reserved_output_tokens
             .or(self.max_output_tokens)
             .unwrap_or(crate::services::context::DEFAULT_RESERVED_OUTPUT_TOKENS);
-        max_context
-            .saturating_sub(reserved)
-            .saturating_sub(crate::services::context::CONTEXT_ASSEMBLY_HEADROOM_TOKENS)
+        Some(
+            max_context
+                .saturating_sub(reserved)
+                .saturating_sub(crate::services::context::CONTEXT_ASSEMBLY_HEADROOM_TOKENS),
+        )
     }
 
     /// 取出这个 profile 的密钥。**keyring 优先，明文字段不再是兜底。**
@@ -932,37 +934,41 @@ mod tests {
             profile.to_response().api_key_masked,
             "sk-1****7890 (plaintext in config.json)"
         );
-        assert_eq!(profile.to_response().effective_input_tokens, 123392);
+        assert_eq!(profile.to_response().effective_input_tokens, Some(123392));
         assert_eq!(profile.to_response().tool_call_mode, "native_tools");
     }
 
-    /// 三个预算字段都空着也要给得出一个数字。
+    /// 窗口不填就是"不知道"，不猜一个数。
     ///
-    /// 用户的原话是"很多 agent IDE 都不用设置"——而这里两个其实早就有默认（预留输出 4096、
-    /// Max output 由供应商预设填），只有窗口没有；窗口一空，这一行就显示 "not set"，于是整组
-    /// 看起来像"不填不能用"。假定窗口**估低**是安全方向：预算显得更紧，不会让人以为还有余量。
+    /// 曾经这里套一个全局假定 128k。用户一句话点破了它：现在各家主力是 200k 到 1M，一个
+    /// 固定常量在多数情况下都偏小，于是这一行开始报假警 —— 说预算只有十几万，而实际有一百万。
+    /// 预留输出的默认留着：那是"给回答留多少"的策略值，和模型无关。
     #[test]
-    fn the_input_estimate_works_without_configuring_anything() {
+    fn an_unknown_window_is_reported_as_unknown_rather_than_guessed() {
         let mut profile = sample_profile();
         profile.max_context_tokens = None;
         profile.reserved_output_tokens = None;
         profile.max_output_tokens = None;
 
-        // 128000 - 4096 - 512
-        assert_eq!(profile.effective_input_tokens(), 123_392);
+        assert_eq!(profile.effective_input_tokens(), None);
 
-        // 填了窗口就用填的那个
-        profile.max_context_tokens = Some(32_000);
-        assert_eq!(profile.effective_input_tokens(), 32_000 - 4_096 - 512);
+        // 填了窗口就用填的那个，预留输出仍然有默认
+        profile.max_context_tokens = Some(1_000_000);
+        assert_eq!(
+            profile.effective_input_tokens(),
+            Some(1_000_000 - 4_096 - 512)
+        );
 
-        // 没填预留输出时退回 Max output（那是这个模型真正会占掉的那部分）
-        profile.reserved_output_tokens = None;
-        profile.max_output_tokens = Some(8_192);
-        assert_eq!(profile.effective_input_tokens(), 32_000 - 8_192 - 512);
+        // 没填预留输出时退回 Max output（那是这个模型真正会从窗口里占掉的部分）
+        profile.max_output_tokens = Some(64_000);
+        assert_eq!(
+            profile.effective_input_tokens(),
+            Some(1_000_000 - 64_000 - 512)
+        );
 
-        // 预留输出比窗口还大也不能变成一个巨大的数（saturating）
-        profile.reserved_output_tokens = Some(999_999);
-        assert_eq!(profile.effective_input_tokens(), 0);
+        // 预留比窗口还大也不能变成一个巨大的数（saturating）
+        profile.reserved_output_tokens = Some(9_999_999);
+        assert_eq!(profile.effective_input_tokens(), Some(0));
     }
 
     /// 只有明文的 profile，默认**不能**用来跑。
