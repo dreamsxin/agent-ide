@@ -98,6 +98,7 @@ pub fn run() {
             commands::agent::fork_agent_session,
             commands::agent::delete_agent_session,
             commands::agent::get_agent_conversation,
+            commands::agent::get_project_memory,
             commands::agent::truncate_agent_conversation,
             commands::agent::undo_last_apply,
             commands::agent::pending_undo,

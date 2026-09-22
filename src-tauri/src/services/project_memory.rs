@@ -3,9 +3,120 @@ use std::path::PathBuf;
 pub const PROJECT_MEMORY_FILE: &str = "AGENTS.md";
 pub const MAX_PROJECT_MEMORY_CHARS: usize = 8_000;
 
+/// 项目记忆此刻的状态，外加那一个能改变它的动作。
+///
+/// 两件事放在一起，因为它们只在一起才有用：界面要么说"这个项目没有 AGENTS.md，Agent 只能
+/// 按通用习惯干活"，要么说"它有 9.2 KB，最后 1.2 KB 根本没发给模型"。两种情况下用户想做的
+/// 都是同一件事，而那句提示词就在手边。
+///
+/// 截断这件事以前只有模型知道（注入的文本末尾有一句 `project memory truncated`），用户看不到
+/// 任何症状 —— 他写的规则从某一行之后就静默失效了。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMemoryInfo {
+    pub exists: bool,
+    /// 这份文件该在哪；不存在时也给出来，用户要知道该在哪新建
+    pub path: String,
+    /// 磁盘上的字节数（trim 之后，和注入时算的是同一个数）
+    pub bytes: usize,
+    /// 注入上限
+    pub limit: usize,
+    /// 超了上限：尾部不会进入任何一次运行
+    pub truncated: bool,
+    /// 让 Agent 起草/更新这份文件的提示词。前端按普通提问发出去 —— 它写文件走的是
+    /// 平常那条审查 + 撤销的路，没有任何新权限。
+    pub draft_prompt: String,
+}
+
 pub fn project_memory_path() -> Result<PathBuf, String> {
     let root = crate::services::workspace::workspace_root()?;
     Ok(root.join(PROJECT_MEMORY_FILE))
+}
+
+/// 读一次项目记忆的状态。文件不存在不是错误 —— 那是最常见的情况。
+pub fn project_memory_info() -> Result<ProjectMemoryInfo, String> {
+    let path = project_memory_path()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(format!("Read {}: {}", path.display(), err)),
+    };
+    let bytes = content
+        .as_deref()
+        .map(|text| text.trim().len())
+        .unwrap_or(0);
+    Ok(ProjectMemoryInfo {
+        exists: content.is_some(),
+        path: path.display().to_string(),
+        bytes,
+        limit: MAX_PROJECT_MEMORY_CHARS,
+        truncated: bytes > MAX_PROJECT_MEMORY_CHARS,
+        draft_prompt: draft_project_memory_prompt(content.is_some(), bytes),
+    })
+}
+
+/// 让 Agent 起草（或更新）项目记忆的提示词。
+///
+/// 纯函数，因为这段文字就是这个功能的全部：没有专门的代码路径，Agent 用它平常的读写工具
+/// 干活，产出的改动照样经过审查区和撤销栈。这也意味着提示词里的每一条约束都是"说给模型听的"
+/// 而不是强制的 —— 所以要写清**为什么**，让它有理由照做。
+///
+/// 三条约束是这份文件真正的成败所在：
+/// - **只写查得到的事实。** 一份编出来的构建命令比没有文档更糟：它会被后面每一次运行当成
+///   真相，而第一次照着跑的人才会发现它是假的。
+/// - **有上限。** 它被注入每一次运行，超过 8 000 字节的部分静默消失 —— 尾部恰好是最后写的
+///   那几条规则。
+/// - **已经有就改，不要整份重写。** 那份文件里往往有人手写的、代码里查不到的约定（一次事故
+///   留下的规矩），整份重写会把它们抹掉，而抹掉这件事在 diff 里一眼看不出来。
+pub fn draft_project_memory_prompt(exists: bool, bytes: usize) -> String {
+    let opening = if exists {
+        format!(
+            "This workspace already has {} ({} bytes). Read it first, then update it in place — \
+             keep every rule that is still true, and do not rewrite the file wholesale: it may \
+             contain conventions that exist nowhere in the code (a rule left behind by an \
+             incident), and losing those is not visible in a diff.",
+            PROJECT_MEMORY_FILE, bytes
+        )
+    } else {
+        format!(
+            "This workspace has no {} yet, so every Agent run here starts without any project \
+             conventions. Create it at the workspace root.",
+            PROJECT_MEMORY_FILE
+        )
+    };
+    format!(
+        "{opening}\n\n\
+         Write the file for the next Agent that works here, not for a human reader. Before you \
+         write anything, find the evidence: read the package manifests and lockfiles, the scripts \
+         and task definitions, the CI config, the test layout, and the top-level directories. \
+         Prefer what a config file says over what a README claims.\n\n\
+         Cover, in this order, only what this repo actually has:\n\
+         1. What the project is and which directories matter.\n\
+         2. The exact commands to build, type-check, lint and run tests — copied from where they \
+         are defined, not guessed. Say which one is the real suite if there are several.\n\
+         3. Architecture rules a newcomer would violate: layer boundaries, what must not import \
+         what, where a particular kind of code belongs.\n\
+         4. Conventions that are not obvious from one file: naming, error handling, logging, how \
+         tests are written.\n\
+         5. Traps that have already cost someone time — but only if you can point at the code or \
+         config that proves them.\n\n\
+         Hard constraints:\n\
+         - **Only facts you verified in this repo.** An invented build command is worse than no \
+         file at all: it is treated as truth by every later run, and the person who follows it is \
+         the one who finds out.\n\
+         - **No secrets, tokens, or absolute paths from this machine.**\n\
+         - **Stay under {limit} bytes** (aim for {target}). The backend injects this file into \
+         every Agent run and silently drops everything past that limit — the tail, which is \
+         exactly where the last rules you wrote would be.\n\
+         - Say nothing you would have to invent to say. A short file that is entirely true is the \
+         goal.\n\n\
+         Propose the file as a normal change so it lands in the review area; then summarise in two \
+         or three lines what you put in it and what you deliberately left out because you could not \
+         verify it.",
+        opening = opening,
+        limit = MAX_PROJECT_MEMORY_CHARS,
+        target = MAX_PROJECT_MEMORY_CHARS - 500,
+    )
 }
 
 /// Load the workspace-root `AGENTS.md` project memory file.
@@ -109,8 +220,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// **这个仓库自己的** `AGENTS.md` 必须装得下，而且要留出余量。
+    /// 状态要说清是哪一种"没在用"。
     ///
+    /// "这个项目没有 AGENTS.md"和"它有但尾部被切掉了"在效果上都是"规则没生效"，而用户要做的
+    /// 事完全不同。以前两种情况在界面上都没有任何症状。
+    #[test]
+    fn project_memory_info_tells_missing_from_truncated() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let temp = std::env::temp_dir().join(format!("agent-ide-memory-info-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::env::set_var("AGENT_IDE_CONFIG_DIR", temp.join("config"));
+        crate::services::workspace::save_workspace_path(temp.to_string_lossy().as_ref()).unwrap();
+
+        let missing = project_memory_info().unwrap();
+        assert!(!missing.exists);
+        assert!(!missing.truncated);
+        assert_eq!(missing.bytes, 0);
+        assert!(missing.path.ends_with(PROJECT_MEMORY_FILE));
+        // 不存在时给的是"新建"的提示词
+        assert!(missing.draft_prompt.contains("no AGENTS.md yet"));
+
+        std::fs::write(
+            temp.join(PROJECT_MEMORY_FILE),
+            "x".repeat(MAX_PROJECT_MEMORY_CHARS + 200),
+        )
+        .unwrap();
+        let oversized = project_memory_info().unwrap();
+        assert!(oversized.exists);
+        assert!(
+            oversized.truncated,
+            "{} 字节应该算超出 {}",
+            oversized.bytes, oversized.limit
+        );
+        // 已经存在时给的是"就地更新"的提示词，而且要说清为什么不能整份重写
+        assert!(oversized.draft_prompt.contains("update it in place"));
+        assert!(oversized.draft_prompt.contains("wholesale"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// 提示词里那三条约束是这份文件成败的全部，少一条都要能被这条测试抓住。
+    #[test]
+    fn the_draft_prompt_names_the_constraints_that_matter() {
+        let prompt = draft_project_memory_prompt(false, 0);
+
+        // 只写查得到的事实：编出来的构建命令比没有文档更糟
+        assert!(prompt.contains("Only facts you verified"), "{}", prompt);
+        assert!(prompt.contains("invented build command"), "{}", prompt);
+        // 有上限，而且要说清超了会发生什么（静默丢尾部）
+        assert!(
+            prompt.contains(&MAX_PROJECT_MEMORY_CHARS.to_string()),
+            "{}",
+            prompt
+        );
+        assert!(prompt.contains("silently drops"), "{}", prompt);
+        // 不要把这台机器上的绝对路径和密钥写进去
+        assert!(prompt.contains("No secrets"), "{}", prompt);
+        // 走审查区，而不是直接落盘
+        assert!(prompt.contains("review area"), "{}", prompt);
+    }
+
+    /// **这个仓库自己的** `AGENTS.md` 必须装得下，而且要留出余量。    ///
     /// 截断机制本身上面已经测过了 —— 但那只证明"超了会被切"，不证明"我们的那份没超"。
     /// 而这份文件被注入每一次 Agent 运行，被切掉的是**尾部**，也就是"决定写到哪里"那一节：
     /// 没有任何报错，只是从此每次运行都少看到几条规则。这条测试把那次静默变成一次红色。

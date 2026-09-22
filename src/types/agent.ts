@@ -448,6 +448,53 @@ export function normalizeAgentQuestion(value: unknown): AgentQuestion | null {
   return { id, question, options };
 }
 
+/**
+ * 项目记忆（`AGENTS.md`）此刻的状态，外加让 Agent 起草它的那句提示词。
+ *
+ * `draftPrompt` 由后端给：那段文字就是这个功能的全部，而它必须和后端的注入上限、文件名
+ * 保持一致 —— 在前端再写一份迟早会和后端说的不是同一件事。
+ */
+export interface ProjectMemoryInfo {
+  exists: boolean;
+  path: string;
+  bytes: number;
+  limit: number;
+  truncated: boolean;
+  draftPrompt: string;
+}
+
+/**
+ * 收一条项目记忆状态。读不懂就返回 null。
+ *
+ * 不用 `as`：这条载荷决定界面是说"没有项目记忆"还是"有一份 9 KB 的"，猜错的话用户会照着
+ * 一句假话做决定。缺 `draftPrompt` 也算读不懂 —— 没有它那个按钮就是个空壳。
+ */
+export function normalizeProjectMemoryInfo(value: unknown): ProjectMemoryInfo | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const draftPrompt = typeof raw.draftPrompt === "string" ? raw.draftPrompt : "";
+  const path = typeof raw.path === "string" ? raw.path : "";
+  if (!draftPrompt || !path) {
+    return null;
+  }
+  const bytes = typeof raw.bytes === "number" && Number.isFinite(raw.bytes) ? raw.bytes : 0;
+  const limit = typeof raw.limit === "number" && raw.limit > 0 ? raw.limit : 0;
+  if (!limit) {
+    return null;
+  }
+  return {
+    exists: raw.exists === true,
+    path,
+    bytes,
+    limit,
+    // 自己算而不是信后端那个布尔：两边算出不同结果时，屏幕上说的必须和它旁边那两个数字一致
+    truncated: bytes > limit,
+    draftPrompt,
+  };
+}
+
 export type ContextCompressionMode = "full" | "focused" | "compact" | "budgeted";
 
 export type StepScope = "selection" | "active_file" | "open_files" | "workspace";

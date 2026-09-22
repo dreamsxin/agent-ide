@@ -1899,6 +1899,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **No `parent_id` field.** The reference implementation records a parent session id; here the only question the UI needs answered is "where did this come from", and the title answers it. A stored field nobody reads is dead weight that blocks the next schema change.
    - **`serde(default)` on the new field**, so rows written before it read back as "derived title" — which is exactly what they are.
    - Rust 511 → 514 (513 passing, 1 ignored); frontend 276 → 279.
+142. **Project memory: say whether it is working, and offer to write it (2026-09-22)**
+   Next from the gap list (134). `AGENTS.md` is injected into every Agent run, and both of its failure modes were invisible: the project has no such file (the Agent guesses the build commands and the layout, while the user assumes it knows the conventions), or the file exceeds the 8 000-byte injection bound and everything past it is dropped — the tail, which is where the last rules written down live.
+   - **The status is the feature.** `project_memory_info()` reports exists / bytes / limit / truncated plus the path, and a card in Settings turns that into one of three sentences. The reference implementation appends a `[File truncated]` marker for the **model** and tells the user nothing; that is exactly the silent degradation this product is not allowed to have.
+   - **The draft action is a prompt, not a code path.** The backend returns `draft_prompt`; the frontend sends it as an ordinary prompt. The Agent writes the file with its normal tools, so the change lands in the review area with an undo checkpoint and no new authority is introduced anywhere. Same shape as the reference `/init`, which is also pure prompt expansion.
+   - **The prompt's three constraints are the whole design**: only facts verified in this repo (an invented build command is worse than no file — it is treated as truth by every later run, and the person who follows it is the one who finds out); no secrets or machine-local absolute paths; stay under the byte budget, with the reason stated so the model has a motive to comply. It also says *update in place, do not rewrite wholesale*, because such a file usually carries conventions that exist nowhere in the code and losing them is invisible in a diff.
+   - **The frontend recomputes `truncated` from the two numbers it displays** rather than trusting the backend's boolean: if they ever disagree, the sentence on screen must agree with the numbers next to it.
+   - An unreadable payload says so instead of rendering as "no project memory" — that reading would send the user to create a file that already exists.
+   - **Not taken: an action-log warning on every truncated injection.** It belongs there (that is where degradations live) but the injection happens inside context assembly, which has no `RunEvents`; doing it properly means threading the flag out of the context builder. Recorded here rather than half-done.
+   - Rust 514 → 516 (515 passing, 1 ignored); frontend 279 → 286 across 33 files.
 
 
 

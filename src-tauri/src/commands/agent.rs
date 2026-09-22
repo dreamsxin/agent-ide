@@ -3129,6 +3129,19 @@ pub async fn get_agent_conversation(
     Ok(orch.conversation.clone())
 }
 
+/// 项目记忆（`AGENTS.md`）此刻的状态，外加让 Agent 起草它的那句提示词。
+///
+/// 不需要 orchestrator：这只是读一个文件。状态和提示词一次取回，因为界面上它们是同一块 ——
+/// "这个项目没有项目记忆"和"它有但尾部没发出去"都指向同一个动作。
+///
+/// 起草不走新路径：前端把这句提示词当普通提问发出去，Agent 用平常的写文件工具落地，
+/// 改动照样经过审查区和撤销栈。这个功能的全部就是那段文字。
+#[tauri::command]
+pub async fn get_project_memory(
+) -> Result<crate::services::project_memory::ProjectMemoryInfo, String> {
+    crate::services::project_memory::project_memory_info()
+}
+
 /// 从指定的那一轮起把上下文切掉，返回剩下的几轮。
 ///
 /// 顺带写一条 action log：这是一次用户主动的状态变更，而这个产品的前提是每一次

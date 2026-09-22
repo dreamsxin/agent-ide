@@ -11,6 +11,7 @@ import {
   llmTargetFingerprint,
 } from "../../stores/llmConnection";
 import McpPanel from "./McpPanel";
+import ProjectMemoryCard from "./ProjectMemoryCard";
 import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
@@ -1108,6 +1109,12 @@ export default function SettingsPanel() {
           <code className="bg-surface-border/50 px-1 rounded">LLM_MODEL</code> env vars for default values.
         </div>
       </div>
+
+      {/*
+        项目记忆属于"这个工作区的 Agent 怎么干活"，而不是某一次对话的属性，所以它在设置里。
+        它的两种失效 —— 根本没有这份文件、超上限被静默截断 —— 在别处没有任何症状。
+      */}
+      <ProjectMemoryCard />
 
       <McpPanel />
     </div>
