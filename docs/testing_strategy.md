@@ -2,7 +2,7 @@
 
 ## Overview
 
-Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-22: **265 frontend tests across 31 files** (`npm test`) and **490 Rust lib tests (489 passing, 1 ignored)** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
+Agent IDE uses a multi-layer testing approach covering unit tests, integration tests, and end-to-end runtime validation. Current counts, as of 2026-09-22: **265 frontend tests across 31 files** (`npm test`) and **493 Rust lib tests (492 passing, 1 ignored)** (`cargo test --lib`). CI runs both on three platforms; the desktop E2E suite (`npm run e2e:workflow`) is the Phase 10.0 gate and runs only locally.
 
 ## Test Layers
 

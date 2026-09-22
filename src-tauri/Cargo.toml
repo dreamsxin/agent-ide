@@ -32,6 +32,9 @@ similar = "2"
 chrono = { version = "0.4", features = ["serde"] }
 notify = "6"
 walkdir = "2"
+# 文件名 glob 和内容正则搜索都靠它。自己手写正则不在讨论范围内，而 glob 也用它实现（把
+# 模式翻译成锚定的正则）：少一个依赖，而且 `**` / `*` / `?` 的边界只有一处定义。
+regex = "1"
 git2 = "0.19"
 dirs-next = "2"
 # keyring v3 必须显式启用平台后端；不指定 feature 时编译进去的是 mock store，
