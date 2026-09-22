@@ -43,6 +43,18 @@ pub fn load_workspace_path() -> Result<Option<String>, String> {
         .map(|s| s.to_string()))
 }
 
+/// 用来给落盘记录打"属于哪个工作区"标签的那个键。
+///
+/// 只有一个定义，因为读的键和写的键只要有一处不一样，记录就会写进去却读不回来 —— 那时界面
+/// 看起来和"根本没落盘"完全一样。`external_log` 和 `session_store` 共用它。
+pub fn current_workspace_key() -> Option<String> {
+    load_workspace_path()
+        .ok()
+        .flatten()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+}
+
 pub fn workspace_root() -> Result<PathBuf, String> {
     let configured = load_workspace_path()?;
     let root = match configured {

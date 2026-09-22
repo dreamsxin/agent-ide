@@ -429,23 +429,25 @@ describe("applyAllDiffs", () => {
   });
 });
 
-describe("clearAgentSession", () => {
+describe("session switching", () => {
   /**
-   * "Clear" 是界面上已经有的那个按钮。它只清前端的话，下一条提问仍然带着上一个任务的
-   * 对话摘要进模型上下文 —— 界面看着是全新开始，模型还在接着上一件事聊，而用户看不出来。
+   * "New session" 只清前端的话，下一条提问仍然带着上一个任务的对话摘要进模型上下文 ——
+   * 界面看着是全新开始，模型还在接着上一件事聊，而用户看不出来。
    */
   it("also clears the conversation the backend would feed to the next prompt", async () => {
     useAgentStore.setState({
       conversationTurns: [{ id: "turn-1", prompt: "old task", outcome: "did things" }] as never,
       currentTask: { id: "t1", title: "old", description: "", status: "running" } as never,
     });
-    invokeMock.mockResolvedValueOnce(undefined);
+    invokeMock.mockResolvedValueOnce({ activeId: "session-2", sessions: [], warning: null });
 
-    await useAgentStore.getState().clearAgentSession();
+    await useAgentStore.getState().startNewSession();
 
-    expect(invokeMock).toHaveBeenCalledWith("clear_agent_conversation");
+    expect(invokeMock).toHaveBeenCalledWith("start_new_agent_session");
     expect(useAgentStore.getState().conversationTurns).toEqual([]);
     expect(useAgentStore.getState().currentTask).toBeNull();
+    // 后端回的新会话 id 必须落进 store：列表靠它高亮"current"
+    expect(useAgentStore.getState().activeSessionId).toBe("session-2");
   });
 
   /**
@@ -454,11 +456,77 @@ describe("clearAgentSession", () => {
   it("says so when the view was cleared but the backend was not", async () => {
     invokeMock.mockRejectedValueOnce("no orchestrator");
 
-    await useAgentStore.getState().clearAgentSession();
+    await useAgentStore.getState().startNewSession();
 
     expect(useAgentStore.getState().error).toContain("previous conversation");
   });
+
+  /**
+   * 恢复一个历史会话只换回上下文。计划和审查区必须清空 —— 留着上一个会话的步骤，
+   * 用户会对着一排"点了会报错"的按钮，而那正是"界面显示的和后端实际的不一致"。
+   */
+  it("resuming loads the turns back and does not keep the previous plan", async () => {
+    useAgentStore.setState({
+      steps: [{ id: "s1", title: "old step", status: "done" }] as never,
+      conversationTurns: [],
+    });
+    invokeMock.mockResolvedValueOnce({
+      id: "session-old",
+      title: "refactor the parser",
+      turns: [{ id: "turn-7", prompt: "refactor the parser", outcome: "2 file(s) applied" }],
+    });
+    // resumeSession 结束时会再拉一次列表
+    invokeMock.mockResolvedValueOnce({ activeId: "session-old", sessions: [], warning: null });
+
+    await useAgentStore.getState().resumeSession("session-old");
+
+    expect(invokeMock).toHaveBeenCalledWith("resume_agent_session", { sessionId: "session-old" });
+    expect(useAgentStore.getState().conversationTurns).toHaveLength(1);
+    expect(useAgentStore.getState().steps).toEqual([]);
+    expect(useAgentStore.getState().currentTask?.title).toBe("refactor the parser");
+    expect(useAgentStore.getState().activeSessionId).toBe("session-old");
+  });
+
+  /**
+   * 删掉正在用的那个会话之后，界面上那几轮必须跟着消失：后端已经换了新会话，
+   * 聊天区还列着一段模型此刻根本看不到的历史，比空着更误导。
+   */
+  it("deleting the active session drops the turns it was showing", async () => {
+    useAgentStore.setState({
+      activeSessionId: "session-active",
+      conversationTurns: [{ id: "turn-1", prompt: "a", outcome: "b" }] as never,
+    });
+    invokeMock.mockResolvedValueOnce({ activeId: "session-new", sessions: [], warning: null });
+
+    await useAgentStore.getState().deleteSession("session-active");
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_agent_session", {
+      sessionId: "session-active",
+    });
+    expect(useAgentStore.getState().conversationTurns).toEqual([]);
+    expect(useAgentStore.getState().activeSessionId).toBe("session-new");
+  });
+
+  /**
+   * 一条没有 id 的会话点下去会发一个空 id 给后端，用户看到的是"点了就报错"的列表项。
+   * 归一化必须把它扔掉，而不是靠 `as` 把类型检查关掉。
+   */
+  it("drops session rows that have no id", async () => {
+    invokeMock.mockResolvedValueOnce({
+      activeId: "session-1",
+      sessions: [
+        { id: "session-1", title: "ok", updatedAt: 10, turnCount: 1, lastOutcome: "" },
+        { title: "no id at all", updatedAt: 20, turnCount: 3, lastOutcome: "" },
+      ],
+      warning: null,
+    });
+
+    await useAgentStore.getState().loadSessions();
+
+    expect(useAgentStore.getState().sessions.map((s) => s.id)).toEqual(["session-1"]);
+  });
 });
+
 
 describe("restoreDiffs", () => {
   it("prefers the backend list over the persisted one", async () => {

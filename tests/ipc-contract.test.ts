@@ -202,7 +202,7 @@ describe("Tauri IPC contract", () => {
             "undo_last_apply",
             "verify_workspace",
             "agent_repair_prompt",
-            "clear_agent_conversation",
+            "delete_agent_session",
         ]) {
             expect(registered.has(name), `${name} should be registered`).toBe(true);
         }

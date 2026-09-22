@@ -74,13 +74,10 @@ fn log_path() -> PathBuf {
 /// 记录属于哪个工作区，读和写都从这里取。
 ///
 /// 一个函数而不是两处各自去问：读的键和写的键只要有一处不一样，记录就会写进去却读不
-/// 回来 —— 那时界面看起来和"根本没落盘"完全一样。
+/// 回来 —— 那时界面看起来和"根本没落盘"完全一样。会话历史（`session_store`）按同一个键
+/// 分组，所以键本身也只有一个定义。
 fn current_workspace() -> Option<String> {
-    workspace::load_workspace_path()
-        .ok()
-        .flatten()
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty())
+    workspace::current_workspace_key()
 }
 
 /// 读整个文件。文件不存在是 `Ok(vec![])`，读不出来是 `Err`。

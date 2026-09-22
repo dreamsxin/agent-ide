@@ -3054,14 +3054,135 @@ pub async fn truncate_agent_conversation(
     Ok(orch.conversation.clone())
 }
 
-/// 开始一个不相关的新任务时清空对话历史。
+/// 开始一个新会话：清空对话历史、换一个会话 id。
 ///
-/// 不清的话上一件事的摘要会继续被喂进新任务的上下文，既浪费预算也会误导模型。
+/// 不清的话上一件事的摘要会继续被喂进新任务的上下文，既浪费预算也会误导模型。清空**同时**
+/// 换会话 id：只清不换会让磁盘上那个会话的内容被悄悄换掉，用户点回历史看到的不是他记得的
+/// 那一次。旧会话已经在磁盘上，回得去。
 #[tauri::command]
-pub async fn clear_agent_conversation(
+pub async fn start_new_agent_session(
     agent_state: State<'_, AgentGlobalState>,
-) -> Result<(), String> {
+) -> Result<AgentSessionList, String> {
     let mut orch = agent_state.orchestrator.lock().await;
-    orch.clear_conversation();
-    Ok(())
+    if orch.run_in_flight() {
+        return Err(RUN_IN_FLIGHT_SESSION_SWITCH.to_string());
+    }
+    orch.start_new_session();
+    Ok(session_list(&orch))
+}
+
+/// 运行途中换会话会把这一轮历史记到别的会话里，所以每个入口共用同一句拒绝。
+const RUN_IN_FLIGHT_SESSION_SWITCH: &str =
+    "A run is still in flight. Stop it first, then switch sessions.";
+
+/// 历史会话列表里的一行。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionSummary {
+    pub id: String,
+    pub title: String,
+    pub updated_at: u64,
+    pub turn_count: usize,
+    /// 最后一轮的结果。列表里给一行就够用来认出"是不是这次"。
+    pub last_outcome: String,
+}
+
+/// `list_agent_sessions` 的返回值。
+///
+/// 带上 `warning`：查历史的地方正是该说"历史此刻写不进去"的地方 —— 那件事在界面上没有任何
+/// 其他症状，用户会在下一次打开时才发现什么都没有。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionList {
+    pub active_id: String,
+    pub sessions: Vec<AgentSessionSummary>,
+    pub warning: Option<String>,
+}
+
+/// 恢复一个历史会话之后界面需要知道的东西。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionDetail {
+    pub id: String,
+    pub title: String,
+    pub turns: Vec<crate::agent::orchestrator::ConversationTurn>,
+}
+
+/// 磁盘上的列表 + 后端此刻的会话 id。
+///
+/// 三个命令（列、新建、删除）都返回同一份形状，所以只有一处拼装：各自拼一遍的话，"哪个是
+/// 当前会话"在不同入口回来的答案可以不一样，而界面的高亮就是照它画的。
+fn session_list(orch: &crate::agent::orchestrator::AgentOrchestrator) -> AgentSessionList {
+    let sessions = crate::agent::session_store::list_for_current_workspace()
+        .into_iter()
+        .map(|session| AgentSessionSummary {
+            id: session.id,
+            title: session.title,
+            updated_at: session.updated_at,
+            turn_count: session.turns.len(),
+            last_outcome: session
+                .turns
+                .last()
+                .map(|turn| turn.outcome.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    AgentSessionList {
+        active_id: orch.session_id.clone(),
+        sessions,
+        warning: orch.session_persist_error.clone(),
+    }
+}
+
+/// 当前工作区的历史会话，最近更新的在前。
+#[tauri::command]
+pub async fn list_agent_sessions(
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<AgentSessionList, String> {
+    let orch = agent_state.orchestrator.lock().await;
+    Ok(session_list(&orch))
+}
+
+/// 回到一个历史会话：把那几轮对话装回上下文。
+///
+/// 只恢复上下文，不恢复 steps / diffs —— 见 `AgentOrchestrator::resume_session`。界面必须照
+/// 这个事实措辞，否则用户会以为审查区里那些改动也一起回来了。
+#[tauri::command]
+pub async fn resume_agent_session(
+    agent_state: State<'_, AgentGlobalState>,
+    session_id: String,
+) -> Result<AgentSessionDetail, String> {
+    let stored = crate::agent::session_store::find(&session_id)
+        .ok_or_else(|| format!("That session is no longer on disk ({}).", session_id))?;
+    let title = stored.title.clone();
+    let mut orch = agent_state.orchestrator.lock().await;
+    if orch.run_in_flight() {
+        return Err(RUN_IN_FLIGHT_SESSION_SWITCH.to_string());
+    }
+    orch.resume_session(stored);
+    Ok(AgentSessionDetail {
+        id: orch.session_id.clone(),
+        title,
+        turns: orch.conversation.clone(),
+    })
+}
+
+/// 删掉一个历史会话，返回删完之后的列表。
+///
+/// 删的是**当前**这个会话时要顺带换掉 id：不换的话下一轮对话会把刚删掉的那一行原样写回来，
+/// 表现为"删了没反应"。
+#[tauri::command]
+pub async fn delete_agent_session(
+    agent_state: State<'_, AgentGlobalState>,
+    session_id: String,
+) -> Result<AgentSessionList, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    if orch.session_id == session_id {
+        if orch.run_in_flight() {
+            return Err(RUN_IN_FLIGHT_SESSION_SWITCH.to_string());
+        }
+        orch.start_new_session();
+    }
+    crate::agent::session_store::remove(&session_id)?;
+    Ok(session_list(&orch))
 }

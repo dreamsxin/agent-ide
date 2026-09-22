@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type AgentViewId = "task" | "plan" | "changes" | "pipeline" | "settings";
+export type AgentViewId = "task" | "plan" | "changes" | "sessions" | "pipeline" | "settings";
 
 interface LayoutStore {
   // 面板尺寸

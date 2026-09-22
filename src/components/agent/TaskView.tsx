@@ -43,7 +43,7 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
   const updateAgentSteps = useAgentStore((s) => s.updateAgentSteps);
   const skipAgentStep = useAgentStore((s) => s.skipAgentStep);
   const runAgentStep = useAgentStore((s) => s.runAgentStep);
-  const clearAgentSession = useAgentStore((s) => s.clearAgentSession);
+  const startNewSession = useAgentStore((s) => s.startNewSession);
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
@@ -127,11 +127,11 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
               </div>
             </div>
             <button
-              onClick={() => void clearAgentSession()}
-              title="Also clears the conversation history the next prompt would inherit"
+              onClick={() => void startNewSession()}
+              title="Starts a new session: this view and the conversation history the next prompt would inherit are cleared. The old session stays in the session history."
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] hover:bg-surface-border/30"
             >
-              Clear
+              New session
             </button>
 
           </div>

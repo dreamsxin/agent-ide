@@ -563,6 +563,102 @@ export interface ConversationTurn {
 }
 
 /**
+ * 历史会话列表里的一行。
+ *
+ * 一个"会话"在这个产品里就是**模型上下文**的一段历史：那几轮对话。刻意不含 steps / diffs ——
+ * diff 描述的是磁盘某一刻的样子，隔天恢复出来多半已经对不上，而"界面显示的和实际的不一致"
+ * 正是这个产品要避免的。界面上的措辞必须照这个事实来。
+ */
+export interface AgentSessionSummary {
+  id: string;
+  title: string;
+  /** 毫秒时间戳，列表按它倒序 */
+  updatedAt: number;
+  turnCount: number;
+  /** 最后一轮的结果，用来认出"是不是这次" */
+  lastOutcome: string;
+}
+
+/** `list_agent_sessions` / `start_new_agent_session` / `delete_agent_session` 的返回值 */
+export interface AgentSessionList {
+  activeId: string;
+  sessions: AgentSessionSummary[];
+  /**
+   * 会话历史此刻写不进磁盘的原因。
+   *
+   * 查历史的地方正是该说这句话的地方：写失败在界面上没有任何其他症状，用户会在下一次打开时
+   * 才发现历史里什么都没有。
+   */
+  warning: string | null;
+}
+
+/** 恢复一个历史会话之后后端告诉界面的东西 */
+export interface AgentSessionDetail {
+  id: string;
+  title: string;
+  turns: ConversationTurn[];
+}
+
+function normalizeConversationTurn(value: unknown): ConversationTurn | null {
+  if (!value || typeof value !== "object") return null;
+  const { id, prompt, outcome } = value as Record<string, unknown>;
+  if (typeof id !== "string" || id === "") return null;
+  return {
+    id,
+    prompt: typeof prompt === "string" ? prompt : "",
+    outcome: typeof outcome === "string" ? outcome : "",
+  };
+}
+
+/**
+ * 会话列表的归一化。
+ *
+ * 和 `normalizeContextUsage` 同一个理由：IPC 载荷不可信，`as` 只是把类型检查关掉。一条没有
+ * id 的会话比没有这条更糟 —— 点它会发一个空 id 过去，后端报"找不到"，而用户看到的是一个点
+ * 了就报错的列表项。
+ */
+export function normalizeAgentSessionList(value: unknown): AgentSessionList {
+  const empty: AgentSessionList = { activeId: "", sessions: [], warning: null };
+  if (!value || typeof value !== "object") return empty;
+  const { activeId, sessions, warning } = value as Record<string, unknown>;
+  const rows = Array.isArray(sessions) ? sessions : [];
+  return {
+    activeId: typeof activeId === "string" ? activeId : "",
+    sessions: rows.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const { id, title, updatedAt, turnCount, lastOutcome } = row as Record<string, unknown>;
+      if (typeof id !== "string" || id === "") return [];
+      return [
+        {
+          id,
+          title: typeof title === "string" && title.trim() !== "" ? title : "Untitled session",
+          updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0,
+          turnCount: typeof turnCount === "number" && Number.isFinite(turnCount) ? turnCount : 0,
+          lastOutcome: typeof lastOutcome === "string" ? lastOutcome : "",
+        },
+      ];
+    }),
+    warning: typeof warning === "string" && warning.trim() !== "" ? warning : null,
+  };
+}
+
+/** 恢复结果的归一化。没有 id 就当没恢复成功 —— 那时界面不该把聊天区换掉。 */
+export function normalizeAgentSessionDetail(value: unknown): AgentSessionDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const { id, title, turns } = value as Record<string, unknown>;
+  if (typeof id !== "string" || id === "") return null;
+  return {
+    id,
+    title: typeof title === "string" && title.trim() !== "" ? title : "Untitled session",
+    turns: (Array.isArray(turns) ? turns : []).flatMap((turn) => {
+      const normalized = normalizeConversationTurn(turn);
+      return normalized ? [normalized] : [];
+    }),
+  };
+}
+
+
+/**
  * 上一次连通性测试的结果。
  *
  * 和 `llmConfigured` 是两件事，不能混：后者只说明"存了一个 profile"，端点通不通、

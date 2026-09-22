@@ -1,8 +1,10 @@
 import { lazy, Suspense, type ReactNode } from "react";
 import {
   FileDiff,
+  History,
   ListChecks,
   MessageSquare,
+  Plus,
   Settings,
   Workflow,
 } from "lucide-react";
@@ -18,6 +20,7 @@ import { changesBadge } from "./agentTabBadges";
 
 const AgentSelector = lazy(() => import("../agent/AgentSelector"));
 const DiffView = lazy(() => import("../agent/DiffView"));
+const SessionHistory = lazy(() => import("../agent/SessionHistory"));
 const SettingsPanel = lazy(() => import("../agent/SettingsPanel"));
 const TaskPipeline = lazy(() => import("../agent/TaskPipeline"));
 const TaskView = lazy(() => import("../agent/TaskView"));
@@ -41,6 +44,7 @@ export default function AgentPanel() {
   const steps = useAgentStore((store) => store.steps);
   const diffs = useAgentStore((store) => store.diffs);
   const externalActions = useAgentStore((store) => store.externalActions);
+  const startNewSession = useAgentStore((store) => store.startNewSession);
   const summary = summarizeAgentRun(steps, diffs);
   const externalSummary = summarizeExternalActions(
     // 角标只数**这一次会话**的：恢复出来的历史一直在，没有任何操作能让它归零，而一个
@@ -110,6 +114,23 @@ export default function AgentPanel() {
 
         <div className="my-2 w-px bg-surface-border" />
 
+        {/* 新建会话 / 历史会话之前在界面上没有任何入口，只有恢复横幅里那个按钮沾边，
+            而它要等"有恢复出来的步骤"才出现。放在这里是因为它们是会话级操作，和下面
+            那两个配置入口同一层。 */}
+        <UtilityButton
+          active={false}
+          icon={Plus}
+          label="New session"
+          onClick={() => void startNewSession()}
+          testId="agent-tab-new-session"
+        />
+        <UtilityButton
+          active={activeView === "sessions"}
+          icon={History}
+          label="Session history"
+          onClick={() => setActiveView("sessions")}
+          testId="agent-tab-sessions"
+        />
         <UtilityButton
           active={activeView === "pipeline"}
           icon={Workflow}
@@ -158,6 +179,11 @@ export default function AgentPanel() {
             >
               <DiffView />
             </PrimaryView>
+          </Suspense>
+        )}
+        {activeView === "sessions" && (
+          <Suspense fallback={<PanelLoading label="Loading sessions" />}>
+            <SessionHistory />
           </Suspense>
         )}
         {activeView === "pipeline" && (

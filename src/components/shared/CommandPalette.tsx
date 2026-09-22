@@ -154,6 +154,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
   const agentState = useAgentStore((s) => s.state);
   const pendingUndo = useAgentStore((s) => s.pendingUndo);
   const undoLastApply = useAgentStore((s) => s.undoLastApply);
+  const startNewSession = useAgentStore((s) => s.startNewSession);
   const selectedText = useEditorStore((s) => s.selectedText);
   const addLog = useLogStore((s) => s.addLog);
 
@@ -272,6 +273,28 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         rightVisible,
         toggleRightPanel
       ),
+      // 会话历史和新建会话同理：面板上是两个 8px 的图标，命令面板是它们唯一带文字的入口。
+      // "新建会话"是个动作而不是视图，所以不走 `agentViewCommand`。
+      agentViewCommand(
+        "panel.agent.sessions",
+        "Open Agent Session History",
+        "sessions",
+        setAgentView,
+        rightVisible,
+        toggleRightPanel,
+        ["history", "sessions", "resume", "previous conversation", "context"]
+      ),
+      {
+        id: "agent.new-session",
+        title: "Start a New Agent Session",
+        subtitle:
+          "Clears this view and the conversation the next prompt would inherit. The old session stays in the history.",
+        group: "Agent",
+        keywords: ["new", "clear", "reset", "conversation", "context", "session"],
+        run: () => {
+          void startNewSession();
+        },
+      },
       // Pipeline 和 Settings 此前只有 Agent 面板上两个 8px 宽的纯图标按钮可以进，
       // 命令面板也不收录它们 —— 于是 provider 配置、权限、花费上限和 MCP 全都只能
       // 靠碰对那个图标才能找到。MCP 更深一层：它在 Settings 表单的最底部，
@@ -399,6 +422,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     togglePerformanceOverlay,
     toggleRightPanel,
     toggleTheme,
+    startNewSession,
     undoLastApply,
   ]);
 }

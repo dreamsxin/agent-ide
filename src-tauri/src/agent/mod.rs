@@ -9,6 +9,8 @@ pub mod external_log;
 pub mod multi_agent;
 pub mod orchestrator;
 pub mod planner;
+/// 会话历史的落盘面：没有它，"新建会话 / 回到历史会话"就无从表达。
+pub mod session_store;
 pub mod state_machine;
 pub mod task_shape;
 pub mod workspace_tools;

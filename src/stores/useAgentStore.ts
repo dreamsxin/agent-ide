@@ -9,6 +9,7 @@ import {
 import type {
   AgentState,
   AgentMode,
+  AgentSessionSummary,
   IdeMode,
   AgentRole,
   ContextCompressionMode,
@@ -42,6 +43,8 @@ import {
 import {
   mcpApprovalForPermissions,
   normalizeAgentMode,
+  normalizeAgentSessionDetail,
+  normalizeAgentSessionList,
   permissionsForPreset,
   READ_ONLY_PERMISSIONS,
 } from "../types/agent";
@@ -99,6 +102,18 @@ interface AgentStore {
    * 因为这两种情况下界面要显示的东西一样。
    */
   conversationTurns: ConversationTurn[];
+  /**
+   * 这个工作区的历史会话，最近更新的在前。由 `loadSessions` 从磁盘读回。
+   *
+   * 一个"会话"就是那几轮对话（模型上下文），不含 steps / diffs —— 见
+   * `AgentSessionSummary`。界面上的措辞必须照这个事实来。
+   */
+  sessions: AgentSessionSummary[];
+  /** 后端此刻在用的那个会话 id，列表据它高亮 */
+  activeSessionId: string;
+  /** 会话历史写不进磁盘时的那句话；正常时为 null */
+  sessionWarning: string | null;
+
 
 
   // ====== 角色与流水线 ======
@@ -152,13 +167,28 @@ interface AgentStore {
   restoreAgentSession: (workspacePath?: string) => void;
   reconcileBackendRun: () => Promise<void>;
   /**
-   * 清掉这一次会话：界面上的任务、步骤、SDD，**以及后端的对话历史**。
+   * 开一个新会话：界面上的任务、步骤、SDD 全部清掉，**后端换一个会话 id 并清空对话历史**。
    *
    * 后端那半边必须一起清。少清它的话，界面看着是全新开始，而下一条提问仍然带着上一个
    * 任务的 `conversation_digest()` 进模型上下文 —— 用户看不见，也没法解释模型为什么在
    * 接着聊上一件事。
+   *
+   * 清掉的那一份不会丢：它以一个会话的形式留在磁盘上，`sessions` 里能点回去。
    */
-  clearAgentSession: () => Promise<void>;
+  startNewSession: () => Promise<void>;
+  /** 从磁盘读回这个工作区的历史会话。历史面板显示之前必须先调。 */
+  loadSessions: () => Promise<void>;
+  /**
+   * 回到一个历史会话。
+   *
+   * 只换回**上下文**：steps / diffs 不恢复（diff 描述的是磁盘某一刻的样子，隔天多半已经
+   * 对不上）。所以这里顺手把审查区和计划清成空的，而不是留着上一个会话的 —— 留着会让界面
+   * 显示的和后端实际的不一致，那正是这个产品要避免的。
+   */
+  resumeSession: (sessionId: string) => Promise<void>;
+  /** 删掉一个历史会话。删的是当前这个时，后端会顺带换一个新的。 */
+  deleteSession: (sessionId: string) => Promise<void>;
+
 
   setPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
@@ -346,6 +376,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agentRunId: null,
   restoredSession: null,
   conversationTurns: [],
+  sessions: [],
+  activeSessionId: "",
+  sessionWarning: null,
   messages: [
     {
       id: "welcome",
@@ -557,7 +590,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }));
     }
   },
-  clearAgentSession: async () => {
+  startNewSession: async () => {
     clearPersistedAgentSession();
     set({
       state: "idle",
@@ -575,17 +608,113 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       restoredSession: null,
       conversationTurns: [],
     });
+    get().clearMessages();
     if (!isTauriRuntime()) return;
     try {
       // 后端的对话历史是下一条提问的上下文来源，不清它就等于"看起来重新开始、实际还在
       // 接着上一个任务聊"。清不掉要说出来，因为这件事在界面上完全看不出来。
-      await invoke("clear_agent_conversation");
+      // 返回的是新列表：刚被换下来的那个会话此刻就该出现在历史里。
+      const list = normalizeAgentSessionList(await invoke("start_new_agent_session"));
+      set({
+        sessions: list.sessions,
+        activeSessionId: list.activeId,
+        sessionWarning: list.warning,
+      });
     } catch (err: unknown) {
       set({
         error: `Cleared this view, but the backend still has the previous conversation: ${String(err)}`,
       });
     }
   },
+  loadSessions: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const list = normalizeAgentSessionList(await invoke("list_agent_sessions"));
+      set({
+        sessions: list.sessions,
+        activeSessionId: list.activeId,
+        sessionWarning: list.warning,
+      });
+    } catch (err) {
+      // 读不到历史不该让面板炸掉：这是一个列表展示，不是运行的一部分
+      console.warn("[AgentStore] list_agent_sessions failed:", err);
+    }
+  },
+  resumeSession: async (sessionId) => {
+    if (!isTauriRuntime()) return;
+    // 不 try/catch：运行中换会话、记录已经不在磁盘上，都是用户必须看到的拒绝，
+    // 由调用方（历史面板）就地显示。吞掉的话点了就像没反应。
+    const detail = normalizeAgentSessionDetail(
+      await invoke("resume_agent_session", { sessionId })
+    );
+    if (!detail) return;
+    clearPersistedAgentSession();
+    set({
+      state: "idle",
+      // 任务标题跟着会话走：留着上一个会话的标题会让面板顶上写着另一件事
+      currentTask: { id: detail.id, title: detail.title },
+      contextUsage: null,
+      // steps / diffs 不恢复，所以清空而不是留着上一个会话的 —— 见 `resumeSession` 的注释
+      steps: [],
+      pipeline: DEFAULT_PIPELINE,
+      sddArtifacts: [],
+      activeSddArtifact: null,
+      error: null,
+      streamContent: "",
+      isStreaming: false,
+      agentRunId: null,
+      restoredSession: null,
+      conversationTurns: detail.turns,
+      activeSessionId: detail.id,
+    });
+    // 聊天区按恢复出来的几轮重建：空着的话用户看不出上下文里到底有什么
+    set({
+      messages: [
+        {
+          id: `resumed-${detail.id}`,
+          role: "system" as const,
+          content:
+            `Resumed session "${detail.title}" — ${detail.turns.length} turn(s) of context are back. ` +
+            "File changes and the plan from that session are not restored.",
+          timestamp: Date.now(),
+        },
+        ...detail.turns.flatMap((turn) => [
+          {
+            id: `${turn.id}-prompt`,
+            role: "user" as const,
+            content: turn.prompt,
+            timestamp: Date.now(),
+          },
+          {
+            id: `${turn.id}-outcome`,
+            role: "agent" as const,
+            content: turn.outcome,
+            timestamp: Date.now(),
+          },
+        ]),
+      ],
+    });
+    await get().loadSessions();
+  },
+  deleteSession: async (sessionId) => {
+    if (!isTauriRuntime()) return;
+    const wasActive = get().activeSessionId === sessionId;
+    const list = normalizeAgentSessionList(
+      await invoke("delete_agent_session", { sessionId })
+    );
+    set({
+      sessions: list.sessions,
+      activeSessionId: list.activeId,
+      sessionWarning: list.warning,
+    });
+    // 删掉的是正在用的那个：后端已经换了新会话，界面上那几轮也必须跟着消失，
+    // 否则聊天区还列着一段模型此刻根本看不到的历史
+    if (wasActive) {
+      set({ conversationTurns: [], currentTask: null });
+      get().clearMessages();
+    }
+  },
+
 
   addDiff: (diff) =>
     set((s) => {
