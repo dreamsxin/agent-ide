@@ -27,16 +27,24 @@ const TaskView = lazy(() => import("../agent/TaskView"));
 
 type PrimaryViewId = Extract<AgentViewId, "task" | "plan" | "changes">;
 
+// 词汇表刻意只有一个词：**task**。
+//
+// 用户说的"新开 task / 看历史 task"指的就是这里的会话 —— 一次对话连着它的计划和改动。
+// 之前第一个页签叫 "Task" 而它其实是聊天，容器却叫 "session"，于是同一个东西有两个名字、
+// 而 "Task" 指着第三个东西。参照实现的桌面端也是统一叫 task（CLI 那边叫 session），
+// 这里跟它一致：页签 = Chat / Plan / Changes，容器 = New task / Task history。
+// 后端命令仍然叫 `*_agent_session`：改 IPC 名字对用户没有任何好处，只会制造一次大改。
 const primaryViews: Array<{
   id: PrimaryViewId;
   label: string;
   icon: LucideIcon;
   testId: string;
 }> = [
-  { id: "task", label: "Task", icon: MessageSquare, testId: "agent-tab-chat" },
-  { id: "plan", label: "Plan", icon: ListChecks, testId: "agent-tab-tasks" },
+  { id: "task", label: "Chat", icon: MessageSquare, testId: "agent-tab-chat" },
+  { id: "plan", label: "Plan", icon: ListChecks, testId: "agent-tab-plan" },
   { id: "changes", label: "Changes", icon: FileDiff, testId: "agent-tab-diff" },
 ];
+
 
 export default function AgentPanel() {
   const activeView = useLayoutStore((store) => store.agentView);
@@ -120,9 +128,9 @@ export default function AgentPanel() {
         <UtilityButton
           active={false}
           icon={Plus}
-          label="New session"
+          label="New task"
           onClick={() => {
-            // 被拒绝时错误已经进 store.error，Task / Chat 视图上的错误条会显示
+            // 被拒绝时错误已经进 store.error，Chat / Plan 视图上的错误条会显示
             void startNewSession().catch(() => undefined);
           }}
           testId="agent-tab-new-session"
@@ -130,7 +138,7 @@ export default function AgentPanel() {
         <UtilityButton
           active={activeView === "sessions"}
           icon={History}
-          label="Session history"
+          label="Task history"
           onClick={() => setActiveView("sessions")}
           testId="agent-tab-sessions"
         />
@@ -185,7 +193,7 @@ export default function AgentPanel() {
           </Suspense>
         )}
         {activeView === "sessions" && (
-          <Suspense fallback={<PanelLoading label="Loading sessions" />}>
+          <Suspense fallback={<PanelLoading label="Loading task history" />}>
             <SessionHistory />
           </Suspense>
         )}

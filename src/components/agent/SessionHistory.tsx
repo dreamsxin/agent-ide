@@ -4,16 +4,16 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
 
 /**
- * 历史会话面板：新建一个会话，或回到之前某一次对话。
+ * 历史任务面板：新开一个任务，或回到之前某一次。
  *
- * 在这之前这两件事在界面上**根本没有入口** —— 唯一沾边的是恢复横幅里那个 Clear 按钮，
- * 而它只在有恢复出来的步骤时才出现。所以用户找不到"新建会话"和"历史会话"不是猜不到位置，
- * 是它们确实不存在。
+ * 界面上统一叫 **task**（代码里叫 session，见 `AgentPanel` 顶部的说明）：用户问的是
+ * "怎么新开 task、怎么看历史 task"，而这里就是那两件事唯一的入口。
  *
- * 措辞上刻意反复说"只回来上下文"：一个会话在这里就是那几轮对话，计划不恢复（diff 描述的是
- * 磁盘某一刻的样子，而审查区里那些待审查改动是真实存在的，换会话不动它们）。让用户以为改动
+ * 措辞上刻意反复说"只回来上下文"：一个任务在这里就是那几轮对话，计划不恢复（diff 描述的是
+ * 磁盘某一刻的样子，而审查区里那些待审查改动是真实存在的，换任务不动它们）。让用户以为改动
  * 也一起换了，正是这个产品最该避免的那种误解。
  */
+
 export default function SessionHistory() {
   const sessions = useAgentStore((s) => s.sessions);
   const activeSessionId = useAgentStore((s) => s.activeSessionId);
@@ -51,13 +51,13 @@ export default function SessionHistory() {
       <div className="flex items-center justify-between gap-2 border-b border-surface-border px-3 py-2">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-surface-muted">
           <History aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="truncate">Sessions in this workspace</span>
+          <span className="truncate">Tasks in this workspace</span>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1">
           <button
             type="button"
             onClick={() => void run(loadSessions)}
-            aria-label="Refresh session list"
+            aria-label="Refresh task list"
             title="Refresh the list"
             className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-surface-text"
           >
@@ -66,14 +66,15 @@ export default function SessionHistory() {
           <button
             type="button"
             onClick={() => void run(startNewSession)}
-            title="Start a new session. The current conversation stays in this list."
+            title="Start a new task. The current one stays in this list."
             data-testid="session-new"
             className="flex items-center gap-1 rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-text hover:bg-surface-border/30"
           >
             <Plus aria-hidden="true" className="h-3 w-3" />
-            New session
+            New task
           </button>
         </div>
+
       </div>
 
       {sessionWarning && (
@@ -103,9 +104,10 @@ export default function SessionHistory() {
                       disabled={active}
                       title={
                         active
-                          ? "This is the session you are in"
-                          : "Load this session's conversation back into the model context. The plan is not restored and pending changes are left alone."
+                          ? "This is the task you are in"
+                          : "Load this task's conversation back into the model context. The plan is not restored and pending changes are left alone."
                       }
+
                       className={`min-w-0 flex-1 text-left ${active ? "cursor-default" : "hover:text-accent-blue"}`}
                     >
                       <div className="flex items-center gap-1.5">
@@ -129,8 +131,8 @@ export default function SessionHistory() {
                     <button
                       type="button"
                       onClick={() => void run(() => deleteSession(session.id))}
-                      aria-label={`Delete session ${session.title}`}
-                      title="Delete this session's saved conversation"
+                      aria-label={`Delete task ${session.title}`}
+                      title="Delete this task's saved conversation"
                       className="flex-shrink-0 rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-diff-delete"
                     >
                       <Trash2 aria-hidden="true" className="h-3 w-3" />
@@ -150,17 +152,18 @@ export default function SessionHistory() {
  * 空列表要说清是哪一种空。
  *
  * "还没聊过"和"这个环境根本不保存"在屏幕上长得一模一样，而后者意味着用户刚才那一问不会被
- * 记住 —— 不说清就等于让他以为存好了。会话是按工作区分组的，没打开工作区时一条都存不下来。
+ * 记住 —— 不说清就等于让他以为存好了。任务是按工作区分组的，没打开工作区时一条都存不下来。
  */
 function emptyState(sessionsAreSaved: boolean): string {
   if (!isTauriRuntime()) {
-    return "Session history needs the desktop backend; it is not available in the browser preview.";
+    return "Task history needs the desktop backend; it is not available in the browser preview.";
   }
   if (!sessionsAreSaved) {
-    return "Open a workspace folder first — sessions are grouped by workspace, so nothing is saved until then.";
+    return "Open a workspace folder first — tasks are grouped by workspace, so nothing is saved until then.";
   }
-  return "No saved sessions yet. A session is saved once a prompt finishes.";
+  return "No saved tasks yet. A task appears here once one of its prompts finishes.";
 }
+
 
 /**
  * "多久以前"。

@@ -29,9 +29,9 @@ describe("palette coverage of the Agent panel", () => {
     expect(titles).toContain("Review Agent Changes");
     expect(titles).toContain("Configure Agent Pipeline");
     expect(titles).toContain("Open Agent Settings");
-    // 新建会话 / 历史会话在面板上也只有图标；没有这两条，"新会话在哪开"就只能靠碰
-    expect(titles).toContain("Open Agent Session History");
-    expect(titles).toContain("Start a New Agent Session");
+    // 新建任务 / 历史任务在面板上也只有图标；没有这两条，"新任务在哪开"就只能靠碰
+    expect(titles).toContain("Open Agent Task History");
+    expect(titles).toContain("Start a New Agent Task");
   });
 
   it("finds Settings by what lives inside it, since MCP has no entry of its own", () => {

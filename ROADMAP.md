@@ -1742,6 +1742,18 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Not done: no per-model window lookup that could fill Max context in for you (same missing registry as 122), and no validation that Reserved output < Max context — the estimate already clamps at 0, and an inline error for an impossible pair is a bigger design question than this round.
    - Rust unchanged; frontend 246 → 252 across 29 files (`src/utils/tokenInput.test.ts`).
 
+127. **One word for one thing: the panel called the same object a task, a session and a chat (2026-09-22)**
+   Reported as *task plan 之间还不知道怎么用…怎么新开 new task 和查看历史 task 都不清楚*. This was not a missing feature — 120 shipped both controls — it was a vocabulary failure, and a sharp one:
+   - The first tab was labelled **Task** but rendered `ChatView`; the file named `TaskView.tsx` is the body of the **Plan** tab; the tab test ids were crossed (`task` → `agent-tab-chat`, `plan` → `agent-tab-tasks`). Meanwhile the container you start and revisit was labelled **session**. So "task" pointed at the chat, the thing the user calls a task had another name, and the Plan view's own empty state said "Start a conversation in **Chat**" — a tab that did not exist by that name.
+   - **Settled on one word: task.** Tabs are `Chat | Plan | Changes`; the utility buttons are `New task` and `Task history`. This matches how the reference implementation's desktop UI names the identical object (`titleBar.menu.file.newTask`, `workspaceSidebar.workspaces: "Tasks"`, `commandCenter.section.recentTasks`) while its CLI calls the same row a session — one concept, named for the surface. Ours now does the same, and `AgentPanel` carries the mapping note so the next reader does not "fix" it back.
+   - **The IPC commands stay `*_agent_session`.** Renaming them buys the user nothing and costs a sweep across the command registry, the contract test and four store actions. What the identity needed was a written-down mapping, not a migration.
+   - **The empty chat is now the only explanation of how the pieces fit**, because nothing else explained it: describe a change → steps appear under Plan where you can run/retry/skip one → file writes queue under Changes to review or undo → New task starts fresh, Task history brings one back. The previous text ("Welcome to Agent IDE. I'm your AI coding assistant…") told a first-time user nothing about the four tabs it sits next to.
+   - Also aligned: the palette entries (`Start a New Agent Task`, `Open Agent Task History`, with `tasks` as a keyword), the restore banner's button, the resume system message, every tooltip in the history list, and the three empty states.
+   - Rejected: merging Plan into Chat. They answer different questions — "what is the model going to do, and can I change it" versus "what did we say" — and the plan rows carry per-step controls (scope, execution mode, Run/Retry/Skip) that would be unusable inside a transcript. The reference keeps them separate too (an inline read-only todo block plus a pinned progress panel), and its plan list is *read-only*, which ours deliberately is not.
+   - Still open: `AgentRunSummary` shows `currentTask.title` while the history row shows the session title, and after Stop the header keeps the stopped task's title next to an empty plan (`stopAgent` clears steps but not `currentTask`); single-step runs and repair never set a title at all. There is still no "past tasks" list distinct from the conversation list, and no rename.
+   - Rust unchanged; frontend 252 tests across 29 files (labels only, no new tests — the palette test's two titles were updated).
+
+
 
 
 

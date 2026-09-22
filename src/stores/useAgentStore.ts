@@ -359,18 +359,24 @@ const DEFAULT_PIPELINE: PipelineStage[] = [
 /**
  * 空聊天区里那条欢迎消息。
  *
- * 只有一处定义：初始状态和 `clearMessages()` 曾经写着两句不同的话，而"新建会话"现在有三个
- * 入口都会走后者 —— 同一个"刚开始"的界面因此有两种样子。
+ * 它同时是唯一的"这东西怎么用"说明：面板上四个页签加两个图标按钮，没有任何地方解释它们
+ * 的关系，而用户第一句话正是"不知道 task 和 plan 怎么配合、怎么新开、怎么看历史"。所以这
+ * 一条按流程写，而不是问好。
+ *
+ * 只有一处定义：初始状态和"新建任务"曾经写着两句不同的话，同一个"刚开始"的界面因此有两种样子。
  */
 function welcomeMessage(): ChatMessage {
   return {
     id: "welcome",
     role: "system",
     content:
-      "Welcome to Agent IDE. I'm your AI coding assistant. Try selecting code for quick actions, or ask me to build something.",
+      "Describe what you want changed and send it. I break it into steps — they show up under **Plan**, " +
+      "where you can run, retry or skip one. Anything I write to files queues under **Changes** for you to " +
+      "review or undo. **New task** starts a fresh one; **Task history** brings an earlier one back.",
     timestamp: Date.now(),
   };
 }
+
 
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
@@ -692,8 +698,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           id: `resumed-${detail.id}`,
           role: "system" as const,
           content:
-            `Resumed session "${detail.title}" — ${detail.turns.length} turn(s) of context are back. ` +
-            "The plan from that session is not restored, and pending changes in the review area are left as they are.",
+            `Resumed task "${detail.title}" — ${detail.turns.length} turn(s) of context are back. ` +
+            "The plan from that task is not restored, and pending changes in the review area are left as they are.",
           timestamp: Date.now(),
         },
         ...detail.turns.flatMap((turn) => [

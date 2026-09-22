@@ -327,7 +327,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 ### 7.4 Container Components
 
 - **Editor Container**: Tabs / Split / Minimap / Overlay layers
-- **Agent Panel**: Primary views Task | Plan | Changes, plus utility entries New session, Session history (`sessions`), Pipeline and Settings
+- **Agent Panel**: Primary views Chat | Plan | Changes, plus utility entries New task, Task history (the `sessions` view id), Pipeline and Settings. The user-facing word for a conversation-plus-its-plan is **task**; the code and the IPC commands say `session`.
 - **Bottom Panel**: Terminal / Logs / Tests / Actions
 - **Explorer Panel**
 

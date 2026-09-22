@@ -273,24 +273,24 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         rightVisible,
         toggleRightPanel
       ),
-      // 会话历史和新建会话同理：面板上是两个 8px 的图标，命令面板是它们唯一带文字的入口。
-      // "新建会话"是个动作而不是视图，所以不走 `agentViewCommand`。
+      // 历史任务和新建任务同理：面板上是两个 8px 的图标，命令面板是它们唯一带文字的入口。
+      // "新建任务"是个动作而不是视图，所以不走 `agentViewCommand`。
       agentViewCommand(
         "panel.agent.sessions",
-        "Open Agent Session History",
+        "Open Agent Task History",
         "sessions",
         setAgentView,
         rightVisible,
         toggleRightPanel,
-        ["history", "sessions", "resume", "previous conversation", "context"]
+        ["history", "sessions", "tasks", "resume", "previous conversation", "context"]
       ),
       {
         id: "agent.new-session",
-        title: "Start a New Agent Session",
+        title: "Start a New Agent Task",
         subtitle:
-          "Clears this view and the conversation the next prompt would inherit. The old session stays in the history.",
+          "Clears this view and the conversation the next prompt would inherit. The old task stays in Task history.",
         group: "Agent",
-        keywords: ["new", "clear", "reset", "conversation", "context", "session"],
+        keywords: ["new", "task", "clear", "reset", "conversation", "context", "session"],
         run: () => {
           // 被拒绝时错误已经进 store.error，Agent 面板上的错误条会显示
           void startNewSession().catch(() => undefined);
