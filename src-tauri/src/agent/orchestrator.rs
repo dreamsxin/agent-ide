@@ -934,8 +934,10 @@ impl AgentOrchestrator {
         Some(digest)
     }
 
-    /// 记一轮已完成的对话。结果由当前状态推导，命令层不需要拼摘要。
-    pub fn record_conversation_turn(&mut self, prompt: &str) {
+    /// 一轮的"结果"从当前 diff 状态推导，命令层不需要拼摘要。
+    ///
+    /// 单独拿出来是因为有两个用处：新记一轮，和续跑/修复之后**改写**同一轮的结果。
+    fn turn_outcome(&self) -> String {
         let reviewable: Vec<&str> = self
             .diffs
             .iter()
@@ -948,7 +950,7 @@ impl AgentOrchestrator {
             .filter(|diff| diff.status == "applied")
             .count();
 
-        let outcome = if reviewable.is_empty() && applied == 0 {
+        if reviewable.is_empty() && applied == 0 {
             "no file changes produced".to_string()
         } else {
             let mut parts = Vec::new();
@@ -959,7 +961,12 @@ impl AgentOrchestrator {
                 parts.push(format!("awaiting review: {}", reviewable.join(", ")));
             }
             parts.join("; ")
-        };
+        }
+    }
+
+    /// 记一轮已完成的对话。结果由当前状态推导，命令层不需要拼摘要。
+    pub fn record_conversation_turn(&mut self, prompt: &str) {
+        let outcome = self.turn_outcome();
 
         let id = format!("turn-{}", self.next_turn_id);
         self.next_turn_id = self.next_turn_id.wrapping_add(1);
@@ -972,6 +979,21 @@ impl AgentOrchestrator {
         if self.conversation.len() > MAX_CONVERSATION_TURNS {
             let excess = self.conversation.len() - MAX_CONVERSATION_TURNS;
             self.conversation.drain(..excess);
+        }
+    }
+
+    /// 接着同一问继续干完之后更新历史：续跑流水线、自动修复走这里。
+    ///
+    /// 不无条件 push 新的一轮：续跑接的是暂停前那一问，暂停时那一轮已经记过了，
+    /// 再记一条会让历史里出现两条一模一样的 `asked:`，而摘要有 6 轮的上限 —— 重复
+    /// 挤掉的是真正不同的那几轮。命中同一问就只改写结果（暂停时是"没有文件改动"，
+    /// 干完了才有落盘），对不上（例如修复时调用方自己给了任务描述）才算新的一问。
+    pub fn record_continued_turn(&mut self, prompt: &str) {
+        let outcome = summarize_text(&self.turn_outcome(), MAX_TURN_OUTCOME_CHARS);
+        let asked = summarize_text(prompt.trim(), MAX_TURN_PROMPT_CHARS);
+        match self.conversation.last_mut() {
+            Some(last) if last.prompt == asked => last.outcome = outcome,
+            _ => self.record_conversation_turn(prompt),
         }
     }
 
@@ -4295,6 +4317,62 @@ mod tests {
         let digest = orchestrator.conversation_digest().expect("digest");
         // 不能记成"改了文件"，否则下一轮模型会以为已经动过代码
         assert!(digest.contains("no file changes produced"), "{}", digest);
+    }
+
+    /// 暂停时那一轮已经记过了，而当时还没有任何产出。续跑要改写它，不是再记一条：
+    /// 重复的 `asked:` 会占掉 6 轮窗口里本该留给别的问题的位置。
+    #[test]
+    fn continuing_a_paused_run_updates_that_turn_instead_of_repeating_it() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("add pagination to the list");
+        let paused_digest = orchestrator.conversation_digest().expect("digest");
+        assert!(
+            paused_digest.contains("no file changes produced"),
+            "{}",
+            paused_digest
+        );
+
+        orchestrator
+            .diffs
+            .push(make_diff("src/list.ts", "const a = 1;", "const a = 2;"));
+        orchestrator.record_continued_turn("add pagination to the list");
+
+        assert_eq!(
+            orchestrator.conversation.len(),
+            1,
+            "续跑接的是同一问，不该变成两轮"
+        );
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(digest.contains("src/list.ts"), "{}", digest);
+        assert!(!digest.contains("no file changes produced"), "{}", digest);
+    }
+
+    /// 修复时调用方可以自己给一段任务描述。那就是另一问，必须单独成一轮，
+    /// 否则上一问的结果会被一段跟它无关的描述覆盖掉。
+    #[test]
+    fn continuing_with_a_different_ask_starts_a_new_turn() {
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.record_conversation_turn("add pagination to the list");
+        orchestrator.record_continued_turn("fix the failing type check");
+
+        assert_eq!(orchestrator.conversation.len(), 2);
+        let digest = orchestrator.conversation_digest().expect("digest");
+        assert!(digest.contains("add pagination to the list"), "{}", digest);
+        assert!(digest.contains("fix the failing type check"), "{}", digest);
+    }
+
+    /// 历史里存的是截断过的 prompt。认同一问必须比较截断之后的形状，否则任何
+    /// 超过 400 字的任务续跑一次就会多出一条几乎一样的历史。
+    #[test]
+    fn a_long_prompt_still_matches_the_turn_it_continues() {
+        let mut orchestrator = AgentOrchestrator::new();
+        let long_prompt = "refactor the importer ".repeat(40);
+        assert!(long_prompt.chars().count() > MAX_TURN_PROMPT_CHARS);
+
+        orchestrator.record_conversation_turn(&long_prompt);
+        orchestrator.record_continued_turn(&long_prompt);
+
+        assert_eq!(orchestrator.conversation.len(), 1);
     }
 
     /// 应用之前是单向的：落盘之后审查界面就无能为力了，而"应用了才发现不对"
