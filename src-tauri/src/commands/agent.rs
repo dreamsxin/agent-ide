@@ -934,6 +934,23 @@ pub async fn resolve_agent_approval(
     Ok(agent_state.approval_registry.resolve(&request_id, approved))
 }
 
+/// 把用户对一道选择题的答案送回给正在等它的工具调用。
+///
+/// 空答案在这里拒掉而不是照送：一个空字符串会让模型收到"用户选了 \"\""，那比没有答案更糟。
+/// 前端的"自己写"输入框也靠这条挡住误触发的提交。
+#[tauri::command]
+pub async fn answer_agent_question(
+    request_id: String,
+    answer: String,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<bool, String> {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return Err("An answer cannot be empty.".to_string());
+    }
+    Ok(agent_state.approval_registry.answer(&request_id, answer))
+}
+
 #[tauri::command]
 pub async fn update_agent_step(
     step: TaskStep,

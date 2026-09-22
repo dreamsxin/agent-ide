@@ -351,25 +351,30 @@ describe("approval op types", () => {
  * 白名单本身又会腐烂；而改名会被这个方向抓住 —— 新名字不在文档里。
  */
 describe("built-in tool documentation", () => {
-    function workspaceToolNames(): string[] {
+    /**
+     * 工具名不全带 `workspace_` 前缀（`ask_user_question` 问的不是工作区，而是人），
+     * 所以按前缀扫会漏掉新工具 —— 而漏掉的那个正好是没人替它核文档的那个。改成扫
+     * `agent/workspace_tools.rs` 里所有 `pub const … : &str`：那个文件里这种常量只有
+     * 工具名，而多收一个非工具常量的代价仅仅是要在 SECURITY.md 里提它一次。
+     */
+    function builtInToolNames(): string[] {
         const names = new Set<string>();
-        for (const source of rustSources()) {
-            for (const match of source.matchAll(
-                /pub const [A-Z0-9_]+: &str = "(workspace_[a-z_]+)"/g
-            )) {
-                names.add(match[1]);
-            }
+        const source = readFileSync("src-tauri/src/agent/workspace_tools.rs", "utf8");
+        for (const match of source.matchAll(/pub const [A-Z0-9_]+: &str = "([a-z0-9_]+)"/g)) {
+            names.add(match[1]);
         }
         return [...names].sort();
     }
 
     it("SECURITY.md names every built-in tool the backend can advertise", () => {
-        const tools = workspaceToolNames();
+        const tools = builtInToolNames();
 
         // 前提检查：解析失效时这条测试会以"全部通过"的方式静默死掉
-        expect(tools.length, "the scanner found no workspace_* tool constants").toBeGreaterThan(10);
+        expect(tools.length, "the scanner found no built-in tool constants").toBeGreaterThan(10);
         expect(tools).toContain("workspace_computer_click");
         expect(tools).toContain("workspace_computer_scroll");
+        // 不带前缀的那个必须也在扫描范围内，否则这条守卫只盖住一半的工具
+        expect(tools).toContain("ask_user_question");
 
         const security = readFileSync("SECURITY.md", "utf8");
 

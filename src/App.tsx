@@ -8,6 +8,7 @@ import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import CommandPalette, { usePaletteCommands } from "./components/shared/CommandPalette";
 import ConfirmDialog from "./components/agent/ConfirmDialog";
+import QuestionDialog from "./components/agent/QuestionDialog";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import PanelLoading from "./components/shared/PanelLoading";
 import { useLayoutStore, maxBottomHeight } from "./stores/useLayoutStore";
@@ -181,6 +182,11 @@ export default function App() {
         各送一个决定回去。没人点就在超时后按拒绝处理。
       */}
       <ConfirmDialog />
+      {/*
+        模型也会反过来问用户：`ask_user_question` 挂起一次工具调用，等一个选项或一句
+        自己写的答案。和批准分开渲染，因为它不是授权 —— 不答只会让模型自己判断。
+      */}
+      <QuestionDialog />
 
       {/* 自定义标题栏 */}
       <TopBar />

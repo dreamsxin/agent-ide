@@ -214,6 +214,7 @@ Two tool families are exposed:
 | Workspace delete | `workspace_delete_file` | Same `allow_write` gate and same boundary as writing. Directories refused; the content is read before removal so undo can rebuild the file. The review entry is labelled `delete`, not shown as an emptied file. |
 | Workspace move | `workspace_move_file` | Needs `allow_write` **and** `allowFileCreate`; both paths go through `resolve_for_agent_write`. An existing destination is always refused (including a case-only difference), directories are refused, and the move is one `fs::rename` — so no half-done state, and binary files move too. The review entry is labelled `move` and names the source in `provenance.movedFrom`; undo moves the file back, replaying a batch in reverse order. |
 | MCP | `mcp__{server}__{tool}` | External stdio servers, gated by `McpToolPolicy`. |
+| Ask the user | `ask_user_question` | Only advertised when a question channel is attached (desktop, never the CLI). Pauses the run for one multiple-choice question with 2–4 options plus a free-text answer; authorizes nothing, and an unanswered question never becomes an answer. |
 
 Notes:
 

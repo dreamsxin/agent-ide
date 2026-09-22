@@ -5,7 +5,7 @@ import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
-import { normalizeAgentMode, normalizeApprovalRequest, normalizeContextUsage, normalizeRunUsage } from "../types/agent";
+import { normalizeAgentMode, normalizeAgentQuestion, normalizeApprovalRequest, normalizeContextUsage, normalizeRunUsage } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
@@ -36,6 +36,8 @@ export function useAgentBridge() {
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
   const requestConfirm = useAgentStore((s) => s.requestConfirm);
   const closeConfirm = useAgentStore((s) => s.closeConfirm);
+  const requestQuestion = useAgentStore((s) => s.requestQuestion);
+  const closeQuestion = useAgentStore((s) => s.closeQuestion);
   const addLog = useLogStore((s) => s.addLog);
   const upsertProblems = useProblemStore((s) => s.upsertProblems);
 
@@ -169,12 +171,31 @@ export function useAgentBridge() {
             }
           }),
 
+          // 模型问了一道选择题，正挂在后端等答案。读不懂同样要立刻回一个"没答案"，
+          // 否则后端白等两分钟而界面只表现成"Agent 卡住了"。
+          listen<unknown>("agent-question-requested", (e) => {
+            const question = normalizeAgentQuestion(e.payload);
+            if (question) {
+              requestQuestion(question);
+              return;
+            }
+            console.warn("[useAgentBridge] unreadable question, declining:", e.payload);
+            const id = (e.payload as { id?: unknown } | null)?.id;
+            if (typeof id === "string" && id) {
+              void invoke("resolve_agent_approval", { requestId: id, approved: false }).catch(
+                (err) => console.warn("[useAgentBridge] could not decline it either:", err)
+              );
+            }
+          }),
+
           // 后端已经不等了（超时或 Stop）。少了这条，超时之后对话框还开着，用户点
           // "批准"却没有任何东西在等他 —— 界面会让他以为自己授权了一次导航。
+          // 批准和提问共用这个事件（同一张登记表、同一个 id），两边各按 id 对号。
           listen<{ id?: string }>("agent-approval-closed", (e) => {
             const id = e.payload?.id;
             if (typeof id === "string") {
               closeConfirm(id);
+              closeQuestion(id);
             }
           }),
         ]);
@@ -198,7 +219,9 @@ export function useAgentBridge() {
     appendStreamContent,
     clearStreamContent,
     closeConfirm,
+    closeQuestion,
     requestConfirm,
+    requestQuestion,
     setContextUsage,
     setDiffs,
     setPipeline,

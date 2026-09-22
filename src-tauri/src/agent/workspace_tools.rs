@@ -59,6 +59,11 @@ pub const COMPUTER_CLICK: &str = "workspace_computer_click";
 /// 在批准过的窗口里滚一下轮。和点击同一档授权（都是撤不回的指针输入），单独一个工具只是
 /// 因为参数不同 —— 滚动要格数，点击要动作名。
 pub const COMPUTER_SCROLL: &str = "workspace_computer_scroll";
+/// 问用户一道选择题。
+///
+/// 名字不带 `workspace_` 前缀：它问的不是工作区，而是人。和参考实现同名，模型对它的语义
+/// 已经有先验。
+pub const ASK_USER_QUESTION: &str = "ask_user_question";
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -405,6 +410,31 @@ impl WorkspaceToolPermissions {
         match &self.approval {
             Some(gate) => gate.ask(request, Some(&self.cancel)).await,
             None => crate::agent::approval::ApprovalOutcome::Unattended,
+        }
+    }
+
+    /// 这次运行有没有人可以回答提问。
+    ///
+    /// 用来决定要不要把 `ask_user_question` 挂出去：headless 入口没有对话框，挂了也只会
+    /// 换来一次"没人可问"，而一个每次都失败的工具会被模型反复调用。
+    pub fn can_ask_user(&self) -> bool {
+        self.approval.is_some()
+    }
+
+    /// 问用户一道选择题，等一个答案。
+    ///
+    /// 和 `require_approval` 走同一条通道、同一张登记表、同一个超时，因为要守的不变量一样：
+    /// 没人应答不能变成默认值，Stop 之后不能再拿到答案。区别是它不授权任何东西 ——
+    /// 回来的是一个决定，不是一次许可。
+    async fn ask_user(
+        &self,
+        request: &crate::agent::approval::QuestionRequest,
+    ) -> crate::agent::approval::QuestionOutcome {
+        match &self.approval {
+            Some(gate) => gate.ask_question(request, Some(&self.cancel)).await,
+            None => crate::agent::approval::QuestionOutcome::Unanswered(
+                crate::agent::approval::ApprovalOutcome::Unattended,
+            ),
         }
     }
 
@@ -891,6 +921,38 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         });
     }
 
+    if permissions.can_ask_user() {
+        definitions.push(ToolDefinition {
+            name: ASK_USER_QUESTION.to_string(),
+            description:
+                "Ask the user one multiple-choice question and wait for their answer. Use it only \
+                 when you are blocked on a decision that is genuinely theirs — a product choice, \
+                 a preference between two valid designs, which of several files they meant. Do not \
+                 use it for anything you can settle by reading the code, and do not use it to ask \
+                 for permission to continue: state what you are doing and do it. Give 2 to 4 short, \
+                 concrete options; the user can always type an answer of their own instead, so \
+                 phrase the options as the likely answers rather than as an exhaustive list. If \
+                 nobody answers within two minutes the call comes back unanswered and you must \
+                 proceed on your own judgment."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question, as one sentence the user can answer without reading the code"
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "2 to 4 short answers to choose from. Do not add an 'Other' option; the user always gets one."
+                    }
+                },
+                "required": ["question", "options"]
+            }),
+        });
+    }
+
     if permissions.allows_capture() {
         definitions.push(ToolDefinition {
             name: COMPUTER_CAPTURE.to_string(),
@@ -1078,6 +1140,8 @@ impl ToolInvoker for WorkspaceToolInvoker {
             COMPUTER_WINDOWS => self.permissions.allows_computer(),
             COMPUTER_CAPTURE => self.permissions.allows_capture(),
             COMPUTER_CLICK | COMPUTER_SCROLL => self.permissions.allows_input(),
+            // 没有对话框就不认领：一个每次都回"没人可问"的工具会被反复调用
+            ASK_USER_QUESTION => self.permissions.can_ask_user(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -1175,6 +1239,14 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 string_arg(&args, "path_glob"),
             ),
             LIST_FILES => list_files_tool(string_arg(&args, "path").unwrap_or(".")),
+            ASK_USER_QUESTION => {
+                ask_user_question_tool(
+                    string_arg(&args, "question").ok_or("Missing 'question'")?,
+                    &string_list_arg(&args, "options"),
+                    &self.permissions,
+                )
+                .await
+            }
             RUN_COMMAND => {
                 run_command_tool(
                     string_arg(&args, "command").ok_or("Missing 'command'")?,
@@ -1313,6 +1385,31 @@ fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// 取一个字符串数组参数。
+///
+/// 也接受单个字符串：模型偶尔会把只有一项的数组写成裸字符串，而那种错误在这里的代价是
+/// 一次白跑的工具调用。空项和纯空白项丢掉 —— 一个空选项在对话框上是一个点不明白的按钮。
+fn string_list_arg(args: &serde_json::Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_json::Value::String(single)) => {
+            let single = single.trim();
+            if single.is_empty() {
+                Vec::new()
+            } else {
+                vec![single.to_string()]
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// 取一个非负整数参数。
@@ -1808,6 +1905,100 @@ fn walk_and_match(
                 }
             }
         }
+    }
+}
+
+/// 一道选择题最少 / 最多几个选项。
+///
+/// 下界是 2：一个选项的"选择题"不是问题，是通知。上界是 4：再多的话对话框变成一张清单，
+/// 而用户要读完每一项才能选 —— 那时候让他自己写一句反而更快（提问框永远留着那个入口）。
+const MIN_QUESTION_OPTIONS: usize = 2;
+const MAX_QUESTION_OPTIONS: usize = 4;
+
+/// 问用户一道选择题，把答案交回模型。
+///
+/// 存在的理由：在这之前，模型遇到一个只有用户能定的岔路（两种都对的设计、他到底指哪个
+/// 文件）只有两条路 —— 猜一个然后继续，或者停下来在回答里问一句而运行已经结束。前者会把
+/// 一半的工作做在错的分支上，后者要用户再发一次 prompt 才能接着做。
+///
+/// 三条不变量，都是"不能替用户说话"的不同说法：
+/// - **没拿到答案绝不编一个。** 超时、关掉、Stop 都如实说出来，让模型用自己的判断继续。
+///   编出来的答案会被当成用户的偏好带到后面每一步。
+/// - **参数不合格是错误，不是将就。** 一个空问题、一个选项、十个选项，都会变成一个用户
+///   点不明白的对话框，而模型收到一句明确的错误就能改了重问。
+/// - **"自己写"不由模型决定。** 它给的选项是候选而不是全集，对话框永远留着自由输入。
+async fn ask_user_question_tool(
+    question: &str,
+    options: &[String],
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if options.len() < MIN_QUESTION_OPTIONS || options.len() > MAX_QUESTION_OPTIONS {
+        return Err(format!(
+            "A question needs between {} and {} options; this call had {}. Ask one question with \
+             short, concrete options, and remember the user can always type their own answer.",
+            MIN_QUESTION_OPTIONS,
+            MAX_QUESTION_OPTIONS,
+            options.len()
+        ));
+    }
+    // 大小写不敏感地查重：`Redis` 和 `redis` 在对话框上是两个一样的按钮
+    for (index, option) in options.iter().enumerate() {
+        if options[..index]
+            .iter()
+            .any(|earlier| earlier.eq_ignore_ascii_case(option))
+        {
+            return Err(format!(
+                "Two options say the same thing ({:?}). Every option must be a different answer.",
+                option
+            ));
+        }
+        if option.eq_ignore_ascii_case("other") {
+            return Err(
+                "Do not add an 'Other' option — the user always gets a free-text answer. Use that \
+                 slot for a real alternative."
+                    .to_string(),
+            );
+        }
+    }
+
+    let request = crate::agent::approval::QuestionRequest::new(question, options.to_vec());
+    match permissions.ask_user(&request).await {
+        crate::agent::approval::QuestionOutcome::Answered(answer) => Ok(format!(
+            "The user answered: {:?}. Continue with that answer; do not ask again.",
+            answer
+        )),
+        // 超时和"没人可问"都不是失败：让整个工具调用失败会把模型逼回"猜一个"，而它现在
+        // 至少知道自己在猜。说清没拿到答案，比编一个答案或者卡死都好。
+        crate::agent::approval::QuestionOutcome::Unanswered(
+            crate::agent::approval::ApprovalOutcome::TimedOut,
+        ) => Ok(
+            "Nobody answered in time. Continue with your own judgment, state which option you \
+             assumed, and do not present it as the user's choice."
+                .to_string(),
+        ),
+        crate::agent::approval::QuestionOutcome::Unanswered(
+            crate::agent::approval::ApprovalOutcome::Unattended,
+        ) => Ok(
+            "This run has nobody to ask (no question prompt attached). Continue with your own \
+             judgment and say which option you assumed."
+                .to_string(),
+        ),
+        // 用户主动关掉提问框是一个决定：他不想回答这个问题。这里要失败，否则模型会把
+        // "他关掉了"读成"他没看见"，然后再问一遍同一件事。
+        crate::agent::approval::QuestionOutcome::Unanswered(
+            crate::agent::approval::ApprovalOutcome::Denied
+            | crate::agent::approval::ApprovalOutcome::Approved,
+        ) => Err(
+            "The user dismissed the question without answering. Do not ask it again — decide \
+             yourself and say what you assumed."
+                .to_string(),
+        ),
+        crate::agent::approval::QuestionOutcome::Unanswered(
+            crate::agent::approval::ApprovalOutcome::Cancelled,
+        ) => Err(
+            "This run was stopped while the question was open, so it was never answered."
+                .to_string(),
+        ),
     }
 }
 
@@ -4303,6 +4494,124 @@ mod tests {
                 registry.clone(),
                 events.clone(),
             ))
+    }
+
+    /// 一次问答走完：选项发到前端，答案原样回到模型。
+    #[tokio::test]
+    async fn an_answered_question_reaches_the_model() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let registry = crate::agent::approval::ApprovalRegistry::new();
+        let permissions = approving_permissions(&events, &registry);
+
+        let events_probe = events.clone();
+        let answerer = tokio::spawn(async move {
+            for _ in 0..200 {
+                let asked =
+                    events_probe.payloads_for(crate::agent::approval::QUESTION_REQUESTED_EVENT);
+                if let Some(id) = asked.first().and_then(|payload| payload["id"].as_str()) {
+                    if registry.answer(id, "Postgres") {
+                        return true;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            false
+        });
+
+        let result = ask_user_question_tool(
+            "Which database should the new service use?",
+            &["Postgres".to_string(), "SQLite".to_string()],
+            &permissions,
+        )
+        .await
+        .expect("an answered question is not an error");
+
+        assert!(answerer.await.unwrap(), "answer 应该找到等待方");
+        assert!(result.contains("Postgres"), "{}", result);
+        let asked = events.payloads_for(crate::agent::approval::QUESTION_REQUESTED_EVENT);
+        assert_eq!(
+            asked[0]["question"],
+            "Which database should the new service use?"
+        );
+        assert_eq!(asked[0]["options"][1], "SQLite");
+    }
+
+    /// 没人可问不是失败，但也绝不能变成一个答案。
+    ///
+    /// headless 入口（CLI）没有对话框。让整个调用失败会把模型逼回"猜一个还不说"，所以这里
+    /// 回成功 —— 但回的那句话必须明确说"没拿到答案，你得自己判断并讲出来"。
+    #[tokio::test]
+    async fn a_question_with_nobody_to_ask_says_so_instead_of_answering() {
+        let permissions = WorkspaceToolPermissions::default();
+        assert!(!permissions.can_ask_user());
+
+        let result = ask_user_question_tool(
+            "Which database?",
+            &["Postgres".to_string(), "SQLite".to_string()],
+            &permissions,
+        )
+        .await
+        .expect("no prompt attached is not a tool failure");
+
+        assert!(result.contains("nobody to ask"), "{}", result);
+        // 一个选项都不能被说成用户选的
+        assert!(!result.contains("Postgres"), "{}", result);
+    }
+
+    /// 参数不合格要立刻报错，而且不能弹框。
+    ///
+    /// 一个选项的"选择题"、十个选项、两个一样的选项、模型自己加的 Other，都会变成一个用户
+    /// 点不明白的对话框；明确的错误让模型改了重问，而弹框只会消耗用户的注意力。
+    #[tokio::test]
+    async fn a_malformed_question_is_refused_before_anyone_is_disturbed() {
+        let events = std::sync::Arc::new(crate::agent::events::RecordingEvents::new());
+        let registry = crate::agent::approval::ApprovalRegistry::new();
+        let permissions = approving_permissions(&events, &registry);
+
+        for options in [
+            vec!["Only one".to_string()],
+            vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+                "E".to_string(),
+            ],
+            vec!["Redis".to_string(), "redis".to_string()],
+            vec!["Redis".to_string(), "Other".to_string()],
+        ] {
+            assert!(
+                ask_user_question_tool("Pick one", &options, &permissions)
+                    .await
+                    .is_err(),
+                "{:?}",
+                options
+            );
+        }
+        // 一次都没问出去：错的参数不该打扰用户
+        assert!(events
+            .payloads_for(crate::agent::approval::QUESTION_REQUESTED_EVENT)
+            .is_empty());
+    }
+
+    /// 选项列表的取值：数组是正常形态，单个字符串也收，空项丢掉。
+    #[test]
+    fn option_lists_survive_the_shapes_a_model_writes() {
+        let args = serde_json::json!({
+            "options": ["Postgres", "  SQLite  ", "", "   "],
+            "single": "Postgres",
+            "wrong": 7
+        });
+        assert_eq!(
+            string_list_arg(&args, "options"),
+            vec!["Postgres".to_string(), "SQLite".to_string()]
+        );
+        assert_eq!(
+            string_list_arg(&args, "single"),
+            vec!["Postgres".to_string()]
+        );
+        assert!(string_list_arg(&args, "wrong").is_empty());
+        assert!(string_list_arg(&args, "missing").is_empty());
     }
 
     /// 人点了拒绝 = 不导航，而且记录里写的是人的决定。

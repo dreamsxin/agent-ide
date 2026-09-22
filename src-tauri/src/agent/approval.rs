@@ -23,7 +23,16 @@ use tokio::sync::oneshot;
 
 /// 请求批准时发给前端的事件名。载荷与前端 `DestructiveOpConfirm` 同构。
 pub const APPROVAL_REQUESTED_EVENT: &str = "agent-approval-requested";
+/// 模型问用户一个选择题时发给前端的事件名。
+///
+/// 和批准分成两个事件而不是给批准载荷加一个 `options` 字段：两者要的交互不同（批准是
+/// 是/否，提问是从几个选项里挑一个或自己写一句），共用一个事件会让前端先猜是哪一种，
+/// 猜错就是把一个选择题渲染成一次授权。
+pub const QUESTION_REQUESTED_EVENT: &str = "agent-question-requested";
 /// 后端已经不再等这条请求了（超时 / Stop / 已决定），前端该收掉对话框。
+///
+/// 批准和提问共用这一个：两边的等待都登记在同一张表里、用同一个 id，而"停止等待"这件事
+/// 本身没有区别。前端按 id 对号，认不出的 id 直接忽略。
 pub const APPROVAL_CLOSED_EVENT: &str = "agent-approval-closed";
 
 /// 默认等人多久。
@@ -126,11 +135,56 @@ impl ApprovalOutcome {
     }
 }
 
+/// 一道给用户的选择题。
+///
+/// 和 `ApprovalRequest` 是两种东西：那个问"要不要让我做这件事"，这个问"你想要哪一种"。
+/// 后者不是授权，模型拿到的是一个决定而不是一次许可。
+#[derive(Clone, Debug)]
+pub struct QuestionRequest {
+    pub id: String,
+    pub question: String,
+    /// 模型给的候选项。前端另外永远提供一个"自己写"的入口 —— 只能在模型想到的几项里选，
+    /// 等于让模型的想象力当成用户的全部选项。
+    pub options: Vec<String>,
+}
+
+impl QuestionRequest {
+    /// id 由后端生成，理由同 `ApprovalRequest::new`
+    pub fn new(question: impl Into<String>, options: Vec<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            question: question.into(),
+            options,
+        }
+    }
+
+    fn payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "question": self.question,
+            "options": self.options,
+        })
+    }
+}
+
+/// 问一道选择题的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QuestionOutcome {
+    /// 用户选了一项，或者自己写了一句。两者形状相同：区分"他挑的"和"他写的"对模型没有
+    /// 用处，而把自由输入标成另一类会让模型去猜哪一种更可信。
+    Answered(String),
+    /// 没拿到回答。原因沿用 `ApprovalOutcome`，因为"他关掉了"、"Stop"、"超时"、
+    /// "根本没人可问"这四件事在记录里和给模型的话里都不一样。
+    Unanswered(ApprovalOutcome),
+}
+
 enum Decision {
     Approved,
     Denied,
     /// Stop。不是人做的决定，所以不能走 `Denied`。
     Cancelled,
+    /// 用户对一道选择题给出的答案
+    Answered(String),
 }
 
 /// 挂起的批准请求。
@@ -180,6 +234,18 @@ impl ApprovalRegistry {
                     Decision::Denied
                 })
                 .is_ok(),
+            None => false,
+        }
+    }
+
+    /// 送回一道选择题的答案。返回是否真的有人在等 —— 同 `resolve`，超时之后才点到就是 false。
+    ///
+    /// 空答案不在这里挡：命令层已经拒掉了空串。让一个空字符串走到这里，模型会收到
+    /// "用户选了 \"\""，那比没有答案更糟。
+    pub fn answer(&self, id: &str, answer: impl Into<String>) -> bool {
+        let sender = self.pending().remove(id);
+        match sender {
+            Some(sender) => sender.send(Decision::Answered(answer.into())).is_ok(),
             None => false,
         }
     }
@@ -278,10 +344,53 @@ impl ApprovalGate {
             Ok(Ok(Decision::Approved)) => ApprovalOutcome::Approved,
             Ok(Ok(Decision::Denied)) => ApprovalOutcome::Denied,
             Ok(Ok(Decision::Cancelled)) => ApprovalOutcome::Cancelled,
+            // 一个答案送到了批准的等待方：只有前端把选择题的 id 发给了 `answer_agent_question`
+            // 之外的入口才可能发生。当成拒绝而不是当成批准 —— 没人按过那个按钮。
+            Ok(Ok(Decision::Answered(_))) => ApprovalOutcome::Denied,
             // 发送端被丢弃而没有发送：登记表被清掉了。归到 `Cancelled` 而不是 `Denied` ——
             // 那同样不是某个人对这次动作说的不。
             Ok(Err(_)) => ApprovalOutcome::Cancelled,
             Err(_) => ApprovalOutcome::TimedOut,
+        };
+
+        self.events.emit_json(
+            APPROVAL_CLOSED_EVENT,
+            serde_json::json!({ "id": request.id }),
+        );
+        outcome
+    }
+
+    /// 问一道选择题，等一个答案。
+    ///
+    /// 结构和 `ask` 完全一样（登记 → 再查一次 Stop → 发事件 → 等 → 关对话框），因为要守的
+    /// 不变量一样：没人应答不能当成默认答案，Stop 之后不能再拿到答案，停止等待一定要让
+    /// 对话框消失。区别只在回来的是一个字符串而不是一个是/否。
+    pub async fn ask_question(
+        &self,
+        request: &QuestionRequest,
+        cancel: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> QuestionOutcome {
+        let receiver = self.registry.register(&request.id);
+        let _registered = Registered {
+            registry: &self.registry,
+            id: &request.id,
+        };
+        if is_cancelled(cancel) {
+            return QuestionOutcome::Unanswered(ApprovalOutcome::Cancelled);
+        }
+        self.events
+            .emit_json(QUESTION_REQUESTED_EVENT, request.payload());
+
+        let outcome = match tokio::time::timeout(self.timeout, receiver).await {
+            Ok(Ok(Decision::Answered(answer))) => QuestionOutcome::Answered(answer),
+            // 用户把提问框关掉了。前端送的是"拒绝"，因为那个对话框上没有"批准"可按
+            Ok(Ok(Decision::Denied)) => QuestionOutcome::Unanswered(ApprovalOutcome::Denied),
+            Ok(Ok(Decision::Cancelled)) => QuestionOutcome::Unanswered(ApprovalOutcome::Cancelled),
+            // 同上一个方向的对称情况：一次批准点到了选择题的 id。没有答案就是没有答案，
+            // 绝不能编一个 —— 编出来的那个会被模型当成用户的偏好带到后面每一步。
+            Ok(Ok(Decision::Approved)) => QuestionOutcome::Unanswered(ApprovalOutcome::Denied),
+            Ok(Err(_)) => QuestionOutcome::Unanswered(ApprovalOutcome::Cancelled),
+            Err(_) => QuestionOutcome::Unanswered(ApprovalOutcome::TimedOut),
         };
 
         self.events.emit_json(
@@ -332,6 +441,126 @@ mod tests {
         assert_eq!(outcome, ApprovalOutcome::Approved);
         // 批准也要清登记表，否则同一个 id 会留在里面
         assert_eq!(registry_probe.refuse_all(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaches_the_waiting_question() {
+        let events = Arc::new(RecordingEvents::new());
+        let (registry, gate) = gate(&events);
+        let request = QuestionRequest::new(
+            "Which store should the cache use?",
+            vec!["Redis".to_string(), "In-memory".to_string()],
+        );
+        let id = request.id.clone();
+
+        let resolver = tokio::spawn(async move {
+            for _ in 0..50 {
+                if registry.answer(&id, "In-memory") {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            false
+        });
+
+        let outcome = gate.ask_question(&request, None).await;
+
+        assert!(resolver.await.unwrap(), "answer 应该找到等待方");
+        assert_eq!(outcome, QuestionOutcome::Answered("In-memory".to_string()));
+        // 问题的载荷必须带着选项：没有选项的提问框只能让用户自己写，而模型明明给了候选
+        let asked = events.payloads_for(QUESTION_REQUESTED_EVENT);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["options"][0], "Redis");
+        // 停止等待一定要关掉对话框，否则用户会对一个没人在等的问题作答
+        assert_eq!(events.payloads_for(APPROVAL_CLOSED_EVENT).len(), 1);
+    }
+
+    /// 没人回答绝不能变成一个默认答案。
+    ///
+    /// 编出来的答案会被模型当成用户的偏好带到后面每一步，而用户从没说过那句话 ——
+    /// 这比"没拿到答案"糟得多。
+    #[tokio::test]
+    async fn an_unanswered_question_never_invents_an_answer() {
+        let events = Arc::new(RecordingEvents::new());
+        let (_registry, gate) = gate(&events);
+        let request = QuestionRequest::new("Pick one", vec!["A".to_string(), "B".to_string()]);
+
+        let outcome = gate.ask_question(&request, None).await;
+
+        assert_eq!(
+            outcome,
+            QuestionOutcome::Unanswered(ApprovalOutcome::TimedOut)
+        );
+        assert_eq!(events.payloads_for(APPROVAL_CLOSED_EVENT).len(), 1);
+    }
+
+    /// Stop 之后挂着的提问要被收掉，和批准一样。
+    #[tokio::test]
+    async fn stop_refuses_a_pending_question() {
+        let events = Arc::new(RecordingEvents::new());
+        let (registry, gate) = gate(&events);
+        let request = QuestionRequest::new("Pick one", vec!["A".to_string(), "B".to_string()]);
+        let probe = registry.clone();
+
+        let stopper = tokio::spawn(async move {
+            for _ in 0..50 {
+                if probe.refuse_all() > 0 {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            false
+        });
+
+        let outcome = gate.ask_question(&request, None).await;
+
+        assert!(stopper.await.unwrap(), "refuse_all 应该找到等待方");
+        assert_eq!(
+            outcome,
+            QuestionOutcome::Unanswered(ApprovalOutcome::Cancelled)
+        );
+    }
+
+    /// 一次"批准"点到选择题的 id 上不算答案；一个答案送到批准的等待方也不算批准。
+    ///
+    /// 两条都来自同一张登记表和同一个 id 空间：陈旧的前端、同时开着的两种对话框都能把
+    /// 决定送错地方，而这两种错配里"编一个答案"和"授权一次动作"都是不能接受的结果。
+    #[tokio::test]
+    async fn a_decision_sent_to_the_wrong_kind_of_wait_is_never_a_yes() {
+        let events = Arc::new(RecordingEvents::new());
+        let (registry, gate) = gate(&events);
+
+        let question = QuestionRequest::new("Pick one", vec!["A".to_string(), "B".to_string()]);
+        let question_id = question.id.clone();
+        let registry_for_question = registry.clone();
+        let approver = tokio::spawn(async move {
+            for _ in 0..50 {
+                if registry_for_question.resolve(&question_id, true) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let question_outcome = gate.ask_question(&question, None).await;
+        approver.await.unwrap();
+        assert_eq!(
+            question_outcome,
+            QuestionOutcome::Unanswered(ApprovalOutcome::Denied)
+        );
+
+        let approval = ApprovalRequest::new("browser_open", "Open a page", "example.com", "detail");
+        let approval_id = approval.id.clone();
+        let answerer = tokio::spawn(async move {
+            for _ in 0..50 {
+                if registry.answer(&approval_id, "Redis") {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let approval_outcome = gate.ask(&approval, None).await;
+        answerer.await.unwrap();
+        assert_eq!(approval_outcome, ApprovalOutcome::Denied);
     }
 
     #[tokio::test]

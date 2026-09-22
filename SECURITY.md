@@ -107,6 +107,17 @@ A tool loop re-sends every earlier round, so a long one can outgrow the context 
 
 They are advertised when the profile's `toolCallMode` is `native_tools`, which is the default for cloud profiles. If the endpoint rejects a `tools` parameter the client drops it, retries once, and writes a `tool_capability_degraded` warning to the action log — so a run without tools is visible rather than silent. The tool loop is bounded at 12 rounds per stage, with the per-run token cap as the real cost limit.
 
+## Asking the User
+
+`ask_user_question` is the one tool that reaches the user instead of the machine. The Agent gives a question and 2–4 short options; the run pauses until the user picks one, types their own answer, or declines.
+
+- **It authorizes nothing.** The answer is a decision, not a permission — it can never widen what the Agent may do. It rides the same registry, id space and 120 s timeout as the approval gate (`ApprovalGate::ask_question`), so Stop refuses a pending question exactly like a pending approval, and the dialog is always closed when the backend stops waiting.
+- **No answer is never turned into an answer.** A timeout or an unattended run returns a success result that says nobody answered and instructs the model to state which option it assumed; dismissing the question is an error result. An invented answer would be carried through the rest of the run as the user's stated preference, which is worse than no answer at all.
+- **A decision sent to the wrong kind of wait is never a yes.** The registry is keyed by request id alone, so a stale frontend could send an approval to a question or an answer to an approval. Both map to a refusal, pinned by a test.
+- **The user always gets a free-text answer**, and the model is forbidden from adding an "Other" option itself (rejected with an error). The options are what the model thought of, not the set of possible answers.
+- **Malformed arguments are refused before anyone is disturbed**: fewer than 2 or more than 4 options, options that repeat case-insensitively, or an empty question. The error tells the model what to fix; opening a dialog the user cannot make sense of spends the one thing this tool costs — their attention.
+- It is only advertised when a question channel is attached, so the CLI and other headless entry points never see it.
+
 ## Desktop Observation
 
 `workspace_computer_windows` lists the visible top-level desktop windows — title, app, size, and which one is in the foreground. This is the first slice of computer use and it is **read-only**: nothing on the desktop is clicked, typed into or captured.

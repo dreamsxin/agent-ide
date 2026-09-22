@@ -34,6 +34,7 @@ import type {
   BooleanPermissionKey,
   AgentPermissionPreset,
   DestructiveOpConfirm,
+  AgentQuestion,
   RunUsage,
 } from "../types/agent";
 import {
@@ -146,6 +147,14 @@ interface AgentStore {
   permissionPreset: AgentPermissionPreset;
   permissions: AgentPermission;
   pendingConfirm: DestructiveOpConfirm | null;
+  /**
+   * 模型正在等用户回答的那道选择题。
+   *
+   * 和 `pendingConfirm` 各占一个槽而不是合并：两者的交互不同（是/否 vs 选一项或自己写），
+   * 而且一次运行里两种都可能挂着 —— 合成一个槽会让后来的那条把前一条顶掉，被顶掉的那个
+   * 在后端还挂着，用户却再也看不到它。
+   */
+  pendingQuestion: AgentQuestion | null;
 
   // ====== 同步 Actions ======
   setState: (state: AgentState) => void;
@@ -292,6 +301,18 @@ interface AgentStore {
   resolveConfirm: (approved: boolean) => Promise<boolean>;
   /** 后端已经不等这条请求了（超时 / Stop）。只在 id 对得上时收掉对话框。 */
   closeConfirm: (requestId: string) => void;
+  /** 模型问了一道选择题，等用户回答。 */
+  requestQuestion: (question: AgentQuestion) => void;
+  /**
+   * 把答案送回后端，收掉提问框。返回后端是否真的还有人在等。
+   *
+   * 空答案不发：后端会拒，而界面上"提交了一个空答案"看起来像成功。
+   */
+  answerQuestion: (answer: string) => Promise<boolean>;
+  /** 用户不想回答这道题。走批准那条拒绝通道，因为等待方是同一张登记表。 */
+  dismissQuestion: () => Promise<void>;
+  /** 后端不等这道题了。同 `closeConfirm`，只在 id 对得上时收掉。 */
+  closeQuestion: (requestId: string) => void;
 
   // ====== 连通性测试 ======
   testLlmConnection: () => Promise<string>;
@@ -426,6 +447,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   permissionPreset: "read-only",
   permissions: READ_ONLY_PERMISSIONS,
   pendingConfirm: null,
+  pendingQuestion: null,
 
   // ========== 同步 Actions ==========
   setState: (state) => {
@@ -886,6 +908,73 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // id 要对上：后端关掉的是**那一条**请求，而这时挂着的可能已经是下一条了
       s.pendingConfirm && s.pendingConfirm.id === requestId ? { pendingConfirm: null } : s
     ),
+  requestQuestion: (question) =>
+    set((s) => {
+      if (s.pendingQuestion && s.pendingQuestion.id !== question.id) {
+        // 同 `requestConfirm`：后端能同时挂多条，这里只有一个槽。被顶掉的那条在后端还
+        // 挂着而用户再也看不到，只能白等到超时。
+        console.warn(
+          "[AgentStore] replacing a pending question that was never answered:",
+          s.pendingQuestion.id
+        );
+      }
+      return { pendingQuestion: question };
+    }),
+  answerQuestion: async (answer) => {
+    const pending = get().pendingQuestion;
+    const trimmed = answer.trim();
+    if (!pending || !trimmed) {
+      return false;
+    }
+    // 先收框再等后端，理由同 `resolveConfirm`：还开着的话第二次提交会送第二个答案，
+    // 而后端那条请求已经被第一次取走了
+    set({ pendingQuestion: null });
+    if (!isTauriRuntime()) {
+      return false;
+    }
+    try {
+      const heard = await invoke<boolean>("answer_agent_question", {
+        requestId: pending.id,
+        answer: trimmed,
+      });
+      if (!heard) {
+        // 这个答案没人收到。不说的话，用户以为自己已经替 Agent 定了方向，而 Agent 正
+        // 按自己的判断往下走。
+        set({
+          error: `That answer arrived too late — the Agent had already moved on (${pending.question}).`,
+        });
+      }
+      return heard;
+    } catch (err) {
+      console.warn("[AgentStore] answer_agent_question failed:", err);
+      set({ error: `Could not send that answer: ${String(err)}` });
+      return false;
+    }
+  },
+  dismissQuestion: async () => {
+    const pending = get().pendingQuestion;
+    if (!pending) {
+      return;
+    }
+    set({ pendingQuestion: null });
+    if (!isTauriRuntime()) {
+      return;
+    }
+    // 走批准的拒绝通道：等待方在同一张登记表里，而"关掉"在后端就是"没有答案"
+    try {
+      await invoke<boolean>("resolve_agent_approval", {
+        requestId: pending.id,
+        approved: false,
+      });
+    } catch (err) {
+      console.warn("[AgentStore] could not dismiss the question:", err);
+    }
+  },
+  closeQuestion: (requestId) =>
+    set((s) =>
+      s.pendingQuestion && s.pendingQuestion.id === requestId ? { pendingQuestion: null } : s
+    ),
+
 
   // ========== 异步 Actions (IPC) ==========
   sendPrompt: async (params) => {

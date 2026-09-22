@@ -406,7 +406,50 @@ export function normalizeApprovalRequest(value: unknown): DestructiveOpConfirm |
   };
 }
 
+/**
+ * 模型问用户的一道选择题。
+ *
+ * 和 `DestructiveOpConfirm` 是两回事：那个问"要不要让我做"，这个问"你想要哪一种"。
+ * 答案不是许可，所以没有"批准/拒绝"，只有一个字符串。
+ */
+export interface AgentQuestion {
+  id: string;
+  question: string;
+  /** 模型给的候选项。用户永远还可以自己写一句，所以这不是全集 */
+  options: string[];
+}
+
+/**
+ * 把后端 `agent-question-requested` 的载荷收成一道选择题。
+ *
+ * 缺字段、选项不足两个就返回 null：一个只有一个按钮的"选择题"点不出信息，而显示它会让
+ * 用户以为自己回答了什么。读不懂的请求由调用方回一个"没答案"，不能默默丢掉 ——
+ * 丢掉的话后端要白等满两分钟。
+ */
+export function normalizeAgentQuestion(value: unknown): AgentQuestion | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === "string" ? raw.id : "";
+  const question = typeof raw.question === "string" ? raw.question.trim() : "";
+  if (!id || !question) {
+    return null;
+  }
+  const options = Array.isArray(raw.options)
+    ? raw.options
+        .filter((option): option is string => typeof option === "string")
+        .map((option) => option.trim())
+        .filter((option) => option.length > 0)
+    : [];
+  if (options.length < 2) {
+    return null;
+  }
+  return { id, question, options };
+}
+
 export type ContextCompressionMode = "full" | "focused" | "compact" | "budgeted";
+
 export type StepScope = "selection" | "active_file" | "open_files" | "workspace";
 export type StepExecutionMode = "analyze" | "diff" | "test" | "fix";
 
