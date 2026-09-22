@@ -76,11 +76,27 @@ impl AgentGlobalState {
     /// `send_chat_request` 里强制，所以只要客户端是从这里拿的，就一定被记账、
     /// 也一定受上限约束。已知取舍：`continue_agent_pipeline` 恢复暂停的运行时
     /// 会重新开始记账，续跑的部分不计入上一段的额度。
+    /// 取一个客户端，可选地只把**模型名**换掉。
+    ///
+    /// `model_override` 的用途是"这一次换个模型试试"，而不用为此存一个 profile。它只改模型名：
+    /// endpoint、key、预算、价格、上限统统还是那个 profile 的 —— 换模型不该顺带换掉
+    /// 用户配的花钱上限。价格也因此可能对不上（profile 里的单价是给它原来那个模型配的），
+    /// 所以这条覆盖必须在界面上说出来，并且写一条 action log。
+    ///
+    /// 空串当成没设置：前端的输入框清空之后送过来的就是空串，而一个空模型名会变成供应商那边
+    /// 一句看不懂的 400。
     pub fn get_llm_client(
         &self,
         profile_id: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<(LlmClient, Arc<crate::services::llm_client::RunUsageMeter>), String> {
-        let config = self.get_llm_config(profile_id)?;
+        let mut config = self.get_llm_config(profile_id)?;
+        if let Some(model) = model_override.map(str::trim).filter(|m| !m.is_empty()) {
+            config.model = model.to_string();
+            // `model_type` 是从模型名推出来的（决定输出 token 用哪个键名、走不走 reasoning），
+            // 换了名字必须跟着重算，否则 o3 的请求会带着一个它不认识的 `max_tokens`
+            config.model_type = crate::services::llm_client::ModelType::from_string(model);
+        }
         // 配置了本地模型的 profile 在这里就被挡住：进程内推理已经移除，静默降级成
         // 远端调用只会让用户收到一串莫名其妙的 401/404。这是这条路径上唯一的检查点。
         if let Some(local) = &config.local_model_config {
@@ -154,6 +170,10 @@ pub struct SendPromptRequest {
     pub selection: Option<String>,
     #[serde(rename = "profileId")]
     pub profile_id: Option<String>,
+    /// 只换模型名，不换 profile。见 `get_llm_client`：key、endpoint、预算、价格、上限都还是
+    /// 那个 profile 的，所以价格可能对不上 —— 这条覆盖会写进 action log。
+    #[serde(default, rename = "modelOverride")]
+    pub model_override: Option<String>,
     #[serde(rename = "contextCompression")]
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
@@ -237,6 +257,10 @@ pub struct EstimateContextRequest {
     pub selection: Option<String>,
     #[serde(rename = "profileId")]
     pub profile_id: Option<String>,
+    /// 只换模型名，不换 profile。见 `get_llm_client`：key、endpoint、预算、价格、上限都还是
+    /// 那个 profile 的，所以价格可能对不上 —— 这条覆盖会写进 action log。
+    #[serde(default, rename = "modelOverride")]
+    pub model_override: Option<String>,
     #[serde(rename = "contextCompression")]
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
@@ -259,6 +283,10 @@ pub struct RunAgentStepRequest {
     pub selection: Option<String>,
     #[serde(rename = "profileId")]
     pub profile_id: Option<String>,
+    /// 只换模型名，不换 profile。见 `get_llm_client`：key、endpoint、预算、价格、上限都还是
+    /// 那个 profile 的，所以价格可能对不上 —— 这条覆盖会写进 action log。
+    #[serde(default, rename = "modelOverride")]
+    pub model_override: Option<String>,
     #[serde(rename = "contextCompression")]
     pub context_compression: Option<String>,
     #[serde(default, rename = "contextSources")]
@@ -368,7 +396,10 @@ pub async fn send_agent_prompt(
     agent_state: State<'_, AgentGlobalState>,
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
-    let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let (llm, usage_meter) = agent_state.get_llm_client(
+        request.profile_id.as_deref(),
+        request.model_override.as_deref(),
+    )?;
     let tool_policy =
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
     // 这次运行的副作用开关先造出来，**交给授权**，之后所有需要它的地方都从授权里取：
@@ -471,6 +502,13 @@ pub async fn send_agent_prompt(
     );
     context.enrich_from_workspace_with_sources(&context_sources);
     emit_project_memory_warning(&agent_state.orchestrator, &app_handle, &context).await;
+    emit_model_override_log(
+        &agent_state,
+        &app_handle,
+        request.profile_id.as_deref(),
+        request.model_override.as_deref(),
+    )
+    .await;
 
     let prompt_for_history = request.prompt.clone();
     let outcome = crate::agent::orchestrator::drive_run(
@@ -754,6 +792,32 @@ fn publish_tool_writes(
 /// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
 ///
 /// 三个命令共九条退出分支以前各抄一遍这段。抄漏确实发生了：`run_agent_step` 的
+/// 这次运行临时换了模型时告诉用户。
+///
+/// 和项目记忆截断一样在运行**开始前**说：它影响这一次运行报出来的金额和预算，而事后再说
+/// 用户已经按那个数字下了判断。写 action log 而不是只在聊天框旁边显示一行，是因为那一行
+/// 只有正在看设置的人会注意到，而 action log 是"这次运行到底发生了什么"的档案。
+async fn emit_model_override_log(
+    agent_state: &AgentGlobalState,
+    events: &dyn crate::agent::events::RunEvents,
+    profile_id: Option<&str>,
+    model_override: Option<&str>,
+) {
+    let Some(model) = model_override.map(str::trim).filter(|m| !m.is_empty()) else {
+        return;
+    };
+    let Ok(config) = agent_state.get_llm_config(profile_id) else {
+        return;
+    };
+    let Some((summary, details)) =
+        crate::services::llm_client::model_override_report(&config.model, model)
+    else {
+        return;
+    };
+    let orch = agent_state.orchestrator.lock().await;
+    orch.emit_run_action_log(events, "warn", "model_override", &summary, &details);
+}
+
 /// 项目记忆被截断时告诉用户。
 ///
 /// 为什么在运行**开始前**说，而不是等 `finish_agent_run`：这件事在装配上下文的那一刻才知道，
@@ -1068,7 +1132,10 @@ pub async fn run_agent_step(
     agent_state: State<'_, AgentGlobalState>,
     mcp_state: State<'_, crate::commands::mcp::McpState>,
 ) -> Result<String, String> {
-    let (llm, usage_meter) = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let (llm, usage_meter) = agent_state.get_llm_client(
+        request.profile_id.as_deref(),
+        request.model_override.as_deref(),
+    )?;
     let tool_policy =
         crate::services::mcp::McpToolPolicy::from_request(request.tool_approval.as_deref());
     // 开关先造、交给授权，之后一律从授权里取 —— 和 `send_agent_prompt` 同一个理由
@@ -1179,6 +1246,13 @@ pub async fn run_agent_step(
     );
     context.enrich_from_workspace_with_sources(&context_sources);
     emit_project_memory_warning(&agent_state.orchestrator, &app_handle, &context).await;
+    emit_model_override_log(
+        &agent_state,
+        &app_handle,
+        request.profile_id.as_deref(),
+        request.model_override.as_deref(),
+    )
+    .await;
     let ctx_str = context.to_prompt_context_with_options(&ContextBuildOptions::new(
         compression.clone(),
         context_budget,
@@ -1313,8 +1387,14 @@ pub async fn continue_agent_pipeline(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
     mcp_state: State<'_, crate::commands::mcp::McpState>,
+    profile_id: Option<String>,
+    model_override: Option<String>,
 ) -> Result<String, String> {
-    let (llm, fresh_meter) = agent_state.get_llm_client(None)?;
+    // 续跑必须用**发起时**选的那个 profile 和模型：以前这里写死 `None`，也就是退回当前
+    // 活跃 profile —— 用户在聊天里选了模型 B，续跑却悄悄换回 A，价格、上限、窗口全变了，
+    // 而界面上没有任何提示。
+    let (llm, fresh_meter) =
+        agent_state.get_llm_client(profile_id.as_deref(), model_override.as_deref())?;
     // 续跑是一次新的运行：新开关。沿用暂停前那个开关的话，如果当时是被 Stop 停下的，
     // 续跑会一上来就被自己拦住。
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1671,6 +1751,13 @@ pub struct RepairWorkspaceRequest {
     /// 原始任务描述；不给就用最近一轮对话的 prompt
     #[serde(default)]
     pub original_prompt: Option<String>,
+    /// 用哪个 profile 跑。以前这里根本不传，于是修复循环总是退回当前活跃 profile ——
+    /// 用户在聊天里选的模型 B 被悄悄换成 A，价格、上限、窗口跟着变而界面上看不出来。
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// 只换模型名，见 `get_llm_client`
+    #[serde(default)]
+    pub model_override: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1698,7 +1785,11 @@ pub async fn repair_workspace(
 ) -> Result<RepairWorkspaceReport, String> {
     let (commands, _skipped) = crate::services::verification::prepare_commands(request.commands)?;
     let max_iterations = request.max_iterations.unwrap_or(1).clamp(1, 3);
-    let (llm, usage_meter) = agent_state.get_llm_client(None)?;
+    // 修复循环用发起时选的 profile 和模型，理由同 `continue_agent_pipeline`
+    let (llm, usage_meter) = agent_state.get_llm_client(
+        request.profile_id.as_deref(),
+        request.model_override.as_deref(),
+    )?;
     // 修复也是一次新的运行：新开关，装工具面之前就造好
     let side_effect_switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -3047,7 +3138,7 @@ pub async fn test_llm_connection(
     agent_state: State<'_, AgentGlobalState>,
     profile_id: Option<String>,
 ) -> Result<String, String> {
-    let (llm, _usage_meter) = agent_state.get_llm_client(profile_id.as_deref())?;
+    let (llm, _usage_meter) = agent_state.get_llm_client(profile_id.as_deref(), None)?;
     // 连通性探测有自己的取消开关。以前它清的是全局那个，于是"测试连接"这个
     // 无害动作会把一次正在跑的运行**取消解除**。
     let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));

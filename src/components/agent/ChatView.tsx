@@ -256,6 +256,8 @@ export default function ChatView() {
   const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
   const contextCompression = useAgentStore((s) => s.contextCompression);
   const setChatProfileId = useAgentStore((s) => s.setChatProfileId);
+  const chatModelOverride = useAgentStore((s) => s.chatModelOverride);
+  const setChatModelOverride = useAgentStore((s) => s.setChatModelOverride);
   const setChatContextCompression = useAgentStore((s) => s.setChatContextCompression);
 
   const activeFile = useEditorStore((s) => s.activeFile);
@@ -285,6 +287,9 @@ export default function ChatView() {
   const info = STATE_INFO[agentState] ?? STATE_INFO.idle;
   const isSending = isActing;
   const selectedProfileId = chatProfileId ?? activeProfileId;
+  // 占位符显示"不覆盖时会用哪个模型"：用户要能看出默认值是什么，才知道自己在改什么
+  const activeProfileModel =
+    llmProfiles.find((profile) => profile.id === selectedProfileId)?.model ?? "";
   const selectedContextMode = chatContextCompression ?? contextCompression;
   const selectedProfile = llmProfiles.find((profile) => profile.id === selectedProfileId);
   const failedTaskCount = Object.values(taskRuns).filter((task) => task.status === "failed").length;
@@ -602,6 +607,41 @@ export default function ChatView() {
             <option value="budgeted">Mode: Budgeted</option>
             <option value="full">Mode: Full</option>
           </select>
+        </div>
+        {/*
+          临时换模型：不用为"试一下另一个模型"存一个 profile（存了还会顺带把它设成全局活跃的）。
+          只换模型名 —— key、endpoint、预算、价格、上限都还是所选 profile 的，所以下面那句话
+          必须在，而后端也会为此写一条 action log。
+        */}
+        <div className="mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <input
+              value={chatModelOverride ?? ""}
+              onChange={(event) => setChatModelOverride(event.target.value)}
+              disabled={isSending}
+              placeholder={`Model for this chat (default: ${activeProfileModel || "unset"})`}
+              aria-label="Model for this chat"
+              className="min-w-0 flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            {chatModelOverride && (
+              <button
+                type="button"
+                onClick={() => setChatModelOverride(null)}
+                disabled={isSending}
+                className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-muted hover:bg-surface-border/30"
+                title="Go back to the profile's model"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {chatModelOverride && (
+            <p className="mt-1 text-[10px] leading-relaxed text-surface-muted">
+              Only the model name changes. The key, endpoint, spend and token caps, context budget
+              and per-token prices still come from this profile — the cost shown for the run may be
+              priced at the wrong rate.
+            </p>
+          )}
         </div>
         {(selectedProfile?.effectiveInputTokens !== undefined || contextEstimate) && (
           // 这个数字只覆盖**打包进去的那几节上下文**：系统提示词、工具 schema、逐阶段累积的

@@ -1926,6 +1926,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The CLI prints the same two sentences to stderr, next to the image and history warnings; stdout stays parseable.
    - The wording lives in `truncation_report`, tested like `history_trim_report`: it names the byte size, the bound, and that the tail *was not seen in this run* — "it was truncated" alone does not tell the user which of their rules went missing.
    - Rust 517 → 519 (518 passing, 1 ignored); frontend unchanged.
+145. **Switch model without saving a profile — and stop two paths from silently switching it back (2026-09-22)**
+   Next from the gap list (134). Trying another model meant saving a profile, and `save_llm_profile` sets it active by default: a one-off experiment rewrote the global configuration.
+   - **The override changes the model name and nothing else.** `get_llm_client(profile_id, model_override)` replaces `config.model` and recomputes `model_type` from it (that is what decides whether the request carries `max_tokens` or `max_completion_tokens`, and whether reasoning is sent — keeping the old one would send `o3` a parameter it rejects). Endpoint, key, token cap, spend cap, context budget and per-token prices deliberately stay with the profile: switching a model must not silently widen a spend limit the user set.
+   - **Which means the reported cost can be wrong, so it is said out loud.** `model_override_report` produces a `model_override` action-log warning naming both models and listing exactly what did not change with it; the chat also shows the same caveat under the input. A cost figure the user cannot trace to a rate is worse than no figure.
+   - **Two paths were switching the model behind the user's back.** `continue_agent_pipeline` and `repair_workspace` passed `None` for the profile, i.e. "whatever is active now" — pick model B in the chat, continue the pipeline, and the second half ran on model A with A's prices and caps, invisibly. Both now take the chat's profile and override. This was pre-existing and is the kind of defect that only shows up in a bill.
+   - **Blank is not a model.** An empty or whitespace-only override is treated as "no override" in the store, in the backend, and in the report — an empty model name would otherwise become an unreadable provider 400.
+   - Not taken: adopting the overridden model's context window / prices from `modelLimits`. That table lives in the frontend and covers a subset of ids; guessing a window for the backend's budget decisions would trade a visible caveat for an invisible wrong number. Saving a profile remains the way to get those right, and the warning says so.
+   - Rust 519 → 520 (519 passing, 1 ignored); frontend 287 → 288.
 
 
 

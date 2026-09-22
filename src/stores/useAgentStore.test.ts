@@ -231,6 +231,38 @@ describe("sendPrompt", () => {
     // id 用这一轮的 run id，方便和后端日志对上
     expect(task?.id).toBe(useAgentStore.getState().agentRunId);
   });
+
+  /**
+   * 临时换模型必须真的传到后端，而空输入必须当成"没覆盖"。
+   *
+   * 以前试另一个模型要先存一个 profile，而 `save_llm_profile` 默认还会把它设成活跃的 ——
+   * 为了试一次就改掉了全局配置。而一个空模型名会变成供应商那边一句看不懂的 400，所以清空
+   * 输入框等于取消覆盖。
+   */
+  it("passes a chat model override through, and treats blank as no override", async () => {
+    invokeMock.mockResolvedValue("ok");
+
+    useAgentStore.getState().setChatModelOverride("  gpt-4o  ");
+    expect(useAgentStore.getState().chatModelOverride).toBe("gpt-4o");
+    await useAgentStore.getState().sendPrompt({ prompt: "hello" });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "send_agent_prompt",
+      expect.objectContaining({
+        request: expect.objectContaining({ modelOverride: "gpt-4o" }),
+      })
+    );
+
+    invokeMock.mockClear();
+    useAgentStore.getState().setChatModelOverride("   ");
+    expect(useAgentStore.getState().chatModelOverride).toBeNull();
+    await useAgentStore.getState().sendPrompt({ prompt: "hello" });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "send_agent_prompt",
+      expect.objectContaining({
+        request: expect.objectContaining({ modelOverride: null }),
+      })
+    );
+  });
 });
 
 describe("setActiveLlmProfile", () => {

@@ -1083,6 +1083,31 @@ pub struct HistoryTrim {
     pub budget_tokens: u32,
 }
 
+/// 把"这次运行临时换了模型"变成一句给用户的话。没换、或者换成同一个名字就返回 None。
+///
+/// 必须说出来：覆盖只换模型名，花钱的单价、单次上限、上下文预算都还是 profile 里给**原来那个
+/// 模型**配的。也就是说这次运行报出来的金额可能是按另一个模型的价格算的 —— 一个说不清出处的
+/// 数字比没有数字更糟。
+pub fn model_override_report(profile_model: &str, model: &str) -> Option<(String, String)> {
+    let model = model.trim();
+    if model.is_empty() || model == profile_model.trim() {
+        return None;
+    }
+    Some((
+        format!(
+            "This run used {} instead of the profile's {}",
+            model, profile_model
+        ),
+        format!(
+            "Only the model name was replaced. The endpoint, key, token and spend caps, context \
+             budget and per-token prices all still come from the selected profile — they were set \
+             for {}, so the cost reported for this run may be priced at the wrong rate and the \
+             context budget may not match {}'s real window. Save a profile for {} to get those right.",
+            profile_model, model, model
+        ),
+    ))
+}
+
 /// 把"工具回合中途削过历史"变成一句给用户的话。没削过就返回 None。
 ///
 /// 必须说出来，而且不能只写进发给模型的那条系统提示：模型知道少了一段，用户只会看到一次
@@ -3852,6 +3877,28 @@ mod tests {
 
         assert!(!response.trim().is_empty());
         assert_eq!(rx.recv().await.as_deref(), Some(response.as_str()));
+    }
+
+    /// 临时换模型必须说出来，而且要说清哪些东西**没有**跟着换。
+    ///
+    /// 只换模型名的话，价格还是 profile 里给原来那个模型配的 —— 这次运行报出来的金额可能
+    /// 是按另一个模型的单价算的，而一个说不清出处的数字比没有数字更糟。
+    #[test]
+    fn a_model_override_says_what_did_not_change_with_it() {
+        assert!(model_override_report("deepseek-chat", "deepseek-chat").is_none());
+        assert!(model_override_report("deepseek-chat", "   ").is_none());
+        // 前后空白不算换了模型：那只是输入框里多打了一个空格
+        assert!(model_override_report("deepseek-chat", " deepseek-chat ").is_none());
+
+        let (summary, details) =
+            model_override_report("deepseek-chat", "gpt-4o").expect("a real override is reported");
+
+        assert!(summary.contains("gpt-4o"), "{}", summary);
+        assert!(summary.contains("deepseek-chat"), "{}", summary);
+        // 价格和预算没跟着换，这两件事都要点名
+        assert!(details.contains("priced at the wrong rate"), "{}", details);
+        assert!(details.contains("context budget"), "{}", details);
+        assert!(details.contains("spend caps"), "{}", details);
     }
 
     /// 提示词预算要把输出那一份先扣掉，而窗口未知时一个数字都不给。

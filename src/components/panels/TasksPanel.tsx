@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTaskStore } from "../../stores/useTaskStore";
+import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
@@ -87,7 +88,14 @@ export default function TasksPanel() {
     setVerifyStatus(null);
     try {
       const report = await invoke<RepairWorkspaceReport>("repair_workspace", {
-        request: { commands: tasks.map((item) => item.command), maxIterations: 2 },
+        request: {
+          commands: tasks.map((item) => item.command),
+          maxIterations: 2,
+          // 跟着聊天里选的 profile 和模型跑：不传的话后端退回当前活跃 profile，于是修复
+          // 循环悄悄换到另一个模型上，价格、上限、窗口都变了而这里看不出来
+          profileId: useAgentStore.getState().chatProfileId,
+          modelOverride: useAgentStore.getState().chatModelOverride,
+        },
       });
       const rounds = `${report.iterations} round(s)`;
       setVerifyStatus(

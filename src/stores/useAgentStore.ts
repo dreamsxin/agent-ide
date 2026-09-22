@@ -141,6 +141,14 @@ interface AgentStore {
   llmProfiles: LlmProfile[];
   activeProfileId: string;
   chatProfileId: string | null;
+  /**
+   * 这个聊天临时用的模型名，不存 profile。
+   *
+   * 试另一个模型以前必须先存一个 profile（而且 `save_llm_profile` 默认还把它设成活跃的）——
+   * 为了试一次就改掉了全局配置。这里只换模型名：key、endpoint、预算、价格、上限都还是所选
+   * profile 的，所以后端会为此写一条 action log，界面上也要说清这一点。
+   */
+  chatModelOverride: string | null;
   chatContextCompression: ContextCompressionMode | null;
 
   // ====== 权限控制 ======
@@ -283,6 +291,8 @@ interface AgentStore {
   deleteLlmProfile: (profileId: string) => Promise<void>;
   setActiveLlmProfile: (profileId: string) => Promise<void>;
   setChatProfileId: (profileId: string | null) => void;
+  /** 临时换模型。空串按"没设置"处理 —— 一个空模型名会变成供应商那边一句看不懂的 400。 */
+  setChatModelOverride: (model: string | null) => void;
   revealLlmApiKey: (profileId?: string | null) => Promise<string>;
   setChatContextCompression: (mode: ContextCompressionMode | null) => void;
   updateContextCompression: (mode: ContextCompressionMode) => Promise<void>;
@@ -452,6 +462,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   llmProfiles: [],
   activeProfileId: "",
   chatProfileId: null,
+  chatModelOverride: null,
   chatContextCompression: null,
 
   // ====== 权限初始值 ======
@@ -1095,6 +1106,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           activeFileContent: params.activeFileContent ?? null,
           selection: params.selection ?? null,
           profileId: params.profileId ?? get().chatProfileId,
+          modelOverride: get().chatModelOverride,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
           ideRuntime: params.ideRuntime ?? null,
@@ -1406,6 +1418,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           activeFileContent: params.activeFileContent ?? null,
           selection: params.selection ?? null,
           profileId: params.profileId ?? get().chatProfileId,
+          modelOverride: get().chatModelOverride,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
           ideRuntime: params.ideRuntime ?? null,
@@ -1491,6 +1504,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           activeFileContent: params.activeFileContent ?? null,
           selection: params.selection ?? null,
           profileId: params.profileId ?? get().chatProfileId,
+          modelOverride: get().chatModelOverride,
           contextCompression: params.contextCompression ?? get().chatContextCompression,
           contextSources: params.contextSources ?? null,
           toolApproval: mcpApprovalForPermissions(get().permissions),
@@ -1531,7 +1545,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       if (!isTauriRuntime()) {
         throw new Error("Agent backend is available in the Tauri app runtime.");
       }
-      await invoke("continue_agent_pipeline");
+      // 续跑要用发起时选的那个 profile 和模型：不传的话后端退回当前活跃 profile，
+      // 于是同一条流水线的后半段悄悄换了模型，价格和上限跟着变
+      await invoke("continue_agent_pipeline", {
+        profileId: get().chatProfileId,
+        modelOverride: get().chatModelOverride,
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "Agent task cancelled") {
@@ -1644,6 +1663,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   setChatProfileId: (profileId) => set({ chatProfileId: profileId }),
+  // 空串和纯空白都收成 null：后端把空模型名当"没覆盖"，界面这边也必须是同一个判断，
+  // 否则输入框清空之后还会显示"正在用 xxx"
+  setChatModelOverride: (model) =>
+    set({ chatModelOverride: model && model.trim() ? model.trim() : null }),
   setChatContextCompression: (mode) => set({ chatContextCompression: mode }),
 
   /** 显式取一次明文密钥，只在用户点击"显示"时调用 */
