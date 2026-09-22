@@ -5,7 +5,7 @@ import { useAgentStore } from "../stores/useAgentStore";
 import { useLogStore } from "../stores/useLogStore";
 import { useProblemStore } from "../stores/useProblemStore";
 import type { AgentState, Step, DiffEntry, PipelineStage, AgentActionLogEntry, SddArtifact } from "../types/agent";
-import { normalizeAgentMode, normalizeApprovalRequest, normalizeRunUsage } from "../types/agent";
+import { normalizeAgentMode, normalizeApprovalRequest, normalizeContextUsage, normalizeRunUsage } from "../types/agent";
 import { isTauriRuntime } from "../utils/tauri";
 
 interface StateChangedPayload {
@@ -27,6 +27,7 @@ interface StateChangedPayload {
 export function useAgentBridge() {
   const setState = useAgentStore((s) => s.setState);
   const setSteps = useAgentStore((s) => s.setSteps);
+  const setContextUsage = useAgentStore((s) => s.setContextUsage);
   const updateStep = useAgentStore((s) => s.updateStep);
   const setDiffs = useAgentStore((s) => s.setDiffs);
   const setSddArtifact = useAgentStore((s) => s.setSddArtifact);
@@ -103,6 +104,13 @@ export function useAgentBridge() {
           listen<PipelineStage[]>("agent-pipeline-update", (e) => {
             setPipeline(e.payload);
           }),
+
+          // 上下文占用的测量值。归一化而不是直接铺进 store：载荷来自事件，见
+          // `normalizeContextUsage`（0 代表"没测到"，不是"上下文是空的"）。
+          listen<unknown>("agent-context-usage", (e) => {
+            setContextUsage(normalizeContextUsage(e.payload));
+          }),
+
 
           listen<AgentActionLogEntry>("agent-action-log", (e) => {
             const entry = e.payload;
@@ -191,6 +199,7 @@ export function useAgentBridge() {
     clearStreamContent,
     closeConfirm,
     requestConfirm,
+    setContextUsage,
     setDiffs,
     setPipeline,
     setSddArtifact,

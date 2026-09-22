@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "../utils/tauri";
+import { deriveTaskTitle } from "../utils/agentTaskTitle";
 import {
   normalizeExternalActions,
   type ExternalActionRecord,
@@ -11,6 +12,7 @@ import type {
   IdeMode,
   AgentRole,
   ContextCompressionMode,
+  ContextUsageMeasurement,
   PipelineStage,
   LlmConfigResponse,
   LlmConnectionState,
@@ -50,7 +52,14 @@ interface AgentStore {
   mode: AgentMode;
   ideMode: IdeMode;
   currentTask: Task | null;
-  tasks: Task[];
+  /**
+   * 上下文占用的测量值，来自后端 `agent-context-usage`。
+   *
+   * 和 ChatView 里那份发送前的估算刻意分开：单位和覆盖范围都不同，混成一个数字会让
+   * 人以为它们可以互相校对。没有一次请求回报过用量时保持 null —— 界面这时什么都不
+   * 显示，而不是显示 0%。
+   */
+  contextUsage: ContextUsageMeasurement | null;
   diffs: DiffEntry[];
   /**
    * 本次运行里撤不回的外部动作（浏览器导航等）。
@@ -124,8 +133,8 @@ interface AgentStore {
   setState: (state: AgentState) => void;
   setMode: (mode: AgentMode) => void;
   setIdeMode: (mode: IdeMode) => void;
-  setCurrentTask: (task: Task | null) => void;
-  addTask: (task: Task) => void;
+  /** 后端回报的上下文占用；`null` 表示这次运行没有任何可测量的用量 */
+  setContextUsage: (usage: ContextUsageMeasurement | null) => void;
   setSteps: (steps: Step[]) => void;
   updateStep: (stepId: string, updates: Partial<Step>) => void;
   setDiffs: (diffs: DiffEntry[]) => void;
@@ -321,7 +330,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   mode: "suggest",
   ideMode: "code",
   currentTask: null,
-  tasks: [],
+  contextUsage: null,
   diffs: [],
   externalActions: [],
   sddArtifacts: [],
@@ -378,16 +387,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set({ ideMode });
     persistAgentSession(get());
   },
-  setCurrentTask: (currentTask) => {
-    set({ currentTask });
-    persistAgentSession(get());
-  },
-  addTask: (task) =>
-    set((s) => {
-      const next = { tasks: [...s.tasks, task], currentTask: task };
-      windowQueuePersist(() => persistAgentSession({ ...get(), ...next }));
-      return next;
-    }),
+  setContextUsage: (contextUsage) => set({ contextUsage }),
   setSteps: (steps) => {
     set({ steps });
     persistAgentSession(get());
@@ -562,7 +562,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set({
       state: "idle",
       currentTask: null,
-      tasks: [],
+      contextUsage: null,
       steps: [],
       pipeline: DEFAULT_PIPELINE,
       sddArtifacts: [],
@@ -744,6 +744,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   sendPrompt: async (params) => {
     const runId = makeAgentRunId("chat");
     const requestIdeMode = params.ideMode ?? get().ideMode;
+    // 标题在这里定下来：prompt 的第一行。后端没有任务标题的概念，而 Plan 标题和运行
+    // 摘要两处都在读它 —— 在这之前它永远是 null，两处都渲染硬编码的字面量。
+    const title = deriveTaskTitle(params.prompt);
     set({
       error: null,
       lastApplyResult: null,
@@ -751,6 +754,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       isStreaming: true,
       agentRunId: runId,
       restoredSession: null,
+      currentTask: title ? { id: runId, title } : null,
     });
     persistAgentSession(get());
     try {
@@ -1487,7 +1491,6 @@ interface PersistedAgentSession {
   mode: AgentMode;
   ideMode: IdeMode;
   currentTask: Task | null;
-  tasks: Task[];
   steps: Step[];
   pipeline: PipelineStage[];
   sddArtifacts: SddArtifact[];
@@ -1522,7 +1525,7 @@ function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] 
   }
 }
 
-function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode" | "currentTask" | "tasks" | "steps" | "pipeline" | "sddArtifacts" | "activeSddArtifact" | "error" | "agentRunId">) {
+function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode" | "currentTask" | "steps" | "pipeline" | "sddArtifacts" | "activeSddArtifact" | "error" | "agentRunId">) {
   if (typeof window === "undefined") return;
   const workspacePath = currentWorkspacePath();
   const hasSessionData = state.steps.length > 0 || state.pipeline.some((stage) => stage.status !== "pending") || state.currentTask !== null || Boolean(state.activeSddArtifact);
@@ -1537,7 +1540,6 @@ function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode
     mode: state.mode,
     ideMode: state.ideMode,
     currentTask: state.currentTask,
-    tasks: state.tasks.slice(-50),
     steps: state.steps.slice(-100),
     pipeline: state.pipeline,
     sddArtifacts: state.sddArtifacts.slice(-50),
@@ -1561,7 +1563,10 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
     const pipeline = Array.isArray(parsed.pipeline) && parsed.pipeline.length > 0
       ? parsed.pipeline
       : DEFAULT_PIPELINE;
-    if (steps.length === 0 && pipeline.every((stage) => stage.status === "pending") && !parsed.currentTask) {
+    // 任务先归一化再判断"这份会话还有内容吗"：判断和恢复用同一个值，否则一份
+    // 形状不对的 currentTask 能让一个空会话复活 —— 恢复出来的 store 里它已经是 null。
+    const currentTask = normalizeRestoredTask(parsed.currentTask);
+    if (steps.length === 0 && pipeline.every((stage) => stage.status === "pending") && !currentTask) {
       return null;
     }
     const interrupted = isInFlightState(parsed.state);
@@ -1569,8 +1574,7 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
       state: normalizeRestoredAgentState(parsed.state),
       mode: normalizeAgentMode(parsed.mode),
       ideMode: parsed.ideMode ?? "code",
-      currentTask: parsed.currentTask ?? null,
-      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      currentTask,
       steps: steps.map(normalizeRestoredStep),
       pipeline: pipeline.map(normalizeRestoredPipelineStage),
       sddArtifacts: Array.isArray(parsed.sddArtifacts) ? parsed.sddArtifacts : [],
@@ -1606,6 +1610,22 @@ function normalizeRestoredAgentState(state?: AgentState): AgentState {
 
 function isInFlightState(state?: AgentState): boolean {
   return state === "thinking" || state === "planning" || state === "acting" || state === "reviewing";
+}
+
+/**
+ * localStorage 里的任务只认两个字符串字段。
+ *
+ * 旧版本存进去的 `Task` 还带 `status` / `steps` / `affectedFiles`，直接铺回 store
+ * 会让一个早已删掉的形状重新出现在状态里；而标题是要渲染的，类型不对就会在
+ * 标题栏里出现 `[object Object]`。
+ */
+function normalizeRestoredTask(task: unknown): Task | null {
+  if (!task || typeof task !== "object") return null;
+  const { id, title } = task as Record<string, unknown>;
+  if (typeof id !== "string" || typeof title !== "string" || title.trim() === "") {
+    return null;
+  }
+  return { id, title };
 }
 
 function normalizeRestoredStep(step: Step): Step {

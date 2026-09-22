@@ -6,6 +6,7 @@ import {
   describeRunUsage,
   mcpApprovalForPermissions,
   normalizeApprovalRequest,
+  normalizeContextUsage,
   normalizeDestructiveOpType,
   normalizeRunUsage,
   permissionsForPreset,
@@ -267,5 +268,26 @@ describe("normalizeApprovalRequest", () => {
     expect(normalizeDestructiveOpType("computer_scroll")).toBe("computer_scroll");
   });
 
+});
+
+describe("normalizeContextUsage", () => {
+  it("keeps a measured request", () => {
+    expect(normalizeContextUsage({ lastPromptTokens: 12000, lastTotalTokens: 12500 })).toEqual({
+      lastPromptTokens: 12000,
+      lastTotalTokens: 12500,
+    });
+  });
+
+  /**
+   * 0 在这里不是"上下文是空的"，而是"这次运行没有一个请求回报过用量"（本地 runtime、
+   * mock 端点都是这样）。返回 null 才能让界面整行不显示，而不是显示一个 0%。
+   */
+  it("treats a zero total as no measurement at all", () => {
+    expect(normalizeContextUsage({ lastPromptTokens: 0, lastTotalTokens: 0 })).toBeNull();
+    expect(normalizeContextUsage({ lastTotalTokens: -5 })).toBeNull();
+    expect(normalizeContextUsage({ lastTotalTokens: Number.NaN })).toBeNull();
+    expect(normalizeContextUsage(null)).toBeNull();
+    expect(normalizeContextUsage("12000")).toBeNull();
+  });
 });
 

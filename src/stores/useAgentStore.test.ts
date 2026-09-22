@@ -216,6 +216,21 @@ describe("sendPrompt", () => {
       })
     );
   });
+
+  // Plan 标题和运行摘要两处都读 `currentTask.title`，而在这之前没有任何代码写过它，
+  // 所以那两处永远显示硬编码的字面量。
+  it("names the task from the prompt so the header stops showing a literal", async () => {
+    invokeMock.mockResolvedValue("ok");
+
+    await useAgentStore.getState().sendPrompt({
+      prompt: "  Add pagination to the users list\n只改后端\n",
+    });
+
+    const task = useAgentStore.getState().currentTask;
+    expect(task?.title).toBe("Add pagination to the users list");
+    // id 用这一轮的 run id，方便和后端日志对上
+    expect(task?.id).toBe(useAgentStore.getState().agentRunId);
+  });
 });
 
 describe("setActiveLlmProfile", () => {
@@ -484,7 +499,7 @@ describe("restoreAgentSession", () => {
       JSON.stringify({
         workspacePath: "/tmp/ws",
         mode: "edit",
-        currentTask: "跟进上一轮",
+        currentTask: { id: "run-1", title: "跟进上一轮" },
         steps: [],
         pipeline: [],
       })
@@ -501,7 +516,7 @@ describe("restoreAgentSession", () => {
       JSON.stringify({
         workspacePath: "/tmp/ws",
         mode: "auto",
-        currentTask: "跟进上一轮",
+        currentTask: { id: "run-1", title: "跟进上一轮" },
         steps: [],
         pipeline: [],
       })

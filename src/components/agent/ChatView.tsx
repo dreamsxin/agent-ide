@@ -227,6 +227,8 @@ export default function ChatView() {
   const promoteSddToCodePrompt = useAgentStore((s) => s.promoteSddToCodePrompt);
   // 只为了重新估算而订阅：对话历史是后端上下文里的一节，改了它数字就该跟着变
   const conversationTurns = useAgentStore((s) => s.conversationTurns);
+  // 上下文占用的测量值，来自最后一次真实请求
+  const contextUsage = useAgentStore((s) => s.contextUsage);
   const [input, setInput] = useState("");
   // 失败后重试要重发的是失败的那条 prompt，不是输入框里当时碰巧有什么。
   // 原来 Retry 的 onClick 就是 handleSend、disabled 是 !input.trim()，而
@@ -616,6 +618,32 @@ export default function ChatView() {
             ) : null}
           </div>
         )}
+        {/*
+          测量值单独一行，和上面那行估算刻意不并排：上面是发送前按字符推的、只覆盖打包
+          进去的那几节；这一行是供应商回报的真实 token，覆盖整个请求（系统提示词、工具
+          schema、逐阶段累积的消息都算在里面）。两个数字并排会被当成可以互相校对。
+          窗口未知或没有测到用量时整行不出现 —— 不显示比显示一个假的百分比好。
+        */}
+        {contextUsage && selectedProfile?.effectiveInputTokens ? (
+          <div className="mb-1.5 px-0.5 text-[10px] text-surface-muted">
+            Measured last request:{" "}
+            <span className="font-mono text-surface-text">
+              {contextUsage.lastTotalTokens.toLocaleString()}
+            </span>
+            {" / "}
+            <span className="font-mono text-surface-text">
+              {selectedProfile.effectiveInputTokens.toLocaleString()}
+            </span>{" "}
+            tokens ·{" "}
+            <span className="font-mono text-surface-text">
+              {Math.min(
+                100,
+                Math.round((contextUsage.lastTotalTokens / selectedProfile.effectiveInputTokens) * 100)
+              )}
+              %
+            </span>
+          </div>
+        ) : null}
         <div className="mb-1.5 rounded border border-surface-border bg-surface-base/60">
           <button
             type="button"

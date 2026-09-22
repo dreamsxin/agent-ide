@@ -51,6 +51,27 @@ export interface RunUsage {
 }
 
 /** 事件里的 usage 字段收敛成 `RunUsage`，非法或缺失时返回 null */
+/**
+ * 上下文占用测量值的归一化。
+ *
+ * 和 `normalizeRunUsage` 同一个理由：事件载荷不可信。多一条规则 —— 总数为 0 时返回
+ * null，因为 0 在这里不是"空的上下文"，而是"这次运行没有一个请求回报过用量"，
+ * 界面必须什么都不显示而不是显示 0%。
+ */
+export function normalizeContextUsage(value: unknown): ContextUsageMeasurement | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const count = (key: string): number => {
+    const candidate = raw[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
+      ? Math.floor(candidate)
+      : 0;
+  };
+  const lastTotalTokens = count("lastTotalTokens");
+  if (lastTotalTokens === 0) return null;
+  return { lastPromptTokens: count("lastPromptTokens"), lastTotalTokens };
+}
+
 export function normalizeRunUsage(value: unknown): RunUsage | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
@@ -503,14 +524,34 @@ export interface GhostSuggestion {
   createdAt: number;
 }
 
-/** Task 任务 */
-export interface Task {
-  id: string;
-  title: string;
-  status: "todo" | "doing" | "done" | "error";
-  steps: Step[];
-  affectedFiles: string[];
+/**
+ * 上下文占用的**测量值**：来自供应商回报的最后一次请求。
+ *
+ * 和 `ContextEstimateResponse` 不是一回事，也不能相加或互相校对：估算是发送前按
+ * 字符推出来的、只覆盖打包进去的那几节上下文；这个是真实 token，覆盖整个请求
+ * （系统提示词、工具 schema、逐阶段累积的消息都在里面）。
+ */
+export interface ContextUsageMeasurement {
+  /** 最后一次请求的输入 token */
+  lastPromptTokens: number;
+  /** 输入 + 输出。上下文窗口是两者共用的，所以占用要算总数 */
+  lastTotalTokens: number;
 }
+
+/**
+ * 当前这一轮任务。**只有标题和身份**，没有步骤列表。
+ *
+ * 步骤是 `steps`，那是后端 `record_plan` 的产物；任务只负责回答"现在在做哪件事"。
+ * 曾经这里还有 `steps` / `affectedFiles` / `status` 三个字段，从来没有人写过它们，
+ * 于是标题栏永远显示硬编码的 "Agent Task"。
+ */
+export interface Task {
+  /** 发起这一轮的 run id，方便和后端日志对上 */
+  id: string;
+  /** 来源见 `deriveTaskTitle`：prompt 的第一行 */
+  title: string;
+}
+
 
 /**
  * 后端真正会喂给模型的一轮对话。

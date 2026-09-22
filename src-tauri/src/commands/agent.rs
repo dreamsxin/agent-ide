@@ -836,6 +836,15 @@ fn emit_usage_action_log(
         &snapshot.action_log_summary(),
         &snapshot.action_log_details(),
     );
+    // 顺带把上下文占用发给界面。测量值和估算值分开走：估算在发送前算、单位是推出来的，
+    // 这个是供应商回报的真实 token。没有可测量的东西时 `context_meter()` 返回 None，
+    // 界面就什么都不显示 —— 显示 0% 比不显示更糟，它看起来像"上下文几乎是空的"。
+    if let Some(meter) = snapshot.context_meter() {
+        events.emit_json(
+            "agent-context-usage",
+            serde_json::to_value(meter).unwrap_or_default(),
+        );
+    }
 }
 
 /// Stop the current Agent task.
