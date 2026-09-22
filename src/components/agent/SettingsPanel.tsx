@@ -623,12 +623,13 @@ export default function SettingsPanel() {
           Per-run cap stops a run once the provider-reported total tokens reach it; leave it empty for no limit.
           {" "}
           <span className="text-surface-text">
-            Max output is the only one that is sent to the provider.
+            Max output is the only one of these that is sent to the provider.
           </span>{" "}
-          Leaving it empty does not mean "no limit" — it means the provider picks one, and that default is
-          often a few thousand tokens. A reasoning model can spend all of it on thinking and return an empty
-          answer, so set it explicitly (8k or more) for those.
+          Picking a provider preset fills it in (4096 for OpenAI/Azure/DeepSeek, 8192 for Anthropic), and a
+          reasoning model can spend all of that on thinking and return an empty answer — raise it for those.
+          Clearing the box does not mean "no limit": the provider then picks one, usually a few thousand tokens.
         </div>
+
 
       </div>
 

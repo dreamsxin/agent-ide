@@ -879,16 +879,30 @@ impl ToolCallAccumulator {
         }
     }
 
-    fn finish(self) -> Vec<LlmToolCall> {
-        self.pending
+    /// 拼完的工具调用，以及**丢掉了几个**没拼完的碎片。
+    ///
+    /// 丢掉的那些要报出来：名字没到就没法调用，但"收到过碎片"和"根本没有工具调用"是两件事 ——
+    /// 前者说明流是在工具调用中间断的，而空响应诊断里报成 `tool_calls=0` 会把人引向输出上限，
+    /// 那时真正该看的是流为什么断。
+    fn finish(self) -> (Vec<LlmToolCall>, usize) {
+        let mut discarded = 0;
+        let calls = self
+            .pending
             .into_iter()
-            .filter(|(_, pending)| !pending.name.is_empty())
+            .filter(|(_, pending)| {
+                if pending.name.is_empty() {
+                    discarded += 1;
+                    return false;
+                }
+                true
+            })
             .map(|(_, pending)| LlmToolCall {
                 id: pending.id,
                 name: pending.name,
                 arguments: pending.arguments,
             })
-            .collect()
+            .collect();
+        (calls, discarded)
     }
 }
 
@@ -1290,6 +1304,9 @@ impl LlmClient {
         // 流式这一侧的失败诊断素材，见循环里和收尾处的用法
         let mut finish_reason: Option<String> = None;
         let mut reasoning_chars: usize = 0;
+        // 真正出现过的 choice 下标。报"1 choice(s)"是编的：一个立刻 [DONE] 的流、或者整段
+        // 都没解析成功的流，实际是 0 条 —— 而非流式那条路在同样情况下老实说 0。
+        let mut seen_choices: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         let mut stream = response.bytes_stream();
         let mut sse_buf = String::new();
 
@@ -1305,9 +1322,16 @@ impl LlmClient {
 
         #[derive(Deserialize)]
         struct StreamChoice {
-            delta: StreamDelta,
-            /// 流式这一侧也要收它：空响应时它是唯一能区分"被输出上限截断"和"模型真的没话说"
-            /// 的线索，而这两件事的处理完全不同。
+            /// 终止块常常只带 `finish_reason`，`delta` 缺失或为 null。以前这个字段是必需的，
+            /// 于是那种块整块解析失败、被下面的 `if let Ok(parsed)` 静默丢掉 —— 偏偏它正是
+            /// 唯一带着截断原因（以及有时 usage）的那一块。`choices` 当初加 `default` 就是
+            /// 同一个坑。
+            #[serde(default)]
+            delta: Option<StreamDelta>,
+            #[serde(default)]
+            index: Option<u32>,
+            /// 流式这一侧也要收它：空响应时它是唯一能区分"被输出上限截断"和"模型自己结束了
+            /// 一个空回合"的线索，而这两件事的处理完全不同。
             #[serde(default)]
             finish_reason: Option<String>,
         }
@@ -1315,7 +1339,9 @@ impl LlmClient {
         #[derive(Deserialize)]
         struct StreamDelta {
             content: Option<String>,
-            #[serde(rename = "reasoning_content")]
+            /// `reasoning` 是 OpenRouter 等网关的拼法；只认 `reasoning_content` 会让那些
+            /// 端点上的诊断显示 `reasoning_chars=0`，然后错误正文还在解释"思考吃光了预算"
+            #[serde(rename = "reasoning_content", alias = "reasoning")]
             reasoning_content: Option<String>,
             #[serde(default)]
             tool_calls: Option<Vec<StreamToolCallDelta>>,
@@ -1361,18 +1387,22 @@ impl LlmClient {
                             }
                         }
                         for choice in &parsed.choices {
+                            seen_choices.insert(choice.index.unwrap_or(0));
                             if let Some(ref reason) = choice.finish_reason {
                                 if !reason.is_empty() {
                                     finish_reason = Some(reason.clone());
                                 }
                             }
+                            let Some(ref delta) = choice.delta else {
+                                continue;
+                            };
                             // 只把 content 转发给界面，跳过 reasoning_content（推理内容）；
                             // 但它的**长度**要留下：一次空回答里，"思考了 14 000 字"正是
                             // 解释发生了什么的那个数字
-                            if let Some(ref text) = choice.delta.reasoning_content {
+                            if let Some(ref text) = delta.reasoning_content {
                                 reasoning_chars += text.chars().count();
                             }
-                            if let Some(ref text) = choice.delta.content {
+                            if let Some(ref text) = delta.content {
                                 if !text.is_empty() {
                                     if cancel_flag.load(Ordering::SeqCst) {
                                         return Err("Agent task cancelled".to_string());
@@ -1383,7 +1413,7 @@ impl LlmClient {
                                         .map_err(|_| "LLM stream receiver dropped".to_string())?;
                                 }
                             }
-                            if let Some(ref deltas) = choice.delta.tool_calls {
+                            if let Some(ref deltas) = delta.tool_calls {
                                 tool_calls.absorb(deltas);
                             }
                         }
@@ -1396,20 +1426,26 @@ impl LlmClient {
             meter.record_usage(usage.as_ref());
         }
 
-        let finished_tool_calls = tool_calls.finish();
+        let (finished_tool_calls, discarded_fragments) = tool_calls.finish();
         // 流也可能在输出上限处被截断，那时 content 是空的、tool_calls 也是空的。
         // 以前这里直接返回 Ok("")：界面上表现为 Agent "跑完了但什么都没说"，日志里一切正常，
         // 而真正的原因（思考把输出预算吃光了）一个字都看不到。非流式那条路早就会报错，
         // 同一个失败在两条路上必须有同一句解释。
         if full_response.is_empty() && finished_tool_calls.is_empty() {
+            // 先看取消：Stop 可能正好落在读完最后一块和这里之间，那时报"没有内容"会把一次
+            // 主动取消说成失败，而调用方靠这句字面量来分类
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Err("Agent task cancelled".to_string());
+            }
             return Err(empty_response_error(
                 &self.config,
-                1,
-                &format!(
-                    "stream: finish_reason={}, content_chars=0, reasoning_chars={}, tool_calls=0",
-                    finish_reason.as_deref().unwrap_or("none"),
-                    reasoning_chars
+                seen_choices.len(),
+                &stream_empty_diagnostics(
+                    finish_reason.as_deref(),
+                    reasoning_chars,
+                    discarded_fragments,
                 ),
+                finish_reason.as_deref(),
             ));
         }
 
@@ -1464,8 +1500,9 @@ impl LlmClient {
         #[derive(Deserialize)]
         struct CompletionMessage {
             content: Option<String>,
-            /// 推理模型把思考放这里；正文为空时它的长度能说明预算烧在哪了
-            #[serde(default)]
+            /// 推理模型把思考放这里；正文为空时它的长度能说明预算烧在哪了。
+            /// `reasoning` 是部分网关的拼法，见流式那一侧同名字段。
+            #[serde(default, alias = "reasoning")]
             reasoning_content: Option<String>,
             #[serde(default)]
             tool_calls: Option<Vec<CompletionToolCall>>,
@@ -1498,6 +1535,11 @@ impl LlmClient {
         // choices 会被 into_iter 消耗，用量和条数要先取出来
         let payload_usage = payload.usage.filter(|usage| !usage.is_empty());
         let choice_count = payload.choices.len();
+        // 建议该不该谈输出上限，取决于它；`stop` / `content_filter` 时谈就是错的方向
+        let first_finish_reason = payload
+            .choices
+            .first()
+            .and_then(|choice| choice.finish_reason.clone());
         // 失败时唯一能重现问题的东西就是这几个字段，必须在 choices 被消耗前留下来
         let choice_diagnostics = payload
             .choices
@@ -1558,6 +1600,7 @@ impl LlmClient {
                 &self.config,
                 choice_count,
                 &choice_diagnostics,
+                first_finish_reason.as_deref(),
             ));
         }
 
@@ -2049,44 +2092,102 @@ fn output_token_key(config: &LlmConfig) -> &'static str {
     }
 }
 
-/// 一次调用什么都没产出时，把"这次的输出上限是谁定的"说清楚。
+/// 这次的 `finish_reason` 有没有可能是"被输出上限截断"。
 ///
-/// 这是这条错误里唯一能让用户知道下一步该改什么的信息，而方向和直觉相反：**没设** Max output
-/// 时该做的是显式设一个更大的值，而不是继续让供应商决定 —— 省略这个字段不等于"没有上限"，
-/// 只等于"上限由供应商挑"，而那个默认往往只有几 k，推理模型的思考过程一口就能吃完，于是
-/// content 是空的、finish_reason 是 length。设过上限时才是"把它调大"。
+/// 没给（`None` / 空 / `"none"`）也算**可能**：那时排除不了截断，而把最可能的原因藏起来比
+/// 多说一句更糟。反过来，`stop` / `content_filter` 这类明确的正常结束不能再劝人改输出上限 ——
+/// 那条建议指向一个和本次失败无关的设置，用户照着改只会白费一次。
+fn finish_reason_is_truncation(finish_reason: Option<&str>) -> bool {
+    let Some(reason) = finish_reason else {
+        return true;
+    };
+    let reason = reason.trim().to_ascii_lowercase();
+    reason.is_empty()
+        || reason == "none"
+        || reason == "length"
+        || reason == "max_tokens"
+        || reason == "model_length"
+}
+
+/// 一次调用什么都没产出时给出的解释。
+///
+/// 只有被截断（或无从判断）时才谈输出上限，而两种上限状态的下一步相反：**没设**时该做的是
+/// 显式设一个更大的值，而不是继续让供应商决定 —— 省略这个字段不等于"没有上限"，只等于
+/// "上限由供应商挑"，而那个默认往往只有几 k，推理模型的思考过程一口就能吃完，于是 content
+/// 是空的、finish_reason 是 length。设过上限时才是"把它调大"。
 ///
 /// 单独一个纯函数而不是在两处各拼一遍：流式和非流式是同一个失败，两边措辞不一致的话，用户
 /// 会以为自己碰到的是两个不同的问题。
-fn empty_response_error(config: &LlmConfig, choice_count: usize, diagnostics: &str) -> String {
-    let budget = match config.max_output_tokens {
-        Some(limit) => format!(
-            "This request sent {}={}; raise Max output for this profile so the model has room for \
-             its reasoning *and* an answer.",
-            output_token_key(config),
-            limit
-        ),
-        None => format!(
-            "This request sent no {} at all, so the provider's own default applied — leaving Max \
-             output empty does not remove the limit, it only lets the provider pick one, and that \
-             default is often a few thousand tokens. Set Max output explicitly for this profile \
-             (a reasoning model usually needs 8k or more).",
-            output_token_key(config)
-        ),
+fn empty_response_error(
+    config: &LlmConfig,
+    choice_count: usize,
+    diagnostics: &str,
+    finish_reason: Option<&str>,
+) -> String {
+    let explanation = if finish_reason_is_truncation(finish_reason) {
+        let budget = match config.max_output_tokens {
+            Some(limit) => format!(
+                "This request sent {}={}; raise the output cap (Settings → Max output for this \
+                 profile, or LLM_MAX_OUTPUT for the CLI) so the model has room for its reasoning \
+                 *and* an answer.",
+                output_token_key(config),
+                limit
+            ),
+            None => format!(
+                "This request sent no {} at all, so the provider's own default applied — an empty \
+                 Max output does not remove the limit, it only lets the provider pick one, and \
+                 that default is often a few thousand tokens. Set an output cap explicitly \
+                 (Settings → Max output, or LLM_MAX_OUTPUT for the CLI); a reasoning model \
+                 usually needs 8k or more.",
+                output_token_key(config)
+            ),
+        };
+        format!(
+            "finish_reason=length means the output was cut off at the output limit; a large \
+             reasoning_chars with empty content means the model spent the whole output budget on \
+             reasoning. {}",
+            budget
+        )
+    } else {
+        // 明确正常结束却什么都没说：这时劝人改输出上限是错的方向
+        "The provider ended this turn by itself (see finish_reason above) with an empty message, \
+         so the output limit is not the cause — look at the prompt, the tool-call protocol, or a \
+         content filter."
+            .to_string()
     };
     format!(
-        "LLM response had no message content and no tool calls. {} choice(s) returned [{}]. \
-         finish_reason=length means the output was cut off at the output limit; a large \
-         reasoning_chars with empty content means the model spent the whole output budget on \
-         reasoning. {}",
+        "LLM response had no message content and no tool calls. {} choice(s) returned [{}]. {}",
         choice_count,
         if diagnostics.is_empty() {
             "no choices"
         } else {
             diagnostics
         },
-        budget
+        explanation
     )
+}
+
+/// 流式那一侧的诊断素材。纯函数，好让"空流报什么"能被测到 —— 真正的 SSE 路径要起一个
+/// HTTP 服务才能驱动，那一层的措辞缺陷会因此长期没人看见。
+fn stream_empty_diagnostics(
+    finish_reason: Option<&str>,
+    reasoning_chars: usize,
+    discarded_tool_fragments: usize,
+) -> String {
+    let mut line = format!(
+        "stream: finish_reason={}, content_chars=0, reasoning_chars={}, tool_calls=0",
+        finish_reason.unwrap_or("none"),
+        reasoning_chars
+    );
+    // 收到过工具调用碎片却一个都没拼完，和"根本没有工具调用"是两件事：前者说明流是在
+    // 工具调用中间断的，报成 tool_calls=0 会把人引到完全错的方向
+    if discarded_tool_fragments > 0 {
+        line.push_str(&format!(
+            ", incomplete_tool_call_fragments={}",
+            discarded_tool_fragments
+        ));
+    }
+    line
 }
 
 /// StarCoder 模型引擎
@@ -2456,47 +2557,104 @@ mod tests {
         }
     }
 
-    /// 空响应那条错误里唯一有用的部分是"下一步改什么"，而两种情况的答案相反。
+    /// 空响应那条错误里唯一有用的部分是"下一步改什么"，而三种情况的答案不同。
     ///
-    /// 没设上限时说"调大它"是错的建议 —— 字段根本没发出去，能改的是"显式设一个"；这正是
-    /// 用户读完原来那句话之后会走的错方向（"那我把 Max output 关掉试试"，而它本来就是关的）。
+    /// 断言落在**可执行的事实**上（发出去的字段名和值、有没有值、提不提输出上限），不落在
+    /// 句子措辞上：措辞会改，而"没设上限时不能劝人调大它"这条性质不该跟着改。
     #[test]
-    fn the_empty_response_error_points_the_right_way_in_both_cases() {
-        let with_cap = empty_response_error(
+    fn the_empty_response_error_points_the_right_way() {
+        let truncated_with_cap = empty_response_error(
             &cloud_config("deepseek", "deepseek-reasoner", Some(1024)),
             1,
             "choice 0: finish_reason=length, content_chars=0, reasoning_chars=14710, tool_calls=0",
+            Some("length"),
         );
-        assert!(with_cap.contains("max_tokens=1024"), "{}", with_cap);
-        assert!(with_cap.contains("raise Max output"), "{}", with_cap);
+        // 真正发出去的那个字段和值：用户要改的就是它
+        assert!(
+            truncated_with_cap.contains("max_tokens=1024"),
+            "{}",
+            truncated_with_cap
+        );
+        // 诊断素材原样带着，否则复盘时连"思考了多少"都没有
+        assert!(truncated_with_cap.contains("reasoning_chars=14710"));
 
-        let without_cap = empty_response_error(
+        let truncated_without_cap = empty_response_error(
             &cloud_config("deepseek", "deepseek-reasoner", None),
             1,
             "choice 0: finish_reason=length, content_chars=0, reasoning_chars=14710, tool_calls=0",
+            Some("length"),
         );
-        // 关键一句：留空不等于没有上限，只等于上限由供应商挑
+        // 没设上限时不能出现一个"当前值"，也不能说"调大它" —— 字段根本没发出去
         assert!(
-            without_cap.contains("does not remove the limit"),
+            !truncated_without_cap.contains("max_tokens="),
             "{}",
-            without_cap
+            truncated_without_cap
         );
         assert!(
-            without_cap.contains("Set Max output explicitly"),
-            "{}",
-            without_cap
+            truncated_without_cap.contains("LLM_MAX_OUTPUT"),
+            "CLI 用户也得有地方设：{}",
+            truncated_without_cap
         );
-        // 诊断素材必须原样带着，否则复盘时连"思考了多少"都没有
-        assert!(without_cap.contains("reasoning_chars=14710"));
+
+        // 明确正常结束却空回答：这时提输出上限是错的方向
+        let stopped = empty_response_error(
+            &cloud_config("openai", "gpt-4o", Some(2048)),
+            1,
+            "choice 0: finish_reason=stop, content_chars=0, reasoning_chars=0, tool_calls=0",
+            Some("stop"),
+        );
+        assert!(!stopped.contains("Max output"), "{}", stopped);
+        assert!(!stopped.contains("max_tokens=2048"), "{}", stopped);
 
         // 字段名跟着模型走：o 系列上说 max_tokens 会让用户去翻一个不存在的字段
-        let o_series = empty_response_error(&cloud_config("openai", "o3-mini", Some(2048)), 1, "");
+        let o_series =
+            empty_response_error(&cloud_config("openai", "o3-mini", Some(2048)), 0, "", None);
         assert!(
             o_series.contains("max_completion_tokens=2048"),
             "{}",
             o_series
         );
+        // 一条 choice 都没有时不能编一个数出来
+        assert!(o_series.contains("0 choice(s)"), "{}", o_series);
         assert!(o_series.contains("no choices"), "{}", o_series);
+    }
+
+    /// 流式空响应的诊断行。
+    ///
+    /// 真正的 SSE 路径要起一个 HTTP 服务才能驱动，所以这一层的措辞长期没人看；而"收到过工具
+    /// 调用碎片"和"根本没有工具调用"混成一句，会把人从"流断在工具调用中间"引到输出上限去。
+    #[test]
+    fn the_stream_diagnostics_separate_absent_tool_calls_from_discarded_fragments() {
+        let plain = stream_empty_diagnostics(Some("length"), 14_710, 0);
+        assert!(plain.contains("finish_reason=length"), "{}", plain);
+        assert!(plain.contains("reasoning_chars=14710"), "{}", plain);
+        assert!(!plain.contains("fragments"), "{}", plain);
+
+        let cut_mid_call = stream_empty_diagnostics(None, 0, 2);
+        // 没给原因时说 none，而不是假装知道
+        assert!(
+            cut_mid_call.contains("finish_reason=none"),
+            "{}",
+            cut_mid_call
+        );
+        assert!(
+            cut_mid_call.contains("incomplete_tool_call_fragments=2"),
+            "{}",
+            cut_mid_call
+        );
+    }
+
+    /// 只有"可能被截断"时才谈输出上限。`stop` 之后劝人改上限是把用户送去改一个无关的设置。
+    #[test]
+    fn only_a_possibly_truncated_finish_reason_blames_the_output_limit() {
+        assert!(finish_reason_is_truncation(Some("length")));
+        assert!(finish_reason_is_truncation(Some("MAX_TOKENS")));
+        // 供应商没给：排除不了截断，宁可多说一句
+        assert!(finish_reason_is_truncation(None));
+        assert!(finish_reason_is_truncation(Some("")));
+        assert!(!finish_reason_is_truncation(Some("stop")));
+        assert!(!finish_reason_is_truncation(Some("content_filter")));
+        assert!(!finish_reason_is_truncation(Some("tool_calls")));
     }
 
     /// 三个分支说的必须是三件不同的事。以前这段逻辑在 `commands::agent` 里要
@@ -3050,7 +3208,8 @@ mod tests {
             },
         ]);
 
-        let calls = accumulator.finish();
+        let (calls, discarded) = accumulator.finish();
+        assert_eq!(discarded, 0);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, NATIVE_CHANGES_TOOL);
@@ -3072,7 +3231,11 @@ mod tests {
             function: None,
         }]);
 
-        assert!(accumulator.finish().is_empty());
+        // 名字没到的碎片调用不了，但必须被数出来：空响应诊断里"收到过碎片"和"没有工具调用"
+        // 指向完全不同的原因
+        let (calls, discarded) = accumulator.finish();
+        assert!(calls.is_empty());
+        assert_eq!(discarded, 1);
     }
 
     #[test]

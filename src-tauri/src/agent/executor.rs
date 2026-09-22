@@ -92,9 +92,41 @@ async fn stream_with_tool_loop(
     let mut pending_images: Vec<crate::services::images::ImagePart> = Vec::new();
 
     for iteration in 0..=MAX_TOOL_ITERATIONS {
-        let output = llm
+        let output = match llm
             .stream_chat_with_tools(messages.clone(), cancel_flag.clone(), tx.clone())
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            // 最后一轮什么都没回来时，不能把前几轮已经完成的工作一起丢掉：工具结果已经花过
+            // 预算、可能还落过盘，而 `?` 会让整个阶段失败，`merged` 和整段 transcript（每一条
+            // `role: "tool"` 的结果）一起消失 —— 界面上还留着流出来的那半段回答，紧跟一句
+            // "没有内容"的报错。所以前面有产出就把这次失败当成循环的终点，连着原因一起交上去。
+            //
+            // 取消是例外，必须原样往上抛：调用方靠那句字面量把"用户按了 Stop"和真正的失败
+            // 分开，在这里咽掉会让一次取消被记成正常收尾。
+            Err(error) => {
+                if merged.trim().is_empty() || error == crate::agent::orchestrator::CANCELLED_ERROR
+                {
+                    return Err(error);
+                }
+                let note = format!(
+                    "\n\n[agent-ide] The last round returned nothing ({}). Stopping here with what \
+                     the earlier rounds produced.\n",
+                    error
+                );
+                llm.note_dropped_images(
+                    pending_images.len(),
+                    "the tool loop ended before they fit in a request",
+                );
+                merged.push_str(&note);
+                let mut transcript = messages.split_off(prompt_len);
+                transcript.push(ChatMessage::assistant(note));
+                return Ok(StageOutcome {
+                    text: merged,
+                    transcript,
+                });
+            }
+        };
 
         // 图片只发一次：它已经在上面那次请求里了。留着的代价是复利式的 —— 一张 4 MiB 的
         // 图 base64 后约 5.3 MB，12 轮工具循环会把它重发 11 次（约 59 MB 出网），而

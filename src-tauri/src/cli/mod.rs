@@ -2030,7 +2030,12 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         api_key,
         model: model.clone(),
         provider: "custom".to_string(),
-        max_output_tokens: None,
+        // 空响应那条错误会建议"设一个输出上限"，所以 CLI 这边必须真的有地方设 —— 否则那句
+        // 建议指向一个只有桌面端才有的设置，命令行用户照着做不了。没给就仍然由供应商决定。
+        max_output_tokens: std::env::var("LLM_MAX_OUTPUT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|limit| *limit > 0),
         // 只读工作区工具现在无条件挂上，所以一律走原生工具调用。任意 OpenAI 兼容
         // 端点因此都会收到 `tools` 参数 —— 明确拒绝的那些由 `tools_rejected` 记下
         // 并自动降级重试，代价是一次 400；换来的是模型能读到真实文件内容，而不是

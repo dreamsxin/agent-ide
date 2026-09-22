@@ -2984,6 +2984,12 @@ pub async fn test_llm_connection(
             let preview: String = full.chars().take(120).collect();
             Ok(format!("OK - {}", preview))
         }
+        // 到达了供应商、但它没给内容，不算"连不上"：端点、key、模型名都是对的，把它报成
+        // 连接失败会让用户去查网络和密钥，而真正要改的是输出上限（推理模型上很常见）。
+        Err(e) if e.contains("no message content") => Err(format!(
+            "Reached the provider, but it returned no answer: {}",
+            e
+        )),
         Err(e) => Err(format!("Connection failed: {}", e)),
     }
 }
