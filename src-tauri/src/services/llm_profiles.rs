@@ -224,6 +224,9 @@ impl LlmProfile {
             },
             model: self.model.clone(),
             provider: self.provider.clone(),
+            // 窗口跟着 profile 走：客户端用它按"这一次还剩多少"夹输出上限，
+            // 见 `window_limited_output_tokens`。它仍然不会被发给供应商。
+            max_context_tokens: self.max_context_tokens,
             max_output_tokens: self.max_output_tokens,
             tool_call_mode: normalized_tool_call_mode(&self.tool_call_mode),
             model_type,

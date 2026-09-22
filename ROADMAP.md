@@ -1791,6 +1791,16 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The numbers were cross-checked against two independent sources per family and the conflicting ones were left out rather than averaged; o-series and Gemini are absent for that reason.
    - Still open: nothing refreshes this table — the honest fix remains asking endpoints that publish `context_length`. And `Max context`/`Reserved output` are still display-only; only `Max output` reaches the provider.
    - Rust unchanged; frontend 259 → 264 (`src/utils/modelLimits.test.ts`).
+132. **The output limit is now per request, not per model (2026-09-22)**
+   Adopted from the reference implementation's `resolveNormalRequestMaxOutputTokens`: it caps each request's output budget at `min(model's declared max, window − estimated usage − margin)`. Ours had only the first half, which makes one class of failure unavoidable.
+   - **`prompt + max_tokens > window` is a 400, and the limit itself is legal.** A million-token model may allow 384k output, but once the prompt fills 900k of the window, asking for 384k is rejected outright. Max output answers "how much can this model write"; the provider checks "does this request fit". The two disagree in exactly the long-context case where the run matters most.
+   - `window_limited_output_tokens` (pure, tested) clamps to `window − estimated prompt − 1024`, where the margin exists because the prompt size is a **character-based** estimate and images are not counted at all — an under-estimate would turn into the very 400 this is meant to avoid.
+   - **Two refusals to clamp**, both deliberate: no window configured (clamping against a guessed window would shorten answers for no reason), and a remainder under 512 tokens (the local estimate is not authoritative; squeezing an answer into 200 tokens on its word is harder to diagnose than a provider saying "does not fit"). The second is the reference's rule too — a local estimate never overrides the provider's own verdict.
+   - **A clamp is never silent.** `OutputClamp { requested, sent }` accumulates on the client like image drops do, and `output_clamp_report` turns it into one action-log line naming both numbers, how many times it happened, and what to do (shorten the context, or raise Max context if the real window is larger). Without it the user sees a short answer while Settings still says 384000, and suspects the model.
+   - **`Max context` finally does something.** It was display-only ("budgeting only, never sent"), which is still true — it is not sent, it now *protects*. `LlmConfig` carries it, `to_config` passes it through; the CLI leaves it unset.
+   - Deliberately not done: continuation after a truncated answer. The reference auto-continues up to three times; we have no continuation mechanism, so a retry would re-roll the same prompt and pay twice (122/123 already rejected retry-on-length for that reason).
+   - Rust 480 → 483; frontend unchanged.
+
 
 
 

@@ -273,6 +273,12 @@ pub struct LlmConfig {
     pub model: String, // e.g. "gpt-4"
     pub provider: String,
     pub max_output_tokens: Option<u32>,
+    /// 模型的上下文窗口。**不发给供应商**，只用来按"这一次还剩多少"夹输出上限。
+    ///
+    /// 有它才能避免一类必然失败的请求：`prompt + max_tokens > window` 会被直接 400，
+    /// 而上限本身是合法的 —— 只是加上这次的提示词就装不下了。见
+    /// `window_limited_output_tokens`。
+    pub max_context_tokens: Option<u32>,
     pub tool_call_mode: String,
     pub model_type: ModelType,
     pub local_model_config: Option<LocalModelConfig>,
@@ -286,6 +292,7 @@ impl LlmConfig {
             api_key,
             model,
             provider: "openai".to_string(),
+            max_context_tokens: None,
             max_output_tokens: Some(4096),
             tool_call_mode: "native_tools".to_string(),
             model_type: ModelType::OpenAI,
@@ -300,6 +307,7 @@ impl LlmConfig {
             api_key,
             model,
             provider: "deepseek".to_string(),
+            max_context_tokens: None,
             max_output_tokens: Some(4096),
             tool_call_mode: "native_tools".to_string(),
             model_type: ModelType::DeepSeek,
@@ -315,6 +323,7 @@ impl LlmConfig {
             api_key: String::new(),
             model: local_config.name.clone(),
             provider: "local".to_string(),
+            max_context_tokens: None,
             max_output_tokens: Some(local_config.max_tokens.max(1)),
             tool_call_mode: "text_protocol".to_string(),
             model_type,
@@ -1045,6 +1054,40 @@ pub struct ImageDrop {
     pub reason: String,
 }
 
+/// 一次按剩余窗口下调的输出上限：用户设的值 + 实际发出去的值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputClamp {
+    pub requested: u32,
+    pub sent: u32,
+}
+
+/// 把"这次没按你设的上限发"变成一句给用户的话。没下调过就返回 None。
+///
+/// 必须说出来：不说的话，用户看到的是一次比预期短的回答，而设置里那个数字还明明白白写着
+/// 384000 —— 他会去怀疑模型，而不是去看上下文已经占了多少。
+///
+/// 措辞放在这里而不是命令层：命令层要 `AppHandle` 才能调用，措辞就没法测。
+pub fn output_clamp_report(clamps: &[OutputClamp]) -> Option<(String, String)> {
+    let smallest = clamps.iter().min_by_key(|clamp| clamp.sent)?;
+    let details = format!(
+        "Max output is set to {}, but the prompt already fills most of the context window, so this \
+         run asked for at most {} output token(s) — {} time(s).\nThe limit is per request: \
+         prompt + output must fit the window, and sending the full limit would have been rejected \
+         outright. Shorten the context (or raise Max context if your model's window is larger) to \
+         get the full output budget back.",
+        smallest.requested,
+        smallest.sent,
+        clamps.len()
+    );
+    Some((
+        format!(
+            "Output limit reduced to {} token(s) to fit the remaining context window",
+            smallest.sent
+        ),
+        details,
+    ))
+}
+
 /// 把降级记录变成一句给用户的话（摘要 + 明细）。没有降级就返回 None。
 ///
 /// 措辞放在这里而不是命令层：命令层要 `AppHandle` 才能调用，措辞就没法测 —— 用量日志
@@ -1082,6 +1125,9 @@ pub struct LlmClient {
     /// 只在消息文本里写原因等于只告诉模型，用户看到的仍是一次"正常"的运行。
     /// 用 `Arc` 是因为 `LlmClient` 是 `Clone`：真要出现克隆时两份必须记在一处
     image_drops: Arc<Mutex<Vec<ImageDrop>>>,
+    /// 本次运行里按剩余窗口下调过的输出上限。和 `image_drops` 同理：不说出来，用户只会看到
+    /// 一次比预期短的回答，而设置里那个数字还写着原值
+    output_clamps: Arc<Mutex<Vec<OutputClamp>>>,
     /// 只在测试里挂上，用来断言提示词的组成
     request_recorder: Option<Arc<RequestRecorder>>,
 }
@@ -1113,6 +1159,7 @@ impl LlmClient {
             usage_meter: None,
             tools_rejected: Arc::new(AtomicBool::new(false)),
             image_drops: Arc::new(Mutex::new(Vec::new())),
+            output_clamps: Arc::new(Mutex::new(Vec::new())),
             request_recorder: None,
         }
     }
@@ -1143,6 +1190,30 @@ impl LlmClient {
     fn record_image_drop(&self, drop: ImageDrop) {
         if let Ok(mut drops) = self.image_drops.lock() {
             drops.push(drop);
+        }
+    }
+
+    /// 这次运行里被按剩余窗口下调过的输出上限。命令层用它写 action log。
+    pub fn output_clamps(&self) -> Vec<OutputClamp> {
+        self.output_clamps
+            .lock()
+            .map(|clamps| clamps.clone())
+            .unwrap_or_default()
+    }
+
+    /// 发请求前记一笔"这次没按你设的上限发"。
+    ///
+    /// 传进来的必须是**已经过图片适配**的那份消息 —— 和 `build_chat_request` 真正拿去算的
+    /// 是同一份，否则记下的数字和发出去的数字会差一点，而那种对不上最难解释。
+    fn note_output_clamp(&self, adapted: &[ChatMessage]) {
+        let Some(requested) = self.config.max_output_tokens else {
+            return;
+        };
+        let Some(sent) = window_limited_output_tokens(&self.config, adapted) else {
+            return;
+        };
+        if let Ok(mut clamps) = self.output_clamps.lock() {
+            clamps.push(OutputClamp { requested, sent });
         }
     }
 
@@ -1349,9 +1420,13 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
+        // 先适配图片，再按这份**同一批**消息记一笔输出上限下调：
+        // 记下的数字和发出去的数字必须来自同一份输入，否则日志里那两个数对不上
+        let adapted = self.adapt_and_record_images(messages);
+        self.note_output_clamp(&adapted);
         let body = build_chat_request(
             &self.config,
-            self.adapt_and_record_images(messages),
+            adapted,
             true,
             &self.extra_tools,
             !self.tools_were_rejected(),
@@ -1534,9 +1609,12 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
+        // 见流式那一侧：记账和实际发送必须用同一份消息
+        let adapted = self.adapt_and_record_images(messages);
+        self.note_output_clamp(&adapted);
         let body = build_chat_request(
             &self.config,
-            self.adapt_and_record_images(messages),
+            adapted,
             false,
             &self.extra_tools,
             !self.tools_were_rejected(),
@@ -2045,6 +2123,11 @@ fn build_chat_request(
     include_tools: bool,
 ) -> serde_json::Value {
     let (messages, _) = adapt_images_for_model(&config.model, messages);
+    // 按剩余窗口夹一次。调用方（`clamp_output_for_request`）已经夹过并记了账，这里是兜底：
+    // 夹是幂等的，而任何新的请求路径都不该能绕过它。
+    let output_tokens = config
+        .max_output_tokens
+        .map(|requested| window_limited_output_tokens(config, &messages).unwrap_or(requested));
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": messages,
@@ -2059,7 +2142,7 @@ fn build_chat_request(
                 serde_json::json!({ "include_usage": true }),
             );
         }
-        if let Some(max_output_tokens) = config.max_output_tokens {
+        if let Some(max_output_tokens) = output_tokens {
             let key = output_token_key(config);
             object.insert(key.to_string(), serde_json::json!(max_output_tokens));
         }
@@ -2069,6 +2152,48 @@ fn build_chat_request(
         }
     }
     body
+}
+
+/// 提示词大小按字符估。
+///
+/// 图片不计入 —— 视觉 token 的算法各家不同，硬猜一个会把这个估算变成另一个假数字。这意味着
+/// 带图请求会被低估，所以下面那个余量存在的意义更大。
+fn estimated_prompt_tokens(messages: &[ChatMessage]) -> u32 {
+    let total: usize = messages
+        .iter()
+        .map(|message| crate::services::context::estimate_tokens_for_text(&message.content))
+        .sum();
+    total.min(u32::MAX as usize) as u32
+}
+
+/// 留给估算误差的余量（token）。
+///
+/// 提示词是按字符估的，估低了就会在供应商那边变成一次 400。这个数字是"估偏一点也还发得出去"。
+const REQUEST_WINDOW_MARGIN_TOKENS: u32 = 1_024;
+
+/// 夹到比这个还小就不夹了。
+///
+/// 本地的字符估算不是权威：凭它把一次回答压到两三百 token，比让供应商明确拒绝更难查 ——
+/// 用户看到的是一段莫名其妙被截断的回答，而不是一句"装不下"。
+const MIN_CLAMPED_OUTPUT_TOKENS: u32 = 512;
+
+/// 这次请求实际该发的输出上限；不需要夹就返回 `None`。
+///
+/// 用户设的 Max output 表达的是"这个模型最多能写多少"，而供应商检查的是"提示词 + 上限是不是
+/// 超过窗口"。两者在长上下文里必然冲突：1M 窗口的模型允许 384k 输出，但当提示词已经占了 900k
+/// 时，发 384k 一定被拒 —— 而那是一个本可以避免的失败。
+///
+/// 窗口未知就不夹：拿一个猜出来的窗口去压缩回答，比一次明确的 400 更糟。
+fn window_limited_output_tokens(config: &LlmConfig, messages: &[ChatMessage]) -> Option<u32> {
+    let requested = config.max_output_tokens?;
+    let window = config.max_context_tokens?;
+    let remaining = window
+        .saturating_sub(estimated_prompt_tokens(messages))
+        .saturating_sub(REQUEST_WINDOW_MARGIN_TOKENS);
+    if remaining >= requested || remaining < MIN_CLAMPED_OUTPUT_TOKENS {
+        return None;
+    }
+    Some(remaining)
 }
 
 fn prefers_non_streaming(config: &LlmConfig) -> bool {
@@ -2430,6 +2555,7 @@ mod image_wire_tests {
             api_key: "sk-test".to_string(),
             model: model.to_string(),
             provider: "openai".to_string(),
+            max_context_tokens: None,
             max_output_tokens: None,
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::OpenAI,
@@ -2636,6 +2762,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: model.to_string(),
             provider: provider.to_string(),
+            max_context_tokens: None,
             max_output_tokens,
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::OpenAI,
@@ -2930,6 +3057,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: model.to_string(),
             provider: provider.to_string(),
+            max_context_tokens: None,
             max_output_tokens,
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::from_string(provider),
@@ -3515,6 +3643,7 @@ mod tests {
             api_key,
             model: "deepseek-v4-flash".to_string(),
             provider: "deepseek".to_string(),
+            max_context_tokens: None,
             max_output_tokens: Some(64),
             tool_call_mode: "text_protocol".to_string(),
             model_type: ModelType::DeepSeek,
@@ -3535,5 +3664,71 @@ mod tests {
 
         assert!(!response.trim().is_empty());
         assert_eq!(rx.recv().await.as_deref(), Some(response.as_str()));
+    }
+
+    /// 输出上限要按"这一次还剩多少"夹一次。
+    ///
+    /// `prompt + max_tokens > window` 会被供应商直接拒，而上限本身是合法的 —— 用户设的是
+    /// "这个模型最多能写多少"，供应商查的是"这一次装不装得下"。不夹就是一次本可避免的失败。
+    #[test]
+    fn the_output_limit_is_clamped_to_what_the_window_can_still_take() {
+        let mut cfg = config("deepseek", "deepseek-v4-flash", Some(8_000));
+        cfg.max_context_tokens = Some(10_000);
+        // 32 000 个 ASCII 字符 ≈ 8 000 token
+        let messages = vec![ChatMessage::user(&*"a".repeat(32_000))];
+
+        // 10 000 − 8 000 − 1 024 的余量
+        assert_eq!(window_limited_output_tokens(&cfg, &messages), Some(976));
+        let body = build_chat_request(&cfg, messages, false, &[], false);
+        assert_eq!(body["max_tokens"], 976);
+    }
+
+    /// 三种情况都不该夹。
+    #[test]
+    fn the_clamp_stays_out_of_the_way_when_it_would_not_help() {
+        let mut cfg = config("deepseek", "deepseek-chat", Some(4_096));
+        let short = vec![ChatMessage::user("hi")];
+
+        // 窗口未知：猜一个窗口去压缩回答，比一次明确的拒绝更糟
+        assert_eq!(window_limited_output_tokens(&cfg, &short), None);
+
+        // 还装得下：原样发
+        cfg.max_context_tokens = Some(128_000);
+        assert_eq!(window_limited_output_tokens(&cfg, &short), None);
+        let body = build_chat_request(&cfg, short, false, &[], false);
+        assert_eq!(body["max_tokens"], 4_096);
+
+        // 剩下的连 512 都不到：不夹，让供应商自己拒绝 —— 本地的字符估算不是权威，
+        // 凭它把回答压到两三百 token，用户看到的是一段莫名被截断的回答
+        let huge = vec![ChatMessage::user(&*"a".repeat(520_000))];
+        assert_eq!(window_limited_output_tokens(&cfg, &huge), None);
+    }
+
+    /// 夹过就必须说出来，而且要说清是"这一次"的事，不是设置错了。
+    #[test]
+    fn the_clamp_report_explains_a_short_answer() {
+        assert!(output_clamp_report(&[]).is_none());
+
+        let (summary, details) = output_clamp_report(&[
+            OutputClamp {
+                requested: 64_000,
+                sent: 4_096,
+            },
+            OutputClamp {
+                requested: 64_000,
+                sent: 900,
+            },
+        ])
+        .expect("report");
+
+        // 报最小的那次：它才是"回答为什么短"的原因
+        assert!(summary.contains("900"), "{}", summary);
+        // 两个数字都要在：用户设的值和实际发的值
+        assert!(details.contains("64000"), "{}", details);
+        assert!(details.contains("900"), "{}", details);
+        // 次数也要有，否则看不出是偶发还是整轮都在夹
+        assert!(details.contains("2 time(s)"), "{}", details);
+        // 下一步做什么
+        assert!(details.contains("Shorten the context"), "{}", details);
     }
 }

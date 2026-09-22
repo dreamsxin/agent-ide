@@ -775,6 +775,7 @@ fn finish_agent_run(
     // 运行最后失败或被取消并不会把它取消掉，而失败的那次运行恰恰最需要这条线索。
     emit_tool_degradation_log(orch, events, llm);
     emit_image_degradation_log(orch, events, llm);
+    emit_output_clamp_log(orch, events, llm);
 }
 
 /// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
@@ -2119,6 +2120,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: model.to_string(),
             provider: "openai".to_string(),
+            max_context_tokens: None,
             max_output_tokens: None,
             tool_call_mode: "text_protocol".to_string(),
             model_type: crate::services::llm_client::ModelType::OpenAI,
@@ -3276,4 +3278,22 @@ pub async fn delete_agent_session(
         orch.start_new_session();
     }
     Ok(session_list(&orch))
+}
+
+/// 告诉用户这次没按他设的输出上限发。
+///
+/// 和图片降级同一个理由：不说的话，用户看到的是一次比预期短的回答，而设置里那个数字还写着
+/// 原值 —— 他会去怀疑模型，而不是去看上下文已经占掉了多少。措辞和判断在
+/// `output_clamp_report` 里，那里有测试。
+fn emit_output_clamp_log(
+    orch: &AgentOrchestrator,
+    events: &dyn crate::agent::events::RunEvents,
+    llm: &crate::services::llm_client::LlmClient,
+) {
+    let Some((summary, details)) =
+        crate::services::llm_client::output_clamp_report(&llm.output_clamps())
+    else {
+        return;
+    };
+    orch.emit_run_action_log(events, "warn", "output_limit_clamped", &summary, &details);
 }
