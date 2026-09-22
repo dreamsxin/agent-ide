@@ -162,8 +162,15 @@ export default function SettingsPanel() {
   const spendCapState = spendCapStatus(promptPrice, completionPrice, maxRunSpend);
   const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
   const [saving, setSaving] = useState(false);
-  // 后端探测不到可读条目时会返回 "not configured"，那不算已保存
-  const hasSavedKey = Boolean(apiKeyMasked) && apiKeyMasked !== "not configured";
+  // "已保存"要用后端给的结论，而不是拿掩码串和 "not configured" 比。一份没被开启的明文
+  // 密钥掩码是 `sk-1****7890 (plaintext in config.json)`，字符串比较会判成已保存，于是
+  // 面板显示绿色 (saved)、允许留空提交，而每一次运行都失败。
+  // `api_key_usable` 缺失时退回旧的字符串判断：那是后端还没带这个字段的旧响应。
+  const activeProfile = llmProfiles.find((profile) => profile.id === (profileId || activeProfileId));
+  const hasSavedKey =
+    activeProfile?.api_key_usable ??
+    (Boolean(apiKeyMasked) && apiKeyMasked !== "not configured");
+
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const messageRef = useRef<HTMLDivElement>(null);
 

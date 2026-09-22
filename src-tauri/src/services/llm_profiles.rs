@@ -76,6 +76,13 @@ pub struct LlmProfileResponse {
     pub provider: String,
     pub endpoint: String,
     pub api_key_masked: String,
+    /// 这个 profile 现在**能不能真的跑起来**。
+    ///
+    /// 界面不能靠 `api_key_masked != "not configured"` 这种字符串比较来判断"已配置"：
+    /// 一份没被开启的明文密钥会显示成 `sk-1****7890 (plaintext in config.json)`，字符串
+    /// 比较于是判成已配置，而每一次运行都会失败 —— 正是那个"显示已保存、留空保存、运行全挂"
+    /// 的老陷阱。所以把结论做成一个字段，而不是让前端去猜。
+    pub api_key_usable: bool,
     pub model: String,
     #[serde(rename = "maxContextTokens")]
     pub max_context_tokens: Option<u32>,
@@ -229,6 +236,7 @@ impl LlmProfile {
             provider: self.provider.clone(),
             endpoint: self.endpoint.clone(),
             api_key_masked: self.masked_api_key(),
+            api_key_usable: self.has_readable_api_key(),
             model: self.model.clone(),
             max_context_tokens: self.max_context_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
@@ -266,7 +274,8 @@ impl LlmProfile {
     ///
     /// 以前的顺序是"明文字段有值就用它"，那让 keyring 的保证形同虚设：只要有一次迁移失败，
     /// `config.json` 里就永久留着一份明文，而且从此优先于 keyring 里那份 —— 两种存储模型
-    /// 的坏处一起吃。ROADMAP 308 的决定是宁可响亮地失败、让用户重新输一次。
+    /// 的坏处一起吃。ROADMAP 凭据那一节（"Remove the silent plaintext fallback"）定的是
+    /// 宁可响亮地失败、让用户重新输一次。
     ///
     /// 明文仍然可用，但必须由用户显式开启（`AGENT_IDE_ALLOW_PLAINTEXT_KEY`）。差别在于
     /// 用户**知不知道**：同一台机器上明文可能完全可以接受，不能接受的是它悄悄发生。
@@ -304,8 +313,8 @@ impl LlmProfile {
         }
         Err(format!(
             "Profile '{}' only has a plaintext api_key in config.json, which is ignored by \
-             default. Re-enter the key in Settings so it goes to the OS keyring, or set {}=1 to \
-             use the plaintext one.",
+             default. Re-enter the key in Settings so it goes to the OS keyring. If saving it also \
+             fails, this machine has no working keyring — set {}=1 to use the plaintext one.",
             self.name, ALLOW_PLAINTEXT_KEY_ENV
         ))
     }
@@ -319,7 +328,7 @@ impl LlmProfile {
             }
         }
         // 明文那份要说出它**是明文**，而不是和 keyring 里的那份显示成一模一样。这是
-        // ROADMAP 310 里"可见的 plaintext 指示"那一半：用户有权知道密钥存在哪儿。
+        // ROADMAP 凭据那一节里"可见的 plaintext 指示"那一半：用户有权知道密钥存在哪儿。
         if !self.api_key.trim().is_empty() {
             return format!("{} (plaintext in config.json)", mask_api_key(&self.api_key));
         }
@@ -350,7 +359,12 @@ fn plaintext_keys_allowed() -> bool {
     std::env::var(ALLOW_PLAINTEXT_KEY_ENV)
         .map(|value| {
             let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            // `no` / `off` 也算关。一个名字里带 ALLOW 的变量被设成 `no` 却表示"允许"，
+            // 本身就是个缺陷 —— 这条和 `0` / `false` 是同一个理由。
+            !value.is_empty()
+                && !["0", "false", "no", "off"]
+                    .iter()
+                    .any(|off| value.eq_ignore_ascii_case(off))
         })
         .unwrap_or(false)
 }
@@ -545,6 +559,10 @@ pub fn resolve_llm_config(
 ///
 /// 刻意做成独立入口而不是塞进 `to_response()`：例行的 profile 列表响应
 /// 不应该携带明文密钥，只有用户显式点击时才取一次。
+///
+/// 这里**不走**明文那道开关。开关管的是"我们拿它去调模型"，而这个按钮是用户看自己机器上
+/// 自己那份配置 —— 拒绝显示只会得到一句"Cannot read stored key"，而它明明读到了、还在
+/// 上面那行掩码里写着。看得见和不拿去用是两件事。
 pub fn reveal_api_key(
     config: &LlmProfilesConfig,
     profile_id: Option<&str>,
@@ -556,6 +574,15 @@ pub fn reveal_api_key(
         .find(|profile| profile.id == selected_id)
         .or_else(|| config.profiles.first())
         .ok_or_else(|| "LLM profile not configured".to_string())?;
+    if let Some(credential_ref) = profile.credential_ref.as_deref() {
+        if let Ok(secret) = credentials::read_secret(credential_ref) {
+            return Ok(secret);
+        }
+    }
+    if !profile.api_key.trim().is_empty() {
+        return Ok(profile.api_key.clone());
+    }
+    // 两边都没有的时候，把 `api_key()` 那句带着原因的错误交出去，而不是自己再编一句
     profile.api_key()
 }
 
@@ -898,7 +925,7 @@ mod tests {
 
     /// 只有明文的 profile，默认**不能**用来跑。
     ///
-    /// 这是 ROADMAP 308 的决定：明文兜底让 keyring 的保证形同虚设 —— 一次迁移失败之后，
+    /// 这是 ROADMAP 凭据那一节的决定：明文兜底让 keyring 的保证形同虚设 —— 一次迁移失败之后，
     /// `config.json` 里那份明文会永久地优先于 keyring 里那份，两种存储模型的坏处一起吃。
     /// 拒绝要说清楚三件事：为什么没用它、去哪儿重新输、以及那个显式开关。
     #[test]
@@ -924,6 +951,33 @@ mod tests {
         std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
     }
 
+    /// keyring 里那份**赢**，明文那份连看都不看。
+    ///
+    /// 这是整个改动的正题，而上面两条只证明了兜底那条路。少了这一条，把顺序改回"明文优先"
+    /// 也照样全绿 —— 因为那两条用的都是一个读不出来的条目。
+    #[test]
+    fn the_keyring_value_wins_over_a_plaintext_one() {
+        let _guard = workspace::env_test_guard();
+        let credential_ref = credentials::llm_credential_ref("keyring-wins-test");
+        credentials::store_secret(&credential_ref, "sk-from-keyring")
+            .expect("test service should be writable");
+
+        let mut profile = sample_profile();
+        profile.credential_ref = Some(credential_ref.clone());
+        profile.api_key = "sk-plaintext".to_string();
+
+        std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
+        assert_eq!(profile.api_key().unwrap(), "sk-from-keyring");
+        // 开了明文开关也还是 keyring 那份：开关是兜底的许可，不是优先级
+        std::env::set_var(ALLOW_PLAINTEXT_KEY_ENV, "1");
+        assert_eq!(profile.api_key().unwrap(), "sk-from-keyring");
+        std::env::remove_var(ALLOW_PLAINTEXT_KEY_ENV);
+        // 掩码显示的也该是 keyring 那份，不带 plaintext 后缀
+        assert_eq!(profile.masked_api_key(), "sk-f****ring");
+
+        let _ = credentials::delete_secret(&credential_ref);
+    }
+
     /// keyring 读不出来时，错误里要**同时**有读失败的原因和那份明文为什么被忽略。
     ///
     /// 只说其中一半的话，用户会去修错的那一边：只说"读不出来"他会重输（而重输也会失败，
@@ -939,6 +993,9 @@ mod tests {
         profile.api_key = "sk-plaintext".to_string();
 
         let error = profile.api_key().unwrap_err();
+        // 读失败的那一半：`credentials::read_secret` 的原话被带了进来
+        assert!(error.contains("Credential"), "{}", error);
+        // 明文被忽略的那一半
         assert!(error.contains("plaintext"), "{}", error);
         assert!(error.contains(ALLOW_PLAINTEXT_KEY_ENV), "{}", error);
     }
@@ -947,7 +1004,7 @@ mod tests {
     #[test]
     fn the_plaintext_switch_reads_like_a_switch() {
         let _guard = workspace::env_test_guard();
-        for value in ["", "0", "false", "FALSE"] {
+        for value in ["", "0", "false", "FALSE", "no", "off", "Off"] {
             std::env::set_var(ALLOW_PLAINTEXT_KEY_ENV, value);
             assert!(
                 !plaintext_keys_allowed(),

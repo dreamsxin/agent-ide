@@ -71,8 +71,9 @@ Implementation details:
 - LLM credential references: `llm-profile:<profile_id>`
 - Git credential references: `git-remote:<remote_url>`
 - `~/.agent-ide/config.json` stores `credentialRef` strings. The `api_key` field on `LlmProfile` is `#[serde(default, skip_serializing)]`, so a config file written by this app never contains a plaintext key.
-- Frontend responses use `api_key_masked` (`first4****last4`). `masked_api_key()` probes the credential store rather than trusting the presence of a `credentialRef`, so a reference whose entry cannot be read reports `not configured` instead of falsely claiming a key is stored.
-- The only plaintext-over-IPC path is `reveal_llm_api_key`, used by the Settings eye toggle.
+- Frontend responses carry `api_key_masked` (`first4****last4`) **and** `api_key_usable`. `masked_api_key()` probes the credential store rather than trusting the presence of a `credentialRef`, so an unreadable reference does not falsely claim a key is stored: it falls through to `not configured`, or to `first4****last4 (plaintext in config.json)` when a plaintext key is what is actually there. The Settings panel decides "saved" from `api_key_usable`, not by comparing the mask against a string — a mask that reads as present while every run would fail is exactly the trap that made this area hard to diagnose before.
+- The only plaintext-over-IPC path is `reveal_llm_api_key`, used by the Settings eye toggle. It deliberately does **not** apply the plaintext opt-in: the gate governs whether we *send* a key to a provider, while the eye toggle shows the user their own file. Refusing there would print "cannot read stored key" next to a mask proving it was read.
+
 - No key is transmitted anywhere other than the configured LLM provider endpoint.
 
 Known limitations:

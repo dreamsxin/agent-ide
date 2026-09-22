@@ -601,7 +601,16 @@ export interface LlmProfile {
   provider: ModelProvider;
   endpoint: string;
   api_key_masked: string;
+  /**
+   * 这个 profile 现在能不能真的跑起来（后端判定，不要在前端重算）。
+   *
+   * 不能拿 `api_key_masked !== "not configured"` 当"已配置"：一份没被开启的明文密钥
+   * 会显示成 `sk-1****7890 (plaintext in config.json)`，字符串比较判成已配置，而每次
+   * 运行都会失败。旧的可选性是为了兼容后端还没带这个字段的旧响应。
+   */
+  api_key_usable?: boolean;
   model: string;
+
   modelType?: LocalModelType;
   modelPath?: string;
   modelFile?: string;
