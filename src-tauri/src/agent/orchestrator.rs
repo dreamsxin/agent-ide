@@ -4958,6 +4958,9 @@ mod tests {
             prompt_tokens: Some(1_000),
             completion_tokens: Some(500),
             total_tokens: None,
+            completion_tokens_details: Some(crate::services::llm_client::CompletionTokensDetails {
+                reasoning_tokens: Some(400),
+            }),
             ..Default::default()
         }));
         orchestrator.start_usage_accounting(priced);
@@ -4969,6 +4972,9 @@ mod tests {
         assert_eq!(usage["spendMicros"], 2_000);
         assert_eq!(usage["maxSpendMicros"], 500_000);
         assert_eq!(usage["reportedCalls"], 1);
+        // 键名写在手写的 json! 里，没有 serde 派生兜着：拼错的话状态栏悬浮里那句
+        // "其中多少是思考"会静默消失，而五条命令全绿
+        assert_eq!(usage["reasoningTokens"], 400);
 
         let unpriced = Arc::new(RunUsageMeter::new(None));
         unpriced.record_usage(Some(&LlmUsage {

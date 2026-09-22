@@ -610,10 +610,10 @@ export default function ChatView() {
           // 虚假信心。真正把它们算进来要另一条路（见 ROADMAP 119），不是改这一行文案。
           <div
             className="mb-1.5 px-0.5 text-[10px] text-surface-muted"
-            title="Counts only the context sections listed below. The real request also carries the system prompt, the tool schemas and, inside a pipeline, the messages accumulated by earlier stages — so it is always larger than this. The measured row below (when present) is the provider's own count for the whole request."
+            title="Counts only the context sections listed below. The real request also carries the system prompt, the tool schemas, your own prompt, the pending diffs sent for review, and — inside a pipeline — the messages earlier stages accumulated, so it is always larger than this. The measured row below, when present, is not comparable: that is the provider's count for the largest single call of the last run, and it includes the model's output."
           >
-
             Estimated input budget:{" "}
+
             <span className="font-mono text-surface-text">
               {(contextEstimate?.inputBudgetTokens ?? selectedProfile?.effectiveInputTokens ?? 0).toLocaleString()}
             </span>{" "}

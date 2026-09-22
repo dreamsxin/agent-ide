@@ -524,9 +524,11 @@ pub struct LlmUsage {
     /// OpenAI / DeepSeek 把思考 token 放在这里，**已经包含在 `completion_tokens` 里**。
     #[serde(default, rename = "completion_tokens_details")]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
-    /// 少数网关直接给在顶层，见 `reasoning_tokens()`
-    #[serde(default)]
-    pub reasoning_tokens: Option<u64>,
+    /// 少数网关直接给在顶层。名字带 `_flat` 是为了让 `usage.reasoning_tokens` 写不出来 ——
+    /// 那样写在主流供应商（嵌套形状）上永远是 `None`，而编译器不会有任何抱怨。
+    /// 唯一的读法是 `reasoning_tokens()`。
+    #[serde(default, rename = "reasoning_tokens")]
+    pub reasoning_tokens_flat: Option<u64>,
 }
 
 /// `completion_tokens` 的细分。只取思考那一项：它是"钱花了、正文却可能是空的"唯一的解释。
@@ -550,22 +552,38 @@ impl LlmUsage {
         }
     }
 
-    /// 这次回答里有多少 token 花在思考上。
+    /// 这次回答里有多少 token 花在思考上，**且确实含在 `completion_tokens` 里**。
     ///
-    /// 嵌套字段优先、顶层兜底：两种拼法都在野生端点上出现过，而"只认一种"的后果是一次
-    /// 14 000 字思考的空回答显示成 0 —— 那恰好是这个数字唯一有用的时刻。
+    /// 嵌套字段（OpenAI / DeepSeek 的 `completion_tokens_details`）按协议就是 completion 的
+    /// 细分，直接用。顶层那种拼法没有这个保证：它比 completion 还大就说明它不是细分（有些
+    /// 端点把思考算在 total 里、却不算进 completion），这时宁可不报 —— 否则日志里会出现
+    /// `Completion tokens: 80 (of which 3900 reasoning)` 这种面上就不成立的算式，而读到它的
+    /// 人会转去怀疑记账本身。
     ///
     /// **不加进总数**：它已经算在 `completion_tokens` 里，再加一遍就是重复计费。
     pub fn reasoning_tokens(&self) -> Option<u64> {
-        self.completion_tokens_details
+        if let Some(nested) = self
+            .completion_tokens_details
             .and_then(|details| details.reasoning_tokens)
-            .or(self.reasoning_tokens)
+        {
+            return Some(nested);
+        }
+        let flat = self.reasoning_tokens_flat?;
+        match self.completion_tokens {
+            Some(completion) if flat > completion => None,
+            _ => Some(flat),
+        }
     }
 
+    /// 供应商这次一个数字都没给。
+    ///
+    /// 思考 token 也算数字：只带它的载荷以前会被整条丢掉 —— 那一次调用连
+    /// "reported usage" 都不算，运行结束时显示成"供应商没回报用量"。
     fn is_empty(&self) -> bool {
         self.prompt_tokens.is_none()
             && self.completion_tokens.is_none()
             && self.total_tokens.is_none()
+            && self.reasoning_tokens().is_none()
     }
 }
 
@@ -1493,6 +1511,7 @@ impl LlmClient {
                     finish_reason.as_deref(),
                     reasoning_chars,
                     discarded_fragments,
+                    usage.as_ref().and_then(|usage| usage.reasoning_tokens()),
                 ),
                 finish_reason.as_deref(),
             ));
@@ -1648,7 +1667,12 @@ impl LlmClient {
             return Err(empty_response_error(
                 &self.config,
                 choice_count,
-                &choice_diagnostics,
+                // token 数和输出上限是同一个单位，比字符数更能说明预算被吃掉了多少
+                &format!(
+                    "{}{}",
+                    choice_diagnostics,
+                    reasoning_token_note(payload_usage.and_then(|usage| usage.reasoning_tokens()))
+                ),
                 first_finish_reason.as_deref(),
             ));
         }
@@ -2222,12 +2246,14 @@ fn stream_empty_diagnostics(
     finish_reason: Option<&str>,
     reasoning_chars: usize,
     discarded_tool_fragments: usize,
+    reasoning_tokens: Option<u64>,
 ) -> String {
     let mut line = format!(
         "stream: finish_reason={}, content_chars=0, reasoning_chars={}, tool_calls=0",
         finish_reason.unwrap_or("none"),
         reasoning_chars
     );
+    line.push_str(&reasoning_token_note(reasoning_tokens));
     // 收到过工具调用碎片却一个都没拼完，和"根本没有工具调用"是两件事：前者说明流是在
     // 工具调用中间断的，报成 tool_calls=0 会把人引到完全错的方向
     if discarded_tool_fragments > 0 {
@@ -2237,6 +2263,17 @@ fn stream_empty_diagnostics(
         ));
     }
     line
+}
+
+/// 诊断行里的思考 token。
+///
+/// 空回答这条错误正是这个数字最该出现的地方：字符数只说明"思考很长"，token 数才说明
+/// "输出预算被吃掉了多少"，而后者才是和输出上限同一个单位、能直接比较的量。
+fn reasoning_token_note(reasoning_tokens: Option<u64>) -> String {
+    match reasoning_tokens {
+        Some(tokens) if tokens > 0 => format!(", reasoning_tokens={}", tokens),
+        _ => String::new(),
+    }
 }
 
 /// StarCoder 模型引擎
@@ -2674,12 +2711,12 @@ mod tests {
     /// 调用碎片"和"根本没有工具调用"混成一句，会把人从"流断在工具调用中间"引到输出上限去。
     #[test]
     fn the_stream_diagnostics_separate_absent_tool_calls_from_discarded_fragments() {
-        let plain = stream_empty_diagnostics(Some("length"), 14_710, 0);
+        let plain = stream_empty_diagnostics(Some("length"), 14_710, 0, None);
         assert!(plain.contains("finish_reason=length"), "{}", plain);
         assert!(plain.contains("reasoning_chars=14710"), "{}", plain);
         assert!(!plain.contains("fragments"), "{}", plain);
 
-        let cut_mid_call = stream_empty_diagnostics(None, 0, 2);
+        let cut_mid_call = stream_empty_diagnostics(None, 0, 2, None);
         // 没给原因时说 none，而不是假装知道
         assert!(
             cut_mid_call.contains("finish_reason=none"),
@@ -2691,6 +2728,17 @@ mod tests {
             "{}",
             cut_mid_call
         );
+
+        // 供应商报了用量时，token 数要出现在这条诊断里：它和输出上限同一个单位，
+        // 而字符数只能说明"思考很长"
+        let with_tokens = stream_empty_diagnostics(Some("length"), 14_710, 0, Some(3_900));
+        assert!(
+            with_tokens.contains("reasoning_tokens=3900"),
+            "{}",
+            with_tokens
+        );
+        // 没报用量时不能凭空写一个 0
+        assert!(!plain.contains("reasoning_tokens"), "{}", plain);
     }
 
     /// 思考 token 必须**被看见**，但**不能**被重复计入。
@@ -2713,19 +2761,30 @@ mod tests {
                 .expect("parse flat usage");
         assert_eq!(flat.reasoning_tokens(), Some(64));
 
-        let meter = RunUsageMeter::new(None);
+        // 记账那一半：加进总数会让 per-run 上限提前触发、花费虚高，所以这里配上价格和
+        // 上限，断言两者都没有被思考 token 影响
+        let pricing = TokenPricing {
+            prompt_micros_per_million: 1_000_000,
+            completion_micros_per_million: 1_000_000,
+        };
+        let meter = RunUsageMeter::new(Some(6_000)).with_spend_cap(Some(pricing), Some(10_000_000));
         meter.record_call();
         meter.record_usage(Some(&nested));
         let snapshot = meter.snapshot();
         assert_eq!(snapshot.reasoning_tokens, 3900);
         // 总数仍然只是 prompt + completion
         assert_eq!(snapshot.total_tokens, 1000 + 4096);
+        // 花费按 prompt + completion 算，思考不再收一遍钱
+        assert_eq!(snapshot.spend_micros, Some(1000 + 4096));
+        // 5096 还没到 6000 的 token 上限；把 3900 加进去就会在这里被拒
+        assert!(meter.check_budget().is_ok());
 
         let details = snapshot.action_log_details();
-        assert!(details.contains("3900 reasoning"), "{}", details);
+        assert!(details.contains("3900"), "{}", details);
+        // 读起来不能像是又多花了一笔
         assert!(
             details.contains("already counted in completion"),
-            "读起来不能像是又多花了一笔：{}",
+            "{}",
             details
         );
 
@@ -2738,6 +2797,45 @@ mod tests {
             ..Default::default()
         }));
         assert!(!plain.snapshot().action_log_details().contains("reasoning"));
+    }
+
+    /// 顶层那种拼法没有"含在 completion 里"的保证。比 completion 还大就说明它不是细分，
+    /// 这时报出来会在日志里留下 `Completion tokens: 80 (of which 3900 reasoning)` —— 一个
+    /// 面上就不成立的算式，读到的人会转去怀疑记账本身。
+    #[test]
+    fn a_flat_reasoning_count_larger_than_completion_is_not_claimed_to_be_inside_it() {
+        let impossible: LlmUsage =
+            serde_json::from_str(r#"{"completion_tokens":80,"reasoning_tokens":3900}"#)
+                .expect("parse usage");
+
+        assert_eq!(impossible.reasoning_tokens(), None);
+
+        // 但这条载荷仍然算"供应商报了用量"：completion 是真的
+        let meter = RunUsageMeter::new(None);
+        meter.record_call();
+        meter.record_usage(Some(&impossible));
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.reported_calls, 1);
+        assert_eq!(snapshot.completion_tokens, 80);
+        assert!(!snapshot.action_log_details().contains("reasoning"));
+    }
+
+    /// 只带思考 token 的载荷以前会被整条丢掉：那一次调用连 "reported usage" 都不算，
+    /// 运行结束时显示成"供应商没回报用量"，而它明明报了。
+    #[test]
+    fn a_usage_payload_with_only_reasoning_tokens_still_counts_as_reported() {
+        let only_reasoning: LlmUsage =
+            serde_json::from_str(r#"{"completion_tokens_details":{"reasoning_tokens":512}}"#)
+                .expect("parse usage");
+
+        let meter = RunUsageMeter::new(None);
+        meter.record_call();
+        meter.record_usage(Some(&only_reasoning));
+        let snapshot = meter.snapshot();
+
+        assert_eq!(snapshot.reported_calls, 1);
+        assert!(!snapshot.usage_is_unknown());
+        assert_eq!(snapshot.reasoning_tokens, 512);
     }
 
     #[test]
