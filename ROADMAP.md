@@ -1781,6 +1781,18 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Still no per-model table, for the reason 129 gave and this round re-confirmed**: the sources contradict each other for the same model names, so a table would be wrong on arrival. The difference is that a *preset floor the user can see and edit* does not pretend otherwise, while a hidden global constant did.
    - Rust 480 (test rewritten, count unchanged); frontend 258 → 259.
 
+131. **The limits belong to the model, not the provider (2026-09-22)**
+   Asked whether `defaultMaxOutputTokens` needed the same treatment as the window. It did, and the question exposed that the *shape* was wrong in both cases.
+   - **Per-provider defaults cannot be right.** Inside one vendor, output caps differ by two orders of magnitude — a small vision/flash variant may allow ~1k output while the flagship allows 128k — and the same model id is served by the official endpoint, Azure, and a dozen gateways. Any single number attached to "OpenAI" or "DeepSeek" is therefore wrong for some of that vendor's own models.
+   - **`utils/modelLimits.ts` is a model-keyed table**, ordered most-specific-first (`gpt-5.4-mini` before `gpt-5`), matched case-insensitively against the id with gateway prefixes tolerated (`openai/gpt-4o`, `deepseek-ai/DeepSeek-V4-Flash`) — gateway users are exactly the ones with no preset to lean on. An unrecognised model returns `undefined` and the estimate says "unknown"; that stays the rule from 130.
+   - **Picking a model now fills both boxes**, and changing the model updates them *only* where the field is empty or still holds the previous model's value. A hand-typed number survives a model switch; a number that plainly belonged to the last model does not, because leaving it there makes the estimate disagree with the real ceiling invisibly.
+   - **The three `default*Tokens` fields are gone from the provider presets** (they carried 128k/200k/64k windows and 4096/8192 outputs from an older model generation — the `deepseek` window of 64,000 matched no published figure at all). Presets now carry only endpoint, model list and tool-call mode. The one case where a preset value is still right is **Local GGUF**, where the ceiling comes from the `n_ctx` you loaded with and has nothing to do with the model name, so `handleProviderChange` prefers the table and falls back to the preset.
+   - **Both directions of a wrong Max output are now visible**, which is what makes shipping a table acceptable: too small truncates and the empty-response diagnostic says so (122/123), too large is a plain provider 400. Neither fails silently, and the value sits in an editable box.
+   - The numbers were cross-checked against two independent sources per family and the conflicting ones were left out rather than averaged; o-series and Gemini are absent for that reason.
+   - Still open: nothing refreshes this table — the honest fix remains asking endpoints that publish `context_length`. And `Max context`/`Reserved output` are still display-only; only `Max output` reaches the provider.
+   - Rust unchanged; frontend 259 → 264 (`src/utils/modelLimits.test.ts`).
+
+
 
 
 

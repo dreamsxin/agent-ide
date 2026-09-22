@@ -4,6 +4,7 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
 import { formatTokenCount, parseTokenInput } from "../../utils/tokenInput";
 import { estimateInputTokens } from "../../utils/contextBudget";
+import { modelLimits } from "../../utils/modelLimits";
 import {
   llmConnectionCheckedAt,
   llmConnectionIndicator,
@@ -52,6 +53,9 @@ const providerLabels: Record<string, string> = {
   local: "Local GGUF",
 };
 
+// 预设只管"连到哪、有哪些模型、用哪种工具协议"。
+// 窗口和输出上限**不在这里**：它们跟着模型走（`utils/modelLimits.ts`），因为同一家自己的
+// 模型之间上限能差两个数量级 —— 按供应商给一个值，在其中一边必然是错的。
 const PROVIDERS: ProviderPreset[] = [
   {
     id: "openai",
@@ -59,9 +63,6 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://api.openai.com/v1",
     defaultModel: "gpt-4o",
     models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
-    defaultMaxContextTokens: 128000,
-    defaultReservedOutputTokens: 4096,
-    defaultMaxOutputTokens: 4096,
   },
   {
     id: "anthropic",
@@ -74,9 +75,6 @@ const PROVIDERS: ProviderPreset[] = [
       "claude-3-haiku-20240307",
       "claude-3-5-sonnet-20241022",
     ],
-    defaultMaxContextTokens: 200000,
-    defaultReservedOutputTokens: 8192,
-    defaultMaxOutputTokens: 8192,
   },
   {
     id: "azure",
@@ -84,22 +82,15 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://{resource}.openai.azure.com",
     defaultModel: "gpt-4",
     models: ["gpt-4", "gpt-4o", "gpt-35-turbo"],
-    defaultMaxContextTokens: 128000,
-    defaultReservedOutputTokens: 4096,
-    defaultMaxOutputTokens: 4096,
   },
   {
     id: "deepseek",
     label: "DeepSeek",
     defaultEndpoint: "https://api.deepseek.com",
     defaultModel: "deepseek-chat",
-    models: ["deepseek-chat", "deepseek-v4-flash"],
-    // 128k 是这一家公开资料里出现过的**最小**窗口（V3.x 一代）；新一代标着 1M。预设只给
-    // 保守下限，真实窗口由用户按自己那个模型的文档填 —— 猜大了会让估算显得还有余量。
-    defaultMaxContextTokens: 128000,
-    defaultReservedOutputTokens: 4096,
-    defaultMaxOutputTokens: 4096,
+    models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"],
   },
+
   {
     id: "custom",
     label: "Custom Provider",
@@ -218,7 +209,10 @@ export default function SettingsPanel() {
     }
   }, [activeProfileId, llmConfigured, llmEndpoint, llmModel, llmProfiles]);
 
-  // 切换 provider 时自动填默认值
+  // 切换 provider 时自动填默认值。
+  //
+  // 预算不再由预设携带，而是按**模型**查表（`modelLimits`）：同一家自己的模型之间输出上限
+  // 能差两个数量级，按供应商给一个值必然在其中一边是错的。
   const handleProviderChange = useCallback(
     (p: ModelProvider) => {
       setProvider(p);
@@ -226,15 +220,48 @@ export default function SettingsPanel() {
       if (preset) {
         setEndpoint(preset.defaultEndpoint);
         setModel(preset.defaultModel);
-        setMaxContextTokens(numberToInput(preset.defaultMaxContextTokens));
+        const limits = modelLimits(preset.defaultModel);
+        // 模型表优先；本地 GGUF 这种"上限取决于你加载时给的 n_ctx、和模型名无关"的情况
+        // 才用预设自带的值
+        setMaxContextTokens(
+          numberToInput(limits?.contextWindow ?? preset.defaultMaxContextTokens)
+        );
+        setMaxOutputTokens(numberToInput(limits?.maxOutput ?? preset.defaultMaxOutputTokens));
+        // 预留输出通常留空：它有全局默认（4096），公式还会先退回 Max output。
+        // 多填一个数字只是多一处会过期的东西。
         setReservedOutputTokens(numberToInput(preset.defaultReservedOutputTokens));
-        setMaxOutputTokens(numberToInput(preset.defaultMaxOutputTokens));
         setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
       }
       // 不清除 apiKey
     },
     []
   );
+
+  /**
+   * 换模型时跟着换预算。
+   *
+   * 只覆盖"还空着"或"正好等于上一个模型那一档"的框：用户手填过的值不能被一次换模型悄悄改掉，
+   * 而一个明显属于上一个模型的值留在那里更糟 —— 那会让估算和真实上限对不上，而界面看不出来。
+   */
+  const handleModelChange = useCallback(
+    (next: string) => {
+      const before = modelLimits(model);
+      const after = modelLimits(next);
+      setModel(next);
+      setMaxContextTokens((current) =>
+        current.trim() === "" || parseTokenInput(current) === before?.contextWindow
+          ? numberToInput(after?.contextWindow)
+          : current
+      );
+      setMaxOutputTokens((current) =>
+        current.trim() === "" || parseTokenInput(current) === before?.maxOutput
+          ? numberToInput(after?.maxOutput)
+          : current
+      );
+    },
+    [model]
+  );
+
 
   // 保存
   /** 眼睛图标：显示时向后端取一次明文，隐藏时只清本地状态 */
@@ -393,16 +420,16 @@ export default function SettingsPanel() {
   }, [deleteLlmProfile, profileId]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
-  // 窗口用填的那个；没填就退回**这个预设带的**窗口，而不是一个全局假定值。
-  // 全局常量在"各家已经 200k~1M"的今天多数情况下偏小，会让估算变成假警报；预设里的值至少
-  // 跟着用户选的那一家走，而且它就显示在上面那个框里，看得见也改得动。
-  const windowForEstimate = parseTokenInput(maxContextTokens) ?? preset?.defaultMaxContextTokens;
+  // 窗口用填的那个；没填就按**模型**查表。表按模型 id 匹配而不是按供应商：同一家自己的模型
+  // 之间上限能差两个数量级，而同一个模型又会被好几个端点转发。
+  const knownLimits = modelLimits(model);
+  const windowForEstimate = parseTokenInput(maxContextTokens) ?? knownLimits?.contextWindow;
   const inputBudget = estimateInputTokens(
     windowForEstimate,
     parseTokenInput(reservedOutputTokens),
     parseTokenInput(maxOutputTokens)
   );
-  const windowIsFromPreset =
+  const windowIsFromTable =
     parseTokenInput(maxContextTokens) === undefined && windowForEstimate !== undefined;
   const connectionState = llmConnectionIndicator(llmConnection, llmTarget);
   const connectionCheckedAt = llmConnectionCheckedAt(llmConnection, llmTarget);
@@ -575,7 +602,7 @@ export default function SettingsPanel() {
         <>
           <select
             value={model}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(e) => handleModelChange(e.target.value)}
             className="w-full mb-1 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
           >
             <option value="">-- Select --</option>
@@ -593,7 +620,7 @@ export default function SettingsPanel() {
       <input
         type="text"
         value={model}
-        onChange={(e) => setModel(e.target.value)}
+        onChange={(e) => handleModelChange(e.target.value)}
         placeholder="e.g. gpt-4o, claude-3-opus-20240229"
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
@@ -606,10 +633,10 @@ export default function SettingsPanel() {
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
             label="Max context"
-            title="The model's context window, from its documentation. Empty falls back to the provider preset's floor; windows now run from 128k to 1M, so set it if yours is bigger. Budgeting only — never sent to the provider."
+            title="The model's context window, from its documentation. Filled in when the model is recognised; otherwise the estimate says unknown. Budgeting only — never sent to the provider."
             value={maxContextTokens}
             onChange={setMaxContextTokens}
-            placeholder="from preset"
+            placeholder="from model"
             unit="tokens"
           />
           <BudgetInput
@@ -651,8 +678,8 @@ export default function SettingsPanel() {
           ) : (
             <>
               tokens (max context − reserved output − 512)
-              {windowIsFromPreset
-                ? `, using the ${preset?.label ?? "provider"} preset's ${windowForEstimate?.toLocaleString()}-token window because Max context is empty.`
+              {windowIsFromTable
+                ? `, using the ${windowForEstimate?.toLocaleString()}-token window known for ${model} because Max context is empty.`
                 : "."}
             </>
           )}{" "}
@@ -660,17 +687,19 @@ export default function SettingsPanel() {
           <span className="font-mono text-surface-text">1m</span>; the number under each box is what was
           understood.{" "}
           <span className="text-surface-text">
-            Set Max context when your model differs from the preset
+            Picking a model fills these two in when its limits are known
           </span>{" "}
-          — windows now run from 128k to 1M, and the preset numbers are conservative floors, not lookups.
-          There is no per-model table on purpose: the vendors move these faster than this app ships, and a
-          wrong window is worse than an empty one because the percentage beside it looks trustworthy.{" "}
+          — the table is keyed by model, not by provider, because the same vendor ships models whose output
+          caps differ by two orders of magnitude and the same model is served by many endpoints. An unknown
+          model leaves them empty rather than guessing: a wrong window is worse than an empty one, because the
+          percentage beside it looks trustworthy.{" "}
           <span className="text-surface-text">
-            Max output is the only one of these that reaches the provider.
+            Max output is the only one of these that reaches the provider
           </span>{" "}
-          Picking a preset fills it in, and a reasoning model can spend all of it on thinking and return an
-          empty answer — raise it for those.
+          — too small truncates the answer (a reasoning model can spend all of it on thinking), too large is a
+          plain 400 from the provider, so both mistakes are visible.
         </div>
+
 
       </div>
 
