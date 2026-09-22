@@ -27,6 +27,12 @@ pub const SEARCH_TEXT: &str = "workspace_search_text";
 pub const LIST_FILES: &str = "workspace_list_files";
 pub const RUN_COMMAND: &str = "workspace_run_command";
 pub const WRITE_FILE: &str = "workspace_write_file";
+/// 按"找一段、换一段"改一个已存在的文件。
+///
+/// 和 `WRITE_FILE` 同一档授权（都会改磁盘、都要留痕），分开是因为整文件重写有两个实际代价：
+/// 改一行要把整个文件重新生成一遍（长文件上既贵又容易在没动的地方出错），而且模型必须先把
+/// 全文读进上下文。替换式编辑只要那一小段。
+pub const EDIT_FILE: &str = "workspace_edit_file";
 pub const DELETE_FILE: &str = "workspace_delete_file";
 pub const MOVE_FILE: &str = "workspace_move_file";
 pub const BROWSER_OPEN: &str = "workspace_browser_open";
@@ -606,12 +612,50 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
     ];
 
     if permissions.allow_write {
+        // 编辑排在整文件写入**前面**：工具顺序影响模型的选择，而改一个已存在文件的正确做法
+        // 几乎总是替换那一小段，不是把全文重新生成一遍。
+        definitions.push(ToolDefinition {
+            name: EDIT_FILE.to_string(),
+            description:
+                "Change part of an existing workspace file by replacing an exact snippet. Prefer \
+                 this over workspace_write_file whenever the file already exists: you only send \
+                 the part that changes, so nothing you did not intend to touch can drift. Read \
+                 the file first and copy old_string from it verbatim, including indentation. The \
+                 snippet must appear exactly once unless replace_all is true, otherwise the call \
+                 is refused rather than guessing which occurrence you meant. The change is \
+                 recorded as a reviewable, undoable entry."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to an existing file, e.g. src/app.ts"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "Exact text to replace, copied from the file. Include enough surrounding lines to make it unique."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Replacement text. Empty string deletes the snippet."
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence instead of refusing an ambiguous match. Default false."
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        });
+
         definitions.push(ToolDefinition {
             name: WRITE_FILE.to_string(),
             description: format!(
                 "Write the full new contents of a workspace file, then verify the result with a \
-                 check command. Read the file first so you preserve everything you are not \
-                 changing — this replaces the whole file, it does not patch it. {} The change is \
+                 check command. Use this for new files and for rewrites that touch most of the \
+                 file; to change part of an existing file use workspace_edit_file instead, since \
+                 this replaces the whole file and does not patch it. {} The change is \
                  recorded as a reviewable, undoable entry, so prefer this over describing an edit \
                  you cannot verify.",
                 if permissions.allow_create {
@@ -956,7 +1000,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             // 未授权时不认领：工具本来也没有被通告出去，认领它只会把一个
             // "不存在的工具"变成一个"总是失败的工具"
             RUN_COMMAND => self.permissions.allows_commands(),
-            WRITE_FILE | DELETE_FILE => self.permissions.allow_write,
+            WRITE_FILE | EDIT_FILE | DELETE_FILE => self.permissions.allow_write,
             BROWSER_OPEN | BROWSER_TABS => self.permissions.allows_browser(),
             BROWSER_READ_PAGE => self.permissions.allows_page_read(),
             COMPUTER_WINDOWS => self.permissions.allows_computer(),
@@ -986,6 +1030,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 tool_name,
                 RUN_COMMAND
                     | WRITE_FILE
+                    | EDIT_FILE
                     | DELETE_FILE
                     | MOVE_FILE
                     | BROWSER_OPEN
@@ -1061,6 +1106,21 @@ impl ToolInvoker for WorkspaceToolInvoker {
                 args.get("content")
                     .and_then(|value| value.as_str())
                     .ok_or("Missing 'content'")?,
+                &self.permissions,
+            ),
+            EDIT_FILE => edit_file_tool(
+                string_arg(&args, "path").ok_or("Missing 'path'")?,
+                // 和 `content` 同一个理由走原始取值：`new_string` 为空是合法的（删掉那一段），
+                // 而 `string_arg` 会把空串当缺失
+                args.get("old_string")
+                    .and_then(|value| value.as_str())
+                    .ok_or("Missing 'old_string'")?,
+                args.get("new_string")
+                    .and_then(|value| value.as_str())
+                    .ok_or("Missing 'new_string'")?,
+                args.get("replace_all")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
                 &self.permissions,
             ),
             DELETE_FILE => delete_file_tool(
@@ -1443,14 +1503,141 @@ async fn run_command_tool(
     ))
 }
 
+/// 这个文件原本用的是哪种行尾。
+///
+/// 写回去要照原样：只按 `\n` 写回一个 CRLF 文件，diff 会显示"每一行都改了"，而实际只动了
+/// 一处 —— 审查区会因此变得没法看，而这个产品的全部意义就是让人看得清改了什么。
+fn dominant_line_ending(content: &str) -> &'static str {
+    let crlf = content.matches("\r\n").count();
+    let lf = content.matches('\n').count().saturating_sub(crlf);
+    if crlf > lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// 匹配前把行尾统一成 `\n`。
+///
+/// 模型给的 `old_string` 几乎总是 LF（它看到的是我们读出来的文本），而文件可能是 CRLF。
+/// 不统一的话，一个明明照抄自文件的片段会"找不到"，而错误信息说不出为什么。
+fn to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+/// 按"找一段、换一段"改一个已存在的文件。
+///
+/// 只做**精确**匹配（外加行尾统一）。参照实现还有一串模糊回退（按行 trim、忽略缩进、
+/// 首尾行锚定 + 相似度），这里刻意不做：那些策略能把编辑落到一个和模型意图不同的位置上，
+/// 而这个产品的底线是"你看到的就是发生的"。找不到就报错让模型重读文件，代价是一次调用；
+/// 模糊匹配猜错的代价是一处看起来正确的错误改动。
+///
+/// 约束和 `write_file_tool` 完全一致：同一个 `resolve_for_agent_write`（`.git/`、
+/// `.agent-ide/`、`node_modules/`、凭据文件一律拒绝）、同一个 `record_write` 留痕通道，
+/// 所以它产生的改动一样进审查区、一样能撤销。
+fn edit_file_tool(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    if !permissions.allow_write {
+        return Err(
+            "Editing files is not authorized for this run. Return an agent-changes block for \
+             review instead."
+                .to_string(),
+        );
+    }
+    if old_string.is_empty() {
+        return Err(
+            "old_string is empty, which would match everywhere. Copy the exact snippet you want \
+             replaced from the file."
+                .to_string(),
+        );
+    }
+    if old_string == new_string {
+        return Err(
+            "old_string and new_string are identical, so this edit would change nothing. Send the \
+             text you actually want in place of the snippet."
+                .to_string(),
+        );
+    }
+
+    let resolved = workspace::resolve_for_agent_write(path)?;
+    let original = match std::fs::read_to_string(&resolved) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // 编辑一个不存在的文件不是"少一个授权"，而是用错了工具
+            return Err(format!(
+                "{} does not exist, so there is nothing to edit. Use workspace_write_file to \
+                 create it.",
+                path
+            ));
+        }
+        Err(error) => return Err(format!("Read {} before editing: {}", path, error)),
+    };
+
+    let line_ending = dominant_line_ending(&original);
+    let haystack = to_lf(&original);
+    let needle = to_lf(old_string);
+    let replacement = to_lf(new_string);
+
+    let occurrences = haystack.matches(needle.as_str()).count();
+    if occurrences == 0 {
+        return Err(format!(
+            "That snippet does not appear in {}. Read the file again and copy old_string from it \
+             verbatim, including indentation — this tool matches exactly and does not guess.",
+            path
+        ));
+    }
+    if occurrences > 1 && !replace_all {
+        return Err(format!(
+            "That snippet appears {} times in {}. Add surrounding lines to old_string so it \
+             identifies one place, or set replace_all to true to change all of them.",
+            occurrences, path
+        ));
+    }
+
+    let edited_lf = if replace_all {
+        haystack.replace(needle.as_str(), &replacement)
+    } else {
+        haystack.replacen(needle.as_str(), &replacement, 1)
+    };
+    let updated = if line_ending == "\r\n" {
+        edited_lf.replace('\n', "\r\n")
+    } else {
+        edited_lf
+    };
+
+    std::fs::write(&resolved, &updated).map_err(|error| format!("Write {}: {}", path, error))?;
+
+    permissions.record_write(AgentFileWrite {
+        file: path.to_string(),
+        path: resolved,
+        // 留痕用的是**磁盘上的原文**，不是归一化之后的版本：撤销要还原到字节一致，
+        // 否则一次撤销会顺带把行尾也改掉
+        previous: Some(original),
+        updated,
+        removed: false,
+        moved_from: None,
+    });
+
+    Ok(format!(
+        "Replaced {} occurrence{} in {}. The change is recorded and can be undone.",
+        occurrences,
+        if occurrences == 1 { "" } else { "s" },
+        path
+    ))
+}
+
 /// 把整份新内容写进工作区文件。
 ///
 /// 这是闭环的最后一半：在此之前模型能读、能跑检查，但改动只能以 `agent-changes`
 /// 输出交给人应用，所以它永远看不到**自己那次改动**之后的状态。
 ///
-/// 为什么整份覆盖而不是打补丁：补丁定位失败（"Could not find original content"）
-/// 是既有失败模式的主要来源，而模型已经有读取工具可以先取到准确内容。整份写入
-/// 把"定位"这一步彻底去掉。代价是模型必须保留它不想改的部分，工具描述里明说了。
+/// 和 `edit_file_tool` 的分工：改已存在文件的一部分走替换式编辑（只发那一小段，没动的地方
+/// 不可能漂移）；新建文件、或者要动的部分已经占了大半个文件时，整份写入更直接。
 ///
 /// 约束：
 /// - 路径过 `resolve_for_agent_write`，因此 `.git/`、`.agent-ide/`、`node_modules/`
@@ -2893,8 +3080,156 @@ mod tests {
         assert!(error.contains("not authorized"), "{}", error);
     }
 
-    /// 移动记的是"从哪来"，不是"删一条 + 建一条"。
+    /// 替换式编辑改的是那一小段，留痕留的是整份原文。
     ///
+    /// 两件事一起断言：磁盘上只有那一处变了（没动的行必须逐字保留），而 `record_write` 里的
+    /// `previous` 是**磁盘原文** —— 撤销要还原到字节一致，留一个归一化过的版本会让撤销顺带
+    /// 改掉行尾。
+    #[test]
+    fn edit_tool_changes_one_snippet_and_records_the_original() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/app.ts", "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        let message = edit_file_tool(
+            "src/app.ts",
+            "const b = 2;",
+            "const b = 20;",
+            false,
+            &permissions,
+        )
+        .unwrap();
+        assert!(message.contains("Replaced 1 occurrence"), "{}", message);
+
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("src/app.ts")).unwrap(),
+            "const a = 1;\nconst b = 20;\nconst c = 3;\n"
+        );
+
+        let writes = permissions.take_writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].previous.as_deref(),
+            Some("const a = 1;\nconst b = 2;\nconst c = 3;\n")
+        );
+        assert!(writes[0].updated.contains("const b = 20;"));
+    }
+
+    /// 一段出现多次时必须拒绝，而不是挑一个。
+    ///
+    /// 挑第一处是最危险的默认值：模型以为改了它想改的那一处，实际改了另一处，而两边都
+    /// "成功"了。要全改就明确说 `replace_all`。
+    #[test]
+    fn edit_tool_refuses_an_ambiguous_snippet_until_told_to_replace_all() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/app.ts", "log(x);\nlog(x);\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        let error =
+            edit_file_tool("src/app.ts", "log(x);", "trace(x);", false, &permissions).unwrap_err();
+        assert!(error.contains("2 times"), "{}", error);
+        // 拒绝要彻底：磁盘没动，也没有留下半条痕迹
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("src/app.ts")).unwrap(),
+            "log(x);\nlog(x);\n"
+        );
+        assert!(permissions.take_writes().is_empty());
+
+        let message =
+            edit_file_tool("src/app.ts", "log(x);", "trace(x);", true, &permissions).unwrap();
+        assert!(message.contains("Replaced 2 occurrences"), "{}", message);
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("src/app.ts")).unwrap(),
+            "trace(x);\ntrace(x);\n"
+        );
+    }
+
+    /// CRLF 文件上，模型给的 LF 片段要能匹配，而写回去仍然是 CRLF。
+    ///
+    /// 不统一行尾，一个明明照抄自文件的片段会"找不到"；写回时不还原行尾，diff 会显示整个
+    /// 文件每一行都变了 —— 审查区因此没法看。
+    #[test]
+    fn edit_tool_matches_across_line_endings_and_writes_back_the_original_style() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/app.ts", "const a = 1;\r\nconst b = 2;\r\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        edit_file_tool(
+            "src/app.ts",
+            "const a = 1;\nconst b = 2;",
+            "const a = 9;\nconst b = 2;",
+            false,
+            &permissions,
+        )
+        .unwrap();
+
+        let after = std::fs::read_to_string(env.root.join("src/app.ts")).unwrap();
+        assert_eq!(after, "const a = 9;\r\nconst b = 2;\r\n");
+        assert!(!after.contains("\n\n"), "不能混进裸 LF：{:?}", after);
+    }
+
+    /// 四种"看起来像编辑、其实是错用"的调用都要在改磁盘之前被拒绝。
+    #[test]
+    fn edit_tool_refuses_calls_that_would_be_silent_mistakes() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write("src/app.ts", "const a = 1;\n");
+        let permissions = WorkspaceToolPermissions::new(Vec::new(), true, true);
+
+        // 空片段会匹配到任何位置
+        let error = edit_file_tool("src/app.ts", "", "x", false, &permissions).unwrap_err();
+        assert!(error.contains("empty"), "{}", error);
+
+        // 前后一样：报"成功"会让模型以为改过了
+        let error = edit_file_tool(
+            "src/app.ts",
+            "const a = 1;",
+            "const a = 1;",
+            false,
+            &permissions,
+        )
+        .unwrap_err();
+        assert!(error.contains("identical"), "{}", error);
+
+        // 找不到：让模型重读文件，而不是猜一个位置
+        let error =
+            edit_file_tool("src/app.ts", "const zzz = 0;", "x", false, &permissions).unwrap_err();
+        assert!(error.contains("does not appear"), "{}", error);
+
+        // 文件不存在是用错了工具，不是少一个授权
+        let error = edit_file_tool("src/missing.ts", "a", "b", false, &permissions).unwrap_err();
+        assert!(error.contains("workspace_write_file"), "{}", error);
+
+        // 拒绝清单和写入工具共用一套：凭据文件一样改不动
+        env.write(".env", "SECRET=1\n");
+        let error =
+            edit_file_tool(".env", "SECRET=1", "SECRET=2", false, &permissions).unwrap_err();
+        assert!(error.to_lowercase().contains("credential"), "{}", error);
+
+        // 没有写权限时即使被直接调用也要拒绝
+        let read_only = WorkspaceToolPermissions::read_only();
+        let error = edit_file_tool(
+            "src/app.ts",
+            "const a = 1;",
+            "const a = 2;",
+            false,
+            &read_only,
+        )
+        .unwrap_err();
+        assert!(error.contains("not authorized"), "{}", error);
+
+        // 一次都没有真的写进去
+        assert_eq!(
+            std::fs::read_to_string(env.root.join("src/app.ts")).unwrap(),
+            "const a = 1;\n"
+        );
+        assert!(permissions.take_writes().is_empty());
+    }
+
+    /// 移动记的是"从哪来"，不是"删一条 + 建一条"。    ///
     /// 两条记录会在审查区变成两张互不相干的卡片，各自的 rationale 还会指向没被调用的
     /// 工具；这里断言的是一条记录带着 `moved_from`，以及磁盘上真的搬过去了。
     #[test]
