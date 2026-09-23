@@ -644,77 +644,61 @@ export default function SettingsPanel() {
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Context Budget — all four are <span className="text-surface-text">token counts</span>,
-          and all four are <span className="text-surface-text">optional</span>
+          {t("settings.budget.title")}
         </div>
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
-            label="Max context"
-            title="The model's context window, from its documentation. Filled in when the model is recognised; otherwise the estimate says unknown. Budgeting only — never sent to the provider."
+            label={t("settings.budget.maxContext")}
+            title={t("settings.budget.maxContext.title")}
             value={maxContextTokens}
             onChange={setMaxContextTokens}
-            placeholder="from model"
+            placeholder={t("settings.budget.maxContext.ph")}
             unit="tokens"
           />
           <BudgetInput
-            label="Reserved output"
-            title="How much of the window to keep free for the answer when estimating. Empty means 4,096. Budgeting only."
+            label={t("settings.budget.reserved")}
+            title={t("settings.budget.reserved.title")}
             value={reservedOutputTokens}
             onChange={setReservedOutputTokens}
-            placeholder="4k default"
+            placeholder={t("settings.budget.reserved.ph")}
             unit="tokens"
           />
           <BudgetInput
-            label="Max output"
-            title="The output limit actually sent to the provider. A provider preset fills this in; empty means the provider picks one, which is often only a few thousand tokens."
+            label={t("settings.budget.maxOutput")}
+            title={t("settings.budget.maxOutput.title")}
             value={maxOutputTokens}
             onChange={setMaxOutputTokens}
-            placeholder="provider default"
+            placeholder={t("settings.budget.maxOutput.ph")}
             unit="tokens"
           />
 
           <BudgetInput
-            label="Per-run cap"
-            title="Stops a run once the provider-reported total for that run reaches this. Empty means no limit."
+            label={t("settings.budget.runCap")}
+            title={t("settings.budget.runCap.title")}
             value={maxRunTokens}
             onChange={setMaxRunTokens}
-            placeholder="no limit"
+            placeholder={t("settings.budget.runCap.ph")}
             unit="tokens"
           />
         </div>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
-          Effective input estimate:{" "}
+          {t("settings.budget.estimate")}{" "}
           <span className="font-mono text-surface-text">
-            {inputBudget === undefined ? "unknown" : inputBudget.toLocaleString()}
+            {inputBudget === undefined ? t("settings.budget.unknown") : inputBudget.toLocaleString()}
           </span>{" "}
-          {inputBudget === undefined ? (
-            <>
-              — fill in Max context (your model&apos;s window, from its docs) and this becomes max context −
-              reserved output − 512.
-            </>
-          ) : (
-            <>
-              tokens (max context − reserved output − 512)
-              {windowIsFromTable
-                ? `, using the ${windowForEstimate?.toLocaleString()}-token window known for ${model} because Max context is empty.`
-                : "."}
-            </>
-          )}{" "}
-          You can type <span className="font-mono text-surface-text">128k</span> or{" "}
-          <span className="font-mono text-surface-text">1m</span>; the number under each box is what was
-          understood.{" "}
-          <span className="text-surface-text">
-            Picking a model fills these two in when its limits are known
-          </span>{" "}
-          — the table is keyed by model, not by provider, because the same vendor ships models whose output
-          caps differ by two orders of magnitude and the same model is served by many endpoints. An unknown
-          model leaves them empty rather than guessing: a wrong window is worse than an empty one, because the
-          percentage beside it looks trustworthy.{" "}
-          <span className="text-surface-text">
-            Max output is the only one of these that reaches the provider
-          </span>{" "}
-          — too small truncates the answer (a reasoning model can spend all of it on thinking), too large is a
-          plain 400 from the provider, so both mistakes are visible.
+          {inputBudget === undefined
+            ? t("settings.budget.explain.empty")
+            : windowIsFromTable
+            ? t("settings.budget.explain.fromTable", {
+                window: windowForEstimate?.toLocaleString() ?? "",
+                model,
+              })
+            : t("settings.budget.explain.known")}{" "}
+          {t("settings.budget.shorthand")}{" "}
+          <span className="text-surface-text">{t("settings.budget.modelFill")}</span>{" "}
+          {t("settings.budget.modelFill.detail")}{" "}
+          <span className="text-surface-text">{t("settings.budget.maxOutputNote")}</span>{" "}
+          {t("settings.budget.maxOutputNote.detail")}
         </div>
 
 
@@ -724,12 +708,12 @@ export default function SettingsPanel() {
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Per-Run Spend Cap — in <span className="text-surface-text">US dollars</span>
+          {t("settings.spend.title")}
         </div>
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
-            label="Input $/M tokens"
-            title="Price per million input tokens, in dollars, from the provider's pricing page."
+            label={t("settings.spend.input")}
+            title={t("settings.spend.input.title")}
             value={promptPrice}
             onChange={setPromptPrice}
             placeholder="0.28"
@@ -737,8 +721,8 @@ export default function SettingsPanel() {
             step="0.000001"
           />
           <BudgetInput
-            label="Output $/M tokens"
-            title="Price per million output tokens, in dollars."
+            label={t("settings.spend.output")}
+            title={t("settings.spend.output.title")}
             value={completionPrice}
             onChange={setCompletionPrice}
             placeholder="0.42"
@@ -746,11 +730,11 @@ export default function SettingsPanel() {
             step="0.000001"
           />
           <BudgetInput
-            label="Spend cap $"
-            title="Stops a run once its estimated cost reaches this many dollars. Empty means no limit."
+            label={t("settings.spend.cap")}
+            title={t("settings.spend.cap.title")}
             value={maxRunSpend}
             onChange={setMaxRunSpend}
-            placeholder="no limit"
+            placeholder={t("settings.budget.runCap.ph")}
             unit="usd"
             step="0.01"
           />
@@ -758,47 +742,32 @@ export default function SettingsPanel() {
 
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
           {spendCapState === "active" ? (
-            <>
-              Active: a run stops once its estimated cost reaches{" "}
-              <span className="font-mono text-surface-text">${maxRunSpend}</span>, checked before the
-              token cap.
-            </>
+            t("settings.spend.active", { cap: maxRunSpend })
           ) : spendCapState === "no_price" ? (
-            <span className="text-amber-300">
-              Not enforced: both prices are required. With only one, the estimate would undercount
-              and the cap would be a false guarantee, so spend is recorded as "not computable"
-              instead.
-            </span>
+            <span className="text-amber-300">{t("settings.spend.noPrice")}</span>
           ) : (
-            <>
-              Optional. Enter both per-million prices and a cap to stop a run on cost rather than on
-              token count — useful when a model is cheap in tokens but expensive in money. Prices are
-              stored to the millionth of a dollar.
-            </>
+            t("settings.spend.inactive")
           )}
         </div>
       </div>
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
-        <div className="mb-2 text-[11px] font-semibold text-surface-muted">Reasoning Effort</div>
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">
+          {t("settings.reasoning.title")}
+        </div>
         <select
           value={reasoningEffort}
           onChange={(event) => setReasoningEffort(event.target.value)}
           className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
         >
-          <option value="">Provider default (do not send)</option>
-          <option value="off">Off — no thinking</option>
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
+          <option value="">{t("settings.reasoning.default")}</option>
+          <option value="off">{t("settings.reasoning.off")}</option>
+          <option value="low">{t("settings.reasoning.low")}</option>
+          <option value="medium">{t("settings.reasoning.medium")}</option>
+          <option value="high">{t("settings.reasoning.high")}</option>
         </select>
         <div className="mt-1.5 text-[10px] leading-relaxed text-surface-muted">
-          Sent as <span className="font-mono text-surface-text">reasoning_effort</span> (plus{" "}
-          <span className="font-mono text-surface-text">enable_thinking: false</span> for Off, which is the
-          only spelling some gateways understand). Thinking and the answer share one output budget, so a high
-          tier on a small Max output is how a run comes back empty — raise Max output with it. If the endpoint
-          rejects the field, it is dropped for the rest of the run and the Logs panel says so rather than
-          leaving you to wonder why depth did not change.
+          {t("settings.reasoning.help")}
         </div>
       </div>
 
@@ -825,7 +794,7 @@ export default function SettingsPanel() {
         disabled={saving}
         className="w-full py-1.5 rounded bg-accent-blue hover:bg-accent-blue/80 text-white text-xs font-medium disabled:opacity-50 transition-colors"
       >
-        {saving ? "Saving..." : "Save Profile"}
+        {saving ? t("settings.saving") : t("settings.save")}
       </button>
 
       {/* 反馈紧跟按钮。以前它渲染在 100 行 JSX 之后（Agent Permissions 和 Test
@@ -886,27 +855,27 @@ export default function SettingsPanel() {
         {/* Granular Toggles */}
         <div className="mb-3 space-y-1.5 rounded border border-surface-border bg-surface-border/10 p-2">
           <PermissionToggle
-            label="File Creation"
-            desc="Allow Agent to create new files"
+            label={t("settings.perm.fileCreate")}
+            desc={t("settings.perm.fileCreate.desc")}
             checked={permissions.allowFileCreate}
             onChange={() => togglePermission("allowFileCreate")}
           />
           <PermissionToggle
-            label="Command Execution"
-            desc="Allow Agent to run the project's declared commands"
+            label={t("settings.perm.commandRun")}
+            desc={t("settings.perm.commandRun.desc")}
             checked={permissions.allowCommandRun}
             onChange={() => togglePermission("allowCommandRun")}
           />
           <PermissionToggle
-            label="Browser Use"
-            desc="Allow Agent to open pages in your Chrome (needs an allowed origin below; navigation cannot be undone)"
+            label={t("settings.perm.browser")}
+            desc={t("settings.perm.browser.desc")}
             checked={permissions.allowBrowserUse}
             onChange={() => togglePermission("allowBrowserUse")}
           />
           {permissions.allowBrowserUse && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="browser-origins">
-                Allowed origins (one per line, `*` for any)
+                {t("settings.perm.browser.origins")}
               </label>
               <textarea
                 id="browser-origins"
@@ -927,21 +896,21 @@ export default function SettingsPanel() {
               {/* 空清单时开关等于没开，这句话必须说出来，否则那个开关就是个假承诺 */}
               {permissions.browserOrigins.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
-                  No origin allowed yet — the browser tools stay hidden from the Agent.
+                  {t("settings.perm.browser.empty")}
                 </p>
               )}
             </div>
           )}
           <PermissionToggle
-            label="Page Reading"
-            desc="Allow Agent to read the text of a page you already have open (contents, not just the title; needs an allowed origin below)"
+            label={t("settings.perm.pageRead")}
+            desc={t("settings.perm.pageRead.desc")}
             checked={permissions.allowPageRead}
             onChange={() => togglePermission("allowPageRead")}
           />
           {permissions.allowPageRead && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="page-read-origins">
-                Readable origins (one per line, `*` for any)
+                {t("settings.perm.pageRead.origins")}
               </label>
               <textarea
                 id="page-read-origins"
@@ -962,21 +931,21 @@ export default function SettingsPanel() {
               {/* 这份清单和上面那份是分开的：能打开一个页面 ≠ 能读它登录后才显示的正文 */}
               {permissions.pageReadOrigins.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
-                  No origin allowed yet — the page reading tool stays hidden from the Agent.
+                  {t("settings.perm.pageRead.empty")}
                 </p>
               )}
             </div>
           )}
           <PermissionToggle
-            label="Desktop Observation"
-            desc="Allow Agent to list your visible windows (read-only; needs an allowed app below, Windows only)"
+            label={t("settings.perm.desktop")}
+            desc={t("settings.perm.desktop.desc")}
             checked={permissions.allowComputerUse}
             onChange={() => togglePermission("allowComputerUse")}
           />
           {permissions.allowComputerUse && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="computer-apps">
-                Observable apps (one per line, `*` for any)
+                {t("settings.perm.desktop.apps")}
               </label>
               <textarea
                 id="computer-apps"
@@ -997,21 +966,21 @@ export default function SettingsPanel() {
               {/* 同浏览器：空清单时这个开关什么都不放行，必须说出来 */}
               {permissions.computerApps.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
-                  No app allowed yet — the desktop tool stays hidden from the Agent.
+                  {t("settings.perm.desktop.empty")}
                 </p>
               )}
             </div>
           )}
           <PermissionToggle
-            label="Window Capture"
-            desc="Allow Agent to screenshot one named window (contents, not just the title; needs an allowed app below, Windows only)"
+            label={t("settings.perm.capture")}
+            desc={t("settings.perm.capture.desc")}
             checked={permissions.allowComputerCapture}
             onChange={() => togglePermission("allowComputerCapture")}
           />
           {permissions.allowComputerCapture && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="capture-apps">
-                Capturable apps (one per line, `*` for any)
+                {t("settings.perm.capture.apps")}
               </label>
               <textarea
                 id="capture-apps"
@@ -1032,21 +1001,21 @@ export default function SettingsPanel() {
               {/* 这份清单和上面那份是分开的：能看见窗口存在 ≠ 能看见窗口里的东西 */}
               {permissions.captureApps.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
-                  No app allowed yet — the capture tool stays hidden from the Agent.
+                  {t("settings.perm.capture.empty")}
                 </p>
               )}
             </div>
           )}
           <PermissionToggle
-            label="Window Input"
-            desc="Allow Agent to click (left, double, right) and scroll inside a window it has captured (cannot be undone; every action needs your approval; needs an allowed app below, Windows only)"
+            label={t("settings.perm.input")}
+            desc={t("settings.perm.input.desc")}
             checked={permissions.allowComputerInput}
             onChange={() => togglePermission("allowComputerInput")}
           />
           {permissions.allowComputerInput && (
             <div className="pt-1">
               <label className="block text-[10px] text-surface-muted" htmlFor="input-apps">
-                Clickable / scrollable apps (one per line, `*` for any)
+                {t("settings.perm.input.apps")}
               </label>
 
               <textarea
@@ -1068,7 +1037,7 @@ export default function SettingsPanel() {
               {/* 又是一份单独的清单：能看窗口内容 ≠ 能往里面点，而后者撤不回 */}
               {permissions.inputApps.length === 0 && (
                 <p className="mt-1 text-[10px] text-diff-modify">
-                  No app allowed yet — the click tool stays hidden from the Agent.
+                  {t("settings.perm.input.empty")}
                 </p>
               )}
             </div>
@@ -1085,7 +1054,7 @@ export default function SettingsPanel() {
           disabled={!profileId || profileId === activeProfileId}
           className="rounded border border-surface-border py-1.5 text-[11px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Set Default
+          {t("settings.setDefault")}
         </button>
         <button
           type="button"
@@ -1093,7 +1062,7 @@ export default function SettingsPanel() {
           disabled={!profileId || llmProfiles.length <= 1}
           className="rounded border border-diff-remove/40 py-1.5 text-[11px] text-diff-remove hover:bg-diff-remove/10 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Delete
+          {t("settings.delete")}
         </button>
       </div>
 
@@ -1103,7 +1072,7 @@ export default function SettingsPanel() {
         disabled={testing}
         className="w-full mt-2 py-1.5 rounded border border-accent-purple/50 text-accent-purple text-xs font-medium hover:bg-accent-purple/10 disabled:opacity-50 transition-colors"
       >
-        {testing ? "Testing..." : "⚡ Test Connection"}
+        {testing ? t("settings.testing") : `\u26A1 ${t("settings.test")}`}
       </button>
 
       {/* 反馈统一渲染在 Save Profile 按钮下方，见上。Test Connection 触发时靠
@@ -1112,9 +1081,11 @@ export default function SettingsPanel() {
 
       <div className="mt-4 pt-3 border-t border-surface-border">
         <div className="text-surface-muted text-[10px] leading-relaxed">
-          Tip: Set <code className="bg-surface-border/50 px-1 rounded">LLM_ENDPOINT</code>,{" "}
-          <code className="bg-surface-border/50 px-1 rounded">LLM_API_KEY</code>,{" "}
-          <code className="bg-surface-border/50 px-1 rounded">LLM_MODEL</code> env vars for default values.
+          {t("settings.tip", {
+            endpoint: "LLM_ENDPOINT",
+            apiKey: "LLM_API_KEY",
+            model: "LLM_MODEL",
+          })}
         </div>
       </div>
 
