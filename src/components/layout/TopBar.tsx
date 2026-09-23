@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import ModeSwitch from "../shared/ModeSwitch";
 import type { AgentMode } from "../../types/agent";
+import { useLocaleStore, useT } from "../../i18n";
 import { isTauriRuntime } from "../../utils/tauri";
 import { getLspStatus, probeLsp, type LspStatusSnapshot } from "../../utils/lspClient";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
@@ -31,6 +32,8 @@ import {
 } from "lucide-react";
 
 export default function TopBar() {
+  const t = useT();
+  const toggleLocale = useLocaleStore((s) => s.toggleLocale);
   const agentState = useAgentStore((s) => s.state);
   const agentMode = useAgentStore((s) => s.mode);
   const ideMode = useAgentStore((s) => s.ideMode);
@@ -123,7 +126,7 @@ export default function TopBar() {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "Open Workspace Folder",
+        title: t("topbar.openWorkspaceDialog"),
       });
       if (selected && typeof selected === "string") {
         await invoke("save_workspace_path", { path: selected });
@@ -133,12 +136,12 @@ export default function TopBar() {
     } catch (e) {
       console.warn("Open folder failed:", e);
     }
-  }, [setWorkspacePath]);
+  }, [setWorkspacePath, t]);
 
   // 提取项目名
   const projectName = workspacePath
     ? workspacePath.split(/[/\\]/).pop() || workspacePath
-    : "No folder opened";
+    : t("topbar.noFolder");
   const runTask = pickTask(tasks, ["dev", "start", "run"]);
   const debugTask = pickTask(tasks, ["debug", "preview"]);
   const buildTask = pickTask(tasks, ["build"]);
@@ -160,7 +163,7 @@ export default function TopBar() {
         <button
           onClick={handleOpenFolder}
           className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs flex-shrink-0"
-          title="Open Folder (Ctrl+O)"
+          title={t("topbar.openFolder")}
         >
           <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
@@ -229,9 +232,11 @@ export default function TopBar() {
               </div>
             )}
             <div className="mt-3 border-t border-surface-border pt-2">
-              <div className="mb-1 text-[10px] uppercase text-surface-muted">Recent diagnostics</div>
+              <div className="mb-1 text-[10px] uppercase text-surface-muted">
+                {t("lsp.recentDiagnostics")}
+              </div>
               {diagnosticSummaries.length === 0 ? (
-                <div className="text-surface-muted">No diagnostics received yet.</div>
+                <div className="text-surface-muted">{t("lsp.noDiagnostics")}</div>
               ) : (
                 <div className="max-h-28 space-y-1 overflow-auto">
                   {diagnosticSummaries.map((summary) => (
@@ -261,34 +266,34 @@ export default function TopBar() {
             onClick={() => runProjectTask(runTask)}
             disabled={!runTask || !isTauriRuntime()}
             className="rounded px-2 py-0.5 text-[11px] text-surface-text hover:bg-surface-border/40 disabled:cursor-not-allowed disabled:opacity-40"
-            title={runTask ? runTask.command : "No run task discovered"}
+            title={runTask ? runTask.command : t("topbar.noTask", { kind: t("topbar.run") })}
           >
-            Run
+            {t("topbar.run")}
           </button>
           <button
             onClick={() => runProjectTask(debugTask)}
             disabled={!debugTask || !isTauriRuntime()}
             className="rounded px-2 py-0.5 text-[11px] text-surface-text hover:bg-surface-border/40 disabled:cursor-not-allowed disabled:opacity-40"
-            title={debugTask ? debugTask.command : "No debug task discovered"}
+            title={debugTask ? debugTask.command : t("topbar.noTask", { kind: t("topbar.debug") })}
           >
-            Debug
+            {t("topbar.debug")}
           </button>
           <button
             onClick={() => runProjectTask(buildTask)}
             disabled={!buildTask || !isTauriRuntime()}
             className="rounded px-2 py-0.5 text-[11px] text-surface-muted hover:bg-surface-border/40 hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
-            title={buildTask ? buildTask.command : "No build task discovered"}
+            title={buildTask ? buildTask.command : t("topbar.noTask", { kind: t("topbar.build") })}
           >
-            {buildStatus === "running" ? "Building..." : "Build"}
+            {buildStatus === "running" ? t("topbar.building") : t("topbar.build")}
           </button>
           <button
           onClick={() => runProjectTask(testTask)}
           disabled={!testTask || !isTauriRuntime()}
           data-testid="topbar-test"
           className="rounded px-2 py-0.5 text-[11px] text-surface-muted hover:bg-surface-border/40 hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
-            title={testTask ? testTask.command : "No test task discovered"}
+            title={testTask ? testTask.command : t("topbar.noTask", { kind: t("topbar.test") })}
           >
-            {testStatus === "running" ? "Testing..." : "Test"}
+            {testStatus === "running" ? t("topbar.testing") : t("topbar.test")}
           </button>
         </div>
         <div className="flex items-center gap-0.5 rounded border border-surface-border bg-surface-base p-0.5">
@@ -303,9 +308,9 @@ export default function TopBar() {
                   ? "bg-accent-blue text-white"
                   : "text-surface-muted hover:bg-surface-border/40 hover:text-surface-text"
               }`}
-              title={mode === "plan" ? "Plan/SDD IDE mode" : "Code IDE mode"}
+              title={mode === "plan" ? t("topbar.ideMode.plan.title") : t("topbar.ideMode.code.title")}
             >
-              {mode === "plan" ? "Plan" : "Code"}
+              {mode === "plan" ? t("topbar.ideMode.plan") : t("topbar.ideMode.code")}
             </button>
           ))}
         </div>
@@ -318,10 +323,10 @@ export default function TopBar() {
           <button
             onClick={handleStop}
             className="inline-flex items-center gap-1 px-2.5 py-1 text-xs bg-red-600/70 hover:bg-red-600 text-white rounded transition-colors"
-            title="Stop Agent"
+            title={t("topbar.stop.title")}
           >
             <SquareIcon aria-hidden="true" className="h-3 w-3 fill-current" />
-            Stop
+            {t("topbar.stop")}
           </button>
         )}
 
@@ -331,21 +336,21 @@ export default function TopBar() {
         <button
           onClick={toggleLeftPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
-          title="Toggle Explorer (Ctrl+Shift+E)"
+          title={t("topbar.toggleExplorer")}
         >
           <PanelLeft aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={toggleRightPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
-          title="Toggle Agent Panel (Ctrl+Shift+X)"
+          title={t("topbar.toggleAgent")}
         >
           <Bot aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={toggleBottomPanel}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
-          title="Toggle Terminal (Ctrl+`)"
+          title={t("topbar.toggleTerminal")}
         >
           <PanelBottom aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
@@ -354,18 +359,28 @@ export default function TopBar() {
           className={`text-xs transition-colors p-0.5 ${
             focusMode ? "text-accent-purple" : "text-surface-muted hover:text-surface-text"
           }`}
-          title="Focus Mode (Ctrl+Shift+F)"
+          title={t("topbar.focusMode")}
         >
           <Focus aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
 
         <div className="w-px h-4 bg-surface-border" />
 
+        {/* 语言切换。放在主题旁边而不是设置里：一个中文用户最先要找的就是这个，
+            而它藏在设置面板第几屏都算藏。 */}
+        <button
+          onClick={toggleLocale}
+          className="rounded px-1 text-[11px] text-surface-muted transition-colors hover:bg-surface-border/30 hover:text-surface-text"
+          title={t("language.toggle")}
+        >
+          {t("language.short")}
+        </button>
+
         {/* 主题切换 */}
         <button
           onClick={toggleTheme}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
-          title={`Switch to ${theme === "dark" ? "Light" : "Dark"} Theme`}
+          title={theme === "dark" ? t("topbar.theme.toLight") : t("topbar.theme.toDark")}
         >
           {theme === "dark" ? (
             <Sun aria-hidden="true" className="h-3.5 w-3.5" />
@@ -374,11 +389,11 @@ export default function TopBar() {
           )}
         </button>
 
-        {/* 快捷键帮助 */}
+        {/* 命令面板 */}
         <button
           onClick={handleCommandPalette}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
-          title="Command Palette (Ctrl+Shift+P)"
+          title={t("topbar.commandPalette")}
         >
           <Command aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
@@ -387,7 +402,7 @@ export default function TopBar() {
         <button
           onClick={handleHelp}
           className="text-xs text-surface-muted hover:text-surface-text transition-colors p-0.5"
-          title="Keyboard Shortcuts (F1)"
+          title={t("topbar.shortcuts")}
         >
           <CircleHelp aria-hidden="true" className="h-3.5 w-3.5" />
         </button>
@@ -397,14 +412,14 @@ export default function TopBar() {
           <button
             onClick={handleMinimize}
             className="w-8 h-8 flex items-center justify-center text-surface-muted hover:text-surface-text hover:bg-surface-border/30 transition-colors text-sm"
-            title="Minimize"
+            title={t("topbar.minimize")}
           >
             <Minus aria-hidden="true" className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={handleMaximize}
             className="w-8 h-8 flex items-center justify-center text-surface-muted hover:text-surface-text hover:bg-surface-border/30 transition-colors text-sm"
-            title={isMaximized ? "Restore" : "Maximize"}
+            title={isMaximized ? t("topbar.restore") : t("topbar.maximize")}
           >
             {isMaximized ? (
               <Copy aria-hidden="true" className="h-3.5 w-3.5" />
@@ -415,7 +430,7 @@ export default function TopBar() {
           <button
             onClick={handleClose}
             className="w-8 h-8 flex items-center justify-center text-surface-muted hover:text-white hover:bg-red-600 transition-colors text-sm"
-            title="Close"
+            title={t("topbar.close")}
           >
             <X aria-hidden="true" className="h-4 w-4" />
           </button>
