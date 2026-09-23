@@ -1999,6 +1999,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The test that pinned `image_input_degraded` now pins `run_degraded` **and** the count in the summary, so a silently-dropped report is still caught. Its negative half — a clean run writes nothing — is what keeps the entry meaningful.
    - Still two before the run (`model_override`, `project_memory_truncated`), and deliberately: they explain the run that is *about to* happen, and merging them into the finish entry would put the explanation a turn late. Merging those two with each other is the next small step.
    - Rust 535 unchanged (534 passing, 1 ignored); frontend unchanged.
+154. **Subagent delegation, part one: the contract (2026-09-22)**
+   The largest remaining capability item, and the one with the most leverage: "find every place X is used" currently drags dozens of files through the main conversation and crowds out the work itself. Handing it to a read-only subagent means the main context gains one paragraph instead. `agent/subagent.rs` lands the prompt, the bounds and the returned shape as pure functions; the run loop needs `LlmClient` reachable from the tool layer, which is a signature change and gets its own round.
+   - **Adopted from the reference contract**: the child starts **fresh** (the prompt must carry the whole question — it cannot see the parent conversation), recursion depth is exactly **1**, only the child's final text comes back (not its transcript), and the system prompt explicitly forbids writing `findings.md` — the caller reads the message, not files left behind. That last rule exists because leaving report files is the single most common subagent misbehaviour.
+   - **Not adopted**: their `maxTurns` is threaded through four layers and **read by nothing** — the default `4` looks like a bound and is not one; the only real limit is an inactivity watchdog. `MAX_SUBAGENT_ROUNDS = 8` here is enforced, and when it stops a child the caller is *told*, because a half-finished answer that looks finished is worse than no answer.
+   - **The returned value is bounded at 20 000 chars** with the same reasoning: the whole point is that the parent's context gains a conclusion, not a transcript. Truncation and the round cap both appear in the text handed to the caller.
+   - **Cost is one line, at the end** (`delegation_log_line`): a delegation is a real model loop and the user has a right to know it happened, but not a running commentary.
+   - Rust 535 → 540 (539 passing, 1 ignored); frontend unchanged.
 
 
 

@@ -12,5 +12,7 @@ pub mod planner;
 /// 会话历史的落盘面：没有它，"新建会话 / 回到历史会话"就无从表达。
 pub mod session_store;
 pub mod state_machine;
+/// 把一件子任务交给一个只读子 Agent：它的提示词、边界、交回来的形状。
+pub mod subagent;
 pub mod task_shape;
 pub mod workspace_tools;
