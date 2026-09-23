@@ -2006,6 +2006,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The returned value is bounded at 20 000 chars** with the same reasoning: the whole point is that the parent's context gains a conclusion, not a transcript. Truncation and the round cap both appear in the text handed to the caller.
    - **Cost is one line, at the end** (`delegation_log_line`): a delegation is a real model loop and the user has a right to know it happened, but not a running commentary.
    - Rust 535 → 540 (539 passing, 1 ignored); frontend unchanged.
+155. **Subagent delegation, part two: the loop, and the question part three has to answer (2026-09-22)**
+   `executor::run_subagent` and the `delegate_task` tool now exist and compile; the channel that would switch the tool on is **not attached yet**, so `can_delegate()` is false, the tool is not advertised, and nothing in the UI promises a capability that is not wired.
+   - **The loop reuses `stream_with_tool_loop`** with a new `max_iterations` parameter, so the subagent's 8-round cap is the same enforced mechanism as the main run's 12 — not a second implementation that can drift. The child's stream goes into its own channel that is drained in the background: it must not interleave with the parent's answer in the chat, and an undrained channel would deadlock the child on `send`.
+   - **Depth 1 is structural.** The child's permissions are built from `read_only()` and never get a subagent channel, so it cannot delegate — the prompt says so too, but the prompt is not what enforces it. Building the child from `read_only()` rather than by subtracting from the parent means a future capability added to the parent is *not* inherited by default; subtracting would eventually leak "the subagent can suddenly write files".
+   - **Cancellation is the parent's switch**, shared: Stop means stop the whole thing, not just the outermost layer.
+   - **Part three's real question**: the tool schema the child advertises. `stream_chat_with_tools` sends the *client's* configured tool list, so cloning the parent's client would advertise write and delegate tools that the child's invoker then refuses — the model would spend rounds calling tools that cannot work. Attaching the channel before knowing the answer would have shipped exactly that, so the channel stays off until the client can be given a child-scoped tool list.
+   - Rust 540 unchanged (539 passing, 1 ignored); frontend unchanged.
 
 
 

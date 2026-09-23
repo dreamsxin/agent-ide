@@ -71,6 +71,36 @@ pub const ASK_USER_QUESTION: &str = "ask_user_question";
 /// `web_fetch::normalize_fetch_url` 被硬拒，取回的内容标成不可信，做过的事进外部动作日志。
 /// 事前要用户填一张白名单，换来的是"这工具不好用"；事后可查才是这里要的那种安全。
 pub const WEB_FETCH: &str = "web_fetch";
+/// 把一件子任务交给一个只读子 Agent。
+///
+/// 不带 `workspace_` 前缀：它派的是一个 Agent，不是读工作区。只有挂上了子 Agent 通道
+/// （也就是有模型可用）时才通告出去 —— 没有通道时通告它，只会换来一次必然失败的调用。
+pub const DELEGATE_TASK: &str = "delegate_task";
+
+/// 派子 Agent 需要的东西：一个模型客户端。
+///
+/// 单独一个类型而不是把 `LlmClient` 直接塞进权限结构：这里只借"能发模型请求"这一件能力，
+/// 而子 Agent 自己的权限结构**不会**带上它 —— 递归深度恰好 1 就是这么保证的，不靠提示词。
+#[derive(Clone)]
+pub struct SubagentChannel {
+    llm: std::sync::Arc<crate::services::llm_client::LlmClient>,
+}
+
+impl SubagentChannel {
+    pub fn new(llm: crate::services::llm_client::LlmClient) -> Self {
+        Self {
+            llm: std::sync::Arc::new(llm),
+        }
+    }
+}
+
+impl std::fmt::Debug for SubagentChannel {
+    /// `WorkspaceToolPermissions` 派生 `Debug`，而 `LlmClient` 没有。只印存在性 ——
+    /// 里面有 endpoint 和 key，不该出现在任何日志里。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SubagentChannel")
+    }
+}
 
 /// 单个文件最多回传的字节数，避免一次调用就吃掉整个上下文预算
 const MAX_READ_BYTES: usize = 64_000;
@@ -249,6 +279,9 @@ pub struct WorkspaceToolPermissions {
     /// 它问"此刻这一次要不要做"。撤不回的动作两个都要过 —— 运行开始时同意访问某个
     /// origin，不等于同意此刻打开这一个页面。
     approval: Option<crate::agent::approval::ApprovalGate>,
+    /// 派子 Agent 的通道。`None` 表示这一层不能派 —— 子 Agent 自己的权限就是这样，
+    /// 所以递归深度恰好 1，而且不是靠提示词约束。
+    subagent: Option<SubagentChannel>,
     /// 这次运行里截过的窗口，按"帧"记着。点击只能对着其中一帧给坐标。
     ///
     /// 跟着 `Clone` 共享同一份（`Arc`），理由和 `images` 一样：授权对象在运行中会被克隆
@@ -399,6 +432,27 @@ impl WorkspaceToolPermissions {
     pub fn with_approval(mut self, gate: crate::agent::approval::ApprovalGate) -> Self {
         self.approval = Some(gate);
         self
+    }
+
+    /// 挂上派子 Agent 的能力。子 Agent 自己的权限不会调用这个方法，所以它派不出下一层。
+    pub fn with_subagent(mut self, channel: SubagentChannel) -> Self {
+        self.subagent = Some(channel);
+        self
+    }
+
+    /// 这一层能不能派子 Agent
+    pub fn can_delegate(&self) -> bool {
+        self.subagent.is_some()
+    }
+
+    /// 子 Agent 的权限：只读，不能再派，取消开关和父运行是同一个。
+    ///
+    /// 用 `read_only()` 起底而不是从自己身上摘掉几样：从父权限裁剪的写法，下一次给父权限
+    /// 加一项能力时会默认漏给子 Agent —— 而那种漏是"子 Agent 忽然能写文件了"。
+    fn child_permissions(&self) -> WorkspaceToolPermissions {
+        let mut child = WorkspaceToolPermissions::read_only();
+        child.adopt_cancel(self.cancel_switch());
+        child
     }
 
     /// 就这一次动作问一次人。没有通道就是 `Unattended` —— 仍然是拒绝。
@@ -950,6 +1004,36 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
         });
     }
 
+    if permissions.can_delegate() {
+        definitions.push(ToolDefinition {
+            name: DELEGATE_TASK.to_string(),
+            description:
+                "Hand a self-contained research question to a read-only subagent and get back its \
+                 findings as text. Use it when answering would mean reading many files — 'where is \
+                 X used', 'how does this subsystem fit together', 'which of these three files \
+                 defines Y'. The subagent can read, search, glob and fetch the web; it cannot write, \
+                 run commands, or delegate further. It starts with **no knowledge of this \
+                 conversation**, so the prompt must carry the whole question and say what a good \
+                 answer looks like. You get its final message only, not what it read — which is the \
+                 point: your context gains a conclusion instead of fifty files."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "3-5 words naming the task, for the run log"
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The whole question, self-contained: what to find, where you suspect it lives, and what the answer should contain"
+                    }
+                },
+                "required": ["description", "prompt"]
+            }),
+        });
+    }
+
     if permissions.can_ask_user() {
         definitions.push(ToolDefinition {
             name: ASK_USER_QUESTION.to_string(),
@@ -1172,6 +1256,7 @@ impl ToolInvoker for WorkspaceToolInvoker {
             COMPUTER_CLICK | COMPUTER_SCROLL => self.permissions.allows_input(),
             // 没有对话框就不认领：一个每次都回"没人可问"的工具会被反复调用
             ASK_USER_QUESTION => self.permissions.can_ask_user(),
+            DELEGATE_TASK => self.permissions.can_delegate(),
             // 移动会产生一个新路径，两个授权都要有；缺一个的时候它没被通告，也就不认领
             MOVE_FILE => self.permissions.allow_write && self.permissions.allow_create,
             _ => false,
@@ -1262,6 +1347,14 @@ impl ToolInvoker for WorkspaceToolInvoker {
             WEB_FETCH => {
                 web_fetch_tool(
                     string_arg(&args, "url").ok_or("Missing 'url'")?,
+                    &self.permissions,
+                )
+                .await
+            }
+            DELEGATE_TASK => {
+                delegate_task_tool(
+                    string_arg(&args, "description").unwrap_or(""),
+                    string_arg(&args, "prompt").unwrap_or(""),
                     &self.permissions,
                 )
                 .await
@@ -1958,6 +2051,61 @@ fn walk_and_match(
 /// 而用户要读完每一项才能选 —— 那时候让他自己写一句反而更快（提问框永远留着那个入口）。
 const MIN_QUESTION_OPTIONS: usize = 2;
 const MAX_QUESTION_OPTIONS: usize = 4;
+
+/// 把一件子任务交给一个只读子 Agent，把它的结论交回模型。
+///
+/// 这是上下文预算上的杠杆："这个仓库里哪里用到了 X"如果主 Agent 自己翻，几十个文件的内容会
+/// 留在主对话里，把真正要做的事挤出去；交给子 Agent，主上下文只多一段结论。
+///
+/// 子 Agent 的权限从 `read_only()` 起底、**不带**派子 Agent 的通道，所以递归深度恰好 1 是
+/// 结构上的事实，不是提示词里的一句请求。取消开关和父运行共用：Stop 是要停掉整件事。
+async fn delegate_task_tool(
+    description: &str,
+    prompt: &str,
+    permissions: &WorkspaceToolPermissions,
+) -> Result<String, String> {
+    use crate::agent::subagent;
+
+    let Some(channel) = &permissions.subagent else {
+        return Err(
+            "This run cannot delegate (no subagent channel is attached). Do the work yourself."
+                .to_string(),
+        );
+    };
+    let description = subagent::validate_request(description, prompt)?;
+    if permissions.cancelled() {
+        return Err("This run was stopped before the subagent started.".to_string());
+    }
+
+    // 项目记忆跟着给：它属于这个仓库而不是这段对话，不给的话子 Agent 会按通用习惯理解一个
+    // 有自己约定的代码库。读失败不算失败 —— 没有 AGENTS.md 是最常见的情况。
+    let project_context = crate::services::project_memory::load_project_memory()
+        .ok()
+        .flatten()
+        .map(|memory| memory.text);
+    let task_prompt = subagent::subagent_user_prompt(prompt, project_context.as_deref());
+
+    let child_permissions = permissions.child_permissions();
+    let child_invoker = WorkspaceToolInvoker::without_logging(child_permissions);
+    let (text, rounds) = crate::agent::executor::run_subagent(
+        &channel.llm,
+        subagent::subagent_system_prompt(),
+        &task_prompt,
+        &child_invoker,
+        permissions.cancel_switch(),
+    )
+    .await?;
+
+    let result = subagent::bound_result(&text, rounds, rounds >= subagent::MAX_SUBAGENT_ROUNDS);
+    // 走外部动作那条记录：一次委派是一个完整的模型循环 —— 钱花掉了，撤不回来，而用户有权
+    // 事后知道它发生过。那条通道本来就是"做过、撤不了"的动作的去处，而且它只汇总成一条。
+    permissions.record_external(AgentExternalAction {
+        kind: "delegate_task".to_string(),
+        target: description.clone(),
+        detail: subagent::delegation_log_line(&description, &result),
+    });
+    Ok(subagent::format_for_caller(&result))
+}
 
 /// 取一个公网网址的正文交给模型。
 ///

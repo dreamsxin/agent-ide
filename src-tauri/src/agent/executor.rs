@@ -86,6 +86,9 @@ async fn stream_with_tool_loop(
     invoker: Option<&dyn ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
+    // 这一趟最多跑几轮。主运行用 `MAX_TOOL_ITERATIONS`，子 Agent 用一个更小的上限 ——
+    // 参考实现那边的 `maxTurns` 一路传下去却没人读，于是"上限"只是个装饰。
+    max_iterations: usize,
 ) -> Result<StageOutcome, String> {
     let prompt_len = messages.len();
     let mut merged = String::new();
@@ -93,7 +96,7 @@ async fn stream_with_tool_loop(
     // 回头再读一遍 —— 它们已经花过运行预算了。
     let mut pending_images: Vec<crate::services::images::ImagePart> = Vec::new();
 
-    for iteration in 0..=MAX_TOOL_ITERATIONS {
+    for iteration in 0..=max_iterations {
         // 每一轮都把之前所有消息重发一遍，所以要在发之前看它还装不装得下。窗口未知时
         // `prompt_token_budget()` 返回 None —— 那种情况下不动历史，让供应商去拒绝，
         // 而不是按一个猜出来的窗口丢掉模型刚读到的东西。
@@ -148,13 +151,13 @@ async fn stream_with_tool_loop(
 
         let external = select_external_calls(&output.tool_calls, invoker);
 
-        let is_last_iteration = iteration == MAX_TOOL_ITERATIONS;
+        let is_last_iteration = iteration == max_iterations;
         if external.is_empty() || is_last_iteration {
             let mut final_text = merge_tool_call_output(output);
             if is_last_iteration && !external.is_empty() {
                 final_text.push_str(&format!(
                     "\n\n[agent-ide] Tool loop stopped after {} rounds; remaining tool calls were not executed.\n",
-                    MAX_TOOL_ITERATIONS
+                    max_iterations
                 ));
             }
             // 循环到这里就结束了，留着的图片再也没有请求可搭。它们花过预算却没被看到，
@@ -310,9 +313,54 @@ pub async fn execute_step(
         )),
     ];
 
-    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx)
+    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx, MAX_TOOL_ITERATIONS)
         .await
         .map(|outcome| outcome.text)
+}
+
+/// 跑一个只读子 Agent，返回它最后那段文字和用掉的轮数。
+///
+/// 三件事和主运行刻意不同：
+/// - **它的流不进用户的聊天区。** 子 Agent 的过程是给调用方看的中间产物，混进主回答里只会让
+///   用户读到两个声音交替说话。这里给它一个自己的通道并在后台排空 —— 不排空的话，通道满了
+///   之后 `send` 会永远等下去。
+/// - **轮次上限更小**（`MAX_SUBAGENT_ROUNDS`），而且是真的会停。
+/// - **取消共用父运行那一个开关**：用户按 Stop 是要停掉整件事，不是停掉最外面那一层。
+pub async fn run_subagent(
+    llm: &LlmClient,
+    system_prompt: &str,
+    task_prompt: &str,
+    invoker: &dyn ToolInvoker,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<(String, usize), String> {
+    let messages = vec![
+        ChatMessage::system(system_prompt.to_string()),
+        ChatMessage::user(task_prompt.to_string()),
+    ];
+    let (tx, mut rx) = mpsc::channel::<String>(64);
+    // 后台排空：这些片段不给任何人看，但不读走就会把子 Agent 卡死在 `send` 上
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    let outcome = stream_with_tool_loop(
+        llm,
+        messages,
+        Some(invoker),
+        cancel_flag,
+        tx,
+        crate::agent::subagent::MAX_SUBAGENT_ROUNDS,
+    )
+    .await;
+    drain.abort();
+    let outcome = outcome?;
+
+    // 用掉几轮 = 转录里有几条带工具调用的 assistant 消息。不另设计数器：转录本身就是事实，
+    // 而一个额外的计数器迟早和它说的不是一件事。
+    let rounds = outcome
+        .transcript
+        .iter()
+        .filter(|message| message.role == "assistant" && message.tool_calls.is_some())
+        .count();
+    Ok((outcome.text, rounds))
 }
 
 /// 单条消息带进下一个 stage 时的内容上限
@@ -683,7 +731,7 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
         "Prior stage work is in the messages above, including the actual tool results rather than a retelling of them. Run this stage now."
     }));
 
-    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx).await
+    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx, MAX_TOOL_ITERATIONS).await
 }
 
 /// 从 LLM 响应中解析 diff 块
@@ -1813,6 +1861,7 @@ mod tests {
                 Some(&invoker),
                 std::sync::Arc::new(AtomicBool::new(false)),
                 tx,
+                MAX_TOOL_ITERATIONS,
             ));
         std::env::remove_var("AGENT_IDE_MOCK_TOOL");
         assert!(outcome.is_ok(), "{:?}", outcome);
