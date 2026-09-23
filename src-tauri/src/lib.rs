@@ -100,6 +100,7 @@ pub fn run() {
             commands::agent::get_agent_conversation,
             commands::agent::get_project_memory,
             commands::agent::truncate_agent_conversation,
+            commands::agent::revert_turn_changes,
             commands::agent::undo_last_apply,
             commands::agent::pending_undo,
             commands::agent::verify_workspace,

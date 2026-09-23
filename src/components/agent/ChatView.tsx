@@ -148,6 +148,7 @@ function ContextTurns() {
   const loadConversationTurns = useAgentStore((s) => s.loadConversationTurns);
   const truncateConversationFrom = useAgentStore((s) => s.truncateConversationFrom);
   const isStreaming = useAgentStore((s) => s.isStreaming);
+  const revertTurnChanges = useAgentStore((s) => s.revertTurnChanges);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -165,6 +166,25 @@ function ContextTurns() {
       setError(String(err));
     }
   };
+
+  const handleRevert = async (turnId: string) => {
+    setError(null);
+    try {
+      const result = await revertTurnChanges(turnId);
+      if (result) {
+        // 成功也要留一行：恢复了哪几个文件是用户唯一能核对的东西
+        setError(
+          result.failed.length === 0
+            ? `Restored ${result.restored.length} file(s): ${result.restored.join(", ")}`
+            : `Restored ${result.restored.length} file(s); could not restore ${result.failed.join(", ")}`
+        );
+      }
+    } catch (err) {
+      // 后端挡住时给的是一条指引（"先撤销更晚的改动"），原样显示
+      setError(String(err));
+    }
+  };
+
 
   if (turns.length === 0) return null;
 
@@ -205,6 +225,21 @@ function ContextTurns() {
               >
                 Cut from here
               </button>
+              {/*
+                切上下文只改"发给模型的历史"，磁盘上的改动一个字都不动。这个按钮补的是另一半：
+                把这一轮写出去的文件恢复回去。只有后端能判断能不能做（撤销栈严格后进先出），
+                所以这里不预判、不禁用 —— 被挡住时把后端那句话原样显示出来，它本身就是指引。
+              */}
+              {turn.runId && (
+                <button
+                  type="button"
+                  onClick={() => void handleRevert(turn.id)}
+                  title="Restore the files this turn changed. Only possible while no later change is still applied."
+                  className="opacity-0 transition-opacity group-hover:opacity-100 rounded border border-surface-border px-1.5 py-0.5 text-surface-muted hover:text-diff-remove"
+                >
+                  Revert files
+                </button>
+              )}
             </div>
           ))}
           {error && <div className="text-accent-red">{error}</div>}

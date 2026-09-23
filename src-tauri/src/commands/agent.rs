@@ -2253,6 +2253,7 @@ mod tests {
                 prompt: "fix the parser".to_string(),
                 outcome: "no file changes produced".to_string(),
                 derived: true,
+                run_id: Some("run-1".to_string()),
             }],
         };
         let payload = serde_json::to_value(&detail).expect("serialize");
@@ -3274,6 +3275,43 @@ pub async fn get_agent_conversation(
 pub async fn get_project_memory(
 ) -> Result<crate::services::project_memory::ProjectMemoryInfo, String> {
     crate::services::project_memory::project_memory_info()
+}
+
+/// 撤销某一轮对话改的文件。
+///
+/// 和 `undo_last_apply` 的区别是按**轮**算账：一轮里可能落盘好几次，而用户记得的是
+/// "我让它做的那件事"。中间层不允许抽走（撤销栈严格后进先出），被挡住时后端会说清原因，
+/// 这里把那句话原样传上去 —— 前端不兜、不改写。
+#[tauri::command]
+pub async fn revert_turn_changes(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+    turn_id: String,
+) -> Result<crate::agent::orchestrator::UndoResult, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    let result = orch.revert_turn_changes(&turn_id)?;
+    let summary = format!(
+        "Reverted {} file(s) from {}",
+        result.restored.len(),
+        turn_id
+    );
+    let details = if result.failed.is_empty() {
+        result.restored.join("\n")
+    } else {
+        format!(
+            "{}\nCould not restore: {}",
+            result.restored.join("\n"),
+            result.failed.join(", ")
+        )
+    };
+    orch.emit_run_action_log(&app_handle, "success", "turn_revert", &summary, &details);
+    let _ = app_handle.emit(
+        "agent-diff-ready",
+        serde_json::to_value(&orch.diffs).unwrap_or_default(),
+    );
+    // 撤销可用性跟在这个事件的 payload 里，漏掉这一处撤销按钮会静默停在旧值
+    let _ = app_handle.emit("agent-state-changed", orch.state_payload());
+    Ok(result)
 }
 
 /// 从指定的那一轮起把上下文切掉，返回剩下的几轮。

@@ -165,6 +165,36 @@ describe("testLlmConnection", () => {
   });
 });
 
+describe("revertTurnChanges", () => {
+  /**
+   * 被挡住的原因必须原样传到调用方。
+   *
+   * 后端那句话是一条可执行的指引（"后来的改动还在，撤销只能从新往旧"）；在 store 里兜住它
+   * 就变成了一句"操作失败"，而用户手上本来有下一步可做。
+   */
+  it("lets the backend refusal through instead of swallowing it", async () => {
+    invokeMock.mockRejectedValueOnce(
+      "Changes made after that turn are still applied, and undo has to go newest-first."
+    );
+
+    await expect(useAgentStore.getState().revertTurnChanges("turn-1")).rejects.toContain(
+      "newest-first"
+    );
+  });
+
+  it("sends the turn id and refreshes the context turns afterwards", async () => {
+    invokeMock.mockResolvedValueOnce({ label: "Turn turn-2", restored: ["a.ts"], failed: [] });
+    invokeMock.mockResolvedValueOnce([]);
+
+    const result = await useAgentStore.getState().revertTurnChanges("turn-2");
+
+    expect(result?.restored).toEqual(["a.ts"]);
+    expect(invokeMock).toHaveBeenCalledWith("revert_turn_changes", { turnId: "turn-2" });
+    // 撤销之后那几轮的结果摘要变了，界面上那一份必须跟着重读
+    expect(invokeMock).toHaveBeenCalledWith("get_agent_conversation");
+  });
+});
+
 describe("sendPrompt", () => {
   it("captures the backend error message and enters the error state", async () => {
     invokeMock.mockRejectedValueOnce(

@@ -235,6 +235,15 @@ interface AgentStore {
   /** 从后端拉一次真正的上下文；界面要显示它之前必须先调 */
   loadConversationTurns: () => Promise<void>;
   truncateConversationFrom: (turnId: string) => Promise<void>;
+  /**
+   * 撤销这一轮改的文件。
+   *
+   * 和 `undoLastApply` 的区别是按**轮**算账：一轮里可能落盘好几次。被挡住时（后来的改动
+   * 还在、撤销只能从新往旧）后端给的那句话原样抛出 —— 它是一条可执行的指引，不是"失败"。
+   */
+  revertTurnChanges: (
+    turnId: string
+  ) => Promise<{ label: string; restored: string[]; failed: string[] } | null>;
 
 
 
@@ -918,6 +927,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
     set({ conversationTurns: turns });
   },
+  revertTurnChanges: async (turnId) => {
+    if (!isTauriRuntime()) return null;
+    // 失败原样往上抛：被挡住的原因（"后来的改动还在，撤销只能从新往旧"）正是用户需要
+    // 读到的那句话，在这里兜住它等于把一条可执行的指引变成一句"操作失败"
+    const result = await invoke<{ label: string; restored: string[]; failed: string[] }>(
+      "revert_turn_changes",
+      { turnId }
+    );
+    // 撤销之后审查区和撤销可用性都变了；后端已经发过事件，这里只把上下文那一份刷新一次
+    await get().loadConversationTurns();
+    return result;
+  },
+
 
 
 

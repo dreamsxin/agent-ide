@@ -257,6 +257,18 @@ pub struct ApplyCheckpoint {
     /// 影响**的那张也改掉 —— 而工具写入记录的新状态 `reverted` 是终态，那就成了一句
     /// 永久的假话："你撤销过这条"，而它其实还在磁盘上。
     diff_ids: Vec<String>,
+    /// 这次应用属于哪一次运行。
+    ///
+    /// 有了它，"撤销这一轮改的文件"才说得出来 —— 之前 checkpoint 和对话轮之间没有任何
+    /// 关联，只能一路 pop。用户手动点 Apply（不在任何运行里）时是 `None`：那次改动不属于
+    /// 任何一轮对话，硬塞给最近那一轮就是记错账。
+    run_id: Option<String>,
+    /// 这次应用属于哪个会话（任务）。
+    ///
+    /// 撤销栈不随"新建任务"清空，因为磁盘上的改动不会因为换了任务就消失 —— 但那意味着
+    /// 撤销按钮可能会还原上一个任务写的文件。存下来是为了能**说出**这件事，而不是让用户
+    /// 在新任务里点一下 Undo、还原一个他已经不记得的改动。
+    session_id: String,
 }
 
 impl ApplyCheckpoint {
@@ -298,6 +310,13 @@ pub struct ConversationTurn {
     /// 比"没有记录"更糟，因为它看起来像真的。
     #[serde(default)]
     pub derived: bool,
+    /// 产生这一轮的那次运行。
+    ///
+    /// 有了它，"这一轮改了哪些文件"才问得出来：撤销点记的是运行 id，两边靠它对上。
+    /// `serde(default)` 是为了读得懂加这个字段之前存下的会话 —— 老行没有运行 id，于是
+    /// 它们只能按"整栈 pop"撤销，那正是它们当时的真实情况。
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// 保留的对话轮数
@@ -699,6 +718,10 @@ impl AgentOrchestrator {
     }
 
     /// 记一个回滚点。空快照不记：撤销一个什么都没写的操作会让栈顶失真。
+    ///
+    /// 运行 id 只取 `current_run_id`（而不是"最近一次运行"）：用户在两次运行之间手动点
+    /// Apply 时它是 `None`，那次改动就不属于任何一轮对话 —— 挂到最近那一轮上等于记错账，
+    /// 而"撤销这一轮"会顺手还原一个用户自己决定应用的文件。
     fn push_undo_checkpoint(
         &mut self,
         label: &str,
@@ -712,6 +735,8 @@ impl AgentOrchestrator {
             label: label.to_string(),
             snapshots,
             diff_ids,
+            run_id: self.current_run_id.clone(),
+            session_id: self.session_id.clone(),
         });
         if self.undo_stack.len() > MAX_UNDO_CHECKPOINTS {
             let excess = self.undo_stack.len() - MAX_UNDO_CHECKPOINTS;
@@ -944,27 +969,28 @@ impl AgentOrchestrator {
         created
     }
 
-    /// 栈顶回滚点的描述，供界面显示"将要撤销什么"
+    /// 栈顶回滚点的描述，供界面显示"将要撤销什么"。
+    ///
+    /// 属于别的任务时在描述里说出来：撤销栈不随"新建任务"清空（磁盘上的改动不会因为换了
+    /// 任务就消失），所以新任务里的 Undo 完全可能还原上一个任务写的文件 —— 不说的话，
+    /// 用户按下去才发现自己还原了一个已经不记得的改动。
     pub fn pending_undo(&self) -> Option<(String, Vec<String>)> {
-        self.undo_stack
-            .last()
-            .map(|checkpoint| (checkpoint.label.clone(), checkpoint.files()))
+        self.undo_stack.last().map(|checkpoint| {
+            let label = if checkpoint.session_id == self.session_id {
+                checkpoint.label.clone()
+            } else {
+                format!("{} (from an earlier task)", checkpoint.label)
+            };
+            (label, checkpoint.files())
+        })
     }
 
-    /// 撤销最近一次应用：把文件恢复到那次应用之前。
+    /// 把一个回滚点落到磁盘和卡片上。返回 (恢复成功, 失败)。
     ///
-    /// 模型提出的 diff 恢复后退回 `pending`，重新回到审查区 —— 它本来就是一份提议，
-    /// 撤销只是让它回到未决状态。
-    ///
-    /// **工具写入的记录不能这样处理**，它们是"已经发生过的事"的记录，不是提议：
-    /// 一张删除记录被退回 `pending` 之后，Apply 会走内容替换那条路，把文件写成 0 字节
-    /// 而不是删掉它；一张移动记录根本没有内容可应用，只会失败。所以它们变成终态
-    /// `reverted`：仍然留在列表里可查（撤销掉一次改动不等于它没发生过），但不再是
-    /// 一个可以按的提议。
-    pub fn undo_last_apply(&mut self) -> Result<UndoResult, String> {
-        let Some(checkpoint) = self.undo_stack.pop() else {
-            return Err("Nothing to undo: no applied change is recorded".to_string());
-        };
+    /// 单独抽出来是因为"撤销最近一次"和"撤销某一轮"共用同一套账：卡片必须按 id 认、
+    /// 工具写入记录走终态 `reverted`、模型提议退回未决。两处各写一遍的话，其中一处迟早
+    /// 会把一张不属于这次撤销的卡片也改掉。
+    fn rollback_checkpoint(&mut self, checkpoint: &ApplyCheckpoint) -> (Vec<String>, Vec<String>) {
         let (restored, failed) = crate::agent::diff_apply::restore_snapshots(&checkpoint.snapshots);
 
         for diff in &mut self.diffs {
@@ -987,6 +1013,89 @@ impl AgentOrchestrator {
             }
             diff.status = status_from_hunks(&diff.hunks);
         }
+        (restored, failed)
+    }
+
+    /// 撤销某一轮对话改的文件。
+    ///
+    /// 和"撤销最近一次应用"的区别是它按**轮**算账：一轮里可能有好几次落盘（工具写入一次、
+    /// 自动应用一次），用户记得的是"我让它做的那件事"，不是中间分了几步。两边靠运行 id
+    /// 对上（`ApplyCheckpoint.run_id` ↔ `ConversationTurn.run_id`）。
+    ///
+    /// **只在那一轮的改动正好压在栈顶时才做。** 撤销栈是严格后进先出的：中间抽一层会把
+    /// 之后基于它的改动建立在一个不存在的状态上，而那种破坏在 diff 里看不出来。挡住的时候
+    /// 要说清挡住的原因和怎么继续，而不是给一个"失败了"。
+    pub fn revert_turn_changes(&mut self, turn_id: &str) -> Result<UndoResult, String> {
+        let turn = self
+            .conversation
+            .iter()
+            .find(|turn| turn.id == turn_id)
+            .ok_or_else(|| format!("That turn is no longer part of the context ({}).", turn_id))?;
+        let run_id = turn.run_id.clone().ok_or_else(|| {
+            "That turn was recorded before runs were linked to file changes, so its changes cannot \
+             be told apart. Use Undo Apply instead."
+                .to_string()
+        })?;
+
+        // 从栈顶往下数这一轮连续占了几层
+        let mut depth = 0usize;
+        for checkpoint in self.undo_stack.iter().rev() {
+            if checkpoint.run_id.as_deref() == Some(run_id.as_str()) {
+                depth += 1;
+            } else {
+                break;
+            }
+        }
+        if depth == 0 {
+            let has_any = self
+                .undo_stack
+                .iter()
+                .any(|checkpoint| checkpoint.run_id.as_deref() == Some(run_id.as_str()));
+            return Err(if has_any {
+                "Changes made after that turn are still applied, and undo has to go newest-first. \
+                 Undo those first, then revert this turn."
+                    .to_string()
+            } else {
+                "No applied file change is recorded for that turn.".to_string()
+            });
+        }
+
+        let mut restored = Vec::new();
+        let mut failed = Vec::new();
+        for _ in 0..depth {
+            let Some(checkpoint) = self.undo_stack.pop() else {
+                break;
+            };
+            let (mut ok, mut bad) = self.rollback_checkpoint(&checkpoint);
+            restored.append(&mut ok);
+            failed.append(&mut bad);
+        }
+        // 文件内容变回去了，baseHash 必须跟着变，否则重新应用会被误判 stale
+        crate::agent::diff_apply::stamp_base_hashes(&mut self.diffs);
+        self.refresh_review_state();
+
+        Ok(UndoResult {
+            label: format!("Turn {} ({} apply step(s))", turn_id, depth),
+            restored,
+            failed,
+        })
+    }
+
+    /// 撤销最近一次应用：把文件恢复到那次应用之前。
+    ///
+    /// 模型提出的 diff 恢复后退回 `pending`，重新回到审查区 —— 它本来就是一份提议，
+    /// 撤销只是让它回到未决状态。
+    ///
+    /// **工具写入的记录不能这样处理**，它们是"已经发生过的事"的记录，不是提议：
+    /// 一张删除记录被退回 `pending` 之后，Apply 会走内容替换那条路，把文件写成 0 字节
+    /// 而不是删掉它；一张移动记录根本没有内容可应用，只会失败。所以它们变成终态
+    /// `reverted`：仍然留在列表里可查（撤销掉一次改动不等于它没发生过），但不再是
+    /// 一个可以按的提议。
+    pub fn undo_last_apply(&mut self) -> Result<UndoResult, String> {
+        let Some(checkpoint) = self.undo_stack.pop() else {
+            return Err("Nothing to undo: no applied change is recorded".to_string());
+        };
+        let (restored, failed) = self.rollback_checkpoint(&checkpoint);
         // 文件内容变回去了，baseHash 必须跟着变，否则重新应用会被误判 stale
         crate::agent::diff_apply::stamp_base_hashes(&mut self.diffs);
         self.refresh_review_state();
@@ -1073,6 +1182,12 @@ impl AgentOrchestrator {
             prompt: summarize_text(prompt.trim(), MAX_TURN_PROMPT_CHARS),
             outcome,
             derived,
+            // 这一轮是哪次运行产生的。`push_turn` 在运行收尾之后才被调用，那时
+            // `current_run_id` 已经清掉了，所以退回 `last_run_id` —— 撤销点记的正是那个 id。
+            run_id: self
+                .current_run_id
+                .clone()
+                .or_else(|| self.last_run_id.clone()),
         });
         // 只留末尾若干轮：早期的轮次对"接着上一句"没什么帮助，却一直占预算
         if self.conversation.len() > MAX_CONVERSATION_TURNS {
@@ -3224,6 +3339,141 @@ mod tests {
         assert!(error.contains("reverted"), "{}", error);
         // 文件保持恢复后的样子：被拒绝的 Apply 不能把它写成 0 字节
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "content\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 撤销"这一轮"改的文件：一轮里落盘几次，用户记得的只是那一件事。
+    ///
+    /// 两边靠运行 id 对上。之前 checkpoint 和对话轮之间没有任何关联，所以"回到这一轮之前"
+    /// 根本无从表达 —— 只能一路 pop，连中间那些用户想留的改动一起撤掉。
+    #[test]
+    fn a_turn_reverts_every_apply_step_it_produced() {
+        let base = std::env::temp_dir().join(format!("agent-ide-turn-revert-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let first_path = base.join("a.ts");
+        let second_path = base.join("b.ts");
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.current_run_id = Some("run-a".to_string());
+
+        // 同一轮里两次落盘（工具写了一次，之后又写了一次）
+        std::fs::write(&first_path, "written\n").unwrap();
+        orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "a.ts".to_string(),
+            path: first_path.clone(),
+            previous: Some("before\n".to_string()),
+            updated: "written\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+        std::fs::write(&second_path, "also written\n").unwrap();
+        orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "b.ts".to_string(),
+            path: second_path.clone(),
+            previous: Some("b before\n".to_string()),
+            updated: "also written\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+        // 运行结束后才记这一轮，运行 id 要能对上
+        orchestrator.current_run_id = None;
+        orchestrator.last_run_id = Some("run-a".to_string());
+        orchestrator.record_conversation_turn("change both files");
+        let turn_id = orchestrator.conversation[0].id.clone();
+
+        let result = orchestrator
+            .revert_turn_changes(&turn_id)
+            .expect("both apply steps belong to that turn");
+
+        assert_eq!(result.restored.len(), 2, "{:?}", result);
+        assert_eq!(std::fs::read_to_string(&first_path).unwrap(), "before\n");
+        assert_eq!(std::fs::read_to_string(&second_path).unwrap(), "b before\n");
+        // 撤销完这一轮就没有可撤的了
+        assert!(orchestrator.pending_undo().is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 后来的改动还在时不许抽走中间那一层。
+    ///
+    /// 撤销栈严格后进先出：跳过栈顶去撤下面那一层，会把之后基于它的改动建立在一个不存在的
+    /// 状态上，而这种破坏在 diff 里一点痕迹都看不出来。挡住的时候要说清怎么继续。
+    #[test]
+    fn reverting_a_turn_refuses_while_later_changes_are_still_applied() {
+        let base = std::env::temp_dir().join(format!("agent-ide-turn-block-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("a.ts");
+        let mut orchestrator = AgentOrchestrator::new();
+
+        orchestrator.current_run_id = Some("run-a".to_string());
+        std::fs::write(&path, "from run a\n").unwrap();
+        orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "a.ts".to_string(),
+            path: path.clone(),
+            previous: Some("original\n".to_string()),
+            updated: "from run a\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+        orchestrator.current_run_id = None;
+        orchestrator.last_run_id = Some("run-a".to_string());
+        orchestrator.record_conversation_turn("first ask");
+        let first_turn = orchestrator.conversation[0].id.clone();
+
+        // 之后又跑了一轮，改了同一个文件
+        orchestrator.current_run_id = Some("run-b".to_string());
+        std::fs::write(&path, "from run b\n").unwrap();
+        orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "a.ts".to_string(),
+            path: path.clone(),
+            previous: Some("from run a\n".to_string()),
+            updated: "from run b\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+        orchestrator.current_run_id = None;
+        orchestrator.last_run_id = Some("run-b".to_string());
+        orchestrator.record_conversation_turn("second ask");
+
+        let refusal = orchestrator.revert_turn_changes(&first_turn).unwrap_err();
+
+        assert!(refusal.contains("newest-first"), "{}", refusal);
+        // 一个字都没动：被挡住的操作不能留下半个结果
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "from run b\n");
+        assert_eq!(
+            orchestrator.pending_undo().map(|(_, files)| files.len()),
+            Some(1)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 撤销栈不随"新建任务"清空（磁盘上的改动不会因为换任务而消失），所以要说出来那是
+    /// 上一个任务的改动 —— 否则用户在新任务里点一下 Undo，还原的是他已经不记得的东西。
+    #[test]
+    fn pending_undo_says_when_it_belongs_to_an_earlier_task() {
+        let base = std::env::temp_dir().join(format!("agent-ide-undo-task-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("a.ts");
+        let mut orchestrator = AgentOrchestrator::new();
+
+        std::fs::write(&path, "new\n").unwrap();
+        orchestrator.record_tool_writes(vec![AgentFileWrite {
+            file: "a.ts".to_string(),
+            path,
+            previous: Some("old\n".to_string()),
+            updated: "new\n".to_string(),
+            removed: false,
+            moved_from: None,
+        }]);
+        let (label, _) = orchestrator.pending_undo().expect("a checkpoint");
+        assert!(!label.contains("earlier task"), "{}", label);
+
+        orchestrator.start_new_session();
+        let (label, _) = orchestrator
+            .pending_undo()
+            .expect("the checkpoint survives");
+        assert!(label.contains("earlier task"), "{}", label);
 
         let _ = std::fs::remove_dir_all(&base);
     }

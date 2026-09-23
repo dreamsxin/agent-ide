@@ -677,6 +677,13 @@ export interface ConversationTurn {
    * 那句话是他自己打的。
    */
   derived?: boolean;
+  /**
+   * 产生这一轮的那次运行。
+   *
+   * 撤销点记的也是运行 id，两边靠它对上 —— "撤销这一轮改的文件"就是这么问出来的。
+   * 加这个字段之前存下的会话没有它，那些轮次只能整栈撤销。
+   */
+  runId?: string | null;
 }
 
 
