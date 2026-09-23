@@ -1439,6 +1439,16 @@ impl LlmClient {
         &self.extra_tools
     }
 
+    /// 这个客户端现在还能不能把工具表发出去：档位是 `native_tools`，而且这次运行里供应商
+    /// 没有拒过 `tools`。
+    ///
+    /// 给"只靠工具干活"的那类循环用（子 Agent 就是）。文本协议档位下 `build_chat_request`
+    /// 根本不插 `tools` 键，于是子 Agent 会拿到一张空手：它读不了任何文件，却仍然会给出一个
+    /// 听起来很确定的答案 —— 那比报错更糟。
+    pub fn can_send_tools(&self) -> bool {
+        self.config.tool_call_mode == "native_tools" && !self.tools_were_rejected()
+    }
+
     pub fn get_capabilities(&self) -> ModelCapabilities {
         if let Some(engine) = &self.local_engine {
             return engine.capabilities();

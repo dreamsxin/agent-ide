@@ -149,15 +149,18 @@ Bounded: 2 000-char URL, 10 MiB on the wire counted **while streaming** (a `cont
 
 ## Delegating to a Subagent
 
-`delegate_task` hands a self-contained question to a read-only subagent and returns its final text. It is **only advertised when a subagent channel is attached**, and as of this commit nothing attaches one — the loop and the tool exist, the switch is off, and ROADMAP 155 records the open question (the tool list the child's client should advertise).
+`delegate_task` hands a self-contained question to a read-only subagent and returns its final text. It is **only advertised when a subagent channel is attached**, which the four desktop run entry points (`send_agent_prompt`, `run_agent_step`, `continue_agent_pipeline`, `repair_workspace`) do; a headless entry attaches none, so there the tool is absent rather than failing when called.
 
 What the child cannot do is structural, not prompted:
 
 - Its permissions are built from `read_only()`, so there is no write, no command run, no desktop or browser authority — and a capability added to the parent later is **not** inherited, because the child is constructed fresh rather than by subtracting from the parent.
+- **The tool list it is offered is computed from those same permissions.** The tools in a request body come from the *client* while the calls are served by the *invoker*, so the child gets its own client (`SubagentChannel::child_client`) carrying exactly `tool_definitions(child_permissions)`: the parent's write tools, its MCP tools and `delegate_task` itself are replaced, not appended to. Advertising a tool the child's invoker refuses would spend its limited rounds on calls that cannot work.
 - It gets **no subagent channel**, so recursion depth is exactly 1. The prompt says so too, but the prompt is not what enforces it.
 - It shares the parent's cancel switch: Stop stops the child as well, not just the outer layer.
 - Its tool rounds are capped at 8 and the cap is enforced. When it stops a child early, the caller is told, because a half-finished answer that reads as finished is worse than none.
 - Its reply is bounded (20 000 chars) and its stream never reaches the chat — the caller gets a conclusion, the user does not get two voices interleaved.
+
+The child's client is a clone of the parent's, so the run's usage meter and degradation records are shared: a delegation spends the **same** run's budget and its degradations appear in the same report. The two paths that reuse a previous run's permissions (pipeline continue, repair) replace the channel with this run's client for that reason — an inherited channel would bill the child to a run that has already ended.
 
 Every delegation is recorded as an external action (`delegate_task`) with the description and what it cost in rounds: a delegation is a full model loop, so the money is spent and cannot be taken back, which is exactly what that log is for.
 

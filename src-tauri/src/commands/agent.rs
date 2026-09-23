@@ -433,6 +433,12 @@ pub async fn send_agent_prompt(
     );
     // 移进去而不是克隆：局部变量之后就不能再交给别人，多一个消费者会编译不过
     tool_permissions.adopt_cancel(side_effect_switch);
+    // 派子 Agent 的通道。给的是**接 MCP 之前**的客户端：子 Agent 的工具表在委派时按它自己
+    // 的只读权限重建（`SubagentChannel::child_client`），父运行的 MCP 工具不该出现在里面。
+    // 发不出工具表的档位拿不到通道，于是 `delegate_task` 根本不会被通告出去。
+    let mut tool_permissions = tool_permissions.with_subagent(
+        crate::agent::workspace_tools::SubagentChannel::for_run(&llm),
+    );
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
         std::sync::Arc::new(app_handle.clone()),
@@ -1176,6 +1182,10 @@ pub async fn run_agent_step(
         agent_state.approval_gate(&app_handle),
     );
     tool_permissions.adopt_cancel(side_effect_switch);
+    // 单步执行也能派子 Agent：见 `send_agent_prompt` 里同一处的理由
+    let mut tool_permissions = tool_permissions.with_subagent(
+        crate::agent::workspace_tools::SubagentChannel::for_run(&llm),
+    );
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
         std::sync::Arc::new(app_handle.clone()),
@@ -1450,6 +1460,13 @@ pub async fn continue_agent_pipeline(
     // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
     // 必须一起装：只装定义会让恢复后的 stage 看到工具，却由上次运行残留的执行器
     // 处理调用，或者根本没人处理。
+    //
+    // 子 Agent 通道必须**换成这一次的客户端**，不能沿用克隆过来的那个：里面那份客户端带的是
+    // 上一次运行的用量记账（子 Agent 花的钱会记到一次已经结束的运行上），还可能带着上一次
+    // 的模型覆盖。和上面 `adopt_cancel` / `reset_image_budget` 是同一类必须重置的字段。
+    let tool_permissions = tool_permissions.with_subagent(
+        crate::agent::workspace_tools::SubagentChannel::for_run(&llm),
+    );
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
         std::sync::Arc::new(app_handle.clone()),
@@ -1850,6 +1867,11 @@ pub async fn repair_workspace(
     // 修复循环也要有自己的工具面。以前它直接沿用上一次运行留在 orchestrator 上的
     // `tool_invoker`：那份授权的副作用开关属于上一次运行，被 Stop 过就永久是 true，
     // 于是这一次修复的每一次写盘都会被拒 —— 一个新运行被上一个运行的 Stop 掐死。
+    //
+    // 子 Agent 通道同理要换成这一次的客户端：克隆过来的那个带着上一次运行的用量记账。
+    let repair_permissions = repair_permissions.with_subagent(
+        crate::agent::workspace_tools::SubagentChannel::for_run(&llm),
+    );
     let (llm, tool_invoker) = crate::commands::mcp::attach_mcp_tools(
         &mcp_state.registry,
         std::sync::Arc::new(app_handle.clone()),

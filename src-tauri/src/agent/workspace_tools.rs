@@ -87,10 +87,41 @@ pub struct SubagentChannel {
 }
 
 impl SubagentChannel {
-    pub fn new(llm: crate::services::llm_client::LlmClient) -> Self {
-        Self {
-            llm: std::sync::Arc::new(llm),
+    /// 给这次运行造一个通道 —— 除非这个客户端发不出工具表。
+    ///
+    /// 返回 `Option` 而不是让四个调用点各自判断：子 Agent 除了工具什么都没有（它看不到父
+    /// 对话，也没有预打包的上下文），所以文本协议档位下的子 Agent 是一次必然空手的模型循环 ——
+    /// 钱花了，回来一个没有依据的答案。这个判断只应该有一处，就在这里。
+    pub fn for_run(llm: &crate::services::llm_client::LlmClient) -> Option<Self> {
+        if !llm.can_send_tools() {
+            return None;
         }
+        Some(Self {
+            llm: std::sync::Arc::new(llm.clone()),
+        })
+    }
+
+    /// 这个通道现在还能不能真的派出一个子 Agent。
+    ///
+    /// 和 `for_run` 问的是同一件事，差别是时机：工具表在运行开始时就通告出去了，而供应商
+    /// 拒掉 `tools` 可能发生在之后任何一轮。那之后再派，就是白花一次钱。
+    fn usable(&self) -> bool {
+        self.llm.can_send_tools()
+    }
+
+    /// 按子 Agent 自己的清单重建一份客户端。
+    ///
+    /// `stream_chat_with_tools` 发的是**客户端身上**那份工具表，所以直接复用父客户端等于把
+    /// 写文件、跑命令、父运行的 MCP 工具、以及 `delegate_task` 自己都通告给子 Agent —— 而
+    /// 子 Agent 的执行器一样都不受理。模型会拿它总共 8 轮里的几轮去调用注定失败的工具，
+    /// 然后带着一个"工具不可用"的结论回来。`with_extra_tools` 是**替换**而不是追加，父运行
+    /// 的 MCP 表因此不会漏过去。
+    ///
+    /// 其余状态刻意跟着 clone 共享（用量记账、图片/输出/历史降级、`tools_rejected` 都在
+    /// `Arc` 后面）：子 Agent 花的钱要算在同一次运行的额度上，它遇到的降级也要出现在同一
+    /// 份报告里 —— 否则一次委派就是一笔看不见的开销。
+    fn child_client(&self, tools: Vec<ToolDefinition>) -> crate::services::llm_client::LlmClient {
+        (*self.llm).clone().with_extra_tools(tools)
     }
 }
 
@@ -434,9 +465,13 @@ impl WorkspaceToolPermissions {
         self
     }
 
-    /// 挂上派子 Agent 的能力。子 Agent 自己的权限不会调用这个方法，所以它派不出下一层。
-    pub fn with_subagent(mut self, channel: SubagentChannel) -> Self {
-        self.subagent = Some(channel);
+    /// 挂上（或摘掉）派子 Agent 的能力。子 Agent 自己的权限不会调用这个方法，所以它派不出下一层。
+    ///
+    /// 参数是 `Option` 而不是 `SubagentChannel`：续跑和自动修复克隆的是上一次运行的授权，
+    /// 里面那个通道带的是上一次的客户端（上一次的用量记账、可能还有上一次的模型覆盖）。
+    /// 一个"只能装、不能换掉"的接口会让这两条路默默继承它。
+    pub fn with_subagent(mut self, channel: Option<SubagentChannel>) -> Self {
+        self.subagent = channel;
         self
     }
 
@@ -2072,6 +2107,15 @@ async fn delegate_task_tool(
                 .to_string(),
         );
     };
+    // 通告出去之后供应商可能才拒掉 `tools`。那之后的子 Agent 是一次空手的循环：它读不了
+    // 任何文件，却会给出一个听起来很确定的答案。宁可现在就说清楚。
+    if !channel.usable() {
+        return Err(
+            "This run cannot delegate any more: the provider refused tool calls, so a subagent \
+             would have no way to read anything. Do the work yourself."
+                .to_string(),
+        );
+    }
     let description = subagent::validate_request(description, prompt)?;
     if permissions.cancelled() {
         return Err("This run was stopped before the subagent started.".to_string());
@@ -2086,9 +2130,12 @@ async fn delegate_task_tool(
     let task_prompt = subagent::subagent_user_prompt(prompt, project_context.as_deref());
 
     let child_permissions = permissions.child_permissions();
+    // 通告给子 Agent 的工具表和受理它们的执行器**算自同一个** `child_permissions`：
+    // 两边各写一份清单的话，下一次给只读工具面加一项，两份里总有一份会忘。
+    let child_llm = channel.child_client(tool_definitions(&child_permissions));
     let child_invoker = WorkspaceToolInvoker::without_logging(child_permissions);
     let (text, rounds) = crate::agent::executor::run_subagent(
-        &channel.llm,
+        &child_llm,
         subagent::subagent_system_prompt(),
         &task_prompt,
         &child_invoker,
@@ -5531,5 +5578,121 @@ mod tests {
         let error = move_file_tool("src/a.ts", "src/b.ts", &read_only).unwrap_err();
         assert!(error.contains("not authorized"), "{}", error);
         assert!(env.root.join("src/a.ts").exists());
+    }
+
+    /// 造一个不会真的发请求的客户端：这些测试只看它身上那份工具表。
+    fn test_llm() -> crate::services::llm_client::LlmClient {
+        test_llm_with_mode("native_tools")
+    }
+
+    fn test_llm_with_mode(tool_call_mode: &str) -> crate::services::llm_client::LlmClient {
+        crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+            endpoint: "https://example.invalid/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "test-model".to_string(),
+            provider: "openai".to_string(),
+            max_output_tokens: None,
+            max_context_tokens: None,
+            reasoning_effort: None,
+            tool_call_mode: tool_call_mode.to_string(),
+            model_type: crate::services::llm_client::ModelType::OpenAI,
+            local_model_config: None,
+        })
+    }
+
+    fn mcp_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "mcp__deploy".to_string(),
+            description: "deploy the app".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    /// 子 Agent 通告出去的每一个工具，它自己的执行器都必须受理；父运行多出来的那些都不能漏过去。
+    ///
+    /// 这是这个功能最容易悄悄坏掉的地方：请求体里的工具表来自**客户端**，受理调用的是
+    /// **执行器**，两者各有一份来源。直接把父客户端交给子 Agent 的话，写文件、跑命令、父运行的
+    /// MCP 工具、以及 `delegate_task` 自己都会出现在子 Agent 的可选项里，而它一个都调不动 ——
+    /// 表现是子 Agent 用光轮数、带回一句"工具不可用"，五条门禁全绿。
+    #[test]
+    fn subagent_advertises_exactly_what_its_invoker_handles() {
+        let parent_llm = test_llm().with_extra_tools(vec![mcp_tool()]);
+        let mut parent = WorkspaceToolPermissions::new(vec!["git".to_string()], true, true)
+            .with_subagent(SubagentChannel::for_run(&parent_llm));
+        parent.adopt_cancel(test_cancel());
+
+        let channel = parent.subagent.clone().expect("刚挂上去的通道");
+        let child = parent.child_permissions();
+        let advertised: Vec<String> = channel
+            .child_client(tool_definitions(&child))
+            .extra_tools()
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        let invoker = WorkspaceToolInvoker::without_logging(child);
+
+        assert!(!advertised.is_empty(), "子 Agent 至少要有只读工具可用");
+        for name in &advertised {
+            assert!(invoker.handles(name), "通告了执行器不受理的 {}", name);
+        }
+        for forbidden in [
+            WRITE_FILE,
+            EDIT_FILE,
+            MOVE_FILE,
+            RUN_COMMAND,
+            DELEGATE_TASK,
+            "mcp__deploy",
+        ] {
+            assert!(
+                !advertised.contains(&forbidden.to_string()),
+                "{} 不该通告给子 Agent：{:?}",
+                forbidden,
+                advertised
+            );
+        }
+    }
+
+    /// 递归深度恰好 1，而且是结构上的：子 Agent 的权限里没有通道，所以它既通告不出
+    /// `delegate_task`，被直接调用时也会被拒 —— 不靠提示词里的一句"不要再派"。
+    #[test]
+    fn subagent_cannot_delegate_further() {
+        let mut parent = WorkspaceToolPermissions::read_only()
+            .with_subagent(SubagentChannel::for_run(&test_llm()));
+        parent.adopt_cancel(test_cancel());
+        assert!(parent.can_delegate());
+
+        let child = parent.child_permissions();
+        assert!(!child.can_delegate());
+        assert!(!WorkspaceToolInvoker::without_logging(child.clone()).handles(DELEGATE_TASK));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(delegate_task_tool(
+                "map the store",
+                "Find every place the agent store is mutated and report the file and line of each.",
+                &child,
+            ))
+            .unwrap_err();
+        assert!(error.contains("cannot delegate"), "{}", error);
+    }
+
+    /// 发不出工具表的档位不该有通道：子 Agent 除了工具什么都没有，那样的一次委派是花钱买
+    /// 一个没有依据的答案。文本协议档位下 `build_chat_request` 根本不插 `tools` 键。
+    #[test]
+    fn a_client_that_cannot_send_tools_gets_no_channel() {
+        let text_protocol = test_llm_with_mode("text_protocol");
+        assert!(SubagentChannel::for_run(&text_protocol).is_none());
+
+        let permissions = WorkspaceToolPermissions::read_only()
+            .with_subagent(SubagentChannel::for_run(&text_protocol));
+        assert!(!permissions.can_delegate());
+        let names: Vec<String> = tool_definitions(&permissions)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert!(!names.contains(&DELEGATE_TASK.to_string()), "{:?}", names);
     }
 }
