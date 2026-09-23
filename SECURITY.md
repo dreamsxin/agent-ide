@@ -147,6 +147,20 @@ Bounded: 2 000-char URL, 10 MiB on the wire counted **while streaming** (a `cont
 
 **Every fetch is recorded** as an external action (`web_fetch`, `web_fetch_redirected`, `web_fetch_failed`) with the final URL and how much was read, so "what did it look at" is answerable afterwards. Known limit: no DNS pre-resolution, so a public domain that resolves to a private address is not caught by the host rules above.
 
+## Delegating to a Subagent
+
+`delegate_task` hands a self-contained question to a read-only subagent and returns its final text. It is **only advertised when a subagent channel is attached**, and as of this commit nothing attaches one — the loop and the tool exist, the switch is off, and ROADMAP 155 records the open question (the tool list the child's client should advertise).
+
+What the child cannot do is structural, not prompted:
+
+- Its permissions are built from `read_only()`, so there is no write, no command run, no desktop or browser authority — and a capability added to the parent later is **not** inherited, because the child is constructed fresh rather than by subtracting from the parent.
+- It gets **no subagent channel**, so recursion depth is exactly 1. The prompt says so too, but the prompt is not what enforces it.
+- It shares the parent's cancel switch: Stop stops the child as well, not just the outer layer.
+- Its tool rounds are capped at 8 and the cap is enforced. When it stops a child early, the caller is told, because a half-finished answer that reads as finished is worse than none.
+- Its reply is bounded (20 000 chars) and its stream never reaches the chat — the caller gets a conclusion, the user does not get two voices interleaved.
+
+Every delegation is recorded as an external action (`delegate_task`) with the description and what it cost in rounds: a delegation is a full model loop, so the money is spent and cannot be taken back, which is exactly what that log is for.
+
 ## Desktop Observation
 
 `workspace_computer_windows` lists the visible top-level desktop windows — title, app, size, and which one is in the foreground. This is the first slice of computer use and it is **read-only**: nothing on the desktop is clicked, typed into or captured.
