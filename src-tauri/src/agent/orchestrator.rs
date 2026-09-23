@@ -5879,6 +5879,7 @@ mod tests {
                 transcript: vec![crate::services::llm_client::ChatMessage::assistant(
                     "done".to_string(),
                 )],
+                ..Default::default()
             }),
             &cancel,
             &events,

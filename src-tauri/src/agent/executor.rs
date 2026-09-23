@@ -92,6 +92,8 @@ async fn stream_with_tool_loop(
 ) -> Result<StageOutcome, String> {
     let prompt_len = messages.len();
     let mut merged = String::new();
+    // 真正执行过工具的轮数。循环自己数，因为只有这里知道 —— transcript 会被修剪。
+    let mut tool_rounds = 0usize;
     // 还没送出去的图片。跨轮存在，因为一个请求装不下的那些要留到下一轮，而不是让模型
     // 回头再读一遍 —— 它们已经花过运行预算了。
     let mut pending_images: Vec<crate::services::images::ImagePart> = Vec::new();
@@ -137,6 +139,8 @@ async fn stream_with_tool_loop(
                 return Ok(StageOutcome {
                     text: merged,
                     transcript,
+                    tool_rounds,
+                    hit_round_cap: false,
                 });
             }
         };
@@ -153,8 +157,9 @@ async fn stream_with_tool_loop(
 
         let is_last_iteration = iteration == max_iterations;
         if external.is_empty() || is_last_iteration {
+            let hit_round_cap = is_last_iteration && !external.is_empty();
             let mut final_text = merge_tool_call_output(output);
-            if is_last_iteration && !external.is_empty() {
+            if hit_round_cap {
                 final_text.push_str(&format!(
                     "\n\n[agent-ide] Tool loop stopped after {} rounds; remaining tool calls were not executed.\n",
                     max_iterations
@@ -172,6 +177,8 @@ async fn stream_with_tool_loop(
             return Ok(StageOutcome {
                 text: merged,
                 transcript,
+                tool_rounds,
+                hit_round_cap,
             });
         }
 
@@ -198,6 +205,9 @@ async fn stream_with_tool_loop(
             output.content.clone(),
             &external,
         ));
+        // 这一轮确定要执行工具了，算一轮。放在执行之前：中途被 Stop 的那一轮工具也已经
+        // 开始花钱了，报给调用方的"用了几轮"不该把它抹掉。
+        tool_rounds += 1;
 
         let invoker = invoker.expect("external calls only collected when invoker is present");
         // 这一轮工具产出的图片。它们**不能**挂在 `role: "tool"` 消息上：OpenAI 的
@@ -237,6 +247,8 @@ async fn stream_with_tool_loop(
     Ok(StageOutcome {
         text: merged,
         transcript,
+        tool_rounds,
+        hit_round_cap: false,
     })
 }
 
@@ -318,7 +330,7 @@ pub async fn execute_step(
         .map(|outcome| outcome.text)
 }
 
-/// 跑一个只读子 Agent，返回它最后那段文字和用掉的轮数。
+/// 跑一个只读子 Agent，返回它最后那段文字、用掉的轮数，以及是不是撞了轮数上限。
 ///
 /// 三件事和主运行刻意不同：
 /// - **它的流不进用户的聊天区。** 子 Agent 的过程是给调用方看的中间产物，混进主回答里只会让
@@ -326,13 +338,18 @@ pub async fn execute_step(
 ///   之后 `send` 会永远等下去。
 /// - **轮次上限更小**（`MAX_SUBAGENT_ROUNDS`），而且是真的会停。
 /// - **取消共用父运行那一个开关**：用户按 Stop 是要停掉整件事，不是停掉最外面那一层。
+///
+/// 轮数和"撞没撞上限"都取自循环自己的记账。以前是在这里数 transcript 里带 `tool_calls` 的
+/// assistant 消息、再拿 `rounds >= 上限` 当截断判据，两头都错：最后一轮不执行工具，所以
+/// "用满 8 轮然后正常作答"会被报成截断；而 `trim_tool_loop_history` 会删掉最老的那几组消息，
+/// 于是真被截断的长运行反而数少了、读起来像正常收尾。
 pub async fn run_subagent(
     llm: &LlmClient,
     system_prompt: &str,
     task_prompt: &str,
     invoker: &dyn ToolInvoker,
     cancel_flag: Arc<AtomicBool>,
-) -> Result<(String, usize), String> {
+) -> Result<(String, usize, bool), String> {
     let messages = vec![
         ChatMessage::system(system_prompt.to_string()),
         ChatMessage::user(task_prompt.to_string()),
@@ -352,15 +369,7 @@ pub async fn run_subagent(
     .await;
     drain.abort();
     let outcome = outcome?;
-
-    // 用掉几轮 = 转录里有几条带工具调用的 assistant 消息。不另设计数器：转录本身就是事实，
-    // 而一个额外的计数器迟早和它说的不是一件事。
-    let rounds = outcome
-        .transcript
-        .iter()
-        .filter(|message| message.role == "assistant" && message.tool_calls.is_some())
-        .count();
-    Ok((outcome.text, rounds))
+    Ok((outcome.text, outcome.tool_rounds, outcome.hit_round_cap))
 }
 
 /// 单条消息带进下一个 stage 时的内容上限
@@ -380,6 +389,18 @@ const MAX_CARRIED_THREAD_CHARS: usize = 24_000;
 pub struct StageOutcome {
     pub text: String,
     pub transcript: Vec<ChatMessage>,
+    /// 这一趟真正执行过工具的轮数。
+    ///
+    /// 由循环自己数，**不从 `transcript` 反推**：`trim_tool_loop_history` 会把最老的
+    /// assistant/tool 组从 `messages` 里删掉，而 transcript 就是 `messages` 的尾巴 ——
+    /// 数它等于"被裁掉的那几轮没跑过"，而那正是最长、最该报给调用方的那些运行。
+    pub tool_rounds: usize,
+    /// 撞上了轮数上限：最后一轮里还有没执行的工具调用。
+    ///
+    /// 只有循环自己知道这件事。最后一轮不执行工具，所以"用满 N 轮之后正常作答"和
+    /// "第 N 轮还想调工具但被拦下"在消息上长得一样 —— 而对调用方来说前者是完整答案，
+    /// 后者是一段被截断的探索。子 Agent 把这个标志转述给主 Agent（`format_for_caller`）。
+    pub hit_round_cap: bool,
 }
 
 /// 把上游 stage 的消息线程裁进预算。
@@ -1745,6 +1766,78 @@ mod tests {
                 bounded
             );
         }
+    }
+
+    /// 跑一个 mock 端点上的工具循环：第一轮模型会调一次 `stub_probe`，之后直接作答。
+    ///
+    /// 用它把"轮数/触顶"这两个数字钉死在循环的记账上，而不是事后从 transcript 反推。
+    fn loop_with_mock_tool(max_iterations: usize) -> StageOutcome {
+        let invoker = RecordingInvoker::new("stub_");
+        let _guard = crate::services::workspace::env_test_guard();
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "stub_probe");
+        let llm =
+            crate::services::llm_client::LlmClient::new(crate::services::llm_client::LlmConfig {
+                endpoint: "mock://rounds".to_string(),
+                api_key: "sk-test".to_string(),
+                model: "gpt-4o".to_string(),
+                provider: "openai".to_string(),
+                max_context_tokens: None,
+                reasoning_effort: None,
+                max_output_tokens: None,
+                tool_call_mode: "native".to_string(),
+                model_type: crate::services::llm_client::ModelType::OpenAI,
+                local_model_config: None,
+            })
+            .with_extra_tools(vec![crate::services::llm_client::ToolDefinition {
+                name: "stub_probe".to_string(),
+                description: "probe stub".to_string(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            }]);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(64);
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(stream_with_tool_loop(
+                &llm,
+                vec![ChatMessage::user("probe it")],
+                Some(&invoker),
+                std::sync::Arc::new(AtomicBool::new(false)),
+                tx,
+                max_iterations,
+            ));
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        outcome.expect("mock loop")
+    }
+
+    /// 用掉了每一轮、然后正常作答的循环**不是**被截断的循环。
+    ///
+    /// 这是旧写法（`rounds >= 上限`）报错的那一半：最后一轮本来就不执行工具，所以"用满 N 轮
+    /// 之后给出答案"和"第 N 轮被拦下"在 transcript 上分不开 —— 而子 Agent 会把前者当成
+    /// "这个答案可能不完整"转述给主 Agent。
+    #[test]
+    fn a_loop_that_answered_after_using_every_round_is_not_reported_as_truncated() {
+        let outcome = loop_with_mock_tool(1);
+        assert_eq!(outcome.tool_rounds, 1);
+        assert!(!outcome.hit_round_cap, "{}", outcome.text);
+        assert!(
+            !outcome.text.contains("Tool loop stopped"),
+            "{}",
+            outcome.text
+        );
+    }
+
+    /// 上限那一轮还有没执行的工具调用，就必须说出来 —— 对调用方那是一段没跑完的探索。
+    #[test]
+    fn a_loop_that_still_wanted_tools_at_the_cap_says_so() {
+        let outcome = loop_with_mock_tool(0);
+        assert_eq!(outcome.tool_rounds, 0);
+        assert!(outcome.hit_round_cap);
+        assert!(
+            outcome.text.contains("Tool loop stopped"),
+            "{}",
+            outcome.text
+        );
     }
 
     struct RecordingInvoker {

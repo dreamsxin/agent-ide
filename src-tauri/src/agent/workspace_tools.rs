@@ -2158,7 +2158,7 @@ async fn delegate_task_tool(
 
     // 失败和被 Stop 的委派也要记一条。用 `?` 直接返回的写法把最该记的那两种情况漏掉了：
     // 跑了七轮然后报错、或者中途被 Stop —— 钱一样花了，而日志里一个字都没有。
-    let (text, rounds) = match outcome {
+    let (text, rounds, hit_round_cap) = match outcome {
         Ok(value) => value,
         Err(error) => {
             permissions.record_external(AgentExternalAction {
@@ -2170,7 +2170,9 @@ async fn delegate_task_tool(
         }
     };
 
-    let result = subagent::bound_result(&text, rounds, rounds >= subagent::MAX_SUBAGENT_ROUNDS);
+    // 轮数和"撞没撞上限"都由工具循环自己报上来：从转录反推两头都会错（最后一轮不跑工具，
+    // 而修剪会删掉最老的几组消息）。
+    let result = subagent::bound_result(&text, rounds, hit_round_cap);
     // 走外部动作那条记录：一次委派是一个完整的模型循环 —— 钱花掉了，撤不回来，而用户有权
     // 事后知道它发生过。那条通道本来就是"做过、撤不了"的动作的去处，而且它只汇总成一条。
     permissions.record_external(AgentExternalAction {
