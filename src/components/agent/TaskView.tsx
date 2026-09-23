@@ -14,6 +14,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
+import { useT } from "../../i18n";
 import type { Step } from "../../types/agent";
 
 const statusConfig: Record<
@@ -28,6 +29,7 @@ const statusConfig: Record<
 };
 
 export default function TaskView({ embedded = false }: { embedded?: boolean }) {
+  const t = useT();
   const steps = useAgentStore((s) => s.steps);
   const agentState = useAgentStore((s) => s.state);
   const currentTask = useAgentStore((s) => s.currentTask);
@@ -51,7 +53,7 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
 
   // 没有任务时说"还没有"，不编一个像任务名的字面量：单步执行 / 续跑 / 修复都不设
   // 标题（它们接的是已有任务），而恢复出来的会话可能根本没有任务。
-  const title = currentTask?.title ?? "No task yet";
+  const title = currentTask?.title ?? t("plan.noTaskYet");
   const canRun = agentState === "idle" || agentState === "done" || agentState === "waiting_user" || agentState === "error";
 
   const updateStepField = async (step: Step, updates: Partial<Step>) => {
@@ -90,7 +92,8 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
       {/* 任务标题 + 状态 */}
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-semibold text-surface-text">{title}</span>
-        <span className="text-[10px] text-surface-muted capitalize">{agentState}</span>
+        {/* 状态名以前直接渲染枚举值（`waiting_user` 这种），它是给代码看的，不是给人看的 */}
+        <span className="text-[10px] text-surface-muted">{t(`state.${agentState}`)}</span>
       </div>
       {/*
         错误要在这个面板里也显示。原来只有 Chat 和 Changes 两个页签渲染 `error`，而它们和
@@ -109,32 +112,31 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
             <div className="min-w-0 flex-1">
               <div className="text-surface-text">
                 {restoredSession.interrupted
-                  ? "Restored interrupted Agent task."
-                  : "Restored Agent task state."}
+                  ? t("plan.restored.interrupted")
+                  : t("plan.restored.normal")}
               </div>
               <div className="mt-0.5 truncate font-mono text-[10px]">
-                {(agentRunId ?? restoredSession.runId) || "no-run-id"} · {formatRestoreTime(restoredSession.restoredAt)}
+                {(agentRunId ?? restoredSession.runId) || t("plan.restored.noRunId")} ·{" "}
+                {formatRestoreTime(restoredSession.restoredAt, t("plan.restored.fallback"))}
               </div>
               <div className={`mt-0.5 text-[10px] ${restoredSession.backendMatched ? "text-diff-add" : "text-diff-modify"}`}>
                 {restoredSession.backendMatched === null
-                  ? "Checking backend run..."
+                  ? t("plan.restored.checking")
                   : restoredSession.backendMatched
-                  ? "Backend run matched"
-                  : "Frontend recovered only"}
+                  ? t("plan.restored.matched")
+                  : t("plan.restored.frontendOnly")}
               </div>
-              <div className="mt-0.5">
-                Review diffs or run a step to continue.
-              </div>
+              <div className="mt-0.5">{t("plan.restored.continue")}</div>
             </div>
             <button
               onClick={() => {
                 // 拒绝（运行还在跑）已经写进 store.error，下面那块错误条会显示它
                 void startNewSession().catch(() => undefined);
               }}
-              title="Starts a new task: this view and the conversation history the next prompt would inherit are cleared. The old one stays in Task history."
+              title={t("plan.newTask.title")}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] hover:bg-surface-border/30"
             >
-              New task
+              {t("plan.newTask")}
             </button>
 
           </div>
@@ -164,6 +166,7 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
                 />
                 <EditableStepTitle
                   step={step}
+                  label={t("plan.stepTitle")}
                   onCommit={(title) => updateStepField(step, { title })}
                 />
               </div>
@@ -173,20 +176,20 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
                   onChange={(event) => void updateStepField(step, { scope: event.target.value as Step["scope"] })}
                   className="rounded border border-surface-border bg-surface-base px-1 py-0.5 text-[10px] text-surface-text"
                 >
-                  <option value="selection">Selection</option>
-                  <option value="active_file">Active file</option>
-                  <option value="open_files">Open files</option>
-                  <option value="workspace">Workspace</option>
+                  <option value="selection">{t("plan.scope.selection")}</option>
+                  <option value="active_file">{t("plan.scope.activeFile")}</option>
+                  <option value="open_files">{t("plan.scope.openFiles")}</option>
+                  <option value="workspace">{t("plan.scope.workspace")}</option>
                 </select>
                 <select
                   value={step.executionMode ?? "diff"}
                   onChange={(event) => void updateStepField(step, { executionMode: event.target.value as Step["executionMode"] })}
                   className="rounded border border-surface-border bg-surface-base px-1 py-0.5 text-[10px] text-surface-text"
                 >
-                  <option value="analyze">Analyze</option>
-                  <option value="diff">Diff</option>
-                  <option value="test">Test</option>
-                  <option value="fix">Fix</option>
+                  <option value="analyze">{t("plan.exec.analyze")}</option>
+                  <option value="diff">{t("plan.exec.diff")}</option>
+                  <option value="test">{t("plan.exec.test")}</option>
+                  <option value="fix">{t("plan.exec.fix")}</option>
                 </select>
               </div>
               <div className="flex flex-wrap gap-1">
@@ -194,8 +197,8 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
                   disabled={index === 0 || step.status === "doing"}
                   onClick={() => void moveStep(index, -1)}
                   className="inline-flex h-7 w-7 items-center justify-center rounded border border-surface-border text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
-                  title="Move step up"
-                  aria-label="Move step up"
+                  title={t("plan.moveUp")}
+                  aria-label={t("plan.moveUp")}
                 >
                   <MoveUp aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
@@ -203,8 +206,8 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
                   disabled={index === steps.length - 1 || step.status === "doing"}
                   onClick={() => void moveStep(index, 1)}
                   className="inline-flex h-7 w-7 items-center justify-center rounded border border-surface-border text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
-                  title="Move step down"
-                  aria-label="Move step down"
+                  title={t("plan.moveDown")}
+                  aria-label={t("plan.moveDown")}
                 >
                   <MoveDown aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
@@ -214,22 +217,23 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
                   className="inline-flex h-7 items-center gap-1 rounded border border-accent-blue/40 px-2 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Play aria-hidden="true" className="h-3 w-3" />
-                  Run
+                  {t("plan.run")}
                 </button>
                 <button
                   disabled={!canRun || step.status === "doing"}
                   onClick={() => void runStep(step, true)}
+                  title={t("plan.retry.title")}
                   className="inline-flex h-7 items-center gap-1 rounded border border-surface-border px-2 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <RefreshCcw aria-hidden="true" className="h-3 w-3" />
-                  Retry
+                  {t("plan.retry")}
                 </button>
                 <button
                   disabled={step.status === "doing" || step.status === "skipped"}
                   onClick={() => void skipAgentStep(step.id)}
                   className="inline-flex h-7 w-7 items-center justify-center rounded border border-surface-border text-surface-muted hover:bg-surface-border/30 disabled:cursor-not-allowed disabled:opacity-40"
-                  title="Skip step"
-                  aria-label="Skip step"
+                  title={t("plan.skip")}
+                  aria-label={t("plan.skip")}
                 >
                   <SkipForward aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
@@ -239,15 +243,15 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
         })
       ) : (
         <div className="text-xs text-surface-muted text-center py-6 space-y-2">
-          <div>No active task</div>
-          <div className="text-[10px]">Start a conversation in Chat to see the task plan here.</div>
+          <div>{t("plan.noActiveTask")}</div>
+          <div className="text-[10px]">{t("plan.noActiveTask.hint")}</div>
         </div>
       )}
 
       {/* 步骤日志 */}
       {steps.some((s) => s.logs.length > 0) && (
         <div className="mt-4 border-t border-surface-border pt-3">
-          <div className="text-[10px] text-surface-muted mb-2">Step Logs</div>
+          <div className="text-[10px] text-surface-muted mb-2">{t("plan.stepLogs")}</div>
           {steps
             .filter((s) => s.logs.length > 0)
             .map((step) =>
@@ -268,9 +272,11 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
 
 function EditableStepTitle({
   step,
+  label,
   onCommit,
 }: {
   step: Step;
+  label: string;
   onCommit: (title: string) => Promise<void>;
 }) {
   const [value, setValue] = useState(step.title);
@@ -298,7 +304,7 @@ function EditableStepTitle({
           event.currentTarget.blur();
         }
       }}
-      aria-label="Step title"
+      aria-label={label}
       className={`min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 outline-none focus:border-accent-blue focus:bg-surface-base ${
         step.status === "done" || step.status === "skipped"
           ? "text-surface-muted"
@@ -308,8 +314,8 @@ function EditableStepTitle({
   );
 }
 
-function formatRestoreTime(value: number) {
+function formatRestoreTime(value: number, fallback: string) {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "restored";
+  if (Number.isNaN(date.getTime())) return fallback;
   return date.toLocaleTimeString();
 }

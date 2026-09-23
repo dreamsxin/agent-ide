@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DiffEntry, Step } from "../types/agent";
-import { agentStateLabel, isAgentBusy, summarizeAgentRun } from "./agentExperience";
+import { agentStateMessageKey, isAgentBusy, summarizeAgentRun } from "./agentExperience";
+import { translate } from "../i18n";
 
 const step = (id: string, status: Step["status"]): Step => ({
   id,
@@ -54,9 +55,12 @@ describe("agent experience helpers", () => {
     expect(summary.nextStep?.id).toBe("failed");
   });
 
-  it("uses task-oriented state labels", () => {
-    expect(agentStateLabel("waiting_user")).toBe("Needs review");
-    expect(agentStateLabel("planning")).toBe("Building plan");
+  /** 状态名只留一份映射：这里给键，句子由 `t()` 按语言给 */
+  it("maps every state to a message key", () => {
+    expect(agentStateMessageKey("waiting_user")).toBe("state.waiting_user");
+    expect(agentStateMessageKey("planning")).toBe("state.planning");
+    expect(translate("zh", agentStateMessageKey("waiting_user"))).toBe("等你回答");
+    expect(translate("en", agentStateMessageKey("planning"))).toBe("Planning");
     expect(isAgentBusy("acting")).toBe(true);
     expect(isAgentBusy("done")).toBe(false);
   });

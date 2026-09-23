@@ -41,19 +41,16 @@ export function summarizeAgentRun(steps: Step[], diffs: DiffEntry[]): AgentRunSu
   };
 }
 
-export function agentStateLabel(state: AgentState) {
-  const labels: Record<AgentState, string> = {
-    idle: "Ready",
-    thinking: "Understanding task",
-    planning: "Building plan",
-    acting: "Working",
-    reviewing: "Reviewing changes",
-    waiting_user: "Needs review",
-    done: "Completed",
-    error: "Needs attention",
-  };
-  return labels[state];
+/**
+ * 状态 → 文案键。返回键而不是句子，因为句子有两种语言。
+ *
+ * 这里曾经直接返回英文标签，而 `TaskView` 又渲染枚举值本身，于是同一个状态在界面上有
+ * 三种写法（"Needs review" / "waiting_user" / 中文）。映射只留这一份，翻译交给 `t()`。
+ */
+export function agentStateMessageKey(state: AgentState) {
+  return `state.${state}` as const;
 }
+
 
 export function isAgentBusy(state: AgentState) {
   return ["thinking", "planning", "acting", "reviewing"].includes(state);

@@ -8,10 +8,11 @@ import {
 } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import {
-  agentStateLabel,
+  agentStateMessageKey,
   isAgentBusy,
   summarizeAgentRun,
 } from "../../utils/agentExperience";
+import { useT } from "../../i18n";
 import type { AgentState } from "../../types/agent";
 
 interface AgentRunSummaryProps {
@@ -31,6 +32,7 @@ const statusStyle: Record<AgentState, string> = {
 };
 
 export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunSummaryProps) {
+  const t = useT();
   const state = useAgentStore((store) => store.state);
   const steps = useAgentStore((store) => store.steps);
   const diffs = useAgentStore((store) => store.diffs);
@@ -60,7 +62,7 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
               {currentTask?.title || summary.activeStep?.title || "Current task"}
             </span>
             <span className={`flex-shrink-0 text-[10px] ${statusStyle[state]}`}>
-              {agentStateLabel(state)}
+              {t(agentStateMessageKey(state))}
             </span>
           </div>
           <div className="mt-0.5 truncate text-[10px] text-surface-muted">
