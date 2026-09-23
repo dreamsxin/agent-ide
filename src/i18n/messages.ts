@@ -66,6 +66,24 @@ export const EN = {
   "lsp.install": "Install",
   "lsp.recentDiagnostics": "Recent diagnostics",
   "lsp.noDiagnostics": "No diagnostics received yet.",
+
+  "settings.toolMode.title": "How the model calls tools",
+  "settings.toolMode.native": "Provider-native tools (recommended)",
+  "settings.toolMode.text": "Text protocol (for endpoints without tool support)",
+  "settings.toolMode.help":
+    "Native tools is what lets the Agent read the workspace during a run — open a file, search text, list files — and it is required for MCP tools and for delegating to a subagent. Without it the Agent only sees the bundle assembled when the run started and has to guess at files it was never given. If an endpoint rejects the tools parameter, the request is retried without it and the Logs panel says so, so there is no need to pick text protocol defensively.",
+
+  "settings.permissions.title": "What the Agent may do",
+  "settings.permissions.preset": "Preset",
+  "settings.permissions.readOnly": "Read only",
+  "settings.permissions.createFiles": "Create files",
+  "settings.permissions.runCommands": "Run commands",
+  "settings.permissions.readOnly.desc":
+    "The Agent reads the workspace and proposes changes; you apply them. It cannot run your tests, so it cannot check its own work — the first failure you see will be at apply time.",
+  "settings.permissions.createFiles.desc":
+    "Also lets the Agent create new files. Changes still wait in the review area until you apply them.",
+  "settings.permissions.runCommands.desc":
+    "Also lets the Agent run the commands your project already declares (tests, build). This is what lets it verify a change before proposing it.",
 } as const;
 
 export type MessageKey = keyof typeof EN;
@@ -132,5 +150,22 @@ export const ZH: Record<MessageKey, string> = {
   "lsp.install": "安装",
   "lsp.recentDiagnostics": "最近的诊断",
   "lsp.noDiagnostics": "还没有收到诊断信息。",
+
+  "settings.toolMode.title": "模型怎么调用工具",
+  "settings.toolMode.native": "供应商原生工具（推荐）",
+  "settings.toolMode.text": "文本协议（端点不支持工具时用）",
+  "settings.toolMode.help":
+    "原生工具是 Agent 在运行过程中能读工作区的前提 —— 打开文件、搜索文本、列目录，MCP 工具和派子 Agent 也都依赖它。关掉之后 Agent 只看得到运行开始时打包好的那点上下文，没给它的文件只能猜。端点如果拒绝 tools 参数，这一次请求会自动摘掉它重试，日志面板里会写明，所以不必为了保险先选文本协议。",
+
+  "settings.permissions.title": "Agent 能做什么",
+  "settings.permissions.preset": "预设",
+  "settings.permissions.readOnly": "只读",
+  "settings.permissions.createFiles": "可新建文件",
+  "settings.permissions.runCommands": "可跑命令",
+  "settings.permissions.readOnly.desc":
+    "Agent 读工作区、提出改动，由你决定是否落盘。它跑不了你的测试，也就没法自己验证改对了没有 —— 第一次发现问题会是在应用改动的时候。",
+  "settings.permissions.createFiles.desc": "额外允许它新建文件。改动仍然先进审查区，你点了才落盘。",
+  "settings.permissions.runCommands.desc":
+    "额外允许它跑项目自己声明的命令（测试、构建）。这是它能在提出改动之前先验证一遍的前提。",
 };
 

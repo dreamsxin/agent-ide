@@ -396,4 +396,40 @@ describe("built-in tool documentation", () => {
     });
 });
 
+describe("tool call mode default", () => {
+    /**
+     * 界面不能把后端的默认档位覆盖掉。
+     *
+     * 两边各写一次默认值，而只有前端那份会被真的发出去（保存 profile 时它总是显式带上
+     * `toolCallMode`）。后端刻意把云端默认设成 `native_tools` —— 只读工作区工具、MCP 工具、
+     * 派子 Agent 全都只在那个档位下通告 —— 而设置面板里四处 `?? "text_protocol"` 加一个
+     * 同样的初始值，让每一个从桌面保存的 profile 都退回了弱档位。表现是"Agent 看不见文件"，
+     * 而设置面板上那一栏看起来完全正常，五条门禁也全绿。
+     */
+    it("agrees with the backend", () => {
+        const profiles = readFileSync(
+            join("src-tauri", "src", "services", "llm_profiles.rs"),
+            "utf8"
+        );
+        // 前提检查：函数改名后这条测试不能以"通过"的方式静默失效
+        expect(profiles).toContain("fn default_tool_call_mode()");
+        const backendDefault = profiles
+            .split("fn default_tool_call_mode()")[1]
+            ?.includes('"native_tools"');
+        expect(backendDefault, "the backend default is no longer native_tools").toBe(true);
+
+        const panel = readFileSync(
+            join("src", "components", "agent", "SettingsPanel.tsx"),
+            "utf8"
+        );
+        const weakFallbacks = panel.match(/\?\?\s*"text_protocol"/g) ?? [];
+        expect(
+            weakFallbacks,
+            'the settings panel falls back to text_protocol, which overrides the backend default and silently turns off the workspace read tools'
+        ).toEqual([]);
+        expect(panel).toContain('useState<ToolCallMode>("native_tools")');
+    });
+});
+
+
 

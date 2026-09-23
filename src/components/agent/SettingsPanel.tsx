@@ -12,6 +12,7 @@ import {
 } from "../../stores/llmConnection";
 import McpPanel from "./McpPanel";
 import ProjectMemoryCard from "./ProjectMemoryCard";
+import { useT } from "../../i18n";
 import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
@@ -114,6 +115,7 @@ const PROVIDERS: ProviderPreset[] = [
 
 // ====== SettingsPanel ======
 export default function SettingsPanel() {
+  const t = useT();
   const llmEndpoint = useAgentStore((s) => s.llmEndpoint);
   const llmModel = useAgentStore((s) => s.llmModel);
   const apiKeyMasked = useAgentStore((s) => s.apiKeyMasked);
@@ -159,7 +161,11 @@ export default function SettingsPanel() {
   // 空串 = 不发这个参数（由供应商决定）。存成字符串而不是枚举：档位名是各家自己的词表，
   // 前端替它收窄只会在下一个新档位出现时变成"设不了"
   const [reasoningEffort, setReasoningEffort] = useState("");
-  const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
+  // 默认必须和后端的 `default_tool_call_mode()` 一致（那边是 `native_tools`）。
+  // 这里写 `text_protocol` 的后果不是"默认值不同"，而是**每一个**从界面保存的 profile 都
+  // 显式把后端的默认覆盖掉：工作区只读工具、MCP 工具、派子 Agent 全部只在原生工具档位下
+  // 通告，于是桌面用户拿到的是一个看不见文件的 Agent，而设置面板上那一栏看起来一切正常。
+  const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("native_tools");
   const [saving, setSaving] = useState(false);
   // "已保存"要用后端给的结论，而不是拿掩码串和 "not configured" 比。一份没被开启的明文
   // 密钥掩码是 `sk-1****7890 (plaintext in config.json)`，字符串比较会判成已保存，于是
@@ -201,7 +207,7 @@ export default function SettingsPanel() {
         setPromptPrice(microsToUsdInput(active.promptMicrosPerMillion));
         setCompletionPrice(microsToUsdInput(active.completionMicrosPerMillion));
         setMaxRunSpend(microsToUsdInput(active.maxRunSpendMicros));
-        setToolCallMode(active.toolCallMode ?? "text_protocol");
+        setToolCallMode(active.toolCallMode ?? "native_tools");
       } else {
         setEndpoint(llmEndpoint);
         setModel(llmModel);
@@ -234,7 +240,7 @@ export default function SettingsPanel() {
         // 预留输出通常留空：它有全局默认（4096），公式还会先退回 Max output。
         // 多填一个数字只是多一处会过期的东西。
         setReservedOutputTokens(numberToInput(preset.defaultReservedOutputTokens));
-        setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
+        setToolCallMode(preset.defaultToolCallMode ?? "native_tools");
       }
       // 不清除 apiKey
     },
@@ -380,7 +386,7 @@ export default function SettingsPanel() {
     setPromptPrice(microsToUsdInput(profile.promptMicrosPerMillion));
     setCompletionPrice(microsToUsdInput(profile.completionMicrosPerMillion));
     setMaxRunSpend(microsToUsdInput(profile.maxRunSpendMicros));
-    setToolCallMode(profile.toolCallMode ?? "text_protocol");
+        setToolCallMode(profile.toolCallMode ?? "native_tools");
     setReasoningEffort(profile.reasoningEffort ?? "");
     setApiKey("");
   }, [llmProfiles]);
@@ -401,7 +407,7 @@ export default function SettingsPanel() {
     setPromptPrice("");
     setCompletionPrice("");
     setMaxRunSpend("");
-    setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
+    setToolCallMode(preset.defaultToolCallMode ?? "native_tools");
     setApiKey("");
   }, []);
 
@@ -793,23 +799,18 @@ export default function SettingsPanel() {
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Tool Call Mode
+          {t("settings.toolMode.title")}
         </div>
         <select
           value={toolCallMode}
           onChange={(event) => setToolCallMode(event.target.value as ToolCallMode)}
           className="w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text outline-none focus:border-accent-blue"
         >
-          <option value="text_protocol">Text protocol</option>
-          <option value="native_tools">Provider-native tools</option>
+          <option value="native_tools">{t("settings.toolMode.native")}</option>
+          <option value="text_protocol">{t("settings.toolMode.text")}</option>
         </select>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
-          Native tools is required for the Agent to read the workspace during a run
-          (read file, search text, list files) and for MCP tools. Without it the Agent only sees
-          the context bundle assembled when the run starts, and has to guess file contents it was
-          not given. If an endpoint rejects the <span className="font-mono">tools</span> parameter,
-          the request is retried without it and the run is flagged in the action log; pick text
-          protocol to skip that failed attempt.
+          {t("settings.toolMode.help")}
         </div>
       </div>
 
@@ -843,11 +844,13 @@ export default function SettingsPanel() {
       {/* ▸▸▸▸ Agent Permission Settings ▸▸▸▸ */}
       <div className="mt-4 pt-3 border-t border-surface-border">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted tracking-wide">
-          Agent Permissions
+          {t("settings.permissions.title")}
         </div>
 
         {/* Permission Preset */}
-        <label className="block text-surface-muted mb-1 text-[11px]">Permission Preset</label>
+        <label className="block text-surface-muted mb-1 text-[11px]">
+          {t("settings.permissions.preset")}
+        </label>
         <div className="mb-2 grid grid-cols-3 gap-1">
           {(["read-only", "create-files", "run-commands"] as AgentPermissionPreset[]).map((preset) => (
             <button
@@ -860,19 +863,19 @@ export default function SettingsPanel() {
               }`}
             >
               {preset === "read-only"
-                ? "\u{1F441} Read only"
+                ? `\u{1F441} ${t("settings.permissions.readOnly")}`
                 : preset === "create-files"
-                ? "\u{1F4DD} Create files"
-                : "\u{26A1} Run commands"}
+                ? `\u{1F4DD} ${t("settings.permissions.createFiles")}`
+                : `\u{26A1} ${t("settings.permissions.runCommands")}`}
             </button>
           ))}
         </div>
         <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
           {permissionPreset === "read-only"
-            ? "The Agent can read the workspace and propose changes, nothing else."
+            ? t("settings.permissions.readOnly.desc")
             : permissionPreset === "create-files"
-            ? "Also lets the Agent create new files. Changes still wait in the review area."
-            : "Also lets the Agent run the project's own declared commands (tests, build)."}
+            ? t("settings.permissions.createFiles.desc")
+            : t("settings.permissions.runCommands.desc")}
         </p>
 
         {/* Granular Toggles */}
