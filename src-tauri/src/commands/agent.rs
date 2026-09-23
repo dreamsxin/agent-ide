@@ -767,13 +767,22 @@ fn publish_tool_writes(
     permissions: &crate::agent::workspace_tools::WorkspaceToolPermissions,
 ) {
     let writes = permissions.take_writes();
-    if writes.is_empty() {
+    // 事后比对发现的那些（目前只有 MCP）和工具自报的一起发布：它们同样有写前内容，
+    // 所以同样能进审查区、同样能撤销 —— 区别只在卡片上那句"怎么知道的"。
+    let detected = permissions.take_detected_writes();
+    if writes.is_empty() && detected.is_empty() {
         return;
     }
     // 运行 id 从这批授权自己带的那个取，不读 orchestrator 的 `current_run_id`：被 Stop 的
     // 运行可能在下一个 prompt 开跑之后才排空写入，那时读到的是后一次运行的 id ——
     // "撤销这一轮"就会去还原另一轮写的文件。和 `record_external_actions` 同一条规矩。
-    let recorded = orch.record_tool_writes(writes, permissions.run_id.clone());
+    let mut recorded = orch.record_tool_writes(writes, permissions.run_id.clone());
+    for (tool, writes) in detected {
+        recorded.extend(orch.record_detected_writes(&tool, writes, permissions.run_id.clone()));
+    }
+    if recorded.is_empty() {
+        return;
+    }
     let files = recorded
         .iter()
         .map(|diff| diff.file.clone())

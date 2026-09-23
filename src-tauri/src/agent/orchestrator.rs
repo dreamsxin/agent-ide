@@ -856,6 +856,32 @@ impl AgentOrchestrator {
         writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
         run_id: Option<String>,
     ) -> Vec<crate::agent::state_machine::FileDiff> {
+        self.record_writes_from(None, writes, run_id)
+    }
+
+    /// 同上，但这些改动是**事后比对发现**的，不是某个内置工具自己报上来的。
+    ///
+    /// `source` 是那个工具的限定名（目前只有 MCP 会走这条路）。分开一个入口而不是在
+    /// `AgentFileWrite` 上加字段：那个结构有二十多处构造点，其中绝大多数是测试，
+    /// 为一行出处改二十多处литерал会把这次改动的风险堆在无关的地方。
+    ///
+    /// 出处必须能说出来：审查卡片上的 rationale 此前硬写着 `workspace_write_file`，
+    /// 而一条 MCP 发现来的记录挂上那句话就是假的 —— 用户会去找一个根本没被调用的工具。
+    pub fn record_detected_writes(
+        &mut self,
+        source: &str,
+        writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
+        run_id: Option<String>,
+    ) -> Vec<crate::agent::state_machine::FileDiff> {
+        self.record_writes_from(Some(source), writes, run_id)
+    }
+
+    fn record_writes_from(
+        &mut self,
+        source: Option<&str>,
+        writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
+        run_id: Option<String>,
+    ) -> Vec<crate::agent::state_machine::FileDiff> {
         use crate::agent::state_machine::{DiffHunk, DiffProvenance, FileDiff};
 
         if writes.is_empty() {
@@ -909,7 +935,10 @@ impl AgentOrchestrator {
                 file: write.file.clone(),
                 base_hash: None,
                 provenance: Some(DiffProvenance {
-                    protocol: "workspace_tool".to_string(),
+                    protocol: match source {
+                        Some(_) => "mcp_tool".to_string(),
+                        None => "workspace_tool".to_string(),
+                    },
                     // 删除必须和"清空"长得不一样：两者的 hunk 都是 previous → ""，
                     // 只有这个标签能告诉用户文件已经不在了。
                     operation: if write.removed {
@@ -924,16 +953,27 @@ impl AgentOrchestrator {
                         "edit"
                     }
                     .to_string(),
-                    rationale: Some(
-                        if write.removed {
-                            "Deleted by the Agent through workspace_delete_file"
-                        } else if moved_from.is_some() {
-                            "Moved by the Agent through workspace_move_file"
-                        } else {
-                            "Written directly by the Agent through workspace_write_file"
+                    rationale: Some(match source {
+                        // 事后发现的那一类要说清"怎么知道的"：它不是工具报上来的，而是拿
+                        // 调用前留的底比出来的 —— 用户据此才能判断这条记录有多可信
+                        Some(tool) if write.removed => format!(
+                            "Deleted while the MCP tool {} ran; detected by comparing the file with the copy taken before the call",
+                            tool
+                        ),
+                        Some(tool) => format!(
+                            "Written while the MCP tool {} ran; detected by comparing the file with the copy taken before the call",
+                            tool
+                        ),
+                        None if write.removed => {
+                            "Deleted by the Agent through workspace_delete_file".to_string()
                         }
-                        .to_string(),
-                    ),
+                        None if moved_from.is_some() => {
+                            "Moved by the Agent through workspace_move_file".to_string()
+                        }
+                        None => {
+                            "Written directly by the Agent through workspace_write_file".to_string()
+                        }
+                    }),
                     schema_version: None,
                     change_index: None,
                     source_role: None,
@@ -3206,6 +3246,43 @@ mod tests {
         assert!(recorded[0].hunks[0].updated.is_empty());
         // 已经落盘，状态必须如实
         assert_eq!(recorded[0].status, "applied");
+    }
+
+    /// 事后发现的 MCP 写入要进审查区、要能撤销，而卡片上的出处必须是**那个 MCP 工具**。
+    ///
+    /// 出处写错不是小事：rationale 以前硬写着 `workspace_write_file`，用户照着去找一个
+    /// 根本没被调用过的工具，而真正动手的那个 server 一个字都没提到。
+    #[test]
+    fn a_detected_mcp_write_is_reviewable_undoable_and_names_its_tool() {
+        let mut orchestrator = AgentOrchestrator::new();
+
+        let recorded = orchestrator.record_detected_writes(
+            "mcp__fs__write_file",
+            vec![AgentFileWrite {
+                file: "src/app.ts".to_string(),
+                path: PathBuf::from("src/app.ts"),
+                previous: Some("old\n".to_string()),
+                updated: "new\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            Some("run-1".to_string()),
+        );
+
+        assert_eq!(recorded.len(), 1);
+        let provenance = recorded[0].provenance.as_ref().expect("provenance");
+        assert_eq!(provenance.protocol, "mcp_tool");
+        assert_eq!(provenance.operation, "edit");
+        let rationale = provenance.rationale.as_deref().unwrap_or_default();
+        assert!(rationale.contains("mcp__fs__write_file"), "{}", rationale);
+        // "怎么知道的"要说出来：这条不是工具自报的，是比对出来的
+        assert!(rationale.contains("comparing"), "{}", rationale);
+        assert!(!rationale.contains("workspace_write_file"), "{}", rationale);
+        // 写前内容既进了卡片，也进了撤销栈
+        assert_eq!(recorded[0].hunks[0].original, "old\n");
+        assert_eq!(recorded[0].status, "applied");
+        let pending = orchestrator.pending_undo().expect("undo checkpoint");
+        assert_eq!(pending.1, vec!["src/app.ts".to_string()]);
     }
 
     /// 同一个文件先写后删，净效果是"没了"。合并时只保留第一条记录的判断会把它

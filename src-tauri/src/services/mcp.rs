@@ -660,6 +660,39 @@ fn comparable_component(component: &std::path::Component<'_>) -> String {
     }
 }
 
+/// 参数提到、且落在工作区里的那些路径，解析成绝对路径。
+///
+/// 和 `argument_paths` 共用同一个采集器和同一个边界判断，只是产物不同：那个是给人读的
+/// 一句话，这个是"调用之前该给哪几个文件留一份底"的清单。两处各写一份采集逻辑的话，
+/// 记录里说的路径和真正留了底的文件迟早不是同一批。
+pub fn argument_targets(arguments: &str, root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return Vec::new();
+    };
+    let mut mentions = Vec::new();
+    collect_path_mentions(&value, &mut mentions);
+
+    let root = normalize_lexically(root);
+    let mut targets: Vec<std::path::PathBuf> = Vec::new();
+    for mention in mentions {
+        if !lexically_inside(&root, &mention) {
+            continue;
+        }
+        let candidate = std::path::Path::new(&mention);
+        let joined = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            root.join(candidate)
+        };
+        let resolved = normalize_lexically(&joined);
+        if !targets.contains(&resolved) {
+            targets.push(resolved);
+        }
+    }
+    targets.truncate(MAX_RECORDED_PATHS);
+    targets
+}
+
 /// 丢弃与已注册工具限定名冲突的工具，返回 (保留的工具, 冲突说明)。
 ///
 /// 冲突真实存在：`sanitize_name_part` 把非字母数字统一换成 `_`，所以

@@ -58,6 +58,12 @@ pub async fn attach_mcp_tools(
     (llm.with_extra_tools(definitions), Some(invoker))
 }
 
+/// 一次调用前后各读一遍的文件，单个最多这么大。
+///
+/// 上限存在的理由是延迟而不是内存：参数里提到 lockfile 那种尺寸的文件时，读两遍会让每次
+/// MCP 调用都明显变慢。超过的如实记成"没覆盖"，不假装能撤销。
+const MAX_PROBE_BYTES: u64 = 1024 * 1024;
+
 struct McpToolInvoker {
     registry: Arc<McpRegistry>,
     /// 发事件走 trait，不直接持 `AppHandle`。
@@ -119,6 +125,112 @@ impl McpToolInvoker {
             Some(paths)
         }
     }
+
+    /// 调用**之前**给参数里提到的工作区内文件各留一份底。
+    ///
+    /// 这是让 MCP 写入变得可撤销的唯一办法：MCP 的返回体是自由文本，没有写入清单，工具
+    /// 也不会告诉我们它改了什么。所以只能自己在调用两侧各看一眼 —— 这正是内置工具做的事
+    /// （先读旧内容再写），只不过这里的"旧内容"要由我们代它保存。
+    ///
+    /// 参考实现的 checkpoint 要求工具在结构化输出里自报 `originalFile`，而 MCP 的输出
+    /// schema 装不下那个字段，于是它对 MCP 一律不做 checkpoint。这里不照搬那个结论：
+    /// 自报不了就替它记，代价是一次调用多读几个文件。
+    fn snapshot_targets(&self, arguments: &str) -> (Vec<FileProbe>, usize) {
+        let Ok(root) = crate::services::workspace::workspace_root() else {
+            return (Vec::new(), 0);
+        };
+        let mut probes = Vec::new();
+        let mut uncovered = 0usize;
+        for path in crate::services::mcp::argument_targets(arguments, &root) {
+            let metadata = std::fs::metadata(&path);
+            let existed = metadata
+                .as_ref()
+                .map(|meta| meta.is_file())
+                .unwrap_or(false);
+            // 太大的文件不留底：一次调用可能提到好几个，而 lockfile 那种尺寸的内容读两遍
+            // 会把每次 MCP 调用都变慢。宁可如实说"这个没覆盖"
+            if existed && metadata.map(|meta| meta.len()).unwrap_or(0) > MAX_PROBE_BYTES {
+                uncovered += 1;
+                continue;
+            }
+            let before = std::fs::read_to_string(&path).ok();
+            // 存在但读不出来（二进制、非 UTF-8）：没有能写回去的底，不假装能撤销
+            if existed && before.is_none() {
+                uncovered += 1;
+                continue;
+            }
+            let file = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            probes.push(FileProbe {
+                file,
+                path,
+                before,
+                existed,
+            });
+        }
+        (probes, uncovered)
+    }
+
+    /// 调用**之后**再看一眼，把真的变了的文件记成可撤销的写入。返回记下了几个。
+    fn publish_detected_changes(&self, tool_name: &str, probes: Vec<FileProbe>) -> usize {
+        let mut changed = 0usize;
+        for probe in probes {
+            let exists_now = probe.path.is_file();
+            let after = std::fs::read_to_string(&probe.path).ok();
+            if let Some(write) = write_from_probe(&probe, exists_now, after) {
+                self.permissions
+                    .record_detected_write(tool_name.to_string(), write);
+                changed += 1;
+            }
+        }
+        changed
+    }
+}
+
+/// 比对前后两次读到的东西，决定这是不是一次要记下来的写入。
+///
+/// 纯函数：判断本身就是这个功能的全部内容 —— 什么算"变了"、删除长什么样、读不出来时认不认。
+/// 夹在两次 `fs::read` 中间的话，这四条分支只能靠真跑一个 MCP server 才验证得到。
+fn write_from_probe(
+    probe: &FileProbe,
+    exists_now: bool,
+    after: Option<String>,
+) -> Option<crate::agent::workspace_tools::AgentFileWrite> {
+    let build = |previous: Option<String>, updated: String, removed: bool| {
+        Some(crate::agent::workspace_tools::AgentFileWrite {
+            file: probe.file.clone(),
+            path: probe.path.clone(),
+            previous,
+            updated,
+            removed,
+            moved_from: None,
+        })
+    };
+
+    if probe.existed && !exists_now {
+        // 删除：写前内容还在手里，撤销就是把文件写回去
+        return build(probe.before.clone(), String::new(), true);
+    }
+    // 现在读不出来（被换成二进制了？）：说不出内容，不猜
+    let now = after?;
+    if probe.before.as_deref() == Some(now.as_str()) {
+        return None;
+    }
+    // 调用前不存在的就是新建（`previous: None`），撤销时删掉它
+    build(probe.before.clone(), now, false)
+}
+
+/// 一次 MCP 调用之前给一个文件留下的底。
+struct FileProbe {
+    /// 工作区相对路径，给审查卡片用
+    file: String,
+    path: std::path::PathBuf,
+    /// 调用前的内容。`None` 表示调用前这个文件不存在
+    before: Option<String>,
+    existed: bool,
 }
 
 #[async_trait]
@@ -152,6 +264,7 @@ impl ToolInvoker for McpToolInvoker {
             ),
         );
         let named = self.paths_named(arguments);
+        let (probes, uncovered) = self.snapshot_targets(arguments);
         match self.registry.call(tool_name, arguments, self.policy).await {
             Ok(result) => {
                 self.log(
@@ -159,32 +272,47 @@ impl ToolInvoker for McpToolInvoker {
                     &format!("MCP tool {} returned {} chars", tool_name, result.len()),
                     &truncate(&result, 2000),
                 );
+                let changed = self.publish_detected_changes(tool_name, probes);
                 let mut detail = format!(
                     "Called MCP tool {}; it returned {} character(s).",
                     tool_name,
                     result.chars().count()
                 );
                 if let Some(sentence) = named.as_ref().and_then(|paths| paths.describe()) {
-                    // 提到了路径就说清楚它**没有**进审查区、撤不回来。这句话只在可能动过文件时
-                    // 出现：每条记录都挂一句免责声明，读的人第三条就开始跳过了
                     detail.push(' ');
                     detail.push_str(&sentence);
-                    detail.push_str(
-                        ". Anything it wrote is not shown as a diff and cannot be undone from here.",
-                    );
+                    detail.push('.');
+                }
+                if changed > 0 {
+                    detail.push_str(&format!(
+                        " {} file(s) changed; they are in the review area as applied diffs and Undo Apply restores them.",
+                        changed
+                    ));
+                }
+                let outside = named.as_ref().map(|paths| paths.outside.len()).unwrap_or(0);
+                if uncovered > 0 || outside > 0 {
+                    // 覆盖不到的那部分要自己说出来：读的人看到"1 file(s) changed"会以为那就是全部
+                    detail.push_str(&format!(
+                        " Not covered: {} path(s) outside the workspace and {} file(s) too large or not text — changes there are neither shown nor undoable.",
+                        outside, uncovered
+                    ));
                 }
                 self.record("mcp_tool_call", tool_name, detail);
                 Ok(result)
             }
             Err(error) => {
                 self.log("error", &format!("MCP tool {} failed", tool_name), &error);
-                // 失败也记：一次报错的调用照样可能已经把文件写了一半 —— 错误是 server 说的，
-                // 不是它没动手的证明
-                self.record(
-                    "mcp_tool_failed",
-                    tool_name,
-                    format!("MCP tool {} failed: {}", tool_name, error),
-                );
+                // 失败也要比对：一次报错的调用照样可能已经把文件写了一半 —— 错误是 server
+                // 说的，不是它没动手的证明
+                let changed = self.publish_detected_changes(tool_name, probes);
+                let mut detail = format!("MCP tool {} failed: {}", tool_name, error);
+                if changed > 0 {
+                    detail.push_str(&format!(
+                        " It had already changed {} file(s); they are in the review area and Undo Apply restores them.",
+                        changed
+                    ));
+                }
+                self.record("mcp_tool_failed", tool_name, detail);
                 Err(error)
             }
         }
@@ -325,7 +453,7 @@ pub async fn get_mcp_tools(
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_arguments, truncate, McpToolInvoker};
+    use super::{redact_arguments, truncate, write_from_probe, FileProbe, McpToolInvoker};
     use crate::agent::events::RecordingEvents;
     use crate::agent::executor::ToolInvoker;
     use crate::agent::workspace_tools::WorkspaceToolPermissions;
@@ -402,6 +530,47 @@ mod tests {
         let actions = permissions.take_external_actions();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "mcp_tool_failed");
+    }
+
+    /// 一个被改过的文件要变成"有写前内容、能撤销"的一条写入。
+    ///
+    /// 这是 MCP 写入从"看不见"变成"可撤销"的全部机制：调用前留一份底，调用后比一比。
+    /// 四条分支各有一种错法 —— 把没变的记成改过（审查区出现假卡片）、把删除记成清空
+    /// （用户以为文件还在）、把新建记成编辑（撤销时写回一个空字符串而不是删掉）、
+    /// 读不出来时瞎猜内容（撤销会把文件毁掉）。
+    #[test]
+    fn a_probe_turns_a_real_change_into_an_undoable_write() {
+        let probe = |before: Option<&str>| FileProbe {
+            file: "src/app.ts".to_string(),
+            path: std::path::PathBuf::from("/w/src/app.ts"),
+            before: before.map(|text| text.to_string()),
+            existed: before.is_some(),
+        };
+
+        // 改过：写前内容进 previous，撤销就是写回去
+        let edited = write_from_probe(&probe(Some("old")), true, Some("new".to_string()))
+            .expect("changed file");
+        assert_eq!(edited.previous.as_deref(), Some("old"));
+        assert_eq!(edited.updated, "new");
+        assert!(!edited.removed);
+
+        // 没变：不能进审查区，否则那里全是假卡片
+        assert!(write_from_probe(&probe(Some("same")), true, Some("same".to_string())).is_none());
+
+        // 新建：previous 是 None，撤销时删掉它而不是写一个空文件
+        let created =
+            write_from_probe(&probe(None), true, Some("fresh".to_string())).expect("created file");
+        assert!(created.previous.is_none());
+        assert_eq!(created.updated, "fresh");
+
+        // 删除：标成 removed，卡片上才不会显示成"文件被清空"
+        let deleted =
+            write_from_probe(&probe(Some("gone soon")), false, None).expect("deleted file");
+        assert!(deleted.removed);
+        assert_eq!(deleted.previous.as_deref(), Some("gone soon"));
+
+        // 现在读不出来（变成二进制）：说不出内容就不记，撤销不能拿猜出来的内容覆盖文件
+        assert!(write_from_probe(&probe(Some("text")), true, None).is_none());
     }
 
     /// MCP 工具参数会进 action log。模型把密钥当参数传进来时，日志不能原样留存。

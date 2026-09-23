@@ -287,6 +287,13 @@ pub struct WorkspaceToolPermissions {
     /// 已经发生的写入。跟着 `Clone` 共享同一份（`Arc`），所以命令层可以克隆一份
     /// 交给工具、另一份记在 orchestrator 上，事后从任一份都取得到记录。
     writes: AgentWriteLog,
+    /// **事后比对发现**的写入，按产生它的工具名分组。
+    ///
+    /// 和 `writes` 分开，因为可信度不同：那一份是工具自己报的"我写了什么"，这一份是
+    /// "调用之前我给这个文件留了底，调用之后它变了"。两者都能撤销（都有写前内容），
+    /// 但审查卡片上的理由必须说明是哪一种 —— 把推断出来的结论写成工具的自述，用户
+    /// 就无法判断它有多可靠。
+    detected_writes: std::sync::Arc<std::sync::Mutex<Vec<(String, AgentFileWrite)>>>,
     /// 已经发生的、**撤不回**的外部动作（目前只有浏览器）。
     ///
     /// 单独一份而不是塞进 `writes`：文件写入有 `previous` 可以还原，导航没有。混在
@@ -692,6 +699,32 @@ impl WorkspaceToolPermissions {
         match self.writes.lock() {
             Ok(mut writes) => std::mem::take(&mut *writes),
             Err(_) => Vec::new(),
+        }
+    }
+
+    /// 取出并清空"事后发现"的写入，按工具名分组、保持首次出现的顺序。
+    ///
+    /// 分组而不是返回一串 `(工具, 写入)`：调用方要按工具建卡片（rationale 里要写工具名），
+    /// 每条都单独走一遍会让同一次调用改的几个文件散成几批。
+    pub fn take_detected_writes(&self) -> Vec<(String, Vec<AgentFileWrite>)> {
+        let drained = match self.detected_writes.lock() {
+            Ok(mut writes) => std::mem::take(&mut *writes),
+            Err(_) => Vec::new(),
+        };
+        let mut grouped: Vec<(String, Vec<AgentFileWrite>)> = Vec::new();
+        for (tool, write) in drained {
+            match grouped.iter_mut().find(|(name, _)| name == &tool) {
+                Some((_, writes)) => writes.push(write),
+                None => grouped.push((tool, vec![write])),
+            }
+        }
+        grouped
+    }
+
+    /// 记一条事后比对发现的写入。`tool` 是造成它的那个工具的限定名。
+    pub fn record_detected_write(&self, tool: String, write: AgentFileWrite) {
+        if let Ok(mut writes) = self.detected_writes.lock() {
+            writes.push((tool, write));
         }
     }
 
