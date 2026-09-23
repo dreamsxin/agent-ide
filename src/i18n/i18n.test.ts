@@ -14,10 +14,17 @@ describe("i18n", () => {
     expect(Object.keys(ZH).sort()).toEqual(Object.keys(EN).sort());
   });
 
-  /** 中文表里不能残留英文原文：那是"看起来翻过了"的假象 */
+  /**
+   * 中文表里不能残留英文原文：那是"看起来翻过了"的假象。
+   *
+   * 例外只有专有名词 —— 文件名、产品名翻过去反而找不到对应的东西。例外要列名，
+   * 不能靠放宽规则，否则下一条漏翻的也会从这个缝里过去。
+   */
   it("has a real Chinese string for every key", () => {
+    const sameOnPurpose = new Set(["chat.context.agentsMd"]);
     const untranslated = Object.keys(EN).filter((key) => {
       const messageKey = key as keyof typeof EN;
+      if (sameOnPurpose.has(key)) return false;
       return ZH[messageKey] === EN[messageKey] && /[A-Za-z]{4,}/.test(EN[messageKey]);
     });
     expect(untranslated).toEqual([]);
