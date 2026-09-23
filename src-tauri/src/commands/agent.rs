@@ -863,70 +863,78 @@ fn finish_agent_run(
     publish_tool_writes(orch, events, permissions);
     publish_external_actions(orch, events, permissions);
     emit_usage_action_log(orch, events, meter);
-    // 两种降级都写在这里，而不是各自的成功分支上：降级是**请求已经发生过**的事实，
-    // 运行最后失败或被取消并不会把它取消掉，而失败的那次运行恰恰最需要这条线索。
-    emit_tool_degradation_log(orch, events, llm);
-    emit_image_degradation_log(orch, events, llm);
-    emit_history_trim_log(orch, events, llm);
-    emit_output_clamp_log(orch, events, llm);
-    emit_reasoning_degradation_log(orch, events, llm);
+    emit_degradation_log(orch, events, llm);
 }
 
-/// 供应商拒绝了 `tools` 时告诉用户能力已被降级。
+/// 把这次运行被削减的每一件事写成**一条** action log。
 ///
-/// 不说的话这是一次静默降级：运行看起来正常完成，但 Agent 其实没有工具可用，
-/// 只能靠运行开始时打包的上下文，而用户无从得知。
-fn emit_tool_degradation_log(
+/// 以前是五条独立的 `warn`（工具能力、图片、历史修剪、输出夹紧、reasoning 降级），加上运行
+/// 前两条，一共七种。七种警告的实际效果是零种：第七条加进去的时候，前六条已经没人看了。
+/// 合成一条之后，"这次运行被削了什么"是一个问题、一个答案，明细按需展开。
+///
+/// 仍然写在这里、而不是各自的成功分支上：降级是**请求已经发出去**的事实，运行最后失败或被
+/// 取消并不会把它取消掉，而失败的那次运行恰恰最需要这条线索。
+fn emit_degradation_log(
     orch: &AgentOrchestrator,
     events: &dyn crate::agent::events::RunEvents,
     llm: &crate::services::llm_client::LlmClient,
 ) {
-    if !llm.tools_were_rejected() {
+    let mut reports: Vec<(String, String)> = Vec::new();
+    if llm.tools_were_rejected() {
+        reports.push((
+            "tool calling was rejected, so this run fell back to the text protocol".to_string(),
+            "The endpoint returned a client error naming the 'tools' parameter, so it was dropped \
+             and the request retried. Workspace read tools and MCP tools were unavailable for this \
+             run. Set Tool Call Mode to 'Text protocol' for this profile to skip the failed attempt."
+                .to_string(),
+        ));
+    }
+    for report in [
+        crate::services::llm_client::image_degradation_report(&llm.image_drops()),
+        crate::services::llm_client::history_trim_report(&llm.history_trims()),
+        crate::services::llm_client::output_clamp_report(&llm.output_clamps()),
+        crate::services::llm_client::reasoning_degradation_report(
+            llm.reasoning_was_rejected(),
+            llm.requested_reasoning_effort(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        reports.push(report);
+    }
+    if reports.is_empty() {
         return;
     }
-    orch.emit_run_action_log(
-        events,
-        "warn",
-        "tool_capability_degraded",
-        "Provider rejected tool calling; this run fell back to the text protocol",
-        "The endpoint returned a client error naming the 'tools' parameter, so it was dropped and \
-         the request retried. Workspace read tools and MCP tools were unavailable for this run. \
-         Set Tool Call Mode to 'Text protocol' for this profile to skip the failed attempt.",
+    let summary = format!(
+        "This run was degraded in {} way(s): {}",
+        reports.len(),
+        reports
+            .iter()
+            .map(|(headline, _)| first_clause(headline))
+            .collect::<Vec<_>>()
+            .join("; ")
     );
+    let details = reports
+        .iter()
+        .map(|(headline, body)| format!("{}\n{}", headline, body))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    orch.emit_run_action_log(events, "warn", "run_degraded", &summary, &details);
 }
 
-/// 图片被摘掉时告诉用户。
+/// 取一句话里最前面那一小段，用来拼一行摘要。
 ///
-/// 原因本来只写进了发给模型的那段文本 —— 也就是只有模型知道。用户看到的是一次正常的
-/// 回答，无从判断"它到底看没看见那张图"，而这恰恰是回答不对劲时第一个要排除的可能。
-fn emit_image_degradation_log(
-    orch: &AgentOrchestrator,
-    events: &dyn crate::agent::events::RunEvents,
-    llm: &crate::services::llm_client::LlmClient,
-) {
-    let Some((summary, details)) =
-        crate::services::llm_client::image_degradation_report(&llm.image_drops())
-    else {
-        return;
-    };
-    orch.emit_run_action_log(events, "warn", "image_input_degraded", &summary, &details);
-}
-
-/// 工具回合里丢掉历史时告诉用户。
-///
-/// 和图片降级同一个理由：丢弃只写进了发给模型的那条系统提示，用户看到的是一次正常完成、
-/// 却把刚读过的文件又读一遍的运行 —— 而真正的原因是这次请求已经顶到窗口了。
-fn emit_history_trim_log(
-    orch: &AgentOrchestrator,
-    events: &dyn crate::agent::events::RunEvents,
-    llm: &crate::services::llm_client::LlmClient,
-) {
-    let Some((summary, details)) =
-        crate::services::llm_client::history_trim_report(&llm.history_trims())
-    else {
-        return;
-    };
-    orch.emit_run_action_log(events, "warn", "history_trimmed", &summary, &details);
+/// 摘要要能一眼扫完：五条各自的完整句子拼起来有几百字符，而那正是"看起来像噪音"的长度。
+fn first_clause(headline: &str) -> String {
+    let trimmed = headline.trim();
+    let cut = trimmed.find([':', ';']).unwrap_or(trimmed.len());
+    let clause = trimmed[..cut].trim();
+    let mut chars = clause.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_lowercase(), chars.as_str()),
+        None => clause.to_string(),
+    }
 }
 
 /// 把本次运行的 token 用量写进 action log。措辞和分支判断在
@@ -2467,10 +2475,9 @@ mod tests {
             .map(|(_, phase, summary)| (phase, summary))
             .collect::<Vec<_>>();
         assert!(
-            phases
-                .iter()
-                .any(|(phase, summary)| phase == "image_input_degraded"
-                    && summary == "1 image(s) were not sent to the model"),
+            phases.iter().any(|(phase, summary)| phase == "run_degraded"
+                && summary.contains("degraded in 1 way(s)")
+                && summary.contains("1 image(s) were not sent to the model")),
             "{:?}",
             phases
         );
@@ -2479,7 +2486,7 @@ mod tests {
         let stages: Vec<serde_json::Value> = events
             .payloads_for("agent-action-log")
             .into_iter()
-            .filter(|payload| payload["phase"] == "image_input_degraded")
+            .filter(|payload| payload["phase"] == "run_degraded")
             .map(|payload| payload["stage"].clone())
             .collect();
         assert_eq!(stages, vec![serde_json::Value::Null], "{:?}", stages);
@@ -2513,7 +2520,7 @@ mod tests {
         assert!(
             !action_log_summaries(&events)
                 .iter()
-                .any(|(_, phase, _)| phase == "image_input_degraded"),
+                .any(|(_, phase, _)| phase == "run_degraded"),
             "{:?}",
             action_log_summaries(&events)
         );
@@ -3573,46 +3580,4 @@ pub async fn delete_agent_session(
         orch.start_new_session();
     }
     Ok(session_list(&orch))
-}
-
-/// 告诉用户这次没按他设的输出上限发。
-///
-/// 和图片降级同一个理由：不说的话，用户看到的是一次比预期短的回答，而设置里那个数字还写着
-/// 原值 —— 他会去怀疑模型，而不是去看上下文已经占掉了多少。措辞和判断在
-/// `output_clamp_report` 里，那里有测试。
-fn emit_output_clamp_log(
-    orch: &AgentOrchestrator,
-    events: &dyn crate::agent::events::RunEvents,
-    llm: &crate::services::llm_client::LlmClient,
-) {
-    let Some((summary, details)) =
-        crate::services::llm_client::output_clamp_report(&llm.output_clamps())
-    else {
-        return;
-    };
-    orch.emit_run_action_log(events, "warn", "output_limit_clamped", &summary, &details);
-}
-
-/// 告诉用户端点拒了思考档位，这次运行是按供应商默认档跑的。
-///
-/// 和其它降级同一个理由：设置里写着 high，而实际不是，界面上却看不出来。措辞和判断在
-/// reasoning_degradation_report 里，那里有测试。
-fn emit_reasoning_degradation_log(
-    orch: &AgentOrchestrator,
-    events: &dyn crate::agent::events::RunEvents,
-    llm: &crate::services::llm_client::LlmClient,
-) {
-    let Some((summary, details)) = crate::services::llm_client::reasoning_degradation_report(
-        llm.reasoning_was_rejected(),
-        llm.requested_reasoning_effort(),
-    ) else {
-        return;
-    };
-    orch.emit_run_action_log(
-        events,
-        "warn",
-        "reasoning_effort_rejected",
-        &summary,
-        &details,
-    );
 }

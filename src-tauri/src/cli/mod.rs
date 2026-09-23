@@ -1464,19 +1464,32 @@ async fn execute_steps(
     }
     .map_err(|err| (ExitCode::ProviderFailed, err))?;
     output.events.extend(deferred_events.into_inner());
-    // CLI 没有 action log 可以写，图片降级只好走 stderr。不报的话这里和桌面端犯的是
-    // 同一个错：转录里留着"已附上图片"，而模型其实什么都没看到。stderr 是因为
-    // JSON / NDJSON 的消费者在读 stdout，警告不能混进去。
-    if let Some((summary, details)) =
-        crate::services::llm_client::image_degradation_report(&llm.image_drops())
-    {
-        eprintln!("warning: {}\n{}", summary, details);
-    }
-    // 历史修剪走同一条路：CLI 没有 action log，而"模型忘了前面读过什么"在这里同样需要解释
-    if let Some((summary, details)) =
-        crate::services::llm_client::history_trim_report(&llm.history_trims())
-    {
-        eprintln!("warning: {}\n{}", summary, details);
+    // CLI 没有 action log 可以写，降级只好走 stderr（stdout 留给 JSON / NDJSON 的消费者）。
+    // 和桌面端一样只打**一条**：一次运行被削减的每件事凑成一段。四行分开的 warning 读起来
+    // 就是噪音，而它们讲的是同一件事 —— "这次运行比你以为的少做了什么"。
+    let degradations: Vec<(String, String)> = [
+        crate::services::llm_client::image_degradation_report(&llm.image_drops()),
+        crate::services::llm_client::history_trim_report(&llm.history_trims()),
+        crate::services::llm_client::output_clamp_report(&llm.output_clamps()),
+        crate::services::llm_client::reasoning_degradation_report(
+            llm.reasoning_was_rejected(),
+            llm.requested_reasoning_effort(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !degradations.is_empty() {
+        let body = degradations
+            .iter()
+            .map(|(summary, details)| format!("{}\n{}", summary, details))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        eprintln!(
+            "warning: this run was degraded in {} way(s)\n{}",
+            degradations.len(),
+            body
+        );
     }
 
     Ok(results

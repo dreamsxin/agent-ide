@@ -1991,6 +1991,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `tool_names_do_not_collide_with_mcp_routing` asserted every tool starts with `workspace_`. That was a stand-in for the real invariant (not colliding with MCP, and being claimed by `handles()`); two tools now deliberately lack the prefix, so the test asserts the property instead of the proxy.
    - Next, from the same correction: collapse the six degradation warnings into one line with details on demand, report spend once at the end, and prioritise the remaining gaps by "can it finish more tasks" — subagent delegation, a build mode that stops interrupting, WebSearch.
    - Rust 532 → 535 (534 passing, 1 ignored); frontend unchanged.
+153. **Seven warnings became one (2026-09-22)**
+   Second item from the same correction. The action log had seven `warn` kinds for "this run did less than you think": `tool_capability_degraded`, `image_input_degraded`, `history_trimmed`, `output_limit_clamped`, `reasoning_effort_rejected`, plus two emitted before the run. Each was individually justified and collectively self-defeating — the seventh would have been ignored, and so would the six.
+   - **`emit_degradation_log` emits one `run_degraded` entry.** Summary is a scannable list ("degraded in 3 way(s): 1 image(s) were not sent…; …"), details carry every full reason. The five wording functions stay exactly as they were — they are pure and tested; only the delivery changed.
+   - The CLI prints the same thing as one stderr block instead of four.
+   - `finish_agent_run` no longer has five emit helpers, so the two that became unreachable were deleted rather than left behind a `#[allow]`.
+   - The test that pinned `image_input_degraded` now pins `run_degraded` **and** the count in the summary, so a silently-dropped report is still caught. Its negative half — a clean run writes nothing — is what keeps the entry meaningful.
+   - Still two before the run (`model_override`, `project_memory_truncated`), and deliberately: they explain the run that is *about to* happen, and merging them into the finish entry would put the explanation a turn late. Merging those two with each other is the next small step.
+   - Rust 535 unchanged (534 passing, 1 ignored); frontend unchanged.
 
 
 
