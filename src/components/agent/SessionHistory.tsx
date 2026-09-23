@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { Check, GitBranch, History, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
+
 
 /** 手打的任务名上限，和后端 `session_title_from` 的截断点一致：界面要让这条边界看得见 */
 const MAX_TASK_NAME_CHARS = 60;
@@ -19,6 +22,7 @@ const MAX_TASK_NAME_CHARS = 60;
  */
 
 export default function SessionHistory() {
+  const t = useT();
   const sessions = useAgentStore((s) => s.sessions);
   const activeSessionId = useAgentStore((s) => s.activeSessionId);
   const sessionWarning = useAgentStore((s) => s.sessionWarning);
@@ -61,14 +65,14 @@ export default function SessionHistory() {
       <div className="flex items-center justify-between gap-2 border-b border-surface-border px-3 py-2">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-surface-muted">
           <History aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="truncate">Tasks in this workspace</span>
+          <span className="truncate">{t("session.header")}</span>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1">
           <button
             type="button"
             onClick={() => void run(loadSessions)}
-            aria-label="Refresh task list"
-            title="Refresh the list"
+            aria-label={t("session.refresh")}
+            title={t("session.refresh.title")}
             className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-surface-text"
           >
             <RefreshCw aria-hidden="true" className="h-3 w-3" />
@@ -76,12 +80,12 @@ export default function SessionHistory() {
           <button
             type="button"
             onClick={() => void run(startNewSession)}
-            title="Start a new task. The current one stays in this list."
+            title={t("session.new.title")}
             data-testid="session-new"
             className="flex items-center gap-1 rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-text hover:bg-surface-border/30"
           >
             <Plus aria-hidden="true" className="h-3 w-3" />
-            New task
+            {t("session.new")}
           </button>
         </div>
 
@@ -100,12 +104,13 @@ export default function SessionHistory() {
 
       <div className="min-h-0 flex-1 overflow-auto">
         {sessions.length === 0 ? (
-          <p className="px-3 py-3 text-[11px] text-surface-muted">{emptyState(sessionsAreSaved)}</p>
+          <p className="px-3 py-3 text-[11px] text-surface-muted">{t(emptyStateKey(sessionsAreSaved))}</p>
         ) : (
           <ul className="divide-y divide-surface-border/60">
             {sessions.map((session) => {
               const active = session.id === activeSessionId;
               const renaming = renamingId === session.id;
+              const age = relativeTime(session.updatedAt);
               return (
                 <li key={session.id} className="px-3 py-2">
                   {renaming ? (
@@ -130,14 +135,14 @@ export default function SessionHistory() {
                             setRenamingId(null);
                           }
                         }}
-                        aria-label={`Rename task ${session.title}`}
+                        aria-label={t("session.rename", { name: session.title })}
                         className="min-w-0 flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text"
                       />
                       <button
                         type="submit"
                         // 空名字不提交：后端会拒，而"提交了一个空名字"在界面上看起来像成功
                         disabled={!draftName.trim()}
-                        aria-label="Save the new name"
+                        aria-label={t("session.rename.save")}
                         className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-accent-blue disabled:opacity-40"
                       >
                         <Check aria-hidden="true" className="h-3 w-3" />
@@ -145,7 +150,7 @@ export default function SessionHistory() {
                       <button
                         type="button"
                         onClick={() => setRenamingId(null)}
-                        aria-label="Keep the old name"
+                        aria-label={t("session.rename.cancel")}
                         className="rounded p-1 text-surface-muted hover:bg-surface-border/30"
                       >
                         <X aria-hidden="true" className="h-3 w-3" />
@@ -157,11 +162,7 @@ export default function SessionHistory() {
                       type="button"
                       onClick={() => void run(() => resumeSession(session.id))}
                       disabled={active}
-                      title={
-                        active
-                          ? "This is the task you are in"
-                          : "Load this task's conversation back into the model context. The plan is not restored and pending changes are left alone."
-                      }
+                      title={active ? t("session.resume.active") : t("session.resume.title")}
 
                       className={`min-w-0 flex-1 text-left ${active ? "cursor-default" : "hover:text-accent-blue"}`}
                     >
@@ -169,13 +170,15 @@ export default function SessionHistory() {
                         <span className="truncate text-[11px] text-surface-text">{session.title}</span>
                         {active && (
                           <span className="flex-shrink-0 rounded bg-accent-blue/15 px-1 py-0.5 text-[9px] leading-none text-accent-blue">
-                            current
+                            {t("session.current")}
                           </span>
                         )}
                       </div>
                       <div className="mt-0.5 font-mono text-[10px] text-surface-muted">
-                        {formatRelativeTime(session.updatedAt)} · {session.turnCount} turn
-                        {session.turnCount === 1 ? "" : "s"}
+                        {t(age.key, { count: age.count })} ·{" "}
+                        {t(session.turnCount === 1 ? "session.turns.one" : "session.turns.many", {
+                          count: session.turnCount,
+                        })}
                       </div>
                       {session.lastOutcome && (
                         <div className="mt-0.5 truncate text-[10px] text-surface-muted">
@@ -190,8 +193,8 @@ export default function SessionHistory() {
                           setRenamingId(session.id);
                           setDraftName(session.title);
                         }}
-                        aria-label={`Rename task ${session.title}`}
-                        title="Give this task a name of your own"
+                        aria-label={t("session.rename", { name: session.title })}
+                        title={t("session.rename.title")}
                         className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-surface-text"
                       >
                         <Pencil aria-hidden="true" className="h-3 w-3" />
@@ -199,8 +202,8 @@ export default function SessionHistory() {
                       <button
                         type="button"
                         onClick={() => void run(() => forkSession(session.id))}
-                        aria-label={`Fork task ${session.title}`}
-                        title="Start a new task with the same context. This one is left as it is."
+                        aria-label={t("session.fork", { name: session.title })}
+                        title={t("session.fork.title")}
                         className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-accent-blue"
                       >
                         <GitBranch aria-hidden="true" className="h-3 w-3" />
@@ -208,8 +211,8 @@ export default function SessionHistory() {
                       <button
                         type="button"
                         onClick={() => void run(() => deleteSession(session.id))}
-                        aria-label={`Delete task ${session.title}`}
-                        title="Delete this task's saved conversation"
+                        aria-label={t("session.delete", { name: session.title })}
+                        title={t("session.delete.title")}
                         className="rounded p-1 text-surface-muted hover:bg-surface-border/30 hover:text-diff-delete"
                       >
                         <Trash2 aria-hidden="true" className="h-3 w-3" />
@@ -232,15 +235,17 @@ export default function SessionHistory() {
  *
  * "还没聊过"和"这个环境根本不保存"在屏幕上长得一模一样，而后者意味着用户刚才那一问不会被
  * 记住 —— 不说清就等于让他以为存好了。任务是按工作区分组的，没打开工作区时一条都存不下来。
+ *
+ * 返回文案键而不是成句：这个判断和语言无关，塞进 `t` 就等于把它绑在组件渲染上，测不了。
  */
-function emptyState(sessionsAreSaved: boolean): string {
+export function emptyStateKey(sessionsAreSaved: boolean): MessageKey {
   if (!isTauriRuntime()) {
-    return "Task history needs the desktop backend; it is not available in the browser preview.";
+    return "session.empty.noBackend";
   }
   if (!sessionsAreSaved) {
-    return "Open a workspace folder first — tasks are grouped by workspace, so nothing is saved until then.";
+    return "session.empty.noWorkspace";
   }
-  return "No saved tasks yet. A task appears here once one of its prompts finishes.";
+  return "session.empty.none";
 }
 
 
@@ -249,16 +254,21 @@ function emptyState(sessionsAreSaved: boolean): string {
  *
  * 显示相对时间而不是绝对时间戳：认出"是不是刚才那次"靠的是间隔，而不是 14:32 这个数字。
  * 0 是"后端没给时间戳"（见 `normalizeAgentSessionList`），这时不能算成 1970 年。
+ *
+ * 返回键 + 数字，不返回拼好的句子：中英文的量词位置不同（`5m ago` / `5 分钟前`），
+ * 在这里拼串就等于把英文语序写死进逻辑。
  */
-export function formatRelativeTime(updatedAt: number, now: number = Date.now()): string {
-  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return "unknown time";
+export function relativeTime(
+  updatedAt: number,
+  now: number = Date.now()
+): { key: MessageKey; count: number } {
+  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return { key: "session.time.unknown", count: 0 };
   const seconds = Math.floor((now - updatedAt) / 1000);
-  if (seconds < 60) return "just now";
+  if (seconds < 60) return { key: "session.time.now", count: 0 };
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return { key: "session.time.minutes", count: minutes };
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  if (hours < 24) return { key: "session.time.hours", count: hours };
+  return { key: "session.time.days", count: Math.floor(hours / 24) };
 }
 

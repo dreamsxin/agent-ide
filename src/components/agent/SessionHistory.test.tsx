@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
-import SessionHistory, { formatRelativeTime } from "./SessionHistory";
+import SessionHistory, { emptyStateKey, relativeTime } from "./SessionHistory";
 import { useAgentStore } from "../../stores/useAgentStore";
 
 afterEach(cleanup);
@@ -193,17 +193,25 @@ describe("SessionHistory", () => {
 });
 
 
-describe("formatRelativeTime", () => {
+describe("relativeTime", () => {
   /** 0 是"后端没给时间戳"，不能显示成 1970 年。 */
   it("does not pretend an absent timestamp is the epoch", () => {
-    expect(formatRelativeTime(0)).toBe("unknown time");
+    expect(relativeTime(0).key).toBe("session.time.unknown");
   });
 
   it("counts in the largest unit that still reads as a number", () => {
     const now = 10_000_000_000;
-    expect(formatRelativeTime(now - 30_000, now)).toBe("just now");
-    expect(formatRelativeTime(now - 5 * 60_000, now)).toBe("5m ago");
-    expect(formatRelativeTime(now - 3 * 3_600_000, now)).toBe("3h ago");
-    expect(formatRelativeTime(now - 2 * 86_400_000, now)).toBe("2d ago");
+    expect(relativeTime(now - 30_000, now)).toEqual({ key: "session.time.now", count: 0 });
+    expect(relativeTime(now - 5 * 60_000, now)).toEqual({ key: "session.time.minutes", count: 5 });
+    expect(relativeTime(now - 3 * 3_600_000, now)).toEqual({ key: "session.time.hours", count: 3 });
+    expect(relativeTime(now - 2 * 86_400_000, now)).toEqual({ key: "session.time.days", count: 2 });
+  });
+
+  /**
+   * 浏览器预览里根本存不下来，这一条要压过"还没聊过"：后者会让用户以为刚才那一问存好了。
+   * 测试跑在 jsdom 里，没有 Tauri，所以这里能验到的就是这条优先级。
+   */
+  it("puts the missing backend ahead of every other empty state", () => {
+    expect(emptyStateKey(true)).toBe("session.empty.noBackend");
   });
 });
