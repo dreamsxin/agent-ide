@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLogStore } from "../../stores/useLogStore";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
 import type { GitDiffKind, GitStatusEntry } from "../../types/project";
 
 const STATUS_ICONS: Record<string, { icon: string; color: string }> = {
@@ -13,10 +15,10 @@ const STATUS_ICONS: Record<string, { icon: string; color: string }> = {
   conflicted: { icon: "!", color: "text-diff-remove" },
 };
 
-const DIFF_LABELS: Record<GitDiffKind, string> = {
-  worktree: "Worktree",
-  staged: "Staged",
-  all: "All",
+const DIFF_LABEL_KEYS: Record<GitDiffKind, MessageKey> = {
+  worktree: "git.diff.worktree",
+  staged: "git.diff.staged",
+  all: "git.diff.all",
 };
 
 function entryKey(entry: GitStatusEntry): string {
@@ -31,7 +33,13 @@ function sanitizeTestId(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
+/** 一个文件就说文件名，多个就说数量：路径列全了没人读，而"3 个文件"能一眼确认范围 */
+function fileLabel(files: string[], t: ReturnType<typeof useT>): string {
+  return files.length === 1 ? files[0] : t("git.files", { count: files.length });
+}
+
 export default function GitPanel() {
+  const t = useT();
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const status = useGitStore((s) => s.status);
   const diff = useGitStore((s) => s.diff);
@@ -112,9 +120,9 @@ export default function GitPanel() {
       time: new Date().toLocaleTimeString(),
       level: "info",
       source: "git",
-      message: "Git status refreshed",
+      message: t("git.log.refreshed"),
     });
-  }, [fetchStatus, projectPath, addLog]);
+  }, [fetchStatus, projectPath, addLog, t]);
 
   const previewEntry = useCallback(
     (entry: GitStatusEntry, kind: GitDiffKind = entry.staged ? "staged" : "worktree") => {
@@ -169,7 +177,7 @@ export default function GitPanel() {
         time: new Date().toLocaleTimeString(),
         level: "success",
         source: "git",
-        message: `Committed: ${oid.slice(0, 7)} - ${message}`,
+        message: t("git.log.committed", { oid: oid.slice(0, 7), message }),
       });
       setMessage("");
       await fetchStatus(projectPath);
@@ -178,7 +186,7 @@ export default function GitPanel() {
       setSelectedFile(null);
       setSelectedKeys([]);
     }
-  }, [message, commit, projectPath, addLog, fetchStatus, clearDiff]);
+  }, [message, commit, projectPath, addLog, fetchStatus, clearDiff, t]);
 
   const handleCheckoutBranch = useCallback(
     async (branch: string) => {
@@ -188,7 +196,7 @@ export default function GitPanel() {
           time: new Date().toLocaleTimeString(),
           level: "success",
           source: "git",
-          message: `Checked out ${branch}`,
+          message: t("git.log.checkedOut", { branch }),
         });
         await fetchStatus(projectPath);
         clearDiff();
@@ -196,7 +204,7 @@ export default function GitPanel() {
         setSelectedFile(null);
       }
     },
-    [addLog, checkoutBranch, clearDiff, fetchStatus, projectPath, status?.branch]
+    [addLog, checkoutBranch, clearDiff, fetchStatus, projectPath, status?.branch, t]
   );
 
   const handleCreateBranch = useCallback(async () => {
@@ -207,13 +215,13 @@ export default function GitPanel() {
         time: new Date().toLocaleTimeString(),
         level: "success",
         source: "git",
-        message: `Created and checked out ${name}`,
+        message: t("git.log.created", { branch: name }),
       });
       setBranchName("");
       await fetchStatus(projectPath);
       clearDiff();
     }
-  }, [addLog, branchName, checkoutBranch, clearDiff, fetchStatus, projectPath]);
+  }, [addLog, branchName, checkoutBranch, clearDiff, fetchStatus, projectPath, t]);
 
   const handleCheckoutRemoteBranch = useCallback(async () => {
     if (!remoteBranch) return;
@@ -222,13 +230,13 @@ export default function GitPanel() {
         time: new Date().toLocaleTimeString(),
         level: "success",
         source: "git",
-        message: `Checked out tracking branch ${remoteBranch}`,
+        message: t("git.log.tracking", { branch: remoteBranch }),
       });
       setRemoteBranch("");
       await fetchStatus(projectPath);
       clearDiff();
     }
-  }, [addLog, checkoutRemoteBranch, clearDiff, fetchStatus, projectPath, remoteBranch]);
+  }, [addLog, checkoutRemoteBranch, clearDiff, fetchStatus, projectPath, remoteBranch, t]);
 
   const handleRemoteAction = useCallback(
     async (kind: "fetch" | "pull" | "push") => {
@@ -238,7 +246,8 @@ export default function GitPanel() {
           time: new Date().toLocaleTimeString(),
           level: "success",
           source: "git",
-          message: `Git ${kind} completed`,
+          // 动作名也要跟着语言走：日志面板和这里的按钮是同一个词
+          message: t("git.log.remote", { action: t(`git.${kind}`) }),
         });
         await fetchStatus(projectPath);
         clearDiff();
@@ -247,7 +256,7 @@ export default function GitPanel() {
         }
       }
     },
-    [addLog, clearDiff, credentials, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote, rememberCredentials]
+    [addLog, clearDiff, credentials, fetchRemote, fetchStatus, projectPath, pullRemote, pushRemote, rememberCredentials, t]
   );
 
   const handleResolveConflict = useCallback(
@@ -257,7 +266,7 @@ export default function GitPanel() {
           time: new Date().toLocaleTimeString(),
           level: "success",
           source: "git",
-          message: `Resolved ${file} with ${resolution}`,
+          message: t("git.log.resolved", { file, resolution: t(`git.resolve.${resolution}`) }),
         });
         await fetchStatus(projectPath);
         clearDiff();
@@ -265,7 +274,7 @@ export default function GitPanel() {
         setSelectedEntryKey(null);
       }
     },
-    [addLog, clearDiff, fetchStatus, projectPath, resolveConflict]
+    [addLog, clearDiff, fetchStatus, projectPath, resolveConflict, t]
   );
 
   const handleConflictDiff = useCallback(
@@ -286,10 +295,10 @@ export default function GitPanel() {
       const files = uniquePaths(entries.filter((entry) => !entry.staged));
       if (files.length === 0) return;
       if (await stageFiles(projectPath, files)) {
-        await refreshAfterAction(`Staged ${files.length === 1 ? files[0] : `${files.length} files`}`);
+        await refreshAfterAction(t("git.log.staged", { label: fileLabel(files, t) }));
       }
     },
-    [stageFiles, projectPath, refreshAfterAction]
+    [stageFiles, projectPath, refreshAfterAction, t]
   );
 
   const handleUnstage = useCallback(
@@ -297,24 +306,24 @@ export default function GitPanel() {
       const files = uniquePaths(entries.filter((entry) => entry.staged));
       if (files.length === 0) return;
       if (await unstageFiles(projectPath, files)) {
-        await refreshAfterAction(`Unstaged ${files.length === 1 ? files[0] : `${files.length} files`}`);
+        await refreshAfterAction(t("git.log.unstaged", { label: fileLabel(files, t) }));
       }
     },
-    [unstageFiles, projectPath, refreshAfterAction]
+    [unstageFiles, projectPath, refreshAfterAction, t]
   );
 
   const handleDiscard = useCallback(
     async (entries: GitStatusEntry[]) => {
       const files = uniquePaths(entries);
       if (files.length === 0) return;
-      const label = files.length === 1 ? files[0] : `${files.length} files`;
-      const ok = window.confirm(`Discard changes in ${label}? This cannot be undone.`);
+      const label = fileLabel(files, t);
+      const ok = window.confirm(t("git.discard.confirm", { label }));
       if (!ok) return;
       if (await discardFiles(projectPath, files)) {
-        await refreshAfterAction(`Discarded ${label}`);
+        await refreshAfterAction(t("git.log.discarded", { label }));
       }
     },
-    [discardFiles, projectPath, refreshAfterAction]
+    [discardFiles, projectPath, refreshAfterAction, t]
   );
 
   const handleContextMenu = useCallback((event: React.MouseEvent, entry: GitStatusEntry) => {
@@ -358,7 +367,7 @@ export default function GitPanel() {
           onClick={(event) => event.stopPropagation()}
           data-testid={`git-select-${sanitizeTestId(entry.path)}`}
           className="h-3 w-3 accent-accent-blue"
-          title="Select for batch action"
+          title={t("git.select.title")}
         />
         <span className={`w-4 text-center font-bold text-[10px] ${info.color}`}>{info.icon}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{entry.path}</span>
@@ -367,7 +376,7 @@ export default function GitPanel() {
             event.stopPropagation();
             entry.staged ? handleUnstage([entry]) : handleStage([entry]);
           }}
-          title={entry.staged ? "Unstage" : "Stage"}
+          title={entry.staged ? t("git.unstage") : t("git.stage")}
           data-testid={`git-stage-toggle-${sanitizeTestId(entry.path)}`}
           className="opacity-0 group-hover:opacity-100 text-surface-muted hover:text-surface-text px-1"
         >
@@ -381,12 +390,12 @@ export default function GitPanel() {
     <div data-testid="git-panel" className="h-full flex flex-col bg-surface-panel text-xs">
       <div className="flex items-center justify-between px-3 py-2 border-b border-surface-border">
         <span className="font-semibold text-surface-text tracking-wide text-[11px]">
-          SOURCE CONTROL
+          {t("git.title")}
         </span>
         <button
           onClick={handleRefresh}
           className="text-surface-muted hover:text-surface-text text-sm leading-none px-1"
-          title="Refresh"
+          title={t("git.refresh")}
         >
           ↻
         </button>
@@ -407,7 +416,7 @@ export default function GitPanel() {
               onChange={(event) => handleCheckoutBranch(event.target.value)}
               disabled={loading}
               className="min-w-0 flex-1 bg-surface-base border border-surface-border rounded px-1.5 py-1 font-mono text-[11px] text-surface-text focus:outline-none focus:border-accent-blue"
-              title="Checkout branch"
+              title={t("git.branch.checkout")}
             >
               {localBranches.map((branch) => (
                 <option key={branch.name} value={branch.name}>
@@ -418,46 +427,54 @@ export default function GitPanel() {
           </div>
           {status.upstream && (
             <div className="mt-1 truncate text-[10px] text-surface-muted" title={status.upstream}>
-              upstream: {status.upstream}
+              {t("git.upstream", { name: status.upstream })}
             </div>
           )}
-          {status.ahead > 0 && <div className="text-accent-blue text-[10px] mt-0.5">↑{status.ahead} ahead</div>}
-          {status.behind > 0 && <div className="text-diff-modify text-[10px] mt-0.5">↓{status.behind} behind</div>}
+          {status.ahead > 0 && (
+            <div className="text-accent-blue text-[10px] mt-0.5">
+              {t("git.ahead", { count: status.ahead })}
+            </div>
+          )}
+          {status.behind > 0 && (
+            <div className="text-diff-modify text-[10px] mt-0.5">
+              {t("git.behind", { count: status.behind })}
+            </div>
+          )}
           <div className="mt-2 flex gap-1">
             <button
               onClick={() => handleRemoteAction("fetch")}
               disabled={loading}
               className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
-              Fetch
+              {t("git.fetch")}
             </button>
             <button
               onClick={() => handleRemoteAction("pull")}
               disabled={loading}
               className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
-              Pull
+              {t("git.pull")}
             </button>
             <button
               onClick={() => handleRemoteAction("push")}
               disabled={loading}
               className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
-              Push
+              {t("git.push")}
             </button>
           </div>
           <div className="mt-2 grid grid-cols-2 gap-1">
             <input
               value={credentialUsername}
               onChange={(event) => setCredentialUsername(event.target.value)}
-              placeholder="git username"
+              placeholder={t("git.username.ph")}
               className="min-w-0 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
             />
             <input
               value={credentialPassword}
               onChange={(event) => setCredentialPassword(event.target.value)}
               type="password"
-              placeholder="token/password"
+              placeholder={t("git.password.ph")}
               className="min-w-0 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
             />
           </div>
@@ -468,7 +485,7 @@ export default function GitPanel() {
               onChange={(event) => setRememberCredentials(event.target.checked)}
               className="h-3 w-3 accent-accent-blue"
             />
-            Remember HTTPS credential in OS store
+            {t("git.remember")}
           </label>
           <div className="mt-2 flex gap-1">
             <input
@@ -480,7 +497,7 @@ export default function GitPanel() {
                   handleCreateBranch();
                 }
               }}
-              placeholder="new branch"
+              placeholder={t("git.newBranch.ph")}
               className="min-w-0 flex-1 bg-surface-base border border-surface-border rounded px-2 py-1 text-[10px] text-surface-text focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
             />
             <button
@@ -488,7 +505,7 @@ export default function GitPanel() {
               disabled={!branchName.trim() || loading}
               className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
-              Create
+              {t("git.create")}
             </button>
           </div>
           {remoteBranches.length > 0 && (
@@ -498,9 +515,9 @@ export default function GitPanel() {
                 onChange={(event) => setRemoteBranch(event.target.value)}
                 disabled={loading}
                 className="min-w-0 flex-1 bg-surface-base border border-surface-border rounded px-1.5 py-1 font-mono text-[10px] text-surface-text focus:outline-none focus:border-accent-blue"
-                title="Remote branch"
+                title={t("git.remoteBranch.title")}
               >
-                <option value="">remote branch...</option>
+                <option value="">{t("git.remoteBranch.ph")}</option>
                 {remoteBranches.map((branch) => (
                   <option key={branch.name} value={branch.name}>
                     {branch.name}
@@ -512,14 +529,17 @@ export default function GitPanel() {
                 disabled={!remoteBranch || loading}
                 className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
               >
-                Track
+                {t("git.track")}
               </button>
             </div>
           )}
           {status.conflicts.length > 0 && (
             <div className="mt-2 rounded border border-diff-remove/40 bg-diff-remove/10 p-2 text-[10px] text-diff-remove">
               <div className="mb-1 font-semibold">
-                {status.conflicts.length} conflict{status.conflicts.length === 1 ? "" : "s"} detected
+                {t(
+                  status.conflicts.length === 1 ? "git.conflicts.one" : "git.conflicts.many",
+                  { count: status.conflicts.length }
+                )}
               </div>
               <div className="space-y-1">
                 {status.conflicts.map((file) => (
@@ -527,7 +547,7 @@ export default function GitPanel() {
                     <button
                       onClick={() => handleConflictDiff(file)}
                       className="block w-full truncate text-left font-mono text-diff-remove hover:underline"
-                      title="Open conflict diff"
+                      title={t("git.conflict.open")}
                     >
                       {file}
                     </button>
@@ -536,19 +556,19 @@ export default function GitPanel() {
                         onClick={() => handleResolveConflict(file, "current")}
                         className="rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
                       >
-                        Current
+                        {t("git.resolve.current")}
                       </button>
                       <button
                         onClick={() => handleResolveConflict(file, "incoming")}
                         className="rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
                       >
-                        Incoming
+                        {t("git.resolve.incoming")}
                       </button>
                       <button
                         onClick={() => handleResolveConflict(file, "both")}
                         className="rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
                       >
-                        Both
+                        {t("git.resolve.both")}
                       </button>
                     </div>
                   </div>
@@ -562,7 +582,7 @@ export default function GitPanel() {
       {selectedKeys.length > 0 && (
         <div className="border-b border-surface-border px-2 py-2">
           <div className="mb-1.5 text-[10px] uppercase tracking-wider text-surface-muted">
-            {selectedKeys.length} selected
+            {t("git.selected", { count: selectedKeys.length })}
           </div>
           <div className="flex flex-wrap gap-1">
           <button
@@ -571,39 +591,39 @@ export default function GitPanel() {
             data-testid="git-stage-selected"
             className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
-              Stage
+              {t("git.stage")}
             </button>
             <button
               onClick={() => handleUnstage(selectedEntries)}
               disabled={selectedStaged.length === 0 || loading}
               className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
             >
-              Unstage
+              {t("git.unstage")}
             </button>
             <button
               onClick={() => handleDiscard(selectedEntries)}
               disabled={selectedEntries.length === 0 || loading}
               className="rounded border border-diff-remove/40 px-2 py-1 text-[10px] text-diff-remove hover:bg-diff-remove/10 disabled:opacity-40"
             >
-              Discard
+              {t("git.discard")}
             </button>
             <button
               onClick={() => setSelectedKeys([])}
               className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-muted hover:text-surface-text hover:bg-surface-border/30"
             >
-              Clear
+              {t("git.clear")}
             </button>
           </div>
         </div>
       )}
 
-      {loading && <div className="px-3 py-2 text-surface-muted animate-pulse">Loading...</div>}
+      {loading && <div className="px-3 py-2 text-surface-muted animate-pulse">{t("git.loading")}</div>}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {staged.length > 0 && (
           <div>
             <div data-testid="git-staged-section" className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
-              Staged Changes ({staged.length})
+              {t("git.stagedChanges", { count: staged.length })}
             </div>
             {staged.map(renderEntry)}
           </div>
@@ -612,25 +632,19 @@ export default function GitPanel() {
         {unstaged.length > 0 && (
           <div>
             <div data-testid="git-changes-section" className="px-3 py-1.5 text-surface-muted font-semibold text-[10px] uppercase tracking-wider">
-              Changes ({unstaged.length})
+              {t("git.changes", { count: unstaged.length })}
             </div>
             {unstaged.map(renderEntry)}
           </div>
         )}
 
         {status && staged.length === 0 && unstaged.length === 0 && (
-          <div className="px-3 py-4 text-surface-muted text-center">No changes detected.</div>
+          <div className="px-3 py-4 text-surface-muted text-center">{t("git.noChanges")}</div>
         )}
 
         {!status && !loading && !error && (
           <div className="px-3 py-4 text-surface-muted text-center">
-            {projectPath ? (
-              "No git repository found."
-            ) : (
-              <>
-                No folder opened. Press <span className="font-mono">Ctrl+O</span> to choose one.
-              </>
-            )}
+            {projectPath ? t("git.noRepo") : t("git.noFolder")}
           </div>
         )}
       </div>
@@ -639,7 +653,7 @@ export default function GitPanel() {
         <div className="border-t border-surface-border max-h-60 overflow-auto">
           <div className="sticky top-0 bg-surface-panel border-b border-surface-border px-3 py-1.5">
             <div className="mb-1 truncate text-surface-muted font-semibold text-[10px] uppercase">
-              Diff: {selectedFile}
+              {t("git.diff.title", { file: selectedFile })}
             </div>
             <div className="flex gap-1">
               {(["worktree", "staged", "all"] as GitDiffKind[]).map((kind) => (
@@ -652,7 +666,7 @@ export default function GitPanel() {
                       : "border-surface-border text-surface-muted hover:text-surface-text"
                   }`}
                 >
-                  {DIFF_LABELS[kind]}
+                  {t(DIFF_LABEL_KEYS[kind])}
                 </button>
               ))}
             </div>
@@ -680,7 +694,7 @@ export default function GitPanel() {
           <textarea
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            placeholder="Commit message..."
+            placeholder={t("git.commit.ph")}
             data-testid="git-commit-message"
             rows={2}
             className="w-full bg-surface-base border border-surface-border rounded px-2 py-1 text-surface-text text-[11px] font-mono resize-none focus:outline-none focus:border-accent-blue placeholder:text-surface-muted"
@@ -697,7 +711,7 @@ export default function GitPanel() {
             data-testid="git-commit"
             className="mt-1.5 w-full bg-accent-blue text-white rounded py-1 text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
           >
-            {loading ? "Committing..." : "Commit (Ctrl+Enter)"}
+            {loading ? t("git.committing") : t("git.commit")}
           </button>
         </div>
       )}
@@ -713,7 +727,7 @@ export default function GitPanel() {
               onClick={() => handleStage([menu.entry])}
               className="block w-full px-3 py-1.5 text-left text-surface-text hover:bg-surface-border/30"
             >
-              Stage
+              {t("git.stage")}
             </button>
           )}
           {menu.entry.staged && (
@@ -721,14 +735,14 @@ export default function GitPanel() {
               onClick={() => handleUnstage([menu.entry])}
               className="block w-full px-3 py-1.5 text-left text-surface-text hover:bg-surface-border/30"
             >
-              Unstage
+              {t("git.unstage")}
             </button>
           )}
           <button
             onClick={() => handleDiscard([menu.entry])}
             className="block w-full px-3 py-1.5 text-left text-diff-remove hover:bg-diff-remove/10"
           >
-            Discard Changes
+            {t("git.discardChanges")}
           </button>
         </div>
       )}
