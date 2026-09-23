@@ -2020,7 +2020,8 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The clone shares what should be shared.** `LlmClient`'s usage meter, image/output/history degradation records and `tools_rejected` all sit behind `Arc`, so the child's spend lands on this run's budget and its degradations reach the same end-of-run report. A delegation that billed nowhere would be an invisible cost — the thing the capability-over-gates decision explicitly still requires to be visible.
    - **Pipeline continue and repair must re-attach, not inherit.** Both clone `orch.tool_permissions` from the previous run, which now carries a channel holding *that* run's client — the previous usage meter, possibly a different model override. So the channel is replaced with this run's client, joining `adopt_cancel` and `reset_image_budget` in the list of fields those two paths must reset. Missed, the child's cost would be charged to a run that already ended.
    - Headless entries attach no channel, so there the tool is absent rather than advertised-and-failing.
-   - Rust 540 → 542 (541 passing, 1 ignored); frontend unchanged.
+   - **A profile that cannot send tools gets no channel at all.** `build_chat_request` only inserts `tools` when `tool_call_mode == "native_tools"`, and a subagent has *nothing but* tools — no parent conversation, no packaged context. On a text-protocol profile the child would therefore be a guaranteed-empty loop that still answers confidently, which is worse than an error. `SubagentChannel::for_run` returns `Option` so that judgment lives in one place instead of four call sites, and `LlmClient::can_send_tools` also covers the mid-run case: the provider can reject `tools` *after* the list was advertised, so `delegate_task` re-checks before spending anything.
+   - Rust 540 → 543 (542 passing, 1 ignored); frontend 291 unchanged.
 
 
 

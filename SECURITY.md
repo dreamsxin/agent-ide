@@ -149,7 +149,7 @@ Bounded: 2 000-char URL, 10 MiB on the wire counted **while streaming** (a `cont
 
 ## Delegating to a Subagent
 
-`delegate_task` hands a self-contained question to a read-only subagent and returns its final text. It is **only advertised when a subagent channel is attached**, which the four desktop run entry points (`send_agent_prompt`, `run_agent_step`, `continue_agent_pipeline`, `repair_workspace`) do; a headless entry attaches none, so there the tool is absent rather than failing when called.
+`delegate_task` hands a self-contained question to a read-only subagent and returns its final text. It is **only advertised when a subagent channel is attached**, which the four desktop run entry points (`send_agent_prompt`, `run_agent_step`, `continue_agent_pipeline`, `repair_workspace`) do; a headless entry attaches none, so there the tool is absent rather than failing when called. A profile whose `tool_call_mode` is not `native_tools` also gets no channel, because a subagent with no tools can read nothing and would answer anyway.
 
 What the child cannot do is structural, not prompted:
 
