@@ -46,15 +46,6 @@ const CONNECTION_TONE_CARD = {
 } as const;
 
 // ====== 提供商预设 ======
-const providerLabels: Record<string, string> = {
-  openai: "OpenAI",
-  anthropic: "Anthropic",
-  azure: "Azure OpenAI",
-  deepseek: "DeepSeek",
-  custom: "Custom",
-  local: "Local GGUF",
-};
-
 // 预设只管"连到哪、有哪些模型、用哪种工具协议"。
 // 窗口和输出上限**不在这里**：它们跟着模型走（`utils/modelLimits.ts`），因为同一家自己的
 // 模型之间上限能差两个数量级 —— 按供应商给一个值，在其中一边必然是错的。
@@ -112,6 +103,18 @@ const PROVIDERS: ProviderPreset[] = [
     defaultToolCallMode: "text_protocol",
   },
 ];
+
+/**
+ * provider 的显示名。
+ *
+ * 只有 custom 这一档是描述而不是品牌名，需要翻译；其余是各家自己的写法，翻过去反而和它们的
+ * 文档对不上。名字过去有两处来源（一张 `providerLabels` 表加 `PROVIDERS[].label`），于是同一
+ * 个 provider 在状态卡里叫 Custom、在下拉里叫 Custom Provider。
+ */
+function providerLabel(id: string, t: ReturnType<typeof useT>): string {
+  if (id === "custom") return t("settings.provider.custom");
+  return PROVIDERS.find((p) => p.id === id)?.label ?? id;
+}
 
 // ====== SettingsPanel ======
 export default function SettingsPanel() {
@@ -283,19 +286,22 @@ export default function SettingsPanel() {
     try {
       setRevealedKey(await revealLlmApiKey(profileId || null));
     } catch (e) {
-      setRevealError(`Cannot read stored key: ${e}`);
+      setRevealError(t("settings.err.reveal", { error: String(e) }));
     }
-  }, [profileId, revealLlmApiKey, revealedKey]);
+  }, [profileId, revealLlmApiKey, revealedKey, t]);
 
   const handleSave = useCallback(async () => {
     if (!profileName.trim() || !model.trim() || (provider !== "local" && !endpoint.trim())) {
-      setMessage({ type: "err", text: provider === "local" ? "Profile name and model are required" : "Profile name, endpoint, and model are required" });
+      setMessage({
+        type: "err",
+        text: provider === "local" ? t("settings.err.requiredLocal") : t("settings.err.required"),
+      });
       return;
     }
     // 判断依据是"是否已有可读密钥"，而不是"是否是新 profile"：
     // 引导出来的 profile 有 id 但密钥可能从未真正存进凭据存储。
     if (provider !== "local" && !hasSavedKey && !apiKey.trim()) {
-      setMessage({ type: "err", text: "Secret key is required for a new profile" });
+      setMessage({ type: "err", text: t("settings.err.keyRequired") });
       return;
     }
     setSaving(true);
@@ -319,15 +325,15 @@ export default function SettingsPanel() {
         toolCallMode,
         setActive: true,
       });
-      setMessage({ type: "ok", text: "Saved successfully" });
+      setMessage({ type: "ok", text: t("settings.msg.saved") });
       setApiKey(""); // 保存后清空输入框中的 key
       setRevealedKey(null); // 明文回显必须重新点一次才显示，避免展示过期值
     } catch (e) {
-      setMessage({ type: "err", text: `Save failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.save", { error: String(e) }) });
     } finally {
       setSaving(false);
     }
-  }, [apiKey, completionPrice, endpoint, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, t, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -359,17 +365,17 @@ export default function SettingsPanel() {
       }
       // 后端已有配置，直接测试
       if (!llmConfigured) {
-        setMessage({ type: "err", text: "No config saved. Fill fields and click Save first." });
+        setMessage({ type: "err", text: t("settings.err.noConfig") });
         return;
       }
       const result = await testLlmConnection();
       setMessage({ type: "ok", text: result });
     } catch (e) {
-      setMessage({ type: "err", text: `Test failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.test", { error: String(e) }) });
     } finally {
       setTesting(false);
     }
-  }, [apiKey, completionPrice, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, t, testLlmConnection, toolCallMode]);
 
   const handleProfileSelect = useCallback((id: string) => {
     const profile = llmProfiles.find((item) => item.id === id);
@@ -415,21 +421,21 @@ export default function SettingsPanel() {
     if (!profileId) return;
     try {
       await setActiveLlmProfile(profileId);
-      setMessage({ type: "ok", text: "Default profile updated" });
+      setMessage({ type: "ok", text: t("settings.msg.defaultUpdated") });
     } catch (e) {
-      setMessage({ type: "err", text: `Set default failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.setDefault", { error: String(e) }) });
     }
-  }, [profileId, setActiveLlmProfile]);
+  }, [profileId, setActiveLlmProfile, t]);
 
   const handleDelete = useCallback(async () => {
     if (!profileId) return;
     try {
       await deleteLlmProfile(profileId);
-      setMessage({ type: "ok", text: "Profile deleted" });
+      setMessage({ type: "ok", text: t("settings.msg.deleted") });
     } catch (e) {
-      setMessage({ type: "err", text: `Delete failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.delete", { error: String(e) }) });
     }
-  }, [deleteLlmProfile, profileId]);
+  }, [deleteLlmProfile, profileId, t]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
   // 窗口用填的那个；没填就按**模型**查表。表按模型 id 匹配而不是按供应商：同一家自己的模型
@@ -449,38 +455,38 @@ export default function SettingsPanel() {
   return (
     <div className="p-3 text-xs overflow-auto h-full">
       <div className="text-surface-muted mb-3 font-semibold tracking-wide">
-        Provider Profiles
+        {t("settings.title")}
       </div>
 
       {/* 当前配置状态卡 */}
       {llmConfigured ? (
         <div className={`mb-4 rounded border overflow-hidden ${CONNECTION_TONE_CARD[connectionState.tone].shell}`}>
           <div className={`px-3 py-1.5 border-b text-[11px] font-medium flex items-center gap-1.5 ${CONNECTION_TONE_CARD[connectionState.tone].header}`}>
-            <span>●</span> LLM Service Configured
+            <span>●</span> {t("settings.configured")}
           </div>
           <div className="px-3 py-2 space-y-1 text-[11px]">
             <div className="flex justify-between">
-              <span className="text-surface-muted">Provider</span>
-              <span className="text-surface-text font-medium">{providerLabels[provider] ?? provider}</span>
+              <span className="text-surface-muted">{t("settings.field.provider")}</span>
+              <span className="text-surface-text font-medium">{providerLabel(provider, t)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Model</span>
+              <span className="text-surface-muted">{t("settings.field.model")}</span>
               <span className="text-surface-text font-mono">{llmModel}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Endpoint</span>
+              <span className="text-surface-muted">{t("settings.field.endpoint")}</span>
               <span className="text-surface-text font-mono text-[10px] truncate max-w-[160px]" title={llmEndpoint}>{new URL(llmEndpoint).hostname}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">API Key</span>
+              <span className="text-surface-muted">{t("settings.field.apiKey")}</span>
               <span className="text-surface-text font-mono">{apiKeyMasked || '****'}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Tools</span>
+              <span className="text-surface-muted">{t("settings.field.tools")}</span>
               <span className="text-surface-text font-mono text-[10px]">{toolCallMode}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Connection</span>
+              <span className="text-surface-muted">{t("settings.field.connection")}</span>
               <span
                 className={`font-mono text-[10px] ${CONNECTION_TONE_TEXT[connectionState.tone]}`}
                 title={connectionState.title}
@@ -495,21 +501,21 @@ export default function SettingsPanel() {
         </div>
       ) : (
         <div className="mb-4 px-3 py-2 rounded border border-surface-border bg-surface-border/10 text-surface-muted text-[11px]">
-          No LLM service configured. Fill in the form below to connect an AI model.
+          {t("settings.notConfigured")}
         </div>
       )}
 
-      <label className="block text-surface-muted mb-1 text-[11px]">Profile</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.profile")}</label>
       <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] gap-1">
         <select
           value={profileId}
           onChange={(e) => handleProfileSelect(e.target.value)}
           className="min-w-0 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
         >
-          <option value="">New profile</option>
+          <option value="">{t("settings.profile.new")}</option>
           {llmProfiles.map((profile) => (
             <option key={profile.id} value={profile.id}>
-              {profile.name}{profile.id === activeProfileId ? " (default)" : ""}
+              {profile.name}{profile.id === activeProfileId ? t("settings.profile.defaultSuffix") : ""}
             </option>
           ))}
         </select>
@@ -518,21 +524,21 @@ export default function SettingsPanel() {
           onClick={handleNewProfile}
           className="rounded border border-surface-border px-2 py-1 text-[11px] text-surface-muted hover:text-surface-text"
         >
-          New
+          {t("settings.profile.newButton")}
         </button>
       </div>
 
-      <label className="block text-surface-muted mb-1 text-[11px]">Profile Name</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.profileName")}</label>
       <input
         type="text"
         value={profileName}
         onChange={(e) => setProfileName(e.target.value)}
-        placeholder="Work OpenAI"
+        placeholder={t("settings.profileName.placeholder")}
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
       />
 
       {/* Provider 下拉 */}
-      <label className="block text-surface-muted mb-1 text-[11px]">AI Provider</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.provider")}</label>
       <select
         value={provider}
         onChange={(e) => handleProviderChange(e.target.value as ModelProvider)}
@@ -540,13 +546,13 @@ export default function SettingsPanel() {
       >
         {PROVIDERS.map((p) => (
           <option key={p.id} value={p.id}>
-            {p.label}
+            {providerLabel(p.id, t)}
           </option>
         ))}
       </select>
 
       {/* Endpoint */}
-      <label className="block text-surface-muted mb-1 text-[11px]">API Base URL</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.endpoint")}</label>
       <input
         type="text"
         value={endpoint}
@@ -557,24 +563,23 @@ export default function SettingsPanel() {
 
       {provider === "local" && (
         <div className="mb-3 rounded border border-accent-blue/30 bg-accent-blue/5 p-2 text-[10px] leading-relaxed text-surface-muted">
-          In-process inference was removed. Serve the model through an OpenAI-compatible
-          endpoint — Ollama <span className="font-mono">http://localhost:11434/v1</span>,
-          LM Studio <span className="font-mono">http://localhost:1234/v1</span>, or vLLM — and
-          configure it above as a normal endpoint plus model name. A profile left on this
-          provider is refused when a run starts, with the same instructions.
+          {t("settings.local.note", {
+            ollama: "http://localhost:11434/v1",
+            lmstudio: "http://localhost:1234/v1",
+          })}
         </div>
       )}
 
 
       {/* API Key */}
       <label className="block text-surface-muted mb-1 text-[11px]">
-        Secret Key {hasSavedKey && <span className="text-[10px] text-accent-green">(saved)</span>}
+        {t("settings.secretKey")} {hasSavedKey && <span className="text-[10px] text-accent-green">{t("settings.secretKey.saved")}</span>}
       </label>
       <input
         type="password"
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
-        placeholder={hasSavedKey ? "Enter to overwrite..." : "sk-..."}
+        placeholder={hasSavedKey ? t("settings.secretKey.overwrite") : t("settings.secretKey.placeholder")}
         className="w-full mb-1 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
 
@@ -582,19 +587,19 @@ export default function SettingsPanel() {
           apiKeyMasked 现在由后端实际探测凭据存储得出，所以这里显示
           "not configured" 就意味着真的没存上，而不是界面猜的。 */}
       <div className="mb-3 flex items-center gap-1.5 text-[10px]">
-        <span className="text-surface-muted">Stored:</span>
+        <span className="text-surface-muted">{t("settings.stored")}</span>
         <code
           data-testid="settings-stored-key"
           className="min-w-0 flex-1 truncate rounded bg-surface-border/40 px-1 py-0.5 font-mono text-surface-text"
         >
-          {revealedKey ?? apiKeyMasked ?? "not configured"}
+          {revealedKey ?? apiKeyMasked ?? t("settings.stored.none")}
         </code>
         {hasSavedKey && (
           <button
             type="button"
             onClick={handleToggleReveal}
-            title={revealedKey ? "Hide secret key" : "Show secret key"}
-            aria-label={revealedKey ? "Hide secret key" : "Show secret key"}
+            title={revealedKey ? t("settings.key.hide") : t("settings.key.show")}
+            aria-label={revealedKey ? t("settings.key.hide") : t("settings.key.show")}
             className="flex-shrink-0 rounded border border-surface-border px-1 py-0.5 text-surface-muted hover:text-surface-text"
           >
             {revealedKey ? <EyeOff size={11} /> : <Eye size={11} />}
@@ -609,7 +614,7 @@ export default function SettingsPanel() {
 
 
       {/* Model */}
-      <label className="block text-surface-muted mb-1 text-[11px]">Model Name</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.model")}</label>
       {preset && preset.models.length > 0 ? (
         <>
           <select
@@ -617,7 +622,7 @@ export default function SettingsPanel() {
             onChange={(e) => handleModelChange(e.target.value)}
             className="w-full mb-1 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
           >
-            <option value="">-- Select --</option>
+            <option value="">{t("settings.model.select")}</option>
             {preset.models.map((m) => (
               <option key={m} value={m}>
                 {m}
@@ -625,7 +630,7 @@ export default function SettingsPanel() {
             ))}
           </select>
           <div className="flex gap-1 mb-3">
-            <span className="text-[10px] text-surface-muted">or custom:</span>
+            <span className="text-[10px] text-surface-muted">{t("settings.model.orCustom")}</span>
           </div>
         </>
       ) : null}
@@ -633,7 +638,7 @@ export default function SettingsPanel() {
         type="text"
         value={model}
         onChange={(e) => handleModelChange(e.target.value)}
-        placeholder="e.g. gpt-4o, claude-3-opus-20240229"
+        placeholder={t("settings.model.placeholder")}
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
 
