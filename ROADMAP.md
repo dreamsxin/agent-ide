@@ -1970,6 +1970,10 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Partial failure destroyed the remaining checkpoints.** The loop popped every layer of the turn even after a restore failed, applying older layers on top of a state the failed layer was supposed to have restored — with the snapshots gone (memory-only, no second copy). It now stops at the first failure, keeps the rest of the stack undoable, and says so in the label.
    - **The action log claimed success regardless.** `undo_last_apply` uses `apply_log_level(failed)`; the new command hardcoded `"success"` and counted only restores. Now the same helper, the failed count in the summary, and the review surface/ordering matched to undo.
    - Rust 524 unchanged (523 passing, 1 ignored); frontend 291 unchanged — the fixes are in code the existing tests already cover, and two turn tests now pass the run id explicitly, which is what the command layer does.
+150. **Pin the wire names, because nothing else does (2026-09-22)**
+   Closing the root cause of 149's first defect rather than only its instance. `ConversationTurn` now has a test that serializes it and asserts the exact key set (`derived, id, outcome, prompt, runId`) plus a round-trip, because a field name crossing IPC **is** the interface and no gate checks it: the compiler, clippy, 523 Rust tests and 291 frontend tests were all green while the frontend read `undefined` and a destructive control never rendered.
+   - **Not taken (yet): a scanner over every `Serialize` struct.** The obvious generalization — fail any snake_case field without a `rename`, across `orchestrator.rs` and `commands/agent.rs` — would false-positive on the types that are snake_case **on purpose**: `StoredSession` is the on-disk session format and never reaches the frontend. A guard that cries wolf gets suppressed, so the honest version needs a marker for "this type crosses IPC" first. Recorded here instead of shipped half-right.
+   - Rust 524 → 525 (524 passing, 1 ignored); frontend unchanged.
 
 
 

@@ -3388,6 +3388,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 过 IPC 的字段名本身就是接口，要有人断言它。
+    ///
+    /// 这是五道门全绿却漏掉的那一类缺陷：`ConversationTurn` 没有 `rename_all`，`run_id` 于是
+    /// 原样过去，前端读 `runId` 永远拿到 undefined ——"撤销这一轮"的按钮一次都没渲染过，而
+    /// 编译器、clippy、两边的测试全都无话可说。其它字段侥幸没事只是因为它们是单个单词。
+    #[test]
+    fn a_conversation_turn_crosses_ipc_with_camel_case_keys() {
+        let turn = ConversationTurn {
+            id: "turn-1".to_string(),
+            prompt: "ask".to_string(),
+            outcome: "done".to_string(),
+            derived: false,
+            run_id: Some("run-1".to_string()),
+        };
+
+        let value = serde_json::to_value(&turn).expect("serializes");
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["derived", "id", "outcome", "prompt", "runId"]);
+        // 存下来的会话用同一个结构体读回，所以改了名字也必须还能读回自己写出去的那份
+        let restored: ConversationTurn = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(restored, turn);
+    }
+
     /// 撤销"这一轮"改的文件：一轮里落盘几次，用户记得的只是那一件事。
     ///
     /// 两边靠运行 id 对上。之前 checkpoint 和对话轮之间没有任何关联，所以"回到这一轮之前"
