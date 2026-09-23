@@ -291,6 +291,74 @@ pub struct UndoResult {
 /// 保留的撤销层数
 const MAX_UNDO_CHECKPOINTS: usize = 20;
 
+/// 一条写入及其出处：`None` 是内置工具自己报的，`Some(名字)` 是事后比对发现的。
+pub type SourcedWrite = (
+    Option<String>,
+    crate::agent::workspace_tools::AgentFileWrite,
+);
+
+/// 一个文件在这次发布里被谁改过。
+///
+/// 需要它是因为同一个文件可能既被内置工具写过、又在某次 MCP 调用期间变过。两种出处的
+/// 可信度不同（一个是工具自述，一个是我们比对出来的推断），而卡片上只有一句 rationale，
+/// 所以那句话必须把两者都说出来 —— 只说一个就是在替另一个背书。
+#[derive(Default)]
+struct WriteSources {
+    /// 有内置工具自己报过这个文件
+    tool_reported: bool,
+    /// 比对发现它在这些工具运行期间变过
+    detected: Vec<String>,
+}
+
+impl WriteSources {
+    fn add(&mut self, source: Option<String>) {
+        match source {
+            None => self.tool_reported = true,
+            Some(tool) if !self.detected.contains(&tool) => self.detected.push(tool),
+            Some(_) => {}
+        }
+    }
+
+    /// 卡片上那句"为什么会有这张卡"。
+    ///
+    /// 比对发现的那部分刻意只说"在它运行期间变的"，不说"它写的"：我们比的是调用前后两次
+    /// 读到的内容，而那段时间里用户自己保存一次文件、或者一个 watcher 重写一次产物，
+    /// 看起来完全一样。把推断写成事实会让用户照着一个错的因果去撤销。
+    fn rationale(&self, removed: bool, moved: bool) -> String {
+        let detected = match self.detected.len() {
+            0 => None,
+            1 => Some(format!("the MCP tool {}", self.detected[0])),
+            _ => Some(format!("the MCP tools {}", self.detected.join(", "))),
+        };
+        match (self.tool_reported, detected) {
+            (true, Some(tools)) => format!(
+                "{}; it also changed while {} ran",
+                builtin_rationale(removed, moved),
+                tools
+            ),
+            (true, None) => builtin_rationale(removed, moved),
+            (false, Some(tools)) => format!(
+                "Changed while {} ran — detected by comparing the file with the copy taken before \
+                 the call, so the change is attributed to that call rather than proven to come \
+                 from it",
+                tools
+            ),
+            // 没有出处的写入不会走到这里：`add` 至少被调用一次
+            (false, None) => "Recorded by the Agent".to_string(),
+        }
+    }
+}
+
+fn builtin_rationale(removed: bool, moved: bool) -> String {
+    if removed {
+        "Deleted by the Agent through workspace_delete_file".to_string()
+    } else if moved {
+        "Moved by the Agent through workspace_move_file".to_string()
+    } else {
+        "Written directly by the Agent through workspace_write_file".to_string()
+    }
+}
+
 /// 一轮已完成的对话：用户说了什么，以及那一轮的结果
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationTurn {
@@ -856,14 +924,17 @@ impl AgentOrchestrator {
         writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
         run_id: Option<String>,
     ) -> Vec<crate::agent::state_machine::FileDiff> {
-        self.record_writes_from(None, writes, run_id)
+        self.record_writes_from(
+            writes.into_iter().map(|write| (None, write)).collect(),
+            run_id,
+        )
     }
 
     /// 同上，但这些改动是**事后比对发现**的，不是某个内置工具自己报上来的。
     ///
     /// `source` 是那个工具的限定名（目前只有 MCP 会走这条路）。分开一个入口而不是在
     /// `AgentFileWrite` 上加字段：那个结构有二十多处构造点，其中绝大多数是测试，
-    /// 为一行出处改二十多处литерал会把这次改动的风险堆在无关的地方。
+    /// 为一行出处改二十多处字面量会把这次改动的风险堆在无关的地方。
     ///
     /// 出处必须能说出来：审查卡片上的 rationale 此前硬写着 `workspace_write_file`，
     /// 而一条 MCP 发现来的记录挂上那句话就是假的 —— 用户会去找一个根本没被调用的工具。
@@ -873,13 +944,24 @@ impl AgentOrchestrator {
         writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
         run_id: Option<String>,
     ) -> Vec<crate::agent::state_machine::FileDiff> {
-        self.record_writes_from(Some(source), writes, run_id)
+        self.record_writes_from(
+            writes
+                .into_iter()
+                .map(|write| (Some(source.to_string()), write))
+                .collect(),
+            run_id,
+        )
     }
 
-    fn record_writes_from(
+    /// 发布一批写入：合并成每个文件一张卡片，**一次运行一个撤销检查点**。
+    ///
+    /// 带出处的原因是这两类写入必须走**同一次**调用：分两次调用会给同一个文件压两个检查点，
+    /// 而它们的 `previous` 一个是 MCP 调用前、一个是内置工具写之前。撤销是严格 LIFO 的，
+    /// 于是第二次撤销会把 Agent 的中间产物写回磁盘，界面还报"已恢复"。审查区那边同样会
+    /// 出现同一个文件的两张 applied 卡片。
+    pub fn record_writes_from(
         &mut self,
-        source: Option<&str>,
-        writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
+        writes: Vec<SourcedWrite>,
         run_id: Option<String>,
     ) -> Vec<crate::agent::state_machine::FileDiff> {
         use crate::agent::state_machine::{DiffHunk, DiffProvenance, FileDiff};
@@ -897,20 +979,25 @@ impl AgentOrchestrator {
         let mut order: Vec<(String, bool)> = Vec::new();
         let mut merged: std::collections::HashMap<
             (String, bool),
-            crate::agent::workspace_tools::AgentFileWrite,
+            (WriteSources, crate::agent::workspace_tools::AgentFileWrite),
         > = std::collections::HashMap::new();
-        for write in writes {
+        for (source, write) in writes {
             let key = (write.file.clone(), write.moved_from.is_some());
             match merged.get_mut(&key) {
-                Some(existing) => {
+                Some((sources, existing)) => {
+                    sources.add(source);
+                    // 两份日志之间没有时间戳，所以"后进的赢"只是约定。撤销要的
+                    // `previous` 保留的是**第一条**，那一条才是这次运行开始前的内容。
                     existing.updated = write.updated;
                     // 最后一次操作决定这个文件最终是"改了"还是"没了"：先写后删是删除，
                     // 先删后写（重建）是编辑。只看第一条会把删除显示成一次普通修改。
                     existing.removed = write.removed;
                 }
                 None => {
+                    let mut sources = WriteSources::default();
+                    sources.add(source);
                     order.push(key.clone());
-                    merged.insert(key, write);
+                    merged.insert(key, (sources, write));
                 }
             }
         }
@@ -918,7 +1005,7 @@ impl AgentOrchestrator {
         let mut snapshots = Vec::new();
         let mut created = Vec::new();
         for key in &order {
-            let Some(write) = merged.remove(key) else {
+            let Some((sources, write)) = merged.remove(key) else {
                 continue;
             };
             snapshots.push(crate::agent::diff_apply::FileSnapshot {
@@ -935,9 +1022,10 @@ impl AgentOrchestrator {
                 file: write.file.clone(),
                 base_hash: None,
                 provenance: Some(DiffProvenance {
-                    protocol: match source {
-                        Some(_) => "mcp_tool".to_string(),
-                        None => "workspace_tool".to_string(),
+                    protocol: if sources.tool_reported {
+                        "workspace_tool".to_string()
+                    } else {
+                        "mcp_tool".to_string()
                     },
                     // 删除必须和"清空"长得不一样：两者的 hunk 都是 previous → ""，
                     // 只有这个标签能告诉用户文件已经不在了。
@@ -953,27 +1041,7 @@ impl AgentOrchestrator {
                         "edit"
                     }
                     .to_string(),
-                    rationale: Some(match source {
-                        // 事后发现的那一类要说清"怎么知道的"：它不是工具报上来的，而是拿
-                        // 调用前留的底比出来的 —— 用户据此才能判断这条记录有多可信
-                        Some(tool) if write.removed => format!(
-                            "Deleted while the MCP tool {} ran; detected by comparing the file with the copy taken before the call",
-                            tool
-                        ),
-                        Some(tool) => format!(
-                            "Written while the MCP tool {} ran; detected by comparing the file with the copy taken before the call",
-                            tool
-                        ),
-                        None if write.removed => {
-                            "Deleted by the Agent through workspace_delete_file".to_string()
-                        }
-                        None if moved_from.is_some() => {
-                            "Moved by the Agent through workspace_move_file".to_string()
-                        }
-                        None => {
-                            "Written directly by the Agent through workspace_write_file".to_string()
-                        }
-                    }),
+                    rationale: Some(sources.rationale(write.removed, moved_from.is_some())),
                     schema_version: None,
                     change_index: None,
                     source_role: None,
@@ -3246,6 +3314,52 @@ mod tests {
         assert!(recorded[0].hunks[0].updated.is_empty());
         // 已经落盘，状态必须如实
         assert_eq!(recorded[0].status, "applied");
+    }
+
+    /// 同一个文件既被内置工具写过、又在某次 MCP 调用期间变过：**一张卡片、一个检查点**。
+    ///
+    /// 分两次发布会压两个检查点，它们的 `previous` 一个是 MCP 调用前、一个是内置工具写之前。
+    /// 撤销是严格 LIFO 的，于是第二次撤销把 Agent 的中间产物写回磁盘，界面还报"已恢复"；
+    /// 审查区那边同时出现同一个文件的两张 applied 卡片，"改了几个文件"也会多算。
+    #[test]
+    fn one_file_touched_by_both_sources_yields_one_card_and_one_checkpoint() {
+        let mut orchestrator = AgentOrchestrator::new();
+        let write = |previous: &str, updated: &str| AgentFileWrite {
+            file: "src/app.ts".to_string(),
+            path: PathBuf::from("src/app.ts"),
+            previous: Some(previous.to_string()),
+            updated: updated.to_string(),
+            removed: false,
+            moved_from: None,
+        };
+
+        // 先是 MCP 调用期间变的（A→B），然后内置工具又写了一次（B→C）
+        let recorded = orchestrator.record_writes_from(
+            vec![
+                (Some("mcp__fs__write_file".to_string()), write("A", "B")),
+                (None, write("B", "C")),
+            ],
+            Some("run-1".to_string()),
+        );
+
+        assert_eq!(recorded.len(), 1, "{:?}", recorded);
+        // 撤销要回到这次运行之前，也就是最早那份内容
+        assert_eq!(recorded[0].hunks[0].original, "A");
+        assert_eq!(recorded[0].hunks[0].updated, "C");
+        let rationale = recorded[0]
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.rationale.clone())
+            .unwrap_or_default();
+        // 两个出处都要说出来：只说一个就是在替另一个背书
+        assert!(rationale.contains("workspace_write_file"), "{}", rationale);
+        assert!(rationale.contains("mcp__fs__write_file"), "{}", rationale);
+
+        let (_, files) = orchestrator.pending_undo().expect("one checkpoint");
+        assert_eq!(files, vec!["src/app.ts".to_string()]);
+        // 恰好一层。多出来的那一层会在第二次撤销时把 B 写回磁盘 —— 这里直接数层数而不是
+        // 真跑一次 `undo_last_apply`：那个方法会按相对路径往磁盘上写文件，测试不该留下垃圾
+        assert_eq!(orchestrator.undo_stack.len(), 1);
     }
 
     /// 事后发现的 MCP 写入要进审查区、要能撤销，而卡片上的出处必须是**那个 MCP 工具**。

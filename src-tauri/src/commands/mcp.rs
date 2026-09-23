@@ -141,7 +141,17 @@ impl McpToolInvoker {
         };
         let mut probes = Vec::new();
         let mut uncovered = 0usize;
-        for path in crate::services::mcp::argument_targets(arguments, &root) {
+        for target in crate::services::mcp::argument_targets(arguments, &root) {
+            // 走内置写入用的同一道解析：`argument_targets` 是纯词法的，没碰过磁盘，所以
+            // 它给的路径既可能是一条指向工作区外的符号链接，也可能是 `.env` / `.git/` 这类
+            // 拒绝清单上的目标。留底意味着**读出内容**再把它放进审查卡片和撤销快照 ——
+            // 那两处都会把内容发到界面，撤销还会原路写回去。一道检查两个方向一起挡掉。
+            let Ok(path) =
+                crate::services::workspace::resolve_for_agent_write(&target.to_string_lossy())
+            else {
+                uncovered += 1;
+                continue;
+            };
             let metadata = std::fs::metadata(&path);
             let existed = metadata
                 .as_ref()

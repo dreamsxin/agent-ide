@@ -24,18 +24,31 @@ pub const OUTPUT_ENCODING_ENV: &str = "AGENT_IDE_OUTPUT_ENCODING";
 
 /// 把子进程的字节解成字符串。
 ///
-/// 顺序有意义：**先试 UTF-8**。现代工具链（cargo、node、rustc）即便在 Windows 上也多按
-/// UTF-8 写，而代码页解码会把合法的 UTF-8 中文变成一串乱码 —— 反过来错得更难看。只有
-/// UTF-8 解不通时才落到平台编码。
+/// **逐行**决定编码，不是整块。同一个管道里可以混着两种编码：中文 Windows 上
+/// `cargo build` 里 cargo 自己的诊断是 UTF-8，而它转发的 MSVC 输出是 CP936。整块判断时
+/// 一个 CP936 字节就会让**整段**（包括那些本来正确的 UTF-8）按 GBK 重解一遍，产出的正是
+/// 这个模块想避免的那种"看起来正常但是错的"文字。被 kill 的子进程留下的半个字符同理。
+///
+/// 每一行里顺序有意义：**先试 UTF-8**。现代工具链（cargo、node、rustc）即便在 Windows 上
+/// 也多按 UTF-8 写，而代码页解码会把合法的 UTF-8 中文变成乱码 —— 反过来错得更难看。
 pub fn decode_child_output(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.to_string();
     }
-    if let Some(encoding) = fallback_encoding() {
-        let (text, _, _) = encoding.decode(bytes);
-        return text.into_owned();
+    // 只有整块解不通时才按行拆：常见情况（纯 UTF-8）一次判断就结束
+    let encoding = fallback_encoding();
+    let mut out = String::with_capacity(bytes.len());
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        match (std::str::from_utf8(line), encoding) {
+            (Ok(text), _) => out.push_str(text),
+            (Err(_), Some(encoding)) => out.push_str(&encoding.decode(line).0),
+            (Err(_), None) => out.push_str(&String::from_utf8_lossy(line)),
+        }
     }
-    String::from_utf8_lossy(bytes).to_string()
+    out
 }
 
 /// UTF-8 解不通时该用哪种编码。非 Windows 上返回 `None`（那里 UTF-8 是事实标准，
@@ -153,12 +166,22 @@ fn split_leading_assignments(command: &str) -> Result<LeadingAssignments<'_>, St
         if key.is_empty() || !key.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
             break;
         }
-        // 值两侧的引号在 cmd 里要换成 `set "K=V"` 的形式，所以先剥掉
-        let value = value.trim_matches('\'');
+        // 值两侧的引号在 cmd 里要换成 `set "K=V"` 的形式，所以先剥掉。两种引号都要剥：
+        // 只剥单引号会让 `MSG="two words"` 带着引号进下面那个检查，然后被一句
+        // "cmd 表达不了"拒掉 —— 而 `set "MSG=two words"` 完全表达得了。
+        let value = value.trim_matches(|ch| ch == '\'' || ch == '"');
         if value.contains('"') {
             return Err(format!(
                 "cmd cannot set {} to a value containing a double quote. Set it outside the \
                  command, or use a value without quotes.",
+                key
+            ));
+        }
+        if value.contains('%') {
+            // `set "K=100%"` 之后 `%...%` 会被当成变量展开，值就不是用户写的那个了
+            return Err(format!(
+                "cmd would treat the % in {}'s value as a variable expansion. Set it outside the \
+                 command, or use a value without %.",
                 key
             ));
         }
@@ -172,8 +195,16 @@ fn split_leading_assignments(command: &str) -> Result<LeadingAssignments<'_>, St
 fn token_end(text: &str) -> Option<usize> {
     let mut in_single = false;
     let mut in_double = false;
+    let mut escaped = false;
     for (index, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            // 只在双引号里认转义。引号外的 `\` 在 Windows 上是路径分隔符，
+            // 把 `C:\work\ x` 当成转义会把两个词粘成一个
+            '\\' if in_double => escaped = true,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
             ch if ch.is_whitespace() && !in_single && !in_double => return Some(index),
@@ -187,39 +218,57 @@ fn token_end(text: &str) -> Option<usize> {
 fn rewrite_for_cmd(command: &str) -> Result<String, String> {
     let mut out = String::with_capacity(command.len());
     let mut chars = command.chars().peekable();
-    let mut in_single = false;
     let mut in_double = false;
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\'' if !in_double => {
-                in_single = !in_single;
-                // 单引号在 cmd 里不是引号，只能换成双引号；内容里本来就有双引号时换不了
-                out.push('"');
+            // 双引号里的 `\"` 不结束字符串。数错这一个字符的后果很实在：`echo "a\"b" ; echo c`
+            // 会把顶层的 `;` 当成引号内的内容，于是第二条命令再也不会跑，而且什么都不报；
+            // 反过来也会给一条合法命令报一句假的"引号没闭合"。
+            '\\' if in_double => {
+                out.push('\\');
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
             }
-            '"' if !in_single => {
+            '"' => {
                 in_double = !in_double;
                 out.push('"');
             }
-            '"' if in_single => {
-                return Err(
-                    "That command mixes single and double quotes, which cmd cannot express. \
-                     Rewrite it with double quotes only."
-                        .to_string(),
-                );
+            '\'' if !in_double => {
+                // 单引号段整段取出来再判：cmd 里单引号不是引号，必须换成双引号，而换之前
+                // 得确认换完语义不变 —— 双引号里 `%VAR%` 会展开、结尾的 `\` 会转义掉引号
+                let mut segment = String::new();
+                let mut closed = false;
+                for inner in chars.by_ref() {
+                    if inner == '\'' {
+                        closed = true;
+                        break;
+                    }
+                    segment.push(inner);
+                }
+                if !closed {
+                    return Err("That command has an unclosed quote.".to_string());
+                }
+                check_single_quoted(&segment)?;
+                out.push('"');
+                out.push_str(&segment);
+                out.push('"');
             }
-            ';' if !in_single && !in_double => {
+            ';' if !in_double => {
                 // cmd 用 `&` 表示"接着跑下一条"，`;` 在那里是普通字符
                 out.push('&');
             }
-            '$' if !in_single && chars.peek() == Some(&'(') => {
+            // 命令替换在双引号里同样会被 shell 执行，所以这里不看引号状态；单引号段走上面
+            // 那条分支，在那里它确实是字面量
+            '$' if chars.peek() == Some(&'(') => {
                 return Err(
                     "cmd has no `$(...)` command substitution. Run the inner command first and \
                      pass its result, or use a command that does not need substitution."
                         .to_string(),
                 );
             }
-            '`' if !in_single => {
+            '`' => {
                 return Err(
                     "cmd has no backtick command substitution. Run the inner command separately."
                         .to_string(),
@@ -228,10 +277,39 @@ fn rewrite_for_cmd(command: &str) -> Result<String, String> {
             other => out.push(other),
         }
     }
-    if in_single || in_double {
+    if in_double {
         return Err("That command has an unclosed quote.".to_string());
     }
     Ok(out)
+}
+
+/// 单引号里的内容换成双引号之后还是不是同一个东西。
+fn check_single_quoted(segment: &str) -> Result<(), String> {
+    if segment.contains('"') {
+        return Err(
+            "That command mixes single and double quotes, which cmd cannot express. Rewrite it \
+             with double quotes only."
+                .to_string(),
+        );
+    }
+    if segment.contains('%') {
+        // 单引号里 `%PATH%` 是字面量，双引号里 cmd 会把它换成环境变量的值 ——
+        // 一个搜索模式会变成这台机器的 PATH，而命令照样"成功"
+        return Err(
+            "cmd would expand the % inside that quoted argument. Pass the value without %, or \
+             escape it for cmd (%%)."
+                .to_string(),
+        );
+    }
+    if segment.ends_with('\\') {
+        // `"src\"` 里那个反斜杠会被 argv 解析器当成转义掉的引号，参数就吞掉了后面的内容
+        return Err(
+            "That quoted argument ends with a backslash, which cmd would read as escaping the \
+             closing quote. Drop the trailing backslash."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -290,6 +368,11 @@ mod tests {
         // 值带空格时引号必须留在 `set` 的形式里
         assert_eq!(
             windows_command("MSG='two words' npm run x").unwrap(),
+            "set \"MSG=two words\" && npm run x"
+        );
+        // 双引号写法一样要认：`set "MSG=two words"` 表达得了，拒绝它就是拒绝一条对的命令
+        assert_eq!(
+            windows_command("MSG=\"two words\" npm run x").unwrap(),
             "set \"MSG=two words\" && npm run x"
         );
         // 参数里的 `=` 不是赋值：位置是唯一的区分信息
@@ -354,9 +437,56 @@ mod tests {
             "cargo clippy --all-targets -- -D warnings",
             "npm run build 2>&1 | more",
             "rg \"fn main\" src",
+            // 双引号里的撇号不是引号：单引号那条分支必须让路，否则这句会被判成引号没闭合
+            "git commit -m \"it's fine\"",
         ] {
             assert_eq!(windows_command(command).unwrap(), command, "{}", command);
         }
+    }
+
+    /// 换成双引号之后语义会变的，宁可拒绝，不能悄悄改掉。
+    ///
+    /// 这三条都是"命令照样成功、结果是错的"那一类，最难被发现：`%PATH%` 在双引号里会被
+    /// cmd 换成这台机器的 PATH；结尾的反斜杠会被 argv 解析器当成转义掉的引号，参数吞掉
+    /// 后面的内容。
+    #[test]
+    fn a_conversion_that_would_change_the_meaning_is_refused() {
+        let error = windows_command("rg '%PATH%' src").unwrap_err();
+        assert!(error.contains('%'), "{}", error);
+
+        let error = windows_command("rg pat 'src\\'").unwrap_err();
+        assert!(error.contains("backslash"), "{}", error);
+    }
+
+    /// 双引号里的 `\"` 不结束字符串，数错了会把顶层的 `;` 当成引号内的内容。
+    ///
+    /// 后果是第二条命令再也不会跑，而且什么都不报 —— 对调用方来说它"成功了"。
+    #[test]
+    fn an_escaped_quote_does_not_hide_the_separator() {
+        assert_eq!(
+            windows_command("echo \"a\\\"b\" ; echo c").unwrap(),
+            "echo \"a\\\"b\" & echo c"
+        );
+    }
+
+    /// 一个管道里混着两种编码时，正确的那部分不能被带坏。
+    ///
+    /// 中文 Windows 上 `cargo build` 就是这个形状：cargo 自己的诊断是 UTF-8，它转发的
+    /// MSVC 输出是 CP936。整块判断会让一个 CP936 字节把整段 UTF-8 一起按 GBK 重解。
+    #[test]
+    fn mixed_encodings_in_one_stream_are_decoded_per_line() {
+        let _guard = crate::services::workspace::env_test_guard();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice("编译通过\n".as_bytes());
+        bytes.extend_from_slice(&[0xB2u8, 0xE2, 0xCA, 0xD4]); // GBK 的 "测试"
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"done\n");
+
+        std::env::set_var(OUTPUT_ENCODING_ENV, "gbk");
+        let decoded = decode_child_output(&bytes);
+        std::env::remove_var(OUTPUT_ENCODING_ENV);
+
+        assert_eq!(decoded, "编译通过\n测试\ndone\n");
     }
 
     /// 两边都要说清 shell 是哪一个 —— 模型只有知道平台才能写对命令。
