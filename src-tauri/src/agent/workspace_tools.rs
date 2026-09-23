@@ -555,7 +555,11 @@ impl WorkspaceToolPermissions {
         }
     }
 
-    fn record_external(&self, action: AgentExternalAction) {
+    /// 记一条"做过、撤不回来"的外部动作。
+    ///
+    /// `pub` 是因为 MCP 执行器住在另一个模块，而它是这个产品最大的副作用面 —— 它做过的事
+    /// 必须能进同一份持久记录，否则"事后查得到"这句话在最该成立的地方不成立。
+    pub fn record_external(&self, action: AgentExternalAction) {
         if let Ok(mut actions) = self.external.lock() {
             actions.push(action);
         }

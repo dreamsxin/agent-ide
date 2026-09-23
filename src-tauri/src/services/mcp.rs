@@ -464,6 +464,202 @@ fn cap_tool_result(value: &str) -> String {
     )
 }
 
+/// 参数里**可能是文件路径**的那几个键名。
+///
+/// 只认一张固定的表，不去嗅探所有字符串值：MCP 工具的参数里塞的是 URL、正则、整段代码，
+/// 逐个字符串猜路径会把记录灌成噪音 —— 而噪音等于没人读，那条记录也就白留了。参考实现
+/// 在做"按参数收窄授权"时用的也是一张固定键表，同一个理由。
+///
+/// 表不全是已知的、可接受的代价：漏掉一个键只意味着这次调用少记一条路径，而记录本身
+/// （调了哪个工具、返回多大）仍然在。宁可少说，不可乱说。
+const PATH_ARGUMENT_KEYS: [&str; 12] = [
+    "path",
+    "paths",
+    "file",
+    "files",
+    "file_path",
+    "filePath",
+    "filepath",
+    "directory",
+    "dir",
+    "cwd",
+    "source_path",
+    "destination_path",
+];
+
+/// 一次调用最多记几条路径。记录是给人读的，十几条路径的一行字没人会读完。
+const MAX_RECORDED_PATHS: usize = 8;
+/// 单条路径最多记多少字符
+const MAX_RECORDED_PATH_CHARS: usize = 200;
+
+/// 一次 MCP 调用的参数里提到的路径，按工作区边界分成两堆。
+///
+/// 只是**事后描述**，不是授权判断：MCP 工具的参数结构完全由外部 server 定义，凭一张键表
+/// 去拦调用，拦掉的多半是用户自己配好的正常用法（比如一个专门管别处目录的 server），
+/// 而真想绕开的人换个键名就过去了。所以这里不拒绝，只把"它说要动哪里"记下来 ——
+/// 撤不回来的事至少要看得见。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ArgumentPaths {
+    pub inside: Vec<String>,
+    pub outside: Vec<String>,
+}
+
+impl ArgumentPaths {
+    pub fn is_empty(&self) -> bool {
+        self.inside.is_empty() && self.outside.is_empty()
+    }
+
+    /// 写进记录的那一句。没提到路径时返回 `None` —— 那种调用（查询、计算）不该被描述成动过文件。
+    pub fn describe(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.inside.is_empty() {
+            parts.push(format!("inside the workspace: {}", self.inside.join(", ")));
+        }
+        if !self.outside.is_empty() {
+            // 先说外面那一堆：它是这句话里唯一可能让人想撤销的部分
+            parts.push(format!(
+                "**outside the workspace**: {}",
+                self.outside.join(", ")
+            ));
+        }
+        Some(format!(
+            "Paths named in its arguments — {}",
+            parts.join("; ")
+        ))
+    }
+}
+
+/// 从一次调用的参数里挑出它提到的路径，并按工作区根目录分开。
+///
+/// 判断是**纯词法**的，不碰磁盘：调用已经发生了，这里只是在描述它说过什么，而一次
+/// `canonicalize` 在这个位置既救不回已经写下去的字节，又会因为文件不存在而失败。
+pub fn argument_paths(arguments: &str, root: &std::path::Path) -> ArgumentPaths {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return ArgumentPaths::default();
+    };
+    let mut mentions = Vec::new();
+    collect_path_mentions(&value, &mut mentions);
+
+    let root = normalize_lexically(root);
+    let mut paths = ArgumentPaths::default();
+    for mention in mentions {
+        let bucket = if lexically_inside(&root, &mention) {
+            &mut paths.inside
+        } else {
+            &mut paths.outside
+        };
+        let shown: String = mention.chars().take(MAX_RECORDED_PATH_CHARS).collect();
+        if !bucket.contains(&shown) {
+            bucket.push(shown);
+        }
+    }
+    paths.inside.truncate(MAX_RECORDED_PATHS);
+    paths.outside.truncate(MAX_RECORDED_PATHS);
+    paths
+}
+
+/// 递归收集路径键下面的字符串值（含字符串数组）。
+fn collect_path_mentions(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let is_path_key = PATH_ARGUMENT_KEYS
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(key));
+                match child {
+                    serde_json::Value::String(text) if is_path_key => push_mention(text, out),
+                    serde_json::Value::Array(items) if is_path_key => {
+                        for item in items {
+                            if let serde_json::Value::String(text) = item {
+                                push_mention(text, out);
+                            }
+                        }
+                    }
+                    // 嵌套结构要往下走：`{"edits":[{"path":"a.ts"}]}` 这种形状很常见
+                    other => collect_path_mentions(other, out),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_path_mentions(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 把一个候选值收进来，顺手挡掉明显不是本地路径的东西。
+fn push_mention(text: &str, out: &mut Vec<String>) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || out.len() >= MAX_RECORDED_PATHS * 2 {
+        return;
+    }
+    // `http://`、`file://` 之类不是本地路径；单独判 `://` 而不是列协议表，因为要挡的是
+    // "它根本不是路径"这一类，而协议名无穷多
+    if trimmed.contains("://") {
+        return;
+    }
+    out.push(trimmed.to_string());
+}
+
+/// 逐段归约 `.` 和 `..`，不查磁盘。
+fn normalize_lexically(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // 弹不动时保留 `..`：那意味着它确实爬到了起点之上，下面的前缀比较会判成外面
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// 这个路径（相对的按工作区根拼）落在工作区里吗。
+fn lexically_inside(root: &std::path::Path, mention: &str) -> bool {
+    let candidate = std::path::Path::new(mention);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let normalized = normalize_lexically(&joined);
+    // Windows 上大小写不敏感，而 `C:\repo-old` 不能因为前缀像就算进 `C:\repo`，
+    // 所以比较按**路径段**走，不按字符串前缀
+    let root_parts: Vec<String> = root
+        .components()
+        .map(|part| comparable_component(&part))
+        .collect();
+    let mut mention_parts = normalized
+        .components()
+        .map(|part| comparable_component(&part));
+    for expected in root_parts {
+        match mention_parts.next() {
+            Some(actual) if actual == expected => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn comparable_component(component: &std::path::Component<'_>) -> String {
+    let raw = component.as_os_str().to_string_lossy().to_string();
+    if cfg!(windows) {
+        raw.to_ascii_lowercase()
+    } else {
+        raw
+    }
+}
+
 /// 丢弃与已注册工具限定名冲突的工具，返回 (保留的工具, 冲突说明)。
 ///
 /// 冲突真实存在：`sanitize_name_part` 把非字母数字统一换成 `_`，所以
@@ -886,6 +1082,85 @@ mod tests {
         assert_eq!(cap_tool_result("ok"), "ok");
         let exact = "x".repeat(MAX_TOOL_RESULT_CHARS);
         assert_eq!(cap_tool_result(&exact), exact);
+    }
+
+    /// 参数里提到的路径要被认出来，并分清在不在工作区里。
+    ///
+    /// 这是 MCP 这条路上目前唯一能说出"它要动哪里"的手段：返回体是自由文本，没有写入清单。
+    /// 所以这个判断必须**认得出常见形状**（嵌套对象、字符串数组），而且**不能把爬出去的
+    /// 路径算成在里面** —— 那句话一旦说错，用户读到的是一条假的安心。
+    #[test]
+    fn argument_paths_are_split_by_the_workspace_boundary() {
+        let root = std::path::Path::new(if cfg!(windows) {
+            "C:\\work\\repo"
+        } else {
+            "/work/repo"
+        });
+        let arguments = r#"{
+            "path": "src/app.ts",
+            "edits": [{"file_path": "docs/readme.md"}, {"file_path": "../outside.txt"}],
+            "files": ["a.ts", "b.ts"],
+            "url": "https://example.com/not/a/path",
+            "pattern": "fn \\w+"
+        }"#;
+
+        let paths = argument_paths(arguments, root);
+
+        assert!(
+            paths.inside.contains(&"src/app.ts".to_string()),
+            "{:?}",
+            paths
+        );
+        assert!(
+            paths.inside.contains(&"docs/readme.md".to_string()),
+            "{:?}",
+            paths
+        );
+        assert!(paths.inside.contains(&"a.ts".to_string()), "{:?}", paths);
+        assert_eq!(paths.outside, vec!["../outside.txt".to_string()]);
+        // URL 和正则不是路径，混进来只会让记录变噪音
+        let all = format!("{:?}", paths);
+        assert!(!all.contains("example.com"), "{}", all);
+        assert!(!all.contains("fn"), "{}", all);
+    }
+
+    /// 前缀像但不是同一个目录的路径算在外面，而绝对路径按边界判。
+    #[test]
+    fn a_sibling_directory_is_not_inside_the_workspace() {
+        let (root, sibling, inside) = if cfg!(windows) {
+            (
+                "C:\\work\\repo",
+                "C:\\work\\repo-old\\x.ts",
+                "C:\\work\\repo\\src\\x.ts",
+            )
+        } else {
+            ("/work/repo", "/work/repo-old/x.ts", "/work/repo/src/x.ts")
+        };
+        let arguments = format!(
+            r#"{{"paths": ["{}", "{}"]}}"#,
+            sibling.replace('\\', "\\\\"),
+            inside.replace('\\', "\\\\")
+        );
+
+        let paths = argument_paths(&arguments, std::path::Path::new(root));
+
+        assert_eq!(paths.outside, vec![sibling.to_string()], "{:?}", paths);
+        assert_eq!(paths.inside, vec![inside.to_string()], "{:?}", paths);
+    }
+
+    /// 没提到任何路径的调用不该被描述成动过文件。
+    #[test]
+    fn a_call_without_paths_describes_nothing() {
+        let root = std::path::Path::new(if cfg!(windows) {
+            "C:\\work\\repo"
+        } else {
+            "/work/repo"
+        });
+        let paths = argument_paths(r#"{"query":"select 1","limit":10}"#, root);
+        assert!(paths.is_empty());
+        assert!(paths.describe().is_none());
+        // 参数不是 JSON 时也一样：猜不出来就别猜
+        assert!(argument_paths("not json", root).is_empty());
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub async fn attach_mcp_tools(
         registry: registry.clone(),
         events,
         policy,
-        cancel: permissions.cancel_switch(),
+        permissions: permissions.clone(),
     });
     (llm.with_extra_tools(definitions), Some(invoker))
 }
@@ -66,12 +66,13 @@ struct McpToolInvoker {
     /// 分支一行都没有覆盖 —— 和 orchestrator 当初的问题是同一个。
     events: Arc<dyn RunEvents>,
     policy: McpToolPolicy,
-    /// 这次运行的副作用开关，和内置工具面、`RunLease` 共用同一个 `Arc`。
+    /// 这次运行的授权。取消开关和外部动作记录都从这里取，不各存一份。
     ///
-    /// MCP 是本产品最大的副作用面（文件系统、git、HTTP 服务器都可能挂在这里），
-    /// 之前它完全不看取消开关：用户点了 Stop，界面变空闲，而排在后面的 MCP 调用
-    /// 照旧一个个发出去。
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// MCP 是本产品最大的副作用面（文件系统、git、HTTP 服务器都可能挂在这里），而它做过
+    /// 什么，此前**一条持久记录都没有**：调用只进内存里的 action log，关窗即失。所以这里
+    /// 要的不只是取消开关，而是整份授权 —— 一次 MCP 调用撤不回来，撤不回来的动作就该走
+    /// 那条"事后查得到"的通道，和导航、截图、`web_fetch` 同一条。
+    permissions: crate::agent::workspace_tools::WorkspaceToolPermissions,
 }
 
 impl McpToolInvoker {
@@ -93,6 +94,31 @@ impl McpToolInvoker {
             serde_json::to_value(entry).unwrap_or_default(),
         );
     }
+
+    /// 把这次调用记进持久的外部动作日志。
+    ///
+    /// 记的是"调了什么、它说要动哪里"，不是"改了哪些文件"—— 后者我们现在还看不见（MCP 的
+    /// 返回体是自由文本，没有写入清单）。把看得见的那部分老实记下来，比什么都不记好；也比
+    /// 假装记全了好。
+    fn record(&self, kind: &str, tool_name: &str, detail: String) {
+        self.permissions
+            .record_external(crate::agent::workspace_tools::AgentExternalAction {
+                kind: kind.to_string(),
+                target: tool_name.to_string(),
+                detail,
+            });
+    }
+
+    /// 参数里提到的路径，按工作区边界分开。工作区根取不到时返回 `None`。
+    fn paths_named(&self, arguments: &str) -> Option<crate::services::mcp::ArgumentPaths> {
+        let root = crate::services::workspace::workspace_root().ok()?;
+        let paths = crate::services::mcp::argument_paths(arguments, &root);
+        if paths.is_empty() {
+            None
+        } else {
+            Some(paths)
+        }
+    }
 }
 
 #[async_trait]
@@ -104,7 +130,7 @@ impl ToolInvoker for McpToolInvoker {
     async fn invoke(&self, tool_name: &str, arguments: &str) -> Result<String, String> {
         // Stop 之后不再往外发调用。MCP 工具做什么我们一概不知道，所以这里只能做能做的
         // 那件事：不开始新的。已经在飞的那一次拦不住 —— 那需要 MCP 客户端支持取消。
-        if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.permissions.cancelled() {
             let detail = format!(
                 "This run was stopped, so MCP tool {} was not called.",
                 tool_name
@@ -114,6 +140,7 @@ impl ToolInvoker for McpToolInvoker {
                 &format!("Refused {} after Stop", tool_name),
                 &detail,
             );
+            self.record("mcp_tool_cancelled", tool_name, detail.clone());
             return Err(detail);
         }
         self.log(
@@ -124,6 +151,7 @@ impl ToolInvoker for McpToolInvoker {
                 truncate(&redact_arguments(arguments), 2000)
             ),
         );
+        let named = self.paths_named(arguments);
         match self.registry.call(tool_name, arguments, self.policy).await {
             Ok(result) => {
                 self.log(
@@ -131,10 +159,32 @@ impl ToolInvoker for McpToolInvoker {
                     &format!("MCP tool {} returned {} chars", tool_name, result.len()),
                     &truncate(&result, 2000),
                 );
+                let mut detail = format!(
+                    "Called MCP tool {}; it returned {} character(s).",
+                    tool_name,
+                    result.chars().count()
+                );
+                if let Some(sentence) = named.as_ref().and_then(|paths| paths.describe()) {
+                    // 提到了路径就说清楚它**没有**进审查区、撤不回来。这句话只在可能动过文件时
+                    // 出现：每条记录都挂一句免责声明，读的人第三条就开始跳过了
+                    detail.push(' ');
+                    detail.push_str(&sentence);
+                    detail.push_str(
+                        ". Anything it wrote is not shown as a diff and cannot be undone from here.",
+                    );
+                }
+                self.record("mcp_tool_call", tool_name, detail);
                 Ok(result)
             }
             Err(error) => {
                 self.log("error", &format!("MCP tool {} failed", tool_name), &error);
+                // 失败也记：一次报错的调用照样可能已经把文件写了一半 —— 错误是 server 说的，
+                // 不是它没动手的证明
+                self.record(
+                    "mcp_tool_failed",
+                    tool_name,
+                    format!("MCP tool {} failed: {}", tool_name, error),
+                );
                 Err(error)
             }
         }
@@ -278,6 +328,7 @@ mod tests {
     use super::{redact_arguments, truncate, McpToolInvoker};
     use crate::agent::events::RecordingEvents;
     use crate::agent::executor::ToolInvoker;
+    use crate::agent::workspace_tools::WorkspaceToolPermissions;
     use crate::services::mcp::{McpRegistry, McpToolPolicy};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -291,11 +342,13 @@ mod tests {
     fn a_stopped_run_refuses_further_mcp_calls_and_says_so() {
         let events = Arc::new(RecordingEvents::new());
         let cancel = Arc::new(AtomicBool::new(false));
+        let mut permissions = WorkspaceToolPermissions::read_only();
+        permissions.adopt_cancel(cancel.clone());
         let invoker = McpToolInvoker {
             registry: Arc::new(McpRegistry::new()),
             events: events.clone(),
             policy: McpToolPolicy::AllowAll,
-            cancel: cancel.clone(),
+            permissions: permissions.clone(),
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
@@ -317,17 +370,23 @@ mod tests {
             "{:?}",
             logged[0]
         );
+        // 而且要进那份活过关窗的记录
+        let actions = permissions.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "mcp_tool_cancelled");
     }
 
     /// 没被取消时闸门不挡路：拒绝要来自策略或注册表，不能来自开关。
     #[test]
     fn an_active_run_is_not_blocked_by_the_switch() {
         let events = Arc::new(RecordingEvents::new());
+        let mut permissions = WorkspaceToolPermissions::read_only();
+        permissions.adopt_cancel(Arc::new(AtomicBool::new(false)));
         let invoker = McpToolInvoker {
             registry: Arc::new(McpRegistry::new()),
             events: events.clone(),
             policy: McpToolPolicy::AllowAll,
-            cancel: Arc::new(AtomicBool::new(false)),
+            permissions: permissions.clone(),
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
@@ -339,6 +398,10 @@ mod tests {
         assert!(!error.contains("stopped"), "{}", error);
         // 正常路径会先记一条"正在调用"
         assert_eq!(events.payloads_for("agent-action-log")[0]["level"], "info");
+        // 失败的调用也进持久记录：一句报错不是"它没动手"的证明
+        let actions = permissions.take_external_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "mcp_tool_failed");
     }
 
     /// MCP 工具参数会进 action log。模型把密钥当参数传进来时，日志不能原样留存。
