@@ -10,6 +10,7 @@ import { useThemeStore } from "../../stores/useThemeStore";
 import type { AgentMode } from "../../types/agent";
 import type { ProjectTaskDefinition } from "../../stores/useTaskStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { useT } from "../../i18n";
 import { describeTabs, selectionUrlOrError } from "../../utils/browserTabs";
 import type { BrowserTab } from "../../types/browser";
 
@@ -30,6 +31,7 @@ interface CommandPaletteProps {
 }
 
 export default function CommandPalette({ visible, commands, onClose }: CommandPaletteProps) {
+  const t = useT();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -93,7 +95,7 @@ export default function CommandPalette({ visible, commands, onClose }: CommandPa
               void runSelected();
             }
           }}
-          placeholder="Search commands..."
+          placeholder={t("palette.search")}
           className="w-full border-b border-surface-border bg-surface-base px-4 py-3 text-sm text-surface-text outline-none placeholder:text-surface-muted"
         />
         <div className="max-h-[55vh] overflow-auto p-1">
@@ -125,7 +127,7 @@ export default function CommandPalette({ visible, commands, onClose }: CommandPa
             ))
           ) : (
             <div className="px-4 py-8 text-center text-xs text-surface-muted">
-              No matching commands
+              {t("palette.noMatch")}
             </div>
           )}
         </div>
@@ -135,6 +137,7 @@ export default function CommandPalette({ visible, commands, onClose }: CommandPa
 }
 
 export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition | undefined) => void | Promise<void>, tasks: ProjectTaskDefinition[]) {
+  const t = useT();
   const leftVisible = useLayoutStore((s) => s.leftVisible);
   const rightVisible = useLayoutStore((s) => s.rightVisible);
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
@@ -183,54 +186,61 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     const commands: PaletteCommand[] = [
       {
         id: "browser.open-selection",
-        title: "Browser: Open Selected URL in Chrome",
-        subtitle: "Open the editor selection as a page in your own Chrome",
-        group: "Browser",
+        title: t("palette.browser.open"),
+        subtitle: t("palette.browser.open.sub"),
+        group: t("palette.group.browser"),
         keywords: ["chrome", "url", "open", "cdp", "preview"],
         run: async () => {
           if (!isTauriRuntime()) return;
           const { url, error } = selectionUrlOrError(selectedText);
-          if (!url) {
-            reportBrowser("error", error ?? "Nothing to open.");
+          if (error) {
+            reportBrowser("error", t(error.key, error.params));
             return;
           }
+          // 走到这里 `url` 一定有值，这一句只是给类型收窄用
+          if (!url) return;
           try {
             const tab = await invoke<BrowserTab>("browser_open_url", { url });
-            reportBrowser("info", `Opened in Chrome: ${tab.url}`);
+            reportBrowser("info", t("palette.browser.opened", { url: tab.url }));
           } catch (e) {
-            reportBrowser("error", "Could not open the page in Chrome", String(e));
+            reportBrowser("error", t("palette.browser.openFailed"), String(e));
           }
         },
       },
       {
         id: "browser.list-tabs",
-        title: "Browser: List Chrome Tabs",
-        subtitle: "Show the pages Agent IDE can currently reach",
-        group: "Browser",
+        title: t("palette.browser.tabs"),
+        subtitle: t("palette.browser.tabs.sub"),
+        group: t("palette.group.browser"),
         keywords: ["chrome", "tabs", "cdp", "attach"],
         run: async () => {
           if (!isTauriRuntime()) return;
           try {
             const tabs = await invoke<BrowserTab[]>("browser_list_tabs");
+            const summary = describeTabs(tabs);
             reportBrowser(
               "info",
-              describeTabs(tabs),
+              t(summary.key, summary.params),
               tabs.map((tab) => `${tab.title} — ${tab.url}`).join("\n")
             );
           } catch (e) {
-            reportBrowser("error", "Could not reach Chrome", String(e));
+            reportBrowser("error", t("palette.browser.unreachable"), String(e));
           }
         },
       },
       {
         id: "workspace.open-folder",
-        title: "Open Workspace Folder",
-        subtitle: "Choose a folder and make it the active workspace",
-        group: "Workspace",
+        title: t("palette.workspace.open"),
+        subtitle: t("palette.workspace.open.sub"),
+        group: t("palette.group.workspace"),
         keywords: ["folder", "project"],
         run: async () => {
           if (!isTauriRuntime()) return;
-          const selected = await open({ directory: true, multiple: false, title: "Open Workspace Folder" });
+          const selected = await open({
+            directory: true,
+            multiple: false,
+            title: t("palette.workspace.open"),
+          });
           if (selected && typeof selected === "string") {
             await invoke("save_workspace_path", { path: selected });
             setWorkspacePath(selected);
@@ -238,20 +248,21 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
           }
         },
       },
-      panelCommand("panel.explorer", "Show Explorer", "Navigation", () => {
+      panelCommand("panel.explorer", t("palette.explorer"), t("palette.group.navigation"), () => {
         setLeftTab("explorer");
         if (!leftVisible) toggleLeftPanel();
       }),
-      panelCommand("panel.git", "Show Source Control", "Navigation", () => {
+      panelCommand("panel.git", t("palette.git"), t("palette.group.navigation"), () => {
         setLeftTab("git");
         if (!leftVisible) toggleLeftPanel();
       }),
-      panelCommand("panel.agent", "Show Agent", "Navigation", () => {
+      panelCommand("panel.agent", t("palette.agent"), t("palette.group.navigation"), () => {
         if (!rightVisible) toggleRightPanel();
       }),
       agentViewCommand(
         "panel.agent.task",
-        "Open Agent Task",
+        t("palette.agent.task"),
+        t("palette.group.agent"),
         "task",
         setAgentView,
         rightVisible,
@@ -259,7 +270,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       ),
       agentViewCommand(
         "panel.agent.plan",
-        "Open Agent Plan",
+        t("palette.agent.plan"),
+        t("palette.group.agent"),
         "plan",
         setAgentView,
         rightVisible,
@@ -267,7 +279,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       ),
       agentViewCommand(
         "panel.agent.changes",
-        "Review Agent Changes",
+        t("palette.agent.changes"),
+        t("palette.group.agent"),
         "changes",
         setAgentView,
         rightVisible,
@@ -277,7 +290,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       // "新建任务"是个动作而不是视图，所以不走 `agentViewCommand`。
       agentViewCommand(
         "panel.agent.sessions",
-        "Open Agent Task History",
+        t("palette.agent.sessions"),
+        t("palette.group.agent"),
         "sessions",
         setAgentView,
         rightVisible,
@@ -286,10 +300,9 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       ),
       {
         id: "agent.new-session",
-        title: "Start a New Agent Task",
-        subtitle:
-          "Clears this view and the conversation the next prompt would inherit. The old task stays in Task history.",
-        group: "Agent",
+        title: t("palette.agent.new"),
+        subtitle: t("palette.agent.new.sub"),
+        group: t("palette.group.agent"),
         keywords: ["new", "task", "clear", "reset", "conversation", "context", "session"],
         run: () => {
           // 被拒绝时错误已经进 store.error，Agent 面板上的错误条会显示
@@ -302,7 +315,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       // 所以这里把它当作关键词挂到 Settings 上，搜 "mcp" 能直接到。
       agentViewCommand(
         "panel.agent.pipeline",
-        "Configure Agent Pipeline",
+        t("palette.agent.pipeline"),
+        t("palette.group.agent"),
         "pipeline",
         setAgentView,
         rightVisible,
@@ -311,7 +325,8 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
       ),
       agentViewCommand(
         "panel.agent.settings",
-        "Open Agent Settings",
+        t("palette.agent.settings"),
+        t("palette.group.agent"),
         "settings",
         setAgentView,
         rightVisible,
@@ -328,61 +343,75 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
           "context",
         ]
       ),
-      panelCommand("panel.terminal", "Show Terminal", "Navigation", () => {
+      panelCommand("panel.terminal", t("palette.terminal"), t("palette.group.navigation"), () => {
         setBottomTab("terminal");
         if (!bottomVisible) toggleBottomPanel();
       }),
-      panelCommand("panel.commands", "Show Commands", "Navigation", () => {
+      panelCommand("panel.commands", t("palette.commands"), t("palette.group.navigation"), () => {
         setBottomTab("commands");
         if (!bottomVisible) toggleBottomPanel();
       }),
-      panelCommand("panel.problems", "Show Problems", "Navigation", () => {
+      panelCommand("panel.problems", t("palette.problems"), t("palette.group.navigation"), () => {
         setBottomTab("problems");
         if (!bottomVisible) toggleBottomPanel();
       }),
-      panelCommand("panel.logs", "Show Logs", "Navigation", () => {
+      panelCommand("panel.logs", t("palette.logs"), t("palette.group.navigation"), () => {
         setBottomTab("logs");
         if (!bottomVisible) toggleBottomPanel();
       }),
       {
         id: "layout.focus",
-        title: "Toggle Focus Mode",
-        group: "View",
+        title: t("palette.focus"),
+        group: t("palette.group.view"),
         run: toggleFocusMode,
       },
       {
         id: "theme.toggle",
-        title: "Toggle Theme",
-        group: "View",
+        title: t("palette.theme"),
+        group: t("palette.group.view"),
         run: toggleTheme,
       },
       {
         id: "view.performance-overlay",
-        title: performanceOverlay ? "Hide Editor Performance Overlay" : "Show Editor Performance Overlay",
-        subtitle: "Editor FPS, frame time, and dropped frames",
-        group: "View",
+        title: performanceOverlay ? t("palette.perf.hide") : t("palette.perf.show"),
+        subtitle: t("palette.perf.sub"),
+        group: t("palette.group.view"),
         run: togglePerformanceOverlay,
       },
-      agentModeCommand("agent.mode.suggest", "Set Agent Mode: Suggest", "suggest", changeMode),
-      agentModeCommand("agent.mode.auto", "Set Agent Mode: Auto", "auto", changeMode),
+      agentModeCommand(
+        "agent.mode.suggest",
+        t("palette.mode.suggest"),
+        t("palette.group.agent"),
+        "suggest",
+        changeMode
+      ),
+      agentModeCommand(
+        "agent.mode.auto",
+        t("palette.mode.auto"),
+        t("palette.group.agent"),
+        "auto",
+        changeMode
+      ),
       {
         id: "agent.undo-apply",
         // 唯一的 Undo 按钮在 Changes 视图里，右面板一收起就没有退路了。
         // 撤销是"刚发现改错了"时要用的东西，不能只有一个入口。
-        title: pendingUndo ? `Undo Apply: ${pendingUndo.label}` : "Undo Apply",
+        title: pendingUndo
+          ? t("palette.undo.named", { label: pendingUndo.label })
+          : t("palette.undo"),
         subtitle: pendingUndo
-          ? `Restore ${pendingUndo.files.length} file(s) to their state before that apply`
-          : "Nothing has been applied that can be undone",
-        group: "Agent",
+          ? t("palette.undo.sub", { count: pendingUndo.files.length })
+          : t("palette.undo.none"),
+        group: t("palette.group.agent"),
         keywords: ["revert", "restore", "rollback"],
         disabled: !pendingUndo,
         run: () => void undoLastApply(),
       },
       {
         id: "agent.stop",
-        title: "Stop Agent",
-        subtitle: "Cancel the current Agent run",
-        group: "Agent",
+        title: t("palette.stop"),
+        subtitle: t("palette.stop.sub"),
+        group: t("palette.group.agent"),
         disabled: agentState === "idle" || agentState === "done",
         run: () => void stopAgent(),
       },
@@ -393,7 +422,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         id: `task.${task.id}`,
         title: task.label,
         subtitle: task.command,
-        group: "Project Command",
+        group: t("palette.group.task"),
         keywords: [task.id, task.command, task.source],
         run: () => runProjectTask(task),
       });
@@ -416,6 +445,7 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
     setLeftTab,
     setWorkspacePath,
     stopAgent,
+    t,
     tasks,
     toggleBottomPanel,
     toggleFocusMode,
@@ -435,6 +465,7 @@ function panelCommand(id: string, title: string, group: string, run: () => void)
 function agentViewCommand(
   id: string,
   title: string,
+  group: string,
   view: AgentViewId,
   setAgentView: (view: AgentViewId) => void,
   rightVisible: boolean,
@@ -444,7 +475,7 @@ function agentViewCommand(
   return {
     id,
     title,
-    group: "Agent",
+    group,
     keywords,
     run: () => {
       setAgentView(view);
@@ -456,13 +487,14 @@ function agentViewCommand(
 function agentModeCommand(
   id: string,
   title: string,
+  group: string,
   mode: AgentMode,
   changeMode: (mode: AgentMode) => Promise<void>
 ): PaletteCommand {
   return {
     id,
     title,
-    group: "Agent",
+    group,
     run: () => void changeMode(mode),
   };
 }
@@ -477,6 +509,9 @@ function scoreCommand(command: PaletteCommand, query: string) {
     command.title,
     command.subtitle,
     command.group,
+    // id 也参与匹配：标题跟着界面语言走，而 `panel.explorer`、`theme.toggle` 这些
+    // 不会。少了它，界面切成中文之后搜 "explorer" 就一条都找不到。
+    command.id,
     ...(command.keywords ?? []),
   ]
     .filter(Boolean)

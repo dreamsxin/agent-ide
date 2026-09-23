@@ -21,7 +21,9 @@ describe("i18n", () => {
    * 不能靠放宽规则，否则下一条漏翻的也会从这个缝里过去。
    */
   it("has a real Chinese string for every key", () => {
-    const sameOnPurpose = new Set(["chat.context.agentsMd"]);
+    // 例外只有专有名词：`AGENTS.md` 是文件名，"Agent" 是这个产品里贯穿始终的叫法
+    // （中文界面里也写作「Agent 设置」「Agent 面板」），翻成"智能体"反而对不上其他地方。
+    const sameOnPurpose = new Set(["chat.context.agentsMd", "palette.group.agent"]);
     const untranslated = Object.keys(EN).filter((key) => {
       const messageKey = key as keyof typeof EN;
       if (sameOnPurpose.has(key)) return false;
