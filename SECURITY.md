@@ -128,6 +128,25 @@ They are advertised when the profile's `toolCallMode` is `native_tools`, which i
 - **Malformed arguments are refused before anyone is disturbed**: fewer than 2 or more than 4 options, options that repeat case-insensitively, or an empty question. The error tells the model what to fix; opening a dialog the user cannot make sense of spends the one thing this tool costs — their attention.
 - It is only advertised when a question channel is attached, so the CLI and other headless entry points never see it.
 
+## Fetching the Web
+
+`web_fetch` is attached **by default and asks for no approval**. Looking something up is how an Agent finishes a task, and reading a public page has no effect on this machine that could need undoing. The safety here is a hard refusal where the harm is real, plus an audit trail afterwards — not a prompt before every request, which mostly trains the user to click through the prompts that do matter.
+
+Refused outright, before any request goes out (`services/web_fetch.rs`):
+
+- Anything but `http`/`https`; `http` is upgraded to `https`, because plaintext hands the whole URL, query string included, to every hop.
+- Credentials in the URL — **refused**, not stripped: `https://user:pw@evil.example/` is a disguise for a different host.
+- Hosts that are not public: loopback, `*.localhost`, `*.local`, single-label names (a company DNS suffix turns `wiki` into an internal machine), RFC1918, link-local — `169.254.169.254` is one GET from cloud instance credentials — CGNAT, and the IPv6 spellings that decode to a private v4 (`::ffff:10.0.0.1`, `64:ff9b::192.168.0.1`).
+- Content types that are not text, JSON or XML: megabytes of binary decoded as text fill the context with nothing.
+
+Bounded: 2 000-char URL, 10 MiB on the wire counted **while streaming** (a `content-length` header can lie), 100 000 characters of text with a visible truncation marker, 30 s timeout, at most 10 redirect hops.
+
+**A redirect to a different host is not followed.** The target is handed back to the model, which must call the tool again with that address — so it passes the same refusals and earns its own audit entry. Following it silently would carry one host's approval to another.
+
+**What comes back is marked untrusted**: the text is wrapped with an explicit instruction that it is third-party data to read, never instructions to obey. A fetched page is text a stranger can edit, and may well contain "ignore your previous instructions". The wrapper does not defeat a determined injection, but the default reading of a web page must be *material*, not *orders*.
+
+**Every fetch is recorded** as an external action (`web_fetch`, `web_fetch_redirected`, `web_fetch_failed`) with the final URL and how much was read, so "what did it look at" is answerable afterwards. Known limit: no DNS pre-resolution, so a public domain that resolves to a private address is not caught by the host rules above.
+
 ## Desktop Observation
 
 `workspace_computer_windows` lists the visible top-level desktop windows — title, app, size, and which one is in the foreground. This is the first slice of computer use and it is **read-only**: nothing on the desktop is clicked, typed into or captured.

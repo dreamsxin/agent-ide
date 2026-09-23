@@ -380,9 +380,186 @@ pub fn wrap_untrusted(url: &str, text: &str) -> String {
     )
 }
 
+/// 一次取回的结果。
+pub struct FetchedPage {
+    pub final_url: String,
+    pub status: u16,
+    /// 已经转成纯文本、按上限截断过的正文
+    pub text: String,
+    pub truncated: bool,
+    /// 实际读了多少字节
+    pub bytes: usize,
+}
+
+/// 取一个网址的两种结局。
+///
+/// 跨主机跳转既不是错误也不算成功：它是"你要的东西在别处"。单独做一个结局，是为了让模型
+/// 原样看到那个地址并重新发起一次 —— 那一次会重新过一遍这里所有的门，也会重新记一次账。
+/// 悄悄跟过去，等于拿着一个主机的授权去了另一个主机。
+pub enum FetchOutcome {
+    Page(FetchedPage),
+    CrossHostRedirect {
+        from: String,
+        to: String,
+        status: u16,
+    },
+}
+
+/// 取一个网址的正文。
+///
+/// 代理**照常走**（和 `LlmClient` 一样）：这里的目标一定是公网地址（回环和内网在
+/// `normalize_fetch_url` 已经被拒），而企业网里出口代理是必经的一环。
+/// `browser::cdp_client` 的 `no_proxy()` 是相反情形 —— 那是打本机。
+pub async fn fetch_text(url: &str) -> Result<FetchOutcome, String> {
+    let mut current = normalize_fetch_url(url)?;
+    let client = reqwest::Client::builder()
+        // 自己处理跳转：每一跳都要重新判断，交给 reqwest 自动跟随就没有插手的地方
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("agent-ide/0.1")
+        .build()
+        .map_err(|error| format!("Could not build an HTTP client: {}", error))?;
+
+    for _ in 0..MAX_REDIRECTS {
+        let response = client
+            .get(&current)
+            .send()
+            .await
+            .map_err(|error| format!("Fetching {} failed: {}", current, error))?;
+        let status = response.status();
+
+        if status.is_redirection() {
+            let target = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!("{} answered {} without a Location header.", current, status)
+                })?;
+            let absolute = resolve_redirect(&current, &target)?;
+            if !redirect_is_permitted(&current, &absolute) {
+                return Ok(FetchOutcome::CrossHostRedirect {
+                    from: current,
+                    to: absolute,
+                    status: status.as_u16(),
+                });
+            }
+            current = normalize_fetch_url(&absolute)?;
+            continue;
+        }
+
+        if !status.is_success() {
+            return Err(format!("{} answered {}.", current, status));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if !is_textual_content_type(&content_type) {
+            return Err(format!(
+                "{} is {}, which this tool does not read. Only text, HTML, JSON and XML — a few \
+                 megabytes of binary decoded as text fills the context with nothing.",
+                current, content_type
+            ));
+        }
+
+        let body = read_bounded_body(response).await?;
+        let bytes = body.len();
+        let text = if content_type.to_ascii_lowercase().contains("html") {
+            html_to_text(&body)
+        } else {
+            body.trim().to_string()
+        };
+        let (text, truncated) = bound_text(&text);
+        return Ok(FetchOutcome::Page(FetchedPage {
+            final_url: current,
+            status: status.as_u16(),
+            text,
+            truncated,
+            bytes,
+        }));
+    }
+    Err(format!(
+        "{} kept redirecting (more than {} hops).",
+        url, MAX_REDIRECTS
+    ))
+}
+
+/// 按字节上限读完响应体。
+///
+/// 边读边数：先看 `content-length` 再决定读不读是不够的 —— 那个头可以撒谎，也可以不给，
+/// 而"读完再检查"的写法会先把内存吃光。
+async fn read_bounded_body(response: reqwest::Response) -> Result<String, String> {
+    let mut response = response;
+    let mut collected: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Reading the response failed: {}", error))?
+    {
+        collected.extend_from_slice(&chunk);
+        if collected.len() > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "That response is larger than {} bytes; it was not read.",
+                MAX_RESPONSE_BYTES
+            ));
+        }
+    }
+    Ok(String::from_utf8_lossy(&collected).to_string())
+}
+
+/// 把 `Location` 头收成绝对地址。相对跳转很常见（`/en/docs`、`../v2/`）。
+fn resolve_redirect(from: &str, location: &str) -> Result<String, String> {
+    let location = location.trim();
+    if location.is_empty() {
+        return Err("The redirect target is empty.".to_string());
+    }
+    if location.contains("://") {
+        return Ok(location.to_string());
+    }
+    let (scheme, rest) = from
+        .split_once("://")
+        .ok_or_else(|| "The current URL has no scheme.".to_string())?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if let Some(absolute_path) = location.strip_prefix('/') {
+        return Ok(format!("{}://{}/{}", scheme, authority, absolute_path));
+    }
+    let path = rest.strip_prefix(authority).unwrap_or("");
+    let directory = path.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+    Ok(format!(
+        "{}://{}{}/{}",
+        scheme, authority, directory, location
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 相对跳转要落在同一个目录上，绝对路径要换掉整条路径。
+    ///
+    /// 这一步算错的后果是取到另一个地址：`Location: /login` 被当成相对路径接在
+    /// `/docs/` 后面，就成了 `/docs/login`，而真正的目标是站点根下的登录页。
+    #[test]
+    fn a_relative_redirect_resolves_against_the_current_path() {
+        assert_eq!(
+            resolve_redirect("https://a.com/docs/v1/page", "/login").unwrap(),
+            "https://a.com/login"
+        );
+        assert_eq!(
+            resolve_redirect("https://a.com/docs/v1/page", "next").unwrap(),
+            "https://a.com/docs/v1/next"
+        );
+        assert_eq!(
+            resolve_redirect("https://a.com/docs/v1/page", "https://b.com/x").unwrap(),
+            "https://b.com/x"
+        );
+        assert!(resolve_redirect("https://a.com/x", "   ").is_err());
+    }
 
     /// 内网、回环、云元数据服务一律不许取。
     ///
