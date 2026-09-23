@@ -124,6 +124,21 @@ export const EN = {
   "state.waiting_user": "Waiting for you",
   "state.done": "Done",
   "state.error": "Failed",
+
+  "panel.views": "Agent views",
+  "panel.tab.chat": "Chat",
+  "panel.tab.plan": "Plan",
+  "panel.tab.changes": "Changes",
+  "panel.tab.title": "{name} view",
+  "panel.newTask": "New task",
+  "panel.taskHistory": "Task history",
+  "panel.pipeline": "Pipeline setup",
+  "panel.settings": "Agent settings",
+  "panel.loading.plan": "Loading the plan",
+  "panel.loading.changes": "Loading the changes",
+  "panel.loading.history": "Loading task history",
+  "panel.loading.pipeline": "Loading the pipeline",
+  "panel.loading.settings": "Loading settings",
 } as const;
 
 export type MessageKey = keyof typeof EN;
@@ -246,5 +261,20 @@ export const ZH: Record<MessageKey, string> = {
   "state.waiting_user": "等你回答",
   "state.done": "已完成",
   "state.error": "失败",
+
+  "panel.views": "Agent 视图",
+  "panel.tab.chat": "对话",
+  "panel.tab.plan": "计划",
+  "panel.tab.changes": "改动",
+  "panel.tab.title": "切到{name}",
+  "panel.newTask": "新任务",
+  "panel.taskHistory": "任务历史",
+  "panel.pipeline": "流水线设置",
+  "panel.settings": "Agent 设置",
+  "panel.loading.plan": "正在加载计划…",
+  "panel.loading.changes": "正在加载改动…",
+  "panel.loading.history": "正在加载任务历史…",
+  "panel.loading.pipeline": "正在加载流水线…",
+  "panel.loading.settings": "正在加载设置…",
 };
 

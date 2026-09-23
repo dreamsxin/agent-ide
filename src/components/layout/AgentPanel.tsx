@@ -16,6 +16,8 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { useLayoutStore, type AgentViewId } from "../../stores/useLayoutStore";
 import { summarizeAgentRun } from "../../utils/agentExperience";
 import { summarizeExternalActions } from "../../utils/externalActions";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
 import { changesBadge } from "./agentTabBadges";
 
 const AgentSelector = lazy(() => import("../agent/AgentSelector"));
@@ -36,17 +38,19 @@ type PrimaryViewId = Extract<AgentViewId, "task" | "plan" | "changes">;
 // 后端命令仍然叫 `*_agent_session`：改 IPC 名字对用户没有任何好处，只会制造一次大改。
 const primaryViews: Array<{
   id: PrimaryViewId;
-  label: string;
+  /** 文案键，不是句子：这张表是模块级常量，而语言是运行时状态 */
+  label: MessageKey;
   icon: LucideIcon;
   testId: string;
 }> = [
-  { id: "task", label: "Chat", icon: MessageSquare, testId: "agent-tab-chat" },
-  { id: "plan", label: "Plan", icon: ListChecks, testId: "agent-tab-plan" },
-  { id: "changes", label: "Changes", icon: FileDiff, testId: "agent-tab-diff" },
+  { id: "task", label: "panel.tab.chat", icon: MessageSquare, testId: "agent-tab-chat" },
+  { id: "plan", label: "panel.tab.plan", icon: ListChecks, testId: "agent-tab-plan" },
+  { id: "changes", label: "panel.tab.changes", icon: FileDiff, testId: "agent-tab-diff" },
 ];
 
 
 export default function AgentPanel() {
+  const t = useT();
   const activeView = useLayoutStore((store) => store.agentView);
   const setActiveView = useLayoutStore((store) => store.setAgentView);
   const steps = useAgentStore((store) => store.steps);
@@ -77,20 +81,21 @@ export default function AgentPanel() {
     >
       <nav
         className="flex h-9 flex-shrink-0 items-stretch border-b border-surface-border px-1 no-select"
-        aria-label="Agent task views"
+        aria-label={t("panel.views")}
       >
         <div className="flex min-w-0 flex-1 items-stretch">
           {primaryViews.map((view) => {
             const Icon = view.icon;
             const badge = badgeFor(view.id);
             const active = activeView === view.id;
+            const label = t(view.label);
             return (
               <button
                 key={view.id}
                 type="button"
                 onClick={() => setActiveView(view.id)}
                 aria-pressed={active}
-                title={`${view.label} view`}
+                title={t("panel.tab.title", { name: label })}
                 data-testid={view.testId}
                 className={`relative flex min-w-0 items-center gap-1.5 px-2 text-[11px] transition-colors ${
                   active
@@ -99,7 +104,7 @@ export default function AgentPanel() {
                 }`}
               >
                 <Icon aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="truncate">{view.label}</span>
+                <span className="truncate">{label}</span>
                 {badge !== null && (
                   <span
                     title={badge.hint || undefined}
@@ -128,7 +133,7 @@ export default function AgentPanel() {
         <UtilityButton
           active={false}
           icon={Plus}
-          label="New task"
+          label={t("panel.newTask")}
           onClick={() => {
             // 被拒绝时错误已经进 store.error，Chat / Plan 视图上的错误条会显示
             void startNewSession().catch(() => undefined);
@@ -138,21 +143,21 @@ export default function AgentPanel() {
         <UtilityButton
           active={activeView === "sessions"}
           icon={History}
-          label="Task history"
+          label={t("panel.taskHistory")}
           onClick={() => setActiveView("sessions")}
           testId="agent-tab-sessions"
         />
         <UtilityButton
           active={activeView === "pipeline"}
           icon={Workflow}
-          label="Pipeline configuration"
+          label={t("panel.pipeline")}
           onClick={() => setActiveView("pipeline")}
           testId="agent-tab-pipeline"
         />
         <UtilityButton
           active={activeView === "settings"}
           icon={Settings}
-          label="Agent settings"
+          label={t("panel.settings")}
           onClick={() => setActiveView("settings")}
           testId="agent-tab-settings"
         />
@@ -168,7 +173,7 @@ export default function AgentPanel() {
           </PrimaryView>
         )}
         {activeView === "plan" && (
-          <Suspense fallback={<PanelLoading label="Loading task plan" />}>
+          <Suspense fallback={<PanelLoading label={t("panel.loading.plan")} />}>
             <PrimaryView
               onOpenChanges={() => setActiveView("changes")}
               onOpenPlan={() => setActiveView("plan")}
@@ -183,7 +188,7 @@ export default function AgentPanel() {
           </Suspense>
         )}
         {activeView === "changes" && (
-          <Suspense fallback={<PanelLoading label="Loading changes" />}>
+          <Suspense fallback={<PanelLoading label={t("panel.loading.changes")} />}>
             <PrimaryView
               onOpenChanges={() => setActiveView("changes")}
               onOpenPlan={() => setActiveView("plan")}
@@ -193,12 +198,12 @@ export default function AgentPanel() {
           </Suspense>
         )}
         {activeView === "sessions" && (
-          <Suspense fallback={<PanelLoading label="Loading task history" />}>
+          <Suspense fallback={<PanelLoading label={t("panel.loading.history")} />}>
             <SessionHistory />
           </Suspense>
         )}
         {activeView === "pipeline" && (
-          <Suspense fallback={<PanelLoading label="Loading pipeline" />}>
+          <Suspense fallback={<PanelLoading label={t("panel.loading.pipeline")} />}>
             <div className="flex h-full flex-col overflow-auto">
               <AgentSelector />
               <div className="border-t border-surface-border" />
@@ -209,7 +214,7 @@ export default function AgentPanel() {
           </Suspense>
         )}
         {activeView === "settings" && (
-          <Suspense fallback={<PanelLoading label="Loading settings" />}>
+          <Suspense fallback={<PanelLoading label={t("panel.loading.settings")} />}>
             <SettingsPanel />
           </Suspense>
         )}
