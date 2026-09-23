@@ -62,15 +62,18 @@ describe("hunkKind", () => {
 
 describe("hunkBanner", () => {
   it("移动的横幅必须带上源路径：卡片标题只有落点", () => {
-    expect(hunkBanner("moved", "src/old.ts")).toContain("src/old.ts");
+    expect(hunkBanner("moved", "src/old.ts")).toEqual({
+      key: "diff.banner.movedFrom",
+      params: { path: "src/old.ts" },
+    });
   });
 
   it("源路径缺失时也要说清这是一次移动，而不是显示 undefined", () => {
-    expect(hunkBanner("moved", null)).toBe("→ Moved");
+    expect(hunkBanner("moved", null)).toEqual({ key: "diff.banner.moved" });
   });
 
   it("删除和清空的说法不能混：后者文件还在", () => {
-    expect(hunkBanner("deleted")).not.toBe(hunkBanner("emptied"));
+    expect(hunkBanner("deleted")).not.toEqual(hunkBanner("emptied"));
   });
 
   it("左右对照和统一 diff 文本没有横幅", () => {

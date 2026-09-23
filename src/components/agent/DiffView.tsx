@@ -4,6 +4,8 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
 import { hunkBanner, hunkKind } from "./diffPresentation";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
 import {
   describeExternalAction,
   isFromOtherRun,
@@ -34,9 +36,12 @@ function HunkBlock({
   onRegenerate: () => void;
   findings: ProblemEntry[];
 }) {
+  const t = useT();
   const kind = hunkKind(hunk, operation);
   const hunkStatus = hunk.status ?? "pending";
   const canAct = isReviewableDiffStatus(diffStatus) && hunkStatus !== "applied" && hunkStatus !== "rejected";
+  const banner = hunkBanner(kind, movedFrom);
+  const bannerText = banner ? t(banner.key, banner.params) : null;
   const provenanceLabel = [hunk.provenance?.sourceRole, hunk.provenance?.sourceStage]
     .filter(Boolean)
     .join(" / ");
@@ -44,7 +49,7 @@ function HunkBlock({
   const header = (
     <div className="flex items-center justify-between gap-2 border-b border-surface-border bg-surface-panel/70 px-2 py-1">
       <span className="text-[10px] font-semibold uppercase text-surface-muted">
-        Hunk {index + 1} · {hunkStatus}
+        {t("diff.hunk.header", { index: index + 1, status: t(diffStatusKey(hunkStatus)) })}
       </span>
       {canAct && (
         <span className="flex items-center gap-1">
@@ -53,28 +58,30 @@ function HunkBlock({
             data-testid="apply-hunk"
             className="rounded border border-diff-add/40 px-1.5 py-0.5 text-[10px] text-diff-add hover:bg-diff-add/10"
           >
-            Apply hunk
+            {t("diff.hunk.apply")}
           </button>
           <button
             onClick={onReject}
             data-testid="reject-hunk"
             className="rounded border border-diff-remove/40 px-1.5 py-0.5 text-[10px] text-diff-remove hover:bg-diff-remove/10"
           >
-            Reject hunk
+            {t("diff.hunk.reject")}
           </button>
           {diffStatus === "failed" && (
             <button
               onClick={onRegenerate}
               className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10"
             >
-              Regenerate
+              {t("diff.hunk.regenerate")}
             </button>
           )}
         </span>
       )}
       {findings.length > 0 && (
         <span className="rounded border border-accent-blue/30 bg-accent-blue/10 px-1.5 py-0.5 text-[10px] text-accent-blue">
-          {findings.length} finding{findings.length === 1 ? "" : "s"}
+          {t(findings.length === 1 ? "diff.findings.one" : "diff.findings.many", {
+            count: findings.length,
+          })}
         </span>
       )}
     </div>
@@ -85,7 +92,7 @@ function HunkBlock({
       {findings.slice(0, 3).map((finding) => (
         <div key={finding.id} className="flex gap-1">
           <span className={problemSeverityClass(finding.severity)}>
-            {finding.severity}
+            {t(`diff.severity.${finding.severity}`)}
           </span>
           <span className="min-w-0 flex-1 truncate">
             {finding.source}: {finding.message}
@@ -93,7 +100,9 @@ function HunkBlock({
         </div>
       ))}
       {findings.length > 3 && (
-        <div className="text-surface-muted">+{findings.length - 3} more</div>
+        <div className="text-surface-muted">
+          {t("diff.findings.more", { count: findings.length - 3 })}
+        </div>
       )}
     </div>
   );
@@ -102,10 +111,12 @@ function HunkBlock({
     <div className="border-b border-surface-border/60 bg-surface-base/60 px-2 py-1 font-sans text-[10px] leading-snug text-surface-muted">
       {provenanceLabel && <span>{provenanceLabel}</span>}
       {hunk.provenance.changeIndex != null && (
-        <span className="ml-2">change {hunk.provenance.changeIndex}</span>
+        <span className="ml-2">
+          {t("diff.provenance.change", { index: hunk.provenance.changeIndex })}
+        </span>
       )}
       {hunk.provenance.hunkIndex != null && (
-        <span className="ml-2">hunk {hunk.provenance.hunkIndex}</span>
+        <span className="ml-2">{t("diff.provenance.hunk", { index: hunk.provenance.hunkIndex })}</span>
       )}
       {hunk.provenance.promptContext && (
         <div className="mt-0.5 truncate">{hunk.provenance.promptContext}</div>
@@ -122,7 +133,7 @@ function HunkBlock({
         {provenancePanel}
         {findingPanel}
         <div className="border-b border-accent-blue/20 bg-accent-blue/10 px-2 py-0.5 text-[10px] font-semibold text-accent-blue">
-          {hunkBanner(kind, movedFrom)}
+          {bannerText}
         </div>
       </div>
     );
@@ -136,7 +147,7 @@ function HunkBlock({
         {provenancePanel}
         {findingPanel}
         <div className="border-b border-diff-add/20 bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
-          {hunkBanner("created")}
+          {bannerText}
         </div>
         {lines.map((line, i) => (
           <div key={i} className="bg-diff-add/5 px-2">
@@ -157,7 +168,7 @@ function HunkBlock({
         {provenancePanel}
         {findingPanel}
         <div className="border-b border-diff-remove/20 bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
-          {hunkBanner(kind)}
+          {bannerText}
         </div>
         {lines.map((line, i) => (
           <div key={i} className="bg-diff-remove/5 px-2">
@@ -179,10 +190,10 @@ function HunkBlock({
         {findingPanel}
         <div className="grid grid-cols-2 border-b border-surface-border">
           <div className="bg-diff-remove/10 px-2 py-0.5 text-[10px] font-semibold text-diff-remove">
-            - Original
+            {t("diff.side.original")}
           </div>
           <div className="border-l border-surface-border bg-diff-add/10 px-2 py-0.5 text-[10px] font-semibold text-diff-add">
-            + Updated
+            {t("diff.side.updated")}
           </div>
         </div>
         <div className="grid grid-cols-2">
@@ -227,6 +238,7 @@ function HunkBlock({
 }
 
 export default function DiffView() {
+  const t = useT();
   const diffs = useAgentStore((s) => s.diffs);
   const externalActions = useAgentStore((s) => s.externalActions);
   const agentRunId = useAgentStore((s) => s.agentRunId);
@@ -318,10 +330,10 @@ export default function DiffView() {
           <span className="min-w-0 flex-1 break-words">{error}</span>
           <button
             onClick={() => setError(null)}
-            aria-label="Dismiss error"
+            aria-label={t("diff.dismissError")}
             className="flex-shrink-0 rounded border border-diff-remove/30 px-1.5 py-0.5 text-[10px] hover:bg-diff-remove/10"
           >
-            Dismiss
+            {t("diff.dismiss")}
           </button>
         </div>
       )}
@@ -336,9 +348,9 @@ export default function DiffView() {
               看"Agent 做了什么"。 */}
           <div className="mb-1 flex items-baseline justify-between gap-2">
             <span className="font-medium text-amber-300">
-              {externalSummary.performed} external action(s) — cannot be undone
+              {t("diff.external.summary", { count: externalSummary.performed })}
               {externalSummary.refused > 0 &&
-                `, ${externalSummary.refused} refused, failed or stopped`}
+                t("diff.external.refused", { count: externalSummary.refused })}
             </span>
             {/* 唯一的按钮，而且只能忘掉**更早会话**的记录。能抹掉刚刚发生的事就等于让这
                 份记录变成可以事后否认的东西；而完全没有清理入口，会让一份永不遗忘的
@@ -348,9 +360,9 @@ export default function DiffView() {
                 type="button"
                 onClick={() => void forgetEarlierExternalActions()}
                 className="flex-shrink-0 rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
-                title="Removes them from the durable log and leaves a note that they were cleared. This session's records stay."
+                title={t("diff.external.forget.title")}
               >
-                Forget {restoredCount} earlier
+                {t("diff.external.forget", { count: restoredCount })}
               </button>
             )}
           </div>
@@ -376,13 +388,13 @@ export default function DiffView() {
                     <span className="rounded bg-surface-muted/20 px-1 text-[10px] text-surface-muted">
                       {/* 带上日期：光说"上一次会话"分不出昨天和三个月前，而这条记录存在
                           的目的就是回答"它那天到底做了什么" */}
-                      previous session
+                      {t("diff.external.previousSession")}
                       {action.timestamp ? ` · ${action.timestamp.slice(0, 10)}` : ""}
                     </span>
                   ) : (
                     isFromOtherRun(action, agentRunId) && (
                       <span className="rounded bg-surface-muted/20 px-1 text-[10px] text-surface-muted">
-                        earlier run
+                        {t("diff.external.earlierRun")}
                       </span>
                     )
                   )}
@@ -399,12 +411,12 @@ export default function DiffView() {
       {lastApplyResult && lastApplyResult.failed.length > 0 && (
         <div className="flex-shrink-0 rounded border border-diff-remove/40 bg-diff-remove/10 p-2 text-xs text-diff-remove">
           <div className="mb-1 flex items-center justify-between gap-2">
-            <span>Some diffs could not be applied.</span>
+            <span>{t("diff.applyResult.failed")}</span>
             <button
               onClick={clearApplyResult}
               className="rounded border border-diff-remove/30 px-1.5 py-0.5 text-[10px] hover:bg-diff-remove/10"
             >
-              Dismiss
+              {t("diff.dismiss")}
             </button>
           </div>
           <div className="space-y-1">
@@ -428,13 +440,13 @@ export default function DiffView() {
                 onClick={handleApplyAll}
                 className="flex-1 rounded border border-diff-add/40 bg-diff-add/20 px-2 py-1 text-xs text-diff-add transition-colors hover:bg-diff-add/30"
               >
-                Apply All ({pendingDiffs.length})
+                {t("diff.applyAll", { count: pendingDiffs.length })}
               </button>
               <button
                 onClick={handleRejectAll}
                 className="flex-1 rounded border border-diff-remove/40 bg-diff-remove/20 px-2 py-1 text-xs text-diff-remove transition-colors hover:bg-diff-remove/30"
               >
-                Reject All
+                {t("diff.rejectAll")}
               </button>
             </>
           )}
@@ -444,12 +456,15 @@ export default function DiffView() {
           {pendingUndo && (
             <button
               onClick={handleUndoLastApply}
-              title={`Undo ${pendingUndo.label}: restore ${pendingUndo.files.length} file(s) to their state before that apply`}
+              title={t("diff.undo.title", {
+                label: pendingUndo.label,
+                count: pendingUndo.files.length,
+              })}
               className={`rounded border border-surface-border bg-surface-border/20 px-2 py-1 text-xs text-surface-muted transition-colors hover:bg-surface-border/40 ${
                 hasPending ? "" : "flex-1"
               }`}
             >
-              Undo Apply ({pendingUndo.files.length})
+              {t("diff.undo", { count: pendingUndo.files.length })}
             </button>
           )}
         </div>
@@ -472,7 +487,7 @@ export default function DiffView() {
                     {diff.file}
                   </span>
                   <span className={diffStatusClass(diff.status)}>
-                    {diffStatusLabel(diff.status)}
+                    {t(diffStatusKey(diff.status))}
                   </span>
                   <span className="mr-1 text-[10px] text-diff-add">
                     +{diff.hunks.reduce((sum, h) => sum + h.newLines, 0)}
@@ -519,22 +534,27 @@ export default function DiffView() {
                         className="rounded border border-diff-modify/40 bg-diff-modify/10 px-1 py-0.5 text-diff-modify"
                         title={
                           diff.provenance.regeneratedFromHunkIndex != null
-                            ? `Regenerated from ${diff.provenance.regeneratedFromDiffId}, hunk ${diff.provenance.regeneratedFromHunkIndex}`
-                            : `Regenerated from ${diff.provenance.regeneratedFromDiffId}`
+                            ? t("diff.regenerated.titleHunk", {
+                                id: diff.provenance.regeneratedFromDiffId,
+                                hunk: diff.provenance.regeneratedFromHunkIndex,
+                              })
+                            : t("diff.regenerated.title", {
+                                id: diff.provenance.regeneratedFromDiffId,
+                              })
                         }
                       >
-                        regenerated
+                        {t("diff.regenerated")}
                       </span>
                     )}
                   </div>
                 )}
                 {(diff.status === "partial" || hasReviewedHunks(counts)) && (
                   <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
-                    <span className="text-surface-muted">Hunks:</span>
-                    <HunkCount label="pending" count={counts.pending} className="border-surface-border text-surface-muted" />
-                    <HunkCount label="applied" count={counts.applied} className="border-diff-add/40 text-diff-add" />
-                    <HunkCount label="rejected" count={counts.rejected} className="border-diff-remove/40 text-diff-remove" />
-                    <HunkCount label="failed" count={counts.failed} className="border-diff-remove/40 bg-diff-remove/10 text-diff-remove" />
+                    <span className="text-surface-muted">{t("diff.hunks")}</span>
+                    <HunkCount label={t("diff.status.pending")} count={counts.pending} className="border-surface-border text-surface-muted" />
+                    <HunkCount label={t("diff.status.applied")} count={counts.applied} className="border-diff-add/40 text-diff-add" />
+                    <HunkCount label={t("diff.status.rejected")} count={counts.rejected} className="border-diff-remove/40 text-diff-remove" />
+                    <HunkCount label={t("diff.status.failed")} count={counts.failed} className="border-diff-remove/40 bg-diff-remove/10 text-diff-remove" />
                   </div>
                 )}
                 {diff.status === "pending" && (
@@ -543,13 +563,13 @@ export default function DiffView() {
                       onClick={() => handleApplyDiff(diff.id)}
                       className="rounded border border-diff-add/40 bg-diff-add/15 px-2 py-1 text-[11px] text-diff-add transition-colors hover:bg-diff-add/25"
                     >
-                      Apply
+                      {t("diff.apply")}
                     </button>
                     <button
                       onClick={() => handleRejectDiff(diff.id)}
                       className="rounded border border-diff-remove/40 bg-diff-remove/15 px-2 py-1 text-[11px] text-diff-remove transition-colors hover:bg-diff-remove/25"
                     >
-                      Reject
+                      {t("diff.reject")}
                     </button>
                   </div>
                 )}
@@ -559,7 +579,7 @@ export default function DiffView() {
                       onClick={() => void handleRegenerateDiff(diff)}
                       className="rounded border border-accent-blue/40 bg-accent-blue/10 px-2 py-1 text-[11px] text-accent-blue transition-colors hover:bg-accent-blue/20"
                     >
-                      Regenerate against current file
+                      {t("diff.regenerateAgainstFile")}
                     </button>
                   </div>
                 )}
@@ -584,23 +604,23 @@ export default function DiffView() {
 
               {diff.status === "applied" && (
                 <div className="bg-diff-add/10 px-3 py-1 text-center text-xs text-diff-add">
-                  Applied
+                  {t("diff.status.applied")}
                 </div>
               )}
               {diff.status === "rejected" && (
                 <div className="bg-diff-remove/10 px-3 py-1 text-center text-xs text-diff-remove">
-                  Rejected
+                  {t("diff.status.rejected")}
                 </div>
               )}
               {/* 记录已经被撤销：留在列表里是历史，不是还能按的提议 */}
               {diff.status === "reverted" && (
                 <div className="bg-surface-border/20 px-3 py-1 text-center text-xs text-surface-muted">
-                  Reverted — this is a record of a change the Agent made and you undid
+                  {t("diff.reverted.note")}
                 </div>
               )}
               {diff.status === "failed" && (
                 <div className="bg-diff-remove/10 px-3 py-1 text-xs text-diff-remove">
-                  <div className="font-medium">Apply failed</div>
+                  <div className="font-medium">{t("diff.applyFailed")}</div>
                   {(diff.applyError || failedMessages.get(diff.id)) && (
                     <div className="mt-0.5 break-words text-[11px]">
                       {diff.applyError || failedMessages.get(diff.id)}
@@ -608,7 +628,7 @@ export default function DiffView() {
                   )}
                   {isHashMismatch(diff.applyError || failedMessages.get(diff.id)) && (
                     <div className="mt-1 rounded border border-diff-remove/30 bg-surface-base/70 px-2 py-1 text-[10px] text-surface-muted">
-                      The file changed after the Agent generated this diff. Ask the Agent to regenerate the change against the current file before applying.
+                      {t("diff.staleHint")}
                     </div>
                   )}
                 </div>
@@ -618,10 +638,8 @@ export default function DiffView() {
           })
         ) : (
           <div className="py-10 text-center text-xs text-surface-muted">
-            <div>No pending changes</div>
-            <div className="mt-1 text-[10px]">
-              Code changes suggested by the Agent will appear here.
-            </div>
+            <div>{t("diff.empty")}</div>
+            <div className="mt-1 text-[10px]">{t("diff.empty.hint")}</div>
           </div>
         )}
       </div>
@@ -663,9 +681,14 @@ function hasReviewedHunks(counts: Record<NonNullable<DiffHunk["status"]>, number
   return counts.applied > 0 || counts.rejected > 0 || counts.failed > 0;
 }
 
-function diffStatusLabel(status: DiffEntry["status"]) {
-  if (status === "partial") return "Partial";
-  return status.charAt(0).toUpperCase() + status.slice(1);
+/**
+ * 状态词只有一份来源。
+ *
+ * 以前 diff 卡片首字母大写（`Pending`）、hunk 头是小写（`pending`）、分块计数又是第三份
+ * 字面量，同一个状态在一张卡片上有三种写法。返回键而不是成句，中文也就不用去管大小写。
+ */
+function diffStatusKey(status: DiffEntry["status"] | NonNullable<DiffHunk["status"]>): MessageKey {
+  return `diff.status.${status}`;
 }
 
 function diffStatusClass(status: DiffEntry["status"]) {

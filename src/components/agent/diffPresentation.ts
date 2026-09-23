@@ -1,4 +1,5 @@
 import type { DiffHunk } from "../../types/agent";
+import type { MessageKey } from "../../i18n/messages";
 
 /**
  * 一个 hunk 该怎么画。
@@ -33,18 +34,27 @@ export function hunkKind(hunk: DiffHunk, operation?: string | null): HunkKind {
   return "raw";
 }
 
-/** 横幅文字；`modified` 走左右对照，`raw` 只有统一 diff 文本，都没有单行横幅 */
-export function hunkBanner(kind: HunkKind, movedFrom?: string | null): string | null {
+/** 横幅文案；`modified` 走左右对照，`raw` 只有统一 diff 文本，都没有单行横幅。
+ *
+ * 返回键而不是成句：横幅里嵌着源路径，而中英文里路径的位置不同（`Moved from X` /
+ * `从 X 移过来`），在这里拼串就等于把英文语序写死进这个判断。
+ */
+export function hunkBanner(
+  kind: HunkKind,
+  movedFrom?: string | null
+): { key: MessageKey; params?: Record<string, string> } | null {
   switch (kind) {
     case "created":
-      return "+ New file";
+      return { key: "diff.banner.created" };
     case "deleted":
-      return "- Deleted file";
+      return { key: "diff.banner.deleted" };
     case "emptied":
-      return "- All content removed";
+      return { key: "diff.banner.emptied" };
     case "moved":
       // 源路径是这张卡片唯一的信息量：没有它就只剩"某个文件被移动了"
-      return movedFrom ? `→ Moved from ${movedFrom}` : "→ Moved";
+      return movedFrom
+        ? { key: "diff.banner.movedFrom", params: { path: movedFrom } }
+        : { key: "diff.banner.moved" };
     default:
       return null;
   }
