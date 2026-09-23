@@ -1265,8 +1265,9 @@ pub fn tool_definitions(permissions: &WorkspaceToolPermissions) -> Vec<ToolDefin
                  exit code and output. Use this to see whether a change actually works before \
                  proposing it, and to read real failure output instead of guessing. Only these \
                  commands are permitted: {}. The command must exit on its own; dev servers and \
-                 watch tasks are refused.",
-                permissions.allowed_commands.join(", ")
+                 watch tasks are refused. {}",
+                permissions.allowed_commands.join(", "),
+                crate::services::command_text::shell_brief()
             ),
             parameters: serde_json::json!({
                 "type": "object",

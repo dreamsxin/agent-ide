@@ -107,20 +107,26 @@ pub async fn run_project_command_cancellable(
     if command.is_empty() {
         return Err("Task command is empty".to_string());
     }
+    // 翻成这台机器的 shell 真能执行的形式。翻不了的在这里就说清为什么 —— 让 `cmd` 去报
+    // 一句"找不到 'src/a"，读的人（模型或用户）要花一整轮才能想到是引号的事。
+    //
+    // 报出去的还是**原话**：日志和界面上显示模型/用户写的那一句，翻译只发生在执行的那一刻，
+    // 否则记录里的命令和用户配置的对不上号。
+    let executed = crate::services::command_text::portable_command(&command)?;
 
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let start = Instant::now();
         let mut child = if cfg!(windows) {
             Command::new("cmd")
-                .args(["/C", &command])
+                .args(["/C", &executed])
                 .current_dir(&root)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
         } else {
             Command::new("sh")
-                .args(["-lc", &command])
+                .args(["-lc", &executed])
                 .current_dir(&root)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -175,8 +181,14 @@ pub async fn run_project_command_cancellable(
                 command
             ));
         }
-        let stdout = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).to_string();
-        let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).to_string();
+        // 按平台解码，不是无条件 UTF-8：中文 Windows 上 cargo/MSVC/npm 按 CP936 写字节，
+        // `from_utf8_lossy` 会在模型、Problems 面板、修复提示词看到之前把它们变成 U+FFFD
+        let stdout = crate::services::command_text::decode_child_output(
+            &out_reader.join().unwrap_or_default(),
+        );
+        let stderr = crate::services::command_text::decode_child_output(
+            &err_reader.join().unwrap_or_default(),
+        );
         let combined = [stdout.as_str(), stderr.as_str()]
             .into_iter()
             .filter(|value| !value.is_empty())

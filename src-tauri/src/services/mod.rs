@@ -1,6 +1,8 @@
 pub mod agent_runtime;
 pub mod browser;
 pub mod capture;
+/// 命令和它的输出在 Windows / POSIX 之间的对齐：翻译能翻的，按代码页解码回来的。
+pub mod command_text;
 pub mod computer;
 pub mod context;
 pub mod credentials;
