@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { useT } from "../../i18n";
 import {
   attachLoadedChildren,
   copyNameCandidates,
@@ -98,10 +99,10 @@ function fileEntryToNode(entry: FileEntry): TreeNodeData {
   };
 }
 
-function workspaceRootNode(workspacePath: string): TreeNodeData {
+function workspaceRootNode(workspacePath: string, fallbackName: string): TreeNodeData {
   return {
     id: workspacePath,
-    name: basename(workspacePath) || "Workspace",
+    name: basename(workspacePath) || fallbackName,
     path: workspacePath,
     isDir: true,
     size: 0,
@@ -178,6 +179,7 @@ function TreeNode({
 
 // ====== 主组件 ======
 export default function Explorer() {
+  const t = useT();
   const [rootData, setRootData] = useState<TreeNodeData[]>([]);
   // `loadRoot` 需要读上一棵树来决定重新展开哪些目录，但它不能把 rootData 放进依赖：
   // 那会让它每次树变化都换一个新函数，而挂载 effect 依赖它 —— 无限重载。
@@ -241,7 +243,7 @@ export default function Explorer() {
       }
       if (!isTauriRuntime()) {
         setRootData([]);
-        setError("File explorer is available in the Tauri app runtime.");
+        setError(t("explorer.noBackend"));
         return;
       }
       // 从 ref 读上一棵树：放进 useCallback 的依赖会让 loadRoot 每次树变化都换一个
@@ -274,7 +276,7 @@ export default function Explorer() {
         attachLoadedChildren(nodes, new Map(reloaded.filter((entry) => entry !== null)))
       );
     } catch (e) {
-      setError(`Failed to load directory: ${e}`);
+      setError(t("explorer.loadFailed", { error: String(e) }));
     } finally {
       setLoading(false);
     }
@@ -310,7 +312,7 @@ export default function Explorer() {
         }
       }
       // 显示 toast
-      showToast("Files changed externally. Refreshing...");
+      showToast(t("explorer.externalChange"));
     })
       .then((fn) => {
         unlisten = fn;
@@ -431,7 +433,7 @@ export default function Explorer() {
           closeContextMenu();
           return;
         }
-        node = workspaceRootNode(workspacePath);
+        node = workspaceRootNode(workspacePath, t("explorer.workspace"));
         scope = "blank";
         e.preventDefault();
       }
@@ -497,76 +499,76 @@ export default function Explorer() {
   const handleNewFile = useCallback(
     async (parentPath: string) => {
       openNameDialog({
-        title: "New File",
-        label: "File name",
+        title: t("explorer.newFile"),
+        label: t("explorer.fileName"),
         initialValue: "",
-        confirmText: "Create",
+        confirmText: t("explorer.create"),
         onConfirm: async (name) => {
           const path = joinPath(parentPath, name);
           await createFile(path);
-          showToast(`Created file: ${name}`);
+          showToast(t("explorer.created.file", { name }));
         },
       });
     },
-    [createFile, openNameDialog]
+    [createFile, openNameDialog, t]
   );
 
   // 新建文件夹
   const handleNewFolder = useCallback(
     async (parentPath: string) => {
       openNameDialog({
-        title: "New Folder",
-        label: "Folder name",
+        title: t("explorer.newFolder"),
+        label: t("explorer.folderName"),
         initialValue: "",
-        confirmText: "Create",
+        confirmText: t("explorer.create"),
         onConfirm: async (name) => {
           const path = joinPath(parentPath, name);
           await createDirectory(path);
-          showToast(`Created folder: ${name}`);
+          showToast(t("explorer.created.folder", { name }));
         },
       });
     },
-    [createDirectory, openNameDialog]
+    [createDirectory, openNameDialog, t]
   );
 
   // 重命名
   const handleRename = useCallback(
     async (node: TreeNodeData) => {
       openNameDialog({
-        title: "Rename",
-        label: "New name",
+        title: t("explorer.rename"),
+        label: t("explorer.newName"),
         initialValue: node.name,
-        confirmText: "Rename",
+        confirmText: t("explorer.rename"),
         onConfirm: async (newName) => {
           if (newName === node.name) return;
           const parts = node.path.split(/[/\\]/);
           parts[parts.length - 1] = newName;
           const newPath = parts.join("/");
           await renamePath(node.path, newPath);
-          showToast(`Renamed: ${newName}`);
+          showToast(t("explorer.renamed", { name: newName }));
         },
       });
     },
-    [openNameDialog, renamePath]
+    [openNameDialog, renamePath, t]
   );
 
   // 复制文件/文件夹到内部剪贴板
   const handleCopy = useCallback(
     (node: TreeNodeData) => {
       setFileClipboard({ node, operation: "copy" });
-      showToast(`Copied to Explorer clipboard: ${node.name}`);
+      showToast(t("explorer.copiedToClipboard", { name: node.name }));
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, t]
   );
 
   const handleCut = useCallback(
     (node: TreeNodeData) => {
       setFileClipboard({ node, operation: "cut" });
-      showToast(`Cut: ${node.name}`);
+      showToast(t("explorer.cutToClipboard", { name: node.name }));
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, t]
   );
 
   const handlePaste = useCallback(
@@ -588,17 +590,17 @@ export default function Explorer() {
           targetDirectory
         );
         if ("error" in outcome) {
-          showToast(outcome.error);
+          showToast(t(outcome.error.key, outcome.error.params));
           closeContextMenu();
           return;
         }
         try {
           await renamePath(fileClipboard.node.path, outcome.destination);
-          showToast(`Moved: ${fileClipboard.node.name}`);
+          showToast(t("explorer.moved", { name: fileClipboard.node.name }));
           // 剪切只能粘一次：留着剪贴板会让第二次粘贴去找一个已经不存在的源
           setFileClipboard(null);
         } catch (e) {
-          showToast(`Failed to move: ${e}`);
+          showToast(t("explorer.moveFailed", { error: String(e) }));
         }
         closeContextMenu();
         return;
@@ -606,13 +608,13 @@ export default function Explorer() {
 
       try {
         const destination = await copyWithUniqueName(fileClipboard.node.path, targetDirectory, fileClipboard.node.name, copyPath);
-        showToast(`Pasted: ${basename(destination)}`);
+        showToast(t("explorer.pasted", { name: basename(destination) }));
       } catch (e) {
-        showToast(`Failed to paste: ${e}`);
+        showToast(t("explorer.pasteFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu, copyPath, fileClipboard, renamePath, workspacePath]
+    [closeContextMenu, copyPath, fileClipboard, renamePath, t, workspacePath]
   );
 
 
@@ -647,7 +649,7 @@ export default function Explorer() {
           // 拖到它已经在的目录里：arborist 画的那条插入线让人以为能排序，而这里做不到
           // 排序。这是一次无害的手势，不该报错，静默忽略就好。
           if (outcome.reason !== "sameFolder") {
-            failures.push(outcome.error);
+            failures.push(t(outcome.error.key, outcome.error.params));
           }
           continue;
         }
@@ -662,13 +664,23 @@ export default function Explorer() {
       // 两边都要说：只报第一条失败会让"四个成功一个失败"看起来像整体失败
       if (failures.length > 0) {
         const failureSummary =
-          failures.length === 1 ? failures[0] : `${failures[0]} (+${failures.length - 1} more)`;
-        showToast(moved.length > 0 ? `Moved ${moved.length}; ${failureSummary}` : failureSummary);
+          failures.length === 1
+            ? failures[0]
+            : t("explorer.moveMore", { first: failures[0], count: failures.length - 1 });
+        showToast(
+          moved.length > 0
+            ? t("explorer.movedSome", { count: moved.length, problem: failureSummary })
+            : failureSummary
+        );
       } else if (moved.length > 0) {
-        showToast(moved.length === 1 ? `Moved: ${moved[0]}` : `Moved ${moved.length} items`);
+        showToast(
+          moved.length === 1
+            ? t("explorer.moved", { name: moved[0] })
+            : t("explorer.movedCount", { count: moved.length })
+        );
       }
     },
-    [renamePath, workspacePath]
+    [renamePath, t, workspacePath]
   );
 
   // 复制绝对路径
@@ -676,13 +688,13 @@ export default function Explorer() {
     async (node: TreeNodeData) => {
       try {
         await navigator.clipboard.writeText(node.path);
-        showToast(`Copied file path: ${node.path}`);
+        showToast(t("explorer.copiedPath", { path: node.path }));
       } catch (e) {
-        alert(`Failed to copy file path: ${e}`);
+        alert(t("explorer.copyPathFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu, workspacePath]
+    [closeContextMenu, t]
   );
 
   // 复制相对工作区路径
@@ -691,13 +703,13 @@ export default function Explorer() {
       const relativePath = toWorkspaceRelativePath(workspacePath, node.path);
       try {
         await navigator.clipboard.writeText(relativePath);
-        showToast(`Copied relative path: ${relativePath}`);
+        showToast(t("explorer.copiedRelativePath", { path: relativePath }));
       } catch (e) {
-        alert(`Failed to copy relative path: ${e}`);
+        alert(t("explorer.copyRelativePathFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu, workspacePath]
+    [closeContextMenu, t, workspacePath]
   );
 
   // 在系统文件管理器中显示
@@ -705,29 +717,31 @@ export default function Explorer() {
     async (node: TreeNodeData) => {
       try {
         await invoke("reveal_in_file_explorer", { path: node.path });
-        showToast(`Revealed: ${node.name}`);
+        showToast(t("explorer.revealed", { name: node.name }));
       } catch (e) {
-        alert(`Failed to reveal in file explorer: ${e}`);
+        alert(t("explorer.revealFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, t]
   );
 
   // 删除
   const handleDelete = useCallback(
     async (node: TreeNodeData) => {
-      const type = node.isDir ? "folder" : "file";
-      if (!confirm(`Delete ${type} "${node.name}"?`)) return;
+      const question = node.isDir
+        ? t("explorer.delete.folder", { name: node.name })
+        : t("explorer.delete.file", { name: node.name });
+      if (!confirm(question)) return;
 
       try {
         await deletePath(node.path);
       } catch (e) {
-        alert(`Failed to delete: ${e}`);
+        alert(t("explorer.deleteFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [deletePath, closeContextMenu]
+    [deletePath, closeContextMenu, t]
   );
 
   /**
@@ -789,7 +803,7 @@ export default function Explorer() {
       {/* 标题栏 + 新建按钮 */}
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-border/50 no-select">
         <span className="text-[11px] font-semibold text-surface-muted uppercase tracking-wider">
-          Explorer
+          {t("explorer.title")}
         </span>
         <div className="flex gap-0.5">
           <button
@@ -798,7 +812,7 @@ export default function Explorer() {
               handleNewFile(cwd);
             }}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
-            title="New File"
+            title={t("explorer.newFile")}
           >
             📄+
           </button>
@@ -808,14 +822,14 @@ export default function Explorer() {
               handleNewFolder(cwd);
             }}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
-            title="New Folder"
+            title={t("explorer.newFolder")}
           >
             📁+
           </button>
           <button
             onClick={loadRoot}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
-            title="Refresh"
+            title={t("explorer.refresh")}
           >
             ↻
           </button>
@@ -833,7 +847,7 @@ export default function Explorer() {
         onKeyDownCapture={handleTreeKeyDown}
       >
         {loading && (
-          <div className="p-2 text-xs text-surface-muted">Loading files...</div>
+          <div className="p-2 text-xs text-surface-muted">{t("explorer.loading")}</div>
         )}
         {error && (
           <div className="p-2 text-xs text-diff-remove">
@@ -842,7 +856,7 @@ export default function Explorer() {
               onClick={loadRoot}
               className="ml-2 underline hover:text-surface-text"
             >
-              Retry
+              {t("explorer.retry")}
             </button>
           </div>
         )}
@@ -881,29 +895,26 @@ export default function Explorer() {
           </Tree>
         )}
         {!loading && !error && rootData.length === 0 && (
-          // "No files found." 对没打开工作区和空目录说的是同一句话，而前者的真实原因
-          // 和解决办法完全不同。TopBar 在同一状态下说的是 "No folder opened"。
+          // 空目录和"没打开工作区"不能共用一句话：后者的原因和解决办法完全不同。
+          // TopBar 在同一状态下说的是"还没打开文件夹"。
           <div className="p-2 text-xs text-surface-muted">
-            {workspacePath ? (
-              "No files found."
-            ) : (
-              <>
-                No folder opened. Press <span className="font-mono">Ctrl+O</span> to choose one.
-              </>
-            )}
+            {workspacePath ? t("explorer.empty") : t("explorer.noFolder")}
           </div>
         )}
       </div>
 
       {fileClipboard && (
         <div className="border-t border-surface-border/50 px-2 py-1.5 text-[10px] text-surface-muted">
-          {fileClipboard.operation === "cut" ? "Cut" : "Copied"}:{" "}
+          {fileClipboard.operation === "cut"
+            ? t("explorer.clipboard.cut")
+            : t("explorer.clipboard.copied")}
+          :{" "}
           <span className="font-mono text-surface-text">{fileClipboard.node.name}</span>
           <button
             onClick={() => handlePaste(null)}
             className="ml-2 rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
           >
-            Paste
+            {t("explorer.paste")}
           </button>
         </div>
       )}
@@ -921,13 +932,13 @@ export default function Explorer() {
                 onClick={() => handleNewFile(contextMenu.node.path)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📄</span> New File
+                <span>📄</span> {t("explorer.newFile")}
               </button>
               <button
                 onClick={() => handleNewFolder(contextMenu.node.path)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📁</span> New Folder
+                <span>📁</span> {t("explorer.newFolder")}
               </button>
               <div className="border-t border-surface-border my-0.5" />
             </>
@@ -937,7 +948,7 @@ export default function Explorer() {
               onClick={() => handlePaste(contextMenu.node)}
               className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
             >
-              <span>📌</span> Paste
+              <span>📌</span> {t("explorer.paste")}
             </button>
           )}
           {contextMenu.scope === "node" && (
@@ -946,43 +957,43 @@ export default function Explorer() {
                 onClick={() => handleCopy(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📋</span> Copy File
+                <span>📋</span> {t("explorer.menu.copyFile")}
               </button>
               <button
                 onClick={() => handleCut(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>✂</span> Cut
+                <span>✂</span> {t("explorer.menu.cut")}
               </button>
               <button
                 onClick={() => handleCopyFilePath(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>⧉</span> Copy File Path
+                <span>⧉</span> {t("explorer.menu.copyPath")}
               </button>
               <button
                 onClick={() => handleCopyRelativePath(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>⧉</span> Copy Relative File Path
+                <span>⧉</span> {t("explorer.menu.copyRelativePath")}
               </button>
               <button
                 onClick={() => handleRevealInFileExplorer(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📂</span> Reveal In File Explorer
+                <span>📂</span> {t("explorer.menu.reveal")}
               </button>
               <button
                 onClick={() => handleRename(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>✏️</span> Rename
+                <span>✏️</span> {t("explorer.rename")}
               </button>
               <button
                 onClick={() => handleDelete(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-diff-remove hover:bg-diff-remove/10 flex items-center gap-2"
               >
-                <span>🗑️</span> Delete
+                <span>🗑️</span> {t("explorer.menu.delete")}
               </button>
             </>
           )}
@@ -1000,7 +1011,7 @@ export default function Explorer() {
               // `../x` 会跑到父目录去 —— 用户以为自己在起名字，实际写了一段路径。
               const problem = validateEntryName(value);
               if (problem) {
-                setNameDialogError(problem);
+                setNameDialogError(t(problem.key, problem.params));
                 return;
               }
               try {
@@ -1035,7 +1046,7 @@ export default function Explorer() {
                 onClick={closeNameDialog}
                 className="rounded border border-surface-border px-3 py-1 text-xs text-surface-muted hover:text-surface-text"
               >
-                Cancel
+                {t("explorer.cancel")}
               </button>
               <button
                 type="submit"

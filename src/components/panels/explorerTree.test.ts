@@ -130,8 +130,8 @@ describe("resolveMoveDestination", () => {
     const intoItself = resolveMoveDestination("/w/a", "a", "/w/a");
     const intoChild = resolveMoveDestination("/w/a", "a", "/w/a/b");
 
-    expect("error" in intoItself && intoItself.error).toContain("into itself");
-    expect("error" in intoChild && intoChild.error).toContain("inside it");
+    expect("error" in intoItself && intoItself.error.key).toBe("explorer.move.self");
+    expect("error" in intoChild && intoChild.error.key).toBe("explorer.move.descendant");
   });
 
   /**
@@ -140,13 +140,13 @@ describe("resolveMoveDestination", () => {
    */
   it("says nothing needs doing when the item is already in the target folder", () => {
     const result = resolveMoveDestination("/w/src/app.ts", "app.ts", "/w/src");
-    expect("error" in result && result.error).toContain("already in this folder");
+    expect("error" in result && result.error.key).toBe("explorer.move.sameFolder");
   });
 
   /** 分隔符要先统一：list_directory 在 Windows 上给的是反斜杠 */
   it("compares paths across separator styles", () => {
     const result = resolveMoveDestination("D:\\w\\a", "a", "D:/w/a/b");
-    expect("error" in result && result.error).toContain("inside it");
+    expect("error" in result && result.error.key).toBe("explorer.move.descendant");
   });
 
   /** `ab` 只是名字以 `a` 开头，并不在 `a` 里面 */
@@ -170,8 +170,8 @@ describe("validateEntryName", () => {
    * 但结果和用户的意图不符，而且事后看不出发生了什么。
    */
   it("rejects anything that is a path rather than a name", () => {
-    expect(validateEntryName("a/b")).toContain("path separator");
-    expect(validateEntryName("a\\b")).toContain("path separator");
+    expect(validateEntryName("a/b")?.key).toBe("explorer.name.separator");
+    expect(validateEntryName("a\\b")?.key).toBe("explorer.name.separator");
     expect(validateEntryName("..")).not.toBeNull();
     expect(validateEntryName(".")).not.toBeNull();
     expect(validateEntryName("../x")).not.toBeNull();

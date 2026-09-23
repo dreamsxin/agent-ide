@@ -3,6 +3,20 @@
  * ResizeObserver 和 react-arborist 才能渲染，塞在里面的判断没法单独测。
  */
 
+import type { MessageKey } from "../../i18n/messages";
+
+/**
+ * 给用户看的一句话，用文案键表示。
+ *
+ * 这里不返回成句：拒绝理由里嵌着文件名，而中英文里名字的位置不同
+ * （`Cannot move X into itself` / `不能把 X 移到它自己里面`）。拼串就等于把英文语序
+ * 写进这段判断，而这段判断本身和语言无关 —— 它也是这个模块能被单独测的原因。
+ */
+export interface ExplorerMessage {
+  key: MessageKey;
+  params?: Record<string, string>;
+}
+
 export interface ExplorerNode {
   id: string;
   name: string;
@@ -178,20 +192,26 @@ export function resolveMoveDestination(
   sourcePath: string,
   sourceName: string,
   targetDirectory: string
-): { destination: string } | { error: string; reason: "self" | "descendant" | "sameFolder" } {
+): { destination: string } | { error: ExplorerMessage; reason: "self" | "descendant" | "sameFolder" } {
   const source = normalizeForCompare(sourcePath);
   const target = normalizeForCompare(targetDirectory);
 
   if (target === source) {
-    return { error: `Cannot move "${sourceName}" into itself.`, reason: "self" };
+    return { error: { key: "explorer.move.self", params: { name: sourceName } }, reason: "self" };
   }
   if (target.startsWith(`${source}/`)) {
-    return { error: `Cannot move "${sourceName}" into a folder inside it.`, reason: "descendant" };
+    return {
+      error: { key: "explorer.move.descendant", params: { name: sourceName } },
+      reason: "descendant",
+    };
   }
   const separator = source.lastIndexOf("/");
   const currentParent = separator === -1 ? "" : source.slice(0, separator);
   if (currentParent === target) {
-    return { error: `"${sourceName}" is already in this folder.`, reason: "sameFolder" };
+    return {
+      error: { key: "explorer.move.sameFolder", params: { name: sourceName } },
+      reason: "sameFolder",
+    };
   }
   return { destination: `${target}/${sourceName}` };
 }
@@ -217,22 +237,22 @@ const WINDOWS_RESERVED = new Set([
  * 大小写不敏感去查会在 Linux 上误拒 —— 那里 `README.md` 和 `readme.md` 是两个文件。
  * 这里只挡没有后备的那些情况：形状本身就不是一个名字。
  */
-export function validateEntryName(rawName: string): string | null {
+export function validateEntryName(rawName: string): ExplorerMessage | null {
   const name = rawName.trim();
-  if (!name) return "Name cannot be empty.";
-  if (name === "." || name === "..") return `"${name}" is not a name.`;
+  if (!name) return { key: "explorer.name.empty" };
+  if (name === "." || name === "..") return { key: "explorer.name.dots", params: { name } };
   if (/[/\\]/.test(name)) {
-    return "Name cannot contain a path separator. Create the folder first, then the file inside it.";
+    return { key: "explorer.name.separator" };
   }
-  if (name.includes(":")) return "Name cannot contain ':'.";
-  if (/["<>|?*]/.test(name)) return 'Name cannot contain any of " < > | ? *';
+  if (name.includes(":")) return { key: "explorer.name.colon" };
+  if (/["<>|?*]/.test(name)) return { key: "explorer.name.specials" };
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f]/.test(name)) return "Name cannot contain control characters.";
+  if (/[\u0000-\u001f]/.test(name)) return { key: "explorer.name.control" };
   // Windows 会静默地把结尾的点去掉，于是拿到的文件名和输入的不是一个
-  if (name.endsWith(".")) return "Name cannot end with '.'.";
+  if (name.endsWith(".")) return { key: "explorer.name.trailingDot" };
   const stem = name.split(".")[0].toUpperCase();
   if (WINDOWS_RESERVED.has(stem)) {
-    return `"${stem}" is reserved by Windows and cannot be used as a name.`;
+    return { key: "explorer.name.reserved", params: { name: stem } };
   }
   return null;
 }
