@@ -726,15 +726,18 @@ export interface AgentSessionDetail {
   turns: ConversationTurn[];
 }
 
-function normalizeConversationTurn(value: unknown): ConversationTurn | null {
+export function normalizeConversationTurn(value: unknown): ConversationTurn | null {
   if (!value || typeof value !== "object") return null;
-  const { id, prompt, outcome, derived } = value as Record<string, unknown>;
+  const { id, prompt, outcome, derived, runId } = value as Record<string, unknown>;
   if (typeof id !== "string" || id === "") return null;
   return {
     id,
     prompt: typeof prompt === "string" ? prompt : "",
     outcome: typeof outcome === "string" ? outcome : "",
     derived: derived === true,
+    // 没有运行 id 的轮次（改这个字段之前存下的会话）不显示"撤销这一轮的文件"：
+    // 它的改动认不出来，而一个按下去只会报错的按钮比没有更糟
+    runId: typeof runId === "string" && runId !== "" ? runId : null,
   };
 }
 

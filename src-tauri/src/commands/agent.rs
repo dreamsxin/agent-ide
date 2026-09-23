@@ -764,7 +764,10 @@ fn publish_tool_writes(
     if writes.is_empty() {
         return;
     }
-    let recorded = orch.record_tool_writes(writes);
+    // 运行 id 从这批授权自己带的那个取，不读 orchestrator 的 `current_run_id`：被 Stop 的
+    // 运行可能在下一个 prompt 开跑之后才排空写入，那时读到的是后一次运行的 id ——
+    // "撤销这一轮"就会去还原另一轮写的文件。和 `record_external_actions` 同一条规矩。
+    let recorded = orch.record_tool_writes(writes, permissions.run_id.clone());
     let files = recorded
         .iter()
         .map(|diff| diff.file.clone())
@@ -3291,9 +3294,14 @@ pub async fn revert_turn_changes(
     let mut orch = agent_state.orchestrator.lock().await;
     let result = orch.revert_turn_changes(&turn_id)?;
     let summary = format!(
-        "Reverted {} file(s) from {}",
+        "Reverted {} file(s) from {}{}",
         result.restored.len(),
-        turn_id
+        turn_id,
+        if result.failed.is_empty() {
+            String::new()
+        } else {
+            format!(", {} could not be restored", result.failed.len())
+        }
     );
     let details = if result.failed.is_empty() {
         result.restored.join("\n")
@@ -3304,13 +3312,20 @@ pub async fn revert_turn_changes(
             result.failed.join(", ")
         )
     };
-    orch.emit_run_action_log(&app_handle, "success", "turn_revert", &summary, &details);
     let _ = app_handle.emit(
         "agent-diff-ready",
         serde_json::to_value(&orch.diffs).unwrap_or_default(),
     );
     // 撤销可用性跟在这个事件的 payload 里，漏掉这一处撤销按钮会静默停在旧值
     let _ = app_handle.emit("agent-state-changed", orch.state_payload());
+    // 等级按失败数走同一个 helper：部分失败记成 success 会让日志比现实乐观
+    orch.emit_review_action_log(
+        &app_handle,
+        apply_log_level(result.failed.len()),
+        "turn_revert",
+        &summary,
+        &details,
+    );
     Ok(result)
 }
 

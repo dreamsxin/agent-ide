@@ -45,6 +45,7 @@ import {
   mcpApprovalForPermissions,
   normalizeAgentMode,
   normalizeAgentSessionDetail,
+  normalizeConversationTurn,
   normalizeAgentSessionList,
   permissionsForPreset,
   READ_ONLY_PERMISSIONS,
@@ -911,8 +912,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   loadConversationTurns: async () => {
     if (!isTauriRuntime()) return;
     try {
-      const turns = await invoke<ConversationTurn[]>("get_agent_conversation");
-      set({ conversationTurns: turns });
+      const turns = await invoke<unknown>("get_agent_conversation");
+      // 过归一化，不用 `invoke<ConversationTurn[]>`：泛型参数和 `as` 一样只是把类型检查
+      // 关掉，而这一份载荷决定"撤销这一轮"按不按得下去
+      set({
+        conversationTurns: Array.isArray(turns)
+          ? turns.map(normalizeConversationTurn).filter((turn): turn is ConversationTurn => !!turn)
+          : [],
+      });
     } catch (err) {
       // 读不到上下文不该让面板炸掉：这是一个信息展示，不是运行的一部分
       console.warn("[AgentStore] get_agent_conversation failed:", err);

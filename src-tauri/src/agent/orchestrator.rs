@@ -315,7 +315,10 @@ pub struct ConversationTurn {
     /// 有了它，"这一轮改了哪些文件"才问得出来：撤销点记的是运行 id，两边靠它对上。
     /// `serde(default)` 是为了读得懂加这个字段之前存下的会话 —— 老行没有运行 id，于是
     /// 它们只能按"整栈 pop"撤销，那正是它们当时的真实情况。
-    #[serde(default)]
+    ///
+    /// 显式 `rename`：这个结构体没有 `rename_all`，其它字段都是单个单词所以侥幸没出事，
+    /// 而 `run_id` 会原样过 IPC —— 前端读 `runId` 就永远是 undefined，那个按钮永远不出现。
+    #[serde(default, rename = "runId")]
     pub run_id: Option<String>,
 }
 
@@ -719,14 +722,17 @@ impl AgentOrchestrator {
 
     /// 记一个回滚点。空快照不记：撤销一个什么都没写的操作会让栈顶失真。
     ///
-    /// 运行 id 只取 `current_run_id`（而不是"最近一次运行"）：用户在两次运行之间手动点
-    /// Apply 时它是 `None`，那次改动就不属于任何一轮对话 —— 挂到最近那一轮上等于记错账，
-    /// 而"撤销这一轮"会顺手还原一个用户自己决定应用的文件。
+    /// `run_id` 由调用方给出，**这里不读 `current_run_id`** —— 和 `record_external_actions`
+    /// 同一条规矩，理由也一样：被 Stop 的运行可能在下一个 prompt 开跑之后才排空写入，那时
+    /// 读到的是**后一次**运行的 id。记错比记不到糟得多，它会让"撤销这一轮"去还原另一轮
+    /// 写的文件。用户在两次运行之间手动点 Apply 时传 `None`：那次改动是他自己的决定，
+    /// 不属于任何一轮对话。
     fn push_undo_checkpoint(
         &mut self,
         label: &str,
         snapshots: Vec<crate::agent::diff_apply::FileSnapshot>,
         diff_ids: Vec<String>,
+        run_id: Option<String>,
     ) {
         if snapshots.is_empty() {
             return;
@@ -735,7 +741,7 @@ impl AgentOrchestrator {
             label: label.to_string(),
             snapshots,
             diff_ids,
-            run_id: self.current_run_id.clone(),
+            run_id,
             session_id: self.session_id.clone(),
         });
         if self.undo_stack.len() > MAX_UNDO_CHECKPOINTS {
@@ -848,6 +854,7 @@ impl AgentOrchestrator {
     pub fn record_tool_writes(
         &mut self,
         writes: Vec<crate::agent::workspace_tools::AgentFileWrite>,
+        run_id: Option<String>,
     ) -> Vec<crate::agent::state_machine::FileDiff> {
         use crate::agent::state_machine::{DiffHunk, DiffProvenance, FileDiff};
 
@@ -960,6 +967,7 @@ impl AgentOrchestrator {
             "Agent tool writes",
             snapshots,
             created.iter().map(|diff| diff.id.clone()).collect(),
+            run_id,
         );
         self.diffs.extend(created.clone());
         // 磁盘内容变了，其他还挂着的 diff 的 baseHash 要跟着刷新，
@@ -1062,20 +1070,36 @@ impl AgentOrchestrator {
 
         let mut restored = Vec::new();
         let mut failed = Vec::new();
+        let mut stopped_early = false;
         for _ in 0..depth {
             let Some(checkpoint) = self.undo_stack.pop() else {
                 break;
             };
             let (mut ok, mut bad) = self.rollback_checkpoint(&checkpoint);
             restored.append(&mut ok);
+            let had_failures = !bad.is_empty();
             failed.append(&mut bad);
+            // 一层还不回去就停手，剩下的回滚点留在栈里。继续往下弹会把更早的内容盖在一个
+            // 本该被这一层恢复、但实际没恢复的状态上；而快照只在内存里，弹出去就没有第二份。
+            if had_failures {
+                stopped_early = true;
+                break;
+            }
         }
         // 文件内容变回去了，baseHash 必须跟着变，否则重新应用会被误判 stale
         crate::agent::diff_apply::stamp_base_hashes(&mut self.diffs);
         self.refresh_review_state();
 
         Ok(UndoResult {
-            label: format!("Turn {} ({} apply step(s))", turn_id, depth),
+            label: if stopped_early {
+                // 说清停在哪儿：剩下的回滚点还在栈里，用户可以处理掉占用的文件后再来一次
+                format!(
+                    "Turn {} (stopped after a file could not be restored; the remaining steps are still undoable)",
+                    turn_id
+                )
+            } else {
+                format!("Turn {} ({} apply step(s))", turn_id, depth)
+            },
             restored,
             failed,
         })
@@ -2091,6 +2115,8 @@ impl AgentOrchestrator {
             "Auto-apply",
             snapshots,
             result.applied.iter().map(|item| item.id.clone()).collect(),
+            // 自动应用只在运行进行中发生，所以这里读 `current_run_id` 是准的
+            self.current_run_id.clone(),
         );
 
         for diff in &mut self.diffs {
@@ -2241,6 +2267,8 @@ impl AgentOrchestrator {
             &format!("Apply file {}", diff.file),
             snapshots,
             vec![diff_id.to_string()],
+            // 用户自己点的 Apply 不属于任何一轮对话
+            None,
         );
 
         if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
@@ -2311,6 +2339,8 @@ impl AgentOrchestrator {
             &format!("Apply hunk {} in {}", hunk_index + 1, diff.file),
             snapshots,
             vec![diff_id.to_string()],
+            // 同上：手动应用一个 hunk 是用户的决定，不算某一轮对话的产物
+            None,
         );
 
         if let Some(item) = self.diffs.iter_mut().find(|item| item.id == diff_id) {
@@ -3156,14 +3186,17 @@ mod tests {
     fn a_recorded_removal_is_labelled_delete_and_keeps_its_content() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let recorded = orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "src/gone.ts".to_string(),
-            path: PathBuf::from("src/gone.ts"),
-            previous: Some("goodbye\n".to_string()),
-            updated: String::new(),
-            removed: true,
-            moved_from: None,
-        }]);
+        let recorded = orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "src/gone.ts".to_string(),
+                path: PathBuf::from("src/gone.ts"),
+                previous: Some("goodbye\n".to_string()),
+                updated: String::new(),
+                removed: true,
+                moved_from: None,
+            }],
+            None,
+        );
 
         assert_eq!(recorded.len(), 1);
         let provenance = recorded[0].provenance.as_ref().expect("provenance");
@@ -3181,24 +3214,27 @@ mod tests {
     fn a_write_followed_by_a_delete_is_reported_as_a_delete() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let recorded = orchestrator.record_tool_writes(vec![
-            AgentFileWrite {
-                file: "src/tmp.ts".to_string(),
-                path: PathBuf::from("src/tmp.ts"),
-                previous: Some("original\n".to_string()),
-                updated: "rewritten\n".to_string(),
-                removed: false,
-                moved_from: None,
-            },
-            AgentFileWrite {
-                file: "src/tmp.ts".to_string(),
-                path: PathBuf::from("src/tmp.ts"),
-                previous: Some("rewritten\n".to_string()),
-                updated: String::new(),
-                removed: true,
-                moved_from: None,
-            },
-        ]);
+        let recorded = orchestrator.record_tool_writes(
+            vec![
+                AgentFileWrite {
+                    file: "src/tmp.ts".to_string(),
+                    path: PathBuf::from("src/tmp.ts"),
+                    previous: Some("original\n".to_string()),
+                    updated: "rewritten\n".to_string(),
+                    removed: false,
+                    moved_from: None,
+                },
+                AgentFileWrite {
+                    file: "src/tmp.ts".to_string(),
+                    path: PathBuf::from("src/tmp.ts"),
+                    previous: Some("rewritten\n".to_string()),
+                    updated: String::new(),
+                    removed: true,
+                    moved_from: None,
+                },
+            ],
+            None,
+        );
 
         assert_eq!(recorded.len(), 1, "same file must merge into one entry");
         assert_eq!(
@@ -3221,17 +3257,20 @@ mod tests {
     fn a_recorded_move_names_both_paths_and_undoes_by_moving_back() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let recorded = orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "src/new/home.ts".to_string(),
-            path: PathBuf::from("src/new/home.ts"),
-            previous: None,
-            updated: String::new(),
-            removed: false,
-            moved_from: Some(crate::agent::workspace_tools::MovedFrom {
-                file: "src/old/home.ts".to_string(),
-                path: PathBuf::from("src/old/home.ts"),
-            }),
-        }]);
+        let recorded = orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "src/new/home.ts".to_string(),
+                path: PathBuf::from("src/new/home.ts"),
+                previous: None,
+                updated: String::new(),
+                removed: false,
+                moved_from: Some(crate::agent::workspace_tools::MovedFrom {
+                    file: "src/old/home.ts".to_string(),
+                    path: PathBuf::from("src/old/home.ts"),
+                }),
+            }],
+            None,
+        );
 
         assert_eq!(recorded.len(), 1);
         let provenance = recorded[0].provenance.as_ref().expect("provenance");
@@ -3258,27 +3297,30 @@ mod tests {
     fn a_move_then_edit_keeps_the_content_as_of_the_move() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let recorded = orchestrator.record_tool_writes(vec![
-            AgentFileWrite {
-                file: "src/moved.ts".to_string(),
-                path: PathBuf::from("src/moved.ts"),
-                previous: None,
-                updated: String::new(),
-                removed: false,
-                moved_from: Some(crate::agent::workspace_tools::MovedFrom {
-                    file: "src/before.ts".to_string(),
-                    path: PathBuf::from("src/before.ts"),
-                }),
-            },
-            AgentFileWrite {
-                file: "src/moved.ts".to_string(),
-                path: PathBuf::from("src/moved.ts"),
-                previous: Some("as it was when moved\n".to_string()),
-                updated: "edited after the move\n".to_string(),
-                removed: false,
-                moved_from: None,
-            },
-        ]);
+        let recorded = orchestrator.record_tool_writes(
+            vec![
+                AgentFileWrite {
+                    file: "src/moved.ts".to_string(),
+                    path: PathBuf::from("src/moved.ts"),
+                    previous: None,
+                    updated: String::new(),
+                    removed: false,
+                    moved_from: Some(crate::agent::workspace_tools::MovedFrom {
+                        file: "src/before.ts".to_string(),
+                        path: PathBuf::from("src/before.ts"),
+                    }),
+                },
+                AgentFileWrite {
+                    file: "src/moved.ts".to_string(),
+                    path: PathBuf::from("src/moved.ts"),
+                    previous: Some("as it was when moved\n".to_string()),
+                    updated: "edited after the move\n".to_string(),
+                    removed: false,
+                    moved_from: None,
+                },
+            ],
+            None,
+        );
 
         assert_eq!(recorded.len(), 2, "移动和随后的编辑是两件事，不能压成一条");
         let moved = &recorded[0];
@@ -3319,14 +3361,17 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         // 工具已经把文件删了，卡片是事后补的凭据
-        orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "gone.ts".to_string(),
-            path: path.clone(),
-            previous: Some("content\n".to_string()),
-            updated: String::new(),
-            removed: true,
-            moved_from: None,
-        }]);
+        orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "gone.ts".to_string(),
+                path: path.clone(),
+                previous: Some("content\n".to_string()),
+                updated: String::new(),
+                removed: true,
+                moved_from: None,
+            }],
+            None,
+        );
 
         let undone = orchestrator.undo_last_apply().unwrap();
         assert_eq!(undone.restored, vec!["gone.ts".to_string()]);
@@ -3354,27 +3399,33 @@ mod tests {
         let first_path = base.join("a.ts");
         let second_path = base.join("b.ts");
         let mut orchestrator = AgentOrchestrator::new();
-        orchestrator.current_run_id = Some("run-a".to_string());
+        // 运行 id 由调用方给出（命令层从那批授权里取）：显式传，测的正是这条链路
 
         // 同一轮里两次落盘（工具写了一次，之后又写了一次）
         std::fs::write(&first_path, "written\n").unwrap();
-        orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "a.ts".to_string(),
-            path: first_path.clone(),
-            previous: Some("before\n".to_string()),
-            updated: "written\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "a.ts".to_string(),
+                path: first_path.clone(),
+                previous: Some("before\n".to_string()),
+                updated: "written\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            Some("run-a".to_string()),
+        );
         std::fs::write(&second_path, "also written\n").unwrap();
-        orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "b.ts".to_string(),
-            path: second_path.clone(),
-            previous: Some("b before\n".to_string()),
-            updated: "also written\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "b.ts".to_string(),
+                path: second_path.clone(),
+                previous: Some("b before\n".to_string()),
+                updated: "also written\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            Some("run-a".to_string()),
+        );
         // 运行结束后才记这一轮，运行 id 要能对上
         orchestrator.current_run_id = None;
         orchestrator.last_run_id = Some("run-a".to_string());
@@ -3407,14 +3458,17 @@ mod tests {
 
         orchestrator.current_run_id = Some("run-a".to_string());
         std::fs::write(&path, "from run a\n").unwrap();
-        orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "a.ts".to_string(),
-            path: path.clone(),
-            previous: Some("original\n".to_string()),
-            updated: "from run a\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "a.ts".to_string(),
+                path: path.clone(),
+                previous: Some("original\n".to_string()),
+                updated: "from run a\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            Some("run-a".to_string()),
+        );
         orchestrator.current_run_id = None;
         orchestrator.last_run_id = Some("run-a".to_string());
         orchestrator.record_conversation_turn("first ask");
@@ -3423,14 +3477,17 @@ mod tests {
         // 之后又跑了一轮，改了同一个文件
         orchestrator.current_run_id = Some("run-b".to_string());
         std::fs::write(&path, "from run b\n").unwrap();
-        orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "a.ts".to_string(),
-            path: path.clone(),
-            previous: Some("from run a\n".to_string()),
-            updated: "from run b\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "a.ts".to_string(),
+                path: path.clone(),
+                previous: Some("from run a\n".to_string()),
+                updated: "from run b\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            Some("run-b".to_string()),
+        );
         orchestrator.current_run_id = None;
         orchestrator.last_run_id = Some("run-b".to_string());
         orchestrator.record_conversation_turn("second ask");
@@ -3458,14 +3515,17 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         std::fs::write(&path, "new\n").unwrap();
-        orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "a.ts".to_string(),
-            path,
-            previous: Some("old\n".to_string()),
-            updated: "new\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "a.ts".to_string(),
+                path,
+                previous: Some("old\n".to_string()),
+                updated: "new\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            None,
+        );
         let (label, _) = orchestrator.pending_undo().expect("a checkpoint");
         assert!(!label.contains("earlier task"), "{}", label);
 
@@ -3491,23 +3551,29 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
 
         std::fs::write(&path, "v1\n").unwrap();
-        let first = orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "a.ts".to_string(),
-            path: path.clone(),
-            previous: Some("v0\n".to_string()),
-            updated: "v1\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        let first = orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "a.ts".to_string(),
+                path: path.clone(),
+                previous: Some("v0\n".to_string()),
+                updated: "v1\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            None,
+        );
         std::fs::write(&path, "v2\n").unwrap();
-        let second = orchestrator.record_tool_writes(vec![AgentFileWrite {
-            file: "a.ts".to_string(),
-            path: path.clone(),
-            previous: Some("v1\n".to_string()),
-            updated: "v2\n".to_string(),
-            removed: false,
-            moved_from: None,
-        }]);
+        let second = orchestrator.record_tool_writes(
+            vec![AgentFileWrite {
+                file: "a.ts".to_string(),
+                path: path.clone(),
+                previous: Some("v1\n".to_string()),
+                updated: "v2\n".to_string(),
+                removed: false,
+                moved_from: None,
+            }],
+            None,
+        );
 
         orchestrator.undo_last_apply().unwrap();
 
@@ -3536,27 +3602,30 @@ mod tests {
     fn a_delete_and_a_move_onto_the_same_path_stay_two_entries() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let recorded = orchestrator.record_tool_writes(vec![
-            AgentFileWrite {
-                file: "src/target.ts".to_string(),
-                path: PathBuf::from("src/target.ts"),
-                previous: Some("the old target\n".to_string()),
-                updated: String::new(),
-                removed: true,
-                moved_from: None,
-            },
-            AgentFileWrite {
-                file: "src/target.ts".to_string(),
-                path: PathBuf::from("src/target.ts"),
-                previous: None,
-                updated: String::new(),
-                removed: false,
-                moved_from: Some(crate::agent::workspace_tools::MovedFrom {
-                    file: "src/source.ts".to_string(),
-                    path: PathBuf::from("src/source.ts"),
-                }),
-            },
-        ]);
+        let recorded = orchestrator.record_tool_writes(
+            vec![
+                AgentFileWrite {
+                    file: "src/target.ts".to_string(),
+                    path: PathBuf::from("src/target.ts"),
+                    previous: Some("the old target\n".to_string()),
+                    updated: String::new(),
+                    removed: true,
+                    moved_from: None,
+                },
+                AgentFileWrite {
+                    file: "src/target.ts".to_string(),
+                    path: PathBuf::from("src/target.ts"),
+                    previous: None,
+                    updated: String::new(),
+                    removed: false,
+                    moved_from: Some(crate::agent::workspace_tools::MovedFrom {
+                        file: "src/source.ts".to_string(),
+                        path: PathBuf::from("src/source.ts"),
+                    }),
+                },
+            ],
+            None,
+        );
 
         assert_eq!(recorded.len(), 2);
         let deleted = recorded[0].provenance.as_ref().expect("provenance");
@@ -3571,32 +3640,35 @@ mod tests {
     fn tool_writes_become_applied_diffs_with_an_undo_point() {
         let mut orchestrator = AgentOrchestrator::new();
 
-        let recorded = orchestrator.record_tool_writes(vec![
-            AgentFileWrite {
-                file: "src/app.ts".to_string(),
-                path: PathBuf::from("src/app.ts"),
-                previous: Some("before run\n".to_string()),
-                updated: "first write\n".to_string(),
-                removed: false,
-                moved_from: None,
-            },
-            AgentFileWrite {
-                file: "src/app.ts".to_string(),
-                path: PathBuf::from("src/app.ts"),
-                previous: Some("first write\n".to_string()),
-                updated: "second write\n".to_string(),
-                removed: false,
-                moved_from: None,
-            },
-            AgentFileWrite {
-                file: "src/new.ts".to_string(),
-                path: PathBuf::from("src/new.ts"),
-                previous: None,
-                updated: "created\n".to_string(),
-                removed: false,
-                moved_from: None,
-            },
-        ]);
+        let recorded = orchestrator.record_tool_writes(
+            vec![
+                AgentFileWrite {
+                    file: "src/app.ts".to_string(),
+                    path: PathBuf::from("src/app.ts"),
+                    previous: Some("before run\n".to_string()),
+                    updated: "first write\n".to_string(),
+                    removed: false,
+                    moved_from: None,
+                },
+                AgentFileWrite {
+                    file: "src/app.ts".to_string(),
+                    path: PathBuf::from("src/app.ts"),
+                    previous: Some("first write\n".to_string()),
+                    updated: "second write\n".to_string(),
+                    removed: false,
+                    moved_from: None,
+                },
+                AgentFileWrite {
+                    file: "src/new.ts".to_string(),
+                    path: PathBuf::from("src/new.ts"),
+                    previous: None,
+                    updated: "created\n".to_string(),
+                    removed: false,
+                    moved_from: None,
+                },
+            ],
+            None,
+        );
 
         assert_eq!(recorded.len(), 2, "same file must merge into one entry");
         let edited = &recorded[0];
@@ -3624,7 +3696,7 @@ mod tests {
 
         // 空输入不该压出一个什么都没改的回滚点
         let mut fresh = AgentOrchestrator::new();
-        assert!(fresh.record_tool_writes(Vec::new()).is_empty());
+        assert!(fresh.record_tool_writes(Vec::new(), None).is_empty());
         assert!(fresh.pending_undo().is_none());
     }
 
