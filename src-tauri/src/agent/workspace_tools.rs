@@ -480,13 +480,26 @@ impl WorkspaceToolPermissions {
         self.subagent.is_some()
     }
 
-    /// 子 Agent 的权限：只读，不能再派，取消开关和父运行是同一个。
+    /// 子 Agent 的权限：只读，不能再派，取消开关和父运行是同一个，**记录簿也是同一份**。
     ///
     /// 用 `read_only()` 起底而不是从自己身上摘掉几样：从父权限裁剪的写法，下一次给父权限
     /// 加一项能力时会默认漏给子 Agent —— 而那种漏是"子 Agent 忽然能写文件了"。
+    ///
+    /// 但**授权**要从零起底，**记录**必须接回父运行：`read_only()` 的 `external` / `writes`
+    /// 是 `Default` 造的新 `Arc`，谁也不会去排空它。子 Agent 带着 `web_fetch`，于是一次委派
+    /// 里取过的每个网址都会写进一份没人读的日志 —— 而 SECURITY.md 承诺的是"取过哪些页面事后
+    /// 查得到"。`image_bytes` 同理：图片额度是按整次运行付的钱，子 Agent 不该另开一份。
+    /// `run_id` 跟着一起给，否则这些记录归不到这次运行名下。
+    ///
+    /// `images` 刻意**不**共享：那是"这一次工具调用要附给模型的图片"，子 Agent 的图片属于
+    /// 子 Agent 的对话，混进父运行的消息里就成了父模型没要过的附件。
     fn child_permissions(&self) -> WorkspaceToolPermissions {
         let mut child = WorkspaceToolPermissions::read_only();
         child.adopt_cancel(self.cancel_switch());
+        child.run_id = self.run_id.clone();
+        child.writes = self.writes.clone();
+        child.external = self.external.clone();
+        child.image_bytes = self.image_bytes.clone();
         child
     }
 
@@ -2134,14 +2147,28 @@ async fn delegate_task_tool(
     // 两边各写一份清单的话，下一次给只读工具面加一项，两份里总有一份会忘。
     let child_llm = channel.child_client(tool_definitions(&child_permissions));
     let child_invoker = WorkspaceToolInvoker::without_logging(child_permissions);
-    let (text, rounds) = crate::agent::executor::run_subagent(
+    let outcome = crate::agent::executor::run_subagent(
         &child_llm,
         subagent::subagent_system_prompt(),
         &task_prompt,
         &child_invoker,
         permissions.cancel_switch(),
     )
-    .await?;
+    .await;
+
+    // 失败和被 Stop 的委派也要记一条。用 `?` 直接返回的写法把最该记的那两种情况漏掉了：
+    // 跑了七轮然后报错、或者中途被 Stop —— 钱一样花了，而日志里一个字都没有。
+    let (text, rounds) = match outcome {
+        Ok(value) => value,
+        Err(error) => {
+            permissions.record_external(AgentExternalAction {
+                kind: "delegate_task_failed".to_string(),
+                target: description.clone(),
+                detail: format!("Subagent \"{}\" did not finish: {}", description, error),
+            });
+            return Err(error);
+        }
+    };
 
     let result = subagent::bound_result(&text, rounds, rounds >= subagent::MAX_SUBAGENT_ROUNDS);
     // 走外部动作那条记录：一次委派是一个完整的模型循环 —— 钱花掉了，撤不回来，而用户有权
@@ -5677,6 +5704,31 @@ mod tests {
             ))
             .unwrap_err();
         assert!(error.contains("cannot delegate"), "{}", error);
+    }
+
+    /// 子 Agent 的记录必须落在**父运行**那份日志里。
+    ///
+    /// 授权从 `read_only()` 起底是对的，但 `Default` 会同时造出一份新的 `external` /
+    /// `writes` —— 谁也不会去排空它。子 Agent 带着 `web_fetch`，于是一次委派里取过的每个
+    /// 网址都写进了一份没人读的日志，而 SECURITY.md 承诺的是"事后查得到"。
+    #[test]
+    fn a_subagents_records_reach_the_parents_log() {
+        let mut parent = WorkspaceToolPermissions::read_only()
+            .with_subagent(SubagentChannel::for_run(&test_llm()));
+        parent.adopt_cancel(test_cancel());
+        parent.run_id = Some("run-1".to_string());
+
+        let child = parent.child_permissions();
+        assert_eq!(child.run_id.as_deref(), Some("run-1"));
+        child.record_external(AgentExternalAction {
+            kind: "web_fetch".to_string(),
+            target: "https://example.com/docs".to_string(),
+            detail: "read 12 character(s)".to_string(),
+        });
+
+        let actions = parent.take_external_actions();
+        assert_eq!(actions.len(), 1, "{:?}", actions);
+        assert_eq!(actions[0].target, "https://example.com/docs");
     }
 
     /// 发不出工具表的档位不该有通道：子 Agent 除了工具什么都没有，那样的一次委派是花钱买

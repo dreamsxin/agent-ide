@@ -24,12 +24,19 @@ pub const MAX_REDIRECTS: usize = 10;
 
 /// 把用户/模型给的网址收成一个可以发出去的 https 网址。
 ///
-/// 三件事按顺序做，顺序本身有意义：
+/// 四件事按顺序做，顺序本身有意义：
 /// 1. 先过 `browser::normalize_target_url` —— 控制字符、协议白名单、空主机、URL 内凭据
 ///    都在那里挡掉，两条对外通道用同一套基础规则，不各写一份。
 /// 2. 长度上限。
-/// 3. 主机必须是公网可路由的。这是这个模块存在的主要理由：内网地址和云元数据服务
+/// 3. 用**真正发请求的那个解析器**（reqwest 的 `Url`）解一遍，主机取自解析结果。
+/// 4. 主机必须是公网可路由的。这是这个模块存在的主要理由：内网地址和云元数据服务
 ///    （169.254.169.254）能让一次"看文档"变成一次凭据泄露。
+///
+/// 第 3 步不是多余的一层：以前主机是从字符串里 `split` 出来的，而 WHATWG 的主机解析器认
+/// `127.1`、`0x7f.0.0.1`、`0177.0.0.1`、`192.168.1` 这些简写，也会把 `%31%32%37.0.0.1`
+/// 解码回来 —— 这些写法 `IpAddr::from_str` 全都不认，于是它们绕过了整张内网黑名单，然后
+/// reqwest 照样连到 127.0.0.1。检查的对象必须和最终发出去的对象是同一个东西，所以这里返回
+/// 的也是解析器序列化出来的那个 URL。
 ///
 /// http 升级成 https 而不是拒绝：明文请求会把整个 URL 交给路径上的任何人，而绝大多数站点
 /// 早就支持 https。升级失败时用户看到的是一个明确的连接错误，不是一次静默的明文请求。
@@ -41,14 +48,18 @@ pub fn normalize_fetch_url(raw: &str) -> Result<String, String> {
             MAX_URL_CHARS
         ));
     }
-    let (scheme, rest) = normalized
+    let (_, rest) = normalized
         .split_once("://")
         .ok_or_else(|| "URL has no scheme.".to_string())?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    require_public_host(host_of_authority(authority))?;
     // 升级到 https：明文会把整个 URL（含查询串）暴露给路径上的每一跳
-    let _ = scheme;
-    Ok(format!("https://{}", rest))
+    let upgraded = reqwest::Url::parse(&format!("https://{}", rest))
+        .map_err(|error| format!("That URL cannot be parsed: {}.", error))?;
+    let host = upgraded
+        .host_str()
+        .ok_or_else(|| "URL has no host.".to_string())?;
+    // IPv6 字面量在这里带方括号，而下面判断的是地址本身
+    require_public_host(host.trim_start_matches('[').trim_end_matches(']'))?;
+    Ok(upgraded.to_string())
 }
 
 /// 从 `host:port` 里取主机。IPv6 字面量带方括号。
@@ -595,6 +606,37 @@ mod tests {
         assert!(normalize_fetch_url("https://example.com/docs").is_ok());
         assert!(normalize_fetch_url("http://example.com/docs").is_ok());
         assert!(normalize_fetch_url("https://8.8.8.8/").is_ok());
+    }
+
+    /// 内网地址的非规范写法也必须被拒。
+    ///
+    /// 这一组全都通不过 `IpAddr::from_str`，所以只要主机是从字符串里切出来的，它们就会被当成
+    /// 普通域名放过去 —— 然后 reqwest 用 WHATWG 的解析器把它们还原成 127.0.0.1 / 内网地址，
+    /// 照样连上。检查的对象必须和发出去的对象一致。
+    #[test]
+    fn non_canonical_spellings_of_private_addresses_are_refused() {
+        for host in [
+            "127.1",
+            "0x7f.0.0.1",
+            "0177.0.0.1",
+            "2130706433",
+            "192.168.1",
+            "%31%32%37.0.0.1",
+        ] {
+            let url = format!("http://{}/x", host);
+            assert!(
+                normalize_fetch_url(&url).is_err(),
+                "{} should be refused",
+                host
+            );
+        }
+    }
+
+    /// 返回的 URL 就是要发出去的那一个：主机已经是解析器规范化之后的形式。
+    #[test]
+    fn the_returned_url_is_the_one_that_will_be_sent() {
+        let normalized = normalize_fetch_url("http://EXAMPLE.com/docs?a=1").unwrap();
+        assert_eq!(normalized, "https://example.com/docs?a=1");
     }
 
     /// 明文升级成 https，凭据一律拒绝，超长 URL 拒绝。

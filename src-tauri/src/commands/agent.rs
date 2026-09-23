@@ -1429,7 +1429,7 @@ pub async fn continue_agent_pipeline(
 
     // 一个临界区里完成"有暂停的运行吗 -> 抢执行权 -> 取走快照"。顺序不能反：
     // 先取走快照再发现抢不到执行权，那份快照就没了，续跑的唯一凭据被销毁。
-    let (paused, tool_policy, tool_permissions, lease) = {
+    let (paused, tool_policy, tool_permissions, lease, usage_meter) = {
         let mut orch = agent_state.orchestrator.lock().await;
         if orch.paused_run.is_none() {
             return Err("No paused Agent pipeline to continue.".to_string());
@@ -1446,6 +1446,14 @@ pub async fn continue_agent_pipeline(
             .take()
             .expect("paused run checked in this critical section");
         let policy = orch.tool_policy;
+        // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
+        // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
+        //
+        // 在这个临界区里就取定，而不是等工具面建好之后：子 Agent 通道拿的是客户端的一份
+        // **克隆**，而记账器挂在客户端上。晚挂的话通道里那份还带着 `fresh_meter` —— 一个
+        // 没人读的记账器，于是子 Agent 花的钱既不进用量日志，也不受这次运行的上限约束。
+        let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
+        orch.start_usage_accounting(usage_meter.clone());
         orch.emit_review_action_log(
             &app_handle,
             "info",
@@ -1453,9 +1461,10 @@ pub async fn continue_agent_pipeline(
             "Continuing paused Agent pipeline",
             &format!("Continuing from stage {}", paused.stage_index + 1),
         );
-        (paused, policy, permissions, lease)
+        (paused, policy, permissions, lease, usage_meter)
     };
     let claim = lease.claim;
+    let llm = llm.with_usage_meter(usage_meter.clone());
 
     // 续跑要按暂停前的策略重建整个工具面。工具定义（进请求体）和执行器（跑调用）
     // 必须一起装：只装定义会让恢复后的 stage 看到工具，却由上次运行残留的执行器
@@ -1482,20 +1491,14 @@ pub async fn continue_agent_pipeline(
         tool_permissions.clone(),
     );
 
-    let usage_meter = {
+    {
         let mut orch = agent_state.orchestrator.lock().await;
         orch.tool_invoker = tool_invoker;
         // 授权也写回去，和另外三条路径一致：`repair_workspace` 是从这个字段克隆出它的
         // 工具面的，不写回就意味着"暂停 → 续跑 → 修复"里的修复用的是暂停**之前**那份
         // 授权（旧 run id、旧开关）。
         orch.tool_permissions = tool_permissions.clone();
-        // 续跑必须沿用暂停前的记账器，否则单次运行上限只要中途暂停一次就归零重算。
-        // 沿用不到（例如进程重启后恢复）时退回新记账器，而不是干脆不记账。
-        let usage_meter = orch.resumed_usage_meter().unwrap_or(fresh_meter);
-        orch.start_usage_accounting(usage_meter.clone());
-        usage_meter
-    };
-    let llm = llm.with_usage_meter(usage_meter.clone());
+    }
 
     let stage_index = paused.stage_index;
     // 续跑用的还是暂停前那一问，留一份给历史：暂停那一刻记下的结果是"没有文件改动"，
