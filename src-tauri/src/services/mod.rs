@@ -14,4 +14,6 @@ pub mod problem_parser;
 pub mod project_memory;
 pub mod project_tasks;
 pub mod verification;
+/// 取一个网址的正文给模型看：URL 校验、跳转策略、正文提取。形状见模块文档。
+pub mod web_fetch;
 pub mod workspace;
