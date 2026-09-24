@@ -8,11 +8,17 @@ interface TaskPipelineProps {
 }
 
 export default function TaskPipeline({ stages }: TaskPipelineProps) {
-  const storePipeline = useAgentStore((s) => s.pipeline);
+  // 跑过就显示这次运行的阶段，没跑过就显示配置。
+  //
+  // 两份数据刻意分开：后端会按模式和请求形状给本次运行塑形（Plan 模式换成两个阶段，
+  // 小改动裁成一个），那不是用户的配置。以前只有一个字段，运行事件把它覆盖掉之后，
+  // Pipeline Editor 里显示的就成了那次运行的形状 —— 用户随手一存就把它变成真的配置了。
+  const configuredPipeline = useAgentStore((s) => s.pipeline);
+  const runPipeline = useAgentStore((s) => s.runPipeline);
   const continueAgentPipeline = useAgentStore((s) => s.continueAgentPipeline);
   const isStreaming = useAgentStore((s) => s.isStreaming);
   const logs = useLogStore((s) => s.logs);
-  const displayStages = stages ?? storePipeline;
+  const displayStages = stages ?? runPipeline ?? configuredPipeline;
   const pausedStage = displayStages.find((stage) => stage.status === "paused");
 
   return (

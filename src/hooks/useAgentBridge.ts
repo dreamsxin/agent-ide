@@ -31,7 +31,7 @@ export function useAgentBridge() {
   const updateStep = useAgentStore((s) => s.updateStep);
   const setDiffs = useAgentStore((s) => s.setDiffs);
   const setSddArtifact = useAgentStore((s) => s.setSddArtifact);
-  const setPipeline = useAgentStore((s) => s.setPipeline);
+  const setRunPipeline = useAgentStore((s) => s.setRunPipeline);
   const appendStreamContent = useAgentStore((s) => s.appendStreamContent);
   const clearStreamContent = useAgentStore((s) => s.clearStreamContent);
   const requestConfirm = useAgentStore((s) => s.requestConfirm);
@@ -104,7 +104,7 @@ export function useAgentBridge() {
           }),
 
           listen<PipelineStage[]>("agent-pipeline-update", (e) => {
-            setPipeline(e.payload);
+            setRunPipeline(e.payload);
           }),
 
           // 上下文占用的测量值。归一化而不是直接铺进 store：载荷来自事件，见
@@ -224,7 +224,7 @@ export function useAgentBridge() {
     requestQuestion,
     setContextUsage,
     setDiffs,
-    setPipeline,
+    setRunPipeline,
     setSddArtifact,
     setState,
     setSteps,

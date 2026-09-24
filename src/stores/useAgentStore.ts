@@ -123,7 +123,22 @@ interface AgentStore {
 
   // ====== 角色与流水线 ======
   activeRole: AgentRole;
+  /**
+   * 用户配置的流水线。只有 `get_pipeline` / `update_pipeline` / `reset_pipeline` 能改它。
+   *
+   * 和 `runPipeline` 分开，因为它们是两个问题："我配了什么" 和 "这次跑了什么"。以前只有
+   * 这一个字段，而 `agent-pipeline-update` 事件（送来的是**本次运行**的阶段，可能被裁成
+   * 一步，Plan 模式下换成另外两步）也往这里写 —— 于是跑完一次之后，Pipeline Editor 里
+   * 显示的成了那次运行的形状，用户随手点一下保存就把它变成了真的配置。
+   */
   pipeline: PipelineStage[];
+  /**
+   * 这次运行实际用的阶段，来自后端事件；`null` = 还没跑过。
+   *
+   * 后端按 `ide_mode` 和请求形状给本次运行塑形（见 `begin_planning`），所以它和配置本来
+   * 就可以不一样。计划视图要显示的是这一份，配置界面要显示的是 `pipeline`。
+   */
+  runPipeline: PipelineStage[] | null;
 
   // ====== LLM 配置 ======
   llmConfigured: boolean;
@@ -224,7 +239,13 @@ interface AgentStore {
   deleteSession: (sessionId: string) => Promise<void>;
 
 
-  setPipeline: (stages: PipelineStage[]) => void;
+  /**
+   * 本次运行的阶段，来自 `agent-pipeline-update`。不动用户的配置。
+   *
+   * 这个 setter 以前叫 `setPipeline` 并且写的是配置字段 —— 唯一的调用方是那个事件处理器，
+   * 所以每跑一次，界面上的"我配的流水线"就被换成了"这次跑的流水线"。
+   */
+  setRunPipeline: (stages: PipelineStage[]) => void;
   addDiff: (diff: DiffEntry) => void;
   markDiffApplied: (diffId: string) => void;
   markDiffRejected: (diffId: string) => void;
@@ -463,6 +484,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   activeRole: "coder",
   pipeline: DEFAULT_PIPELINE,
+  runPipeline: null,
   llmConfigured: false,
   llmConnection: UNVERIFIED_LLM_CONNECTION,
   llmEndpoint: "",
@@ -501,8 +523,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set({ steps });
     persistAgentSession(get());
   },
-  setPipeline: (pipeline) => {
-    set({ pipeline });
+  setRunPipeline: (runPipeline) => {
+    set({ runPipeline });
     persistAgentSession(get());
   },
   updateStep: (stepId, updates) =>
@@ -690,7 +712,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       currentTask: null,
       contextUsage: null,
       steps: [],
-      pipeline: DEFAULT_PIPELINE,
+      runPipeline: null,
       sddArtifacts: [],
       activeSddArtifact: null,
       ghostSuggestions: [],
@@ -736,7 +758,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // 后端已经不认识的步骤上。**diffs 刻意保留**：那是真实存在的待审查改动，磁盘上就是
       // 那样，换会话不该让它们从审查区消失（消失才是这个产品要避免的那种不一致）。
       steps: [],
-      pipeline: DEFAULT_PIPELINE,
+      runPipeline: null,
       sddArtifacts: [],
       activeSddArtifact: null,
       error: null,
@@ -807,7 +829,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       currentTask: { id: detail.id, title: detail.title },
       contextUsage: null,
       steps: [],
-      pipeline: DEFAULT_PIPELINE,
+      runPipeline: null,
       sddArtifacts: [],
       activeSddArtifact: null,
       error: null,
@@ -1877,7 +1899,11 @@ interface PersistedAgentSession {
   ideMode: IdeMode;
   currentTask: Task | null;
   steps: Step[];
-  pipeline: PipelineStage[];
+  /**
+   * 这次运行的阶段。存的是运行状态，不是用户的流水线配置 —— 配置由后端保管
+   * （`get_pipeline`），不该被一份会话快照带回来覆盖掉。
+   */
+  runPipeline: PipelineStage[] | null;
   sddArtifacts: SddArtifact[];
   activeSddArtifact: SddArtifact | null;
   error: string | null;
@@ -1910,10 +1936,12 @@ function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] 
   }
 }
 
-function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode" | "currentTask" | "steps" | "pipeline" | "sddArtifacts" | "activeSddArtifact" | "error" | "agentRunId">) {
+function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode" | "currentTask" | "steps" | "runPipeline" | "sddArtifacts" | "activeSddArtifact" | "error" | "agentRunId">) {
   if (typeof window === "undefined") return;
   const workspacePath = currentWorkspacePath();
-  const hasSessionData = state.steps.length > 0 || state.pipeline.some((stage) => stage.status !== "pending") || state.currentTask !== null || Boolean(state.activeSddArtifact);
+  // 判断"这份会话有内容吗"看的是**运行过的**阶段。配置里的阶段永远是 pending，
+  // 用配置判断会让一个从没跑过的界面被存成一份会话。
+  const hasSessionData = state.steps.length > 0 || (state.runPipeline ?? []).some((stage) => stage.status !== "pending") || state.currentTask !== null || Boolean(state.activeSddArtifact);
   if (!workspacePath || !hasSessionData) {
     clearPersistedAgentSession();
     return;
@@ -1926,7 +1954,7 @@ function persistAgentSession(state: Pick<AgentStore, "state" | "mode" | "ideMode
     ideMode: state.ideMode,
     currentTask: state.currentTask,
     steps: state.steps.slice(-100),
-    pipeline: state.pipeline,
+    runPipeline: state.runPipeline,
     sddArtifacts: state.sddArtifacts.slice(-50),
     activeSddArtifact: state.activeSddArtifact,
     error: state.error,
@@ -1945,13 +1973,13 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
       return null;
     }
     const steps = Array.isArray(parsed.steps) ? parsed.steps : [];
-    const pipeline = Array.isArray(parsed.pipeline) && parsed.pipeline.length > 0
-      ? parsed.pipeline
-      : DEFAULT_PIPELINE;
+    // 没有运行过的阶段就是"没跑过"。以前这里在缺字段时退回默认流水线，于是恢复出来的
+    // 界面会显示四个 pending 阶段，像是有一次运行排在那里 —— 那是配置，不是运行。
+    const runPipeline = Array.isArray(parsed.runPipeline) ? parsed.runPipeline : [];
     // 任务先归一化再判断"这份会话还有内容吗"：判断和恢复用同一个值，否则一份
     // 形状不对的 currentTask 能让一个空会话复活 —— 恢复出来的 store 里它已经是 null。
     const currentTask = normalizeRestoredTask(parsed.currentTask);
-    if (steps.length === 0 && pipeline.every((stage) => stage.status === "pending") && !currentTask) {
+    if (steps.length === 0 && runPipeline.every((stage) => stage.status === "pending") && !currentTask) {
       return null;
     }
     const interrupted = isInFlightState(parsed.state);
@@ -1961,7 +1989,8 @@ function loadAgentSession(expectedWorkspacePath = currentWorkspacePath()): Parti
       ideMode: parsed.ideMode ?? "code",
       currentTask,
       steps: steps.map(normalizeRestoredStep),
-      pipeline: pipeline.map(normalizeRestoredPipelineStage),
+      runPipeline:
+        runPipeline.length > 0 ? runPipeline.map(normalizeRestoredPipelineStage) : null,
       sddArtifacts: Array.isArray(parsed.sddArtifacts) ? parsed.sddArtifacts : [],
       activeSddArtifact: parsed.activeSddArtifact ?? null,
       error: parsed.error ?? null,

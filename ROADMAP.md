@@ -2124,6 +2124,11 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **It now compares content**: `pipeline_matches_default()` — empty, or the same roles and the same `pause_before` as the default. Stage *names* are deliberately not compared (display strings, and about to be translated), but `pause_before` is: "stop before this stage and ask me" is an explicit run instruction, and trimming that stage away would silently cancel the pause the user asked for.
    - **Nothing had ever called `begin_planning` from a test**, which is why this survived: the classifier had eight passing tests of its own and none of them reached the caller. Three were added — default pipeline plus a one-spot prompt trims to a single Implement stage; a pipeline with `pause_before` set is left alone; Plan mode keeps its own two-stage pipeline — plus three unit tests on the new predicate.
    - Rust 566 → 572; frontend unchanged.
+170. **Separate run pipeline from configured pipeline (2026-09-24)**
+   The `agent-pipeline-update` event carries the **run's** stages — which may be trimmed to one or two by `begin_planning` — but the store wrote them into `pipeline`, the same field that `PipelineEditor` and `AgentSelector` read as **the user's configuration**. After any trimmed run the editor showed a one-stage pipeline, and a stray Save turned the trim into the real config.
+   - `runPipeline` (`null` = never run) now holds the run's stages. `pipeline` is only written by `get_pipeline` / `update_pipeline` / `reset_pipeline` / `fetchPipeline`. `TaskPipeline` reads `runPipeline ?? pipeline`; editors read only `pipeline`.
+   - Session persistence saves and restores `runPipeline`. A snapshot written by an older build only has `pipeline`, so it restores as "never run" — deliberately no fallback: the persisted session is per-workspace and short-lived, and a shim here would have to guess whether that array was a config or a run. `startNewSession`, `resumeSession`, `forkSession` and `deleteSession` clear `runPipeline` without touching `pipeline` (they used to reset the *configuration* to the default, which is the same defect in the other direction).
+   - Frontend 309 → 311 (36 files), tsc 0; Rust 572 unchanged.
 
 
 

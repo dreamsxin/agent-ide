@@ -705,6 +705,48 @@ describe("restoreAgentSession", () => {
   });
 });
 
+/**
+ * 「我配的流水线」和「这次跑的流水线」是两件事。
+ *
+ * 后端会按模式和请求形状给本次运行塑形：Plan 模式换成两个阶段，小改动裁成一个
+ * （见 `begin_planning`）。以前 store 里只有一个字段，`agent-pipeline-update`
+ * 事件直接往它上面写，于是跑完一次之后 Pipeline Editor 显示的成了那次运行的形状 ——
+ * 用户在那里随手点一下保存，就把一次运行的裁剪结果变成了自己的真实配置。
+ */
+describe("配置的流水线和这次运行的流水线", () => {
+  it("运行事件只改这次运行的那份", () => {
+    useAgentStore.setState({
+      pipeline: [
+        { role: "architect", name: "Design", status: "pending" },
+        { role: "coder", name: "Implement", status: "pending" },
+        { role: "tester", name: "Test", status: "pending" },
+      ],
+      runPipeline: null,
+    });
+
+    // 后端裁成了一步
+    useAgentStore.getState().setRunPipeline([
+      { role: "coder", name: "Implement", status: "active" },
+    ]);
+
+    expect(useAgentStore.getState().runPipeline).toHaveLength(1);
+    expect(useAgentStore.getState().pipeline).toHaveLength(3);
+  });
+
+  it("新开任务清掉这次运行，但配置留着", async () => {
+    invokeMock.mockResolvedValue({ sessions: [], activeId: "", warning: null, sessionsAreSaved: true });
+    useAgentStore.setState({
+      pipeline: [{ role: "coder", name: "Implement", status: "pending" }],
+      runPipeline: [{ role: "coder", name: "Implement", status: "completed" }],
+    });
+
+    await useAgentStore.getState().startNewSession();
+
+    expect(useAgentStore.getState().runPipeline).toBeNull();
+    expect(useAgentStore.getState().pipeline).toHaveLength(1);
+  });
+});
+
 describe("forgetEarlierExternalActions", () => {
   /**
    * 界面上剩下什么由后端那份唯一的记录说了算，所以清空之后必须重新读一遍 ——
