@@ -456,20 +456,19 @@ describe("applyAllDiffs", () => {
     hunks: [],
   };
 
-  it("explains the empty result instead of looking like a dead button", async () => {
+  it("retires the entry instead of leaving a dead button and a fake failure", async () => {
     // 后端的 diff 只在内存里，前端从 localStorage 恢复。重启后界面还显示
-    // Apply All (N)，后端手上是空的，apply 返回 0/0 —— 以前这里什么都不做。
+    // Apply All (N)，后端手上是空的，apply 返回 0/0。以前这里弹一句
+    // 「这次运行失败了 / Nothing was applied…」—— 运行没失败，是清单过期了。
     useAgentStore.setState({ diffs: [pendingDiff], error: null });
     invokeMock.mockResolvedValueOnce({ applied: [], failed: [] });
 
     const applied = await useAgentStore.getState().applyAllDiffs();
 
     expect(applied).toEqual([]);
-    const error = useAgentStore.getState().error ?? "";
-    expect(error).toContain("Nothing was applied");
-    expect(error).toContain("re-run");
-    // 状态不能被谎报成 applied
-    expect(useAgentStore.getState().diffs[0].status).toBe("pending");
+    // 不谎报成 applied，也不谎报成运行失败
+    expect(useAgentStore.getState().diffs[0].status).toBe("stale");
+    expect(useAgentStore.getState().error).toBeNull();
   });
 
   it("stays quiet when there was nothing to apply in the first place", async () => {
@@ -650,7 +649,7 @@ describe("restoreDiffs", () => {
     expect(useAgentStore.getState().diffs).toEqual([backendDiff]);
   });
 
-  it("warns when restored changes are orphaned by an empty backend", async () => {
+  it("retires restored changes the backend no longer knows about", async () => {
     localStorage.setItem(
       "agent-ide-agent-diffs",
       JSON.stringify({
@@ -662,7 +661,10 @@ describe("restoreDiffs", () => {
 
     await useAgentStore.getState().restoreDiffs("/tmp/ws");
 
-    expect(useAgentStore.getState().error).toContain("cannot be applied");
+    // 记录留着（用户要能看见 Agent 上次提过什么），但不再是"等你决定"
+    expect(useAgentStore.getState().diffs).toHaveLength(1);
+    expect(useAgentStore.getState().diffs[0].status).toBe("stale");
+    expect(useAgentStore.getState().error).toBeNull();
   });
 });
 

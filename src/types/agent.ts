@@ -539,8 +539,12 @@ export interface DiffEntry {
    *
    * 它不能退回 `pending` —— 那样 Apply 会把一条删除记录当成内容替换执行，把文件写成
    * 0 字节而不是删掉它；移动记录更是没有内容可应用。见后端 `undo_last_apply`。
+   *
+   * `stale` 也是终态，而且**只有前端会写**：后端的 diff 只活在内存里，重启之后它一条都
+   * 没有，而前端从 localStorage 恢复出一整排。对不上的那些就是 `stale` —— 还看得见（它是
+   * 上一次会话的记录），但不再当成"等你决定"，因为按 Apply 后端根本不认识它们。
    */
-  status: "pending" | "partial" | "applied" | "rejected" | "failed" | "reverted";
+  status: "pending" | "partial" | "applied" | "rejected" | "failed" | "reverted" | "stale";
   applyError?: string;
 }
 

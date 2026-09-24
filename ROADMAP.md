@@ -2220,6 +2220,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `Server '{name}' already exists` was our own sentence stored in the same `error` state that also holds the backend's raw text. Same split as `ProjectMemoryCard`: our sentence goes through a key, anything from the backend stays verbatim.
    - The auto-approve summary keeps its second half — "only auto-approved tools are exposed to the Agent unless the permission preset grants command execution" — because that sentence is the only place the panel says what the checkbox actually authorizes.
    - Frontend 331 unchanged (38 files), tsc 0; Rust 579 unchanged.
+184. **"这次运行失败了 / Nothing was applied" — the run had not failed (2026-09-24)**
+   Reported one round after 181 shipped: Apply all produced a red run-failure banner whose sentence was the one path 181 did **not** touch. The run was fine; the review list was from an earlier session.
+   - **Cause.** The backend's diffs live only in memory (`AgentOrchestrator`), the frontend persists its review list to `localStorage`. After a restart the list comes back with every Apply / Reject button intact while the backend holds nothing, so `apply_diffs` returns `{applied: [], failed: []}` and the store printed a sentence. `restoreDiffs` already detected the same condition on startup and printed a *different* sentence; `rejectAllDiffs` had a third. Three copies of one fact, all English, none of them fixing the buttons.
+   - **Fix: a terminal `stale` status, not a third message.** `markOrphanedDiffsStale()` rewrites those entries once, in one place, and persists them. `stale` is absent from `REVIEWABLE_DIFF_STATUSES`, so the single source in `utils/agentExperience.ts` does the rest for free: the Changes badge stops counting them, Apply all disappears, and each card shows 「上一次会话留下的」 plus why it cannot be applied. The records stay — seeing what the Agent proposed is the point of the review area.
+   - **Why not a banner with a "re-run" button**: re-running needs the original prompt, and the prompt that produced a three-file diff is usually not the one you would send now. An honest record plus an empty action row says more than a button that guesses.
+   - The framing was the actual defect the user hit: a stale list is not a failed run, and `state: "error"` made the panel say something untrue about the Agent.
+   - Frontend 331 unchanged (38 files, two tests rewritten), tsc 0; Rust 579 unchanged — `stale` is frontend-only and the comment on `DiffEntry.status` says so.
+
 
 
 

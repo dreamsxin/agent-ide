@@ -611,12 +611,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         persistDiffs(backend);
         return;
       }
-      const orphaned = persisted.filter(isReviewableDiff);
-      if (orphaned.length > 0) {
-        set({
-          error: `${orphaned.length} restored change(s) are no longer known to the backend and cannot be applied. Re-run the task to regenerate them.`,
-        });
-      }
+      set({ diffs: markOrphanedDiffsStale(persisted) });
     } catch (err: unknown) {
       console.warn("[AgentStore] get_agent_diffs failed:", err);
     }
@@ -1244,7 +1239,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   applyAllDiffs: async () => {
-    const reviewable = get().diffs.filter(isReviewableDiff);
     if (!isTauriRuntime()) {
       set({ error: "Applying diffs needs the desktop runtime (npm run tauri -- dev)." });
       return [];
@@ -1253,15 +1247,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const result = await invoke<ApplyDiffsResult>("apply_diffs");
       // 后端的 diff 只活在内存里，前端却把它们写进了 localStorage。重启之后界面
       // 还显示 N 条待处理，后端手上是空的，apply 就成了静默空操作 —— 按钮点了
-      // 没反应、文件没变、也没有任何提示。这里把这种不一致明确报出来。
+      // 没反应、文件没变。这里不弹"运行失败"（运行没失败），而是把那些条目标成
+      // 过期记录，按钮跟着消失。
       if (result.applied.length === 0 && result.failed.length === 0) {
-        set({
-          lastApplyResult: result,
-          error:
-            reviewable.length > 0
-              ? `Nothing was applied: the backend has no pending diffs for this review list. It was restored from an earlier session, so re-run the task to regenerate the changes.`
-              : null,
-        });
+        set({ lastApplyResult: result, diffs: markOrphanedDiffsStale(get().diffs) });
         return [];
       }
       set((s) => {
@@ -1399,21 +1388,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   rejectAllDiffs: async () => {
-    const reviewable = get().diffs.filter(isReviewableDiff);
     if (!isTauriRuntime()) {
       set({ error: "Rejecting diffs needs the desktop runtime (npm run tauri -- dev)." });
       return [];
     }
     try {
       const rejected = await invoke<DiffEntry[]>("reject_diffs");
+      // 和 Apply all 同一种不一致：后端手上没有这份清单，拒绝也是空操作。
       if (rejected.length === 0) {
-        set({
-          lastApplyResult: null,
-          error:
-            reviewable.length > 0
-              ? `Nothing was rejected: the backend has no pending diffs for this review list. It was restored from an earlier session, so re-run the task to regenerate the changes.`
-              : null,
-        });
+        set({ lastApplyResult: null, diffs: markOrphanedDiffsStale(get().diffs) });
         return [];
       }
       set((s) => {
@@ -1922,6 +1905,28 @@ function persistDiffs(diffs: DiffEntry[]) {
   };
   localStorage.setItem(AGENT_DIFFS_STORAGE_KEY, JSON.stringify(payload));
 }
+
+/**
+ * 把后端已经不认识的待审改动标成 `stale`，并落盘。
+ *
+ * 后端的 diff 只活在内存里，重启之后一条都没有；前端却从 localStorage 恢复出一整排，
+ * 每条都带着 Apply / Reject 按钮。用户点 Apply all，后端返回空结果，界面弹一句
+ * 「这次运行失败了 / Nothing was applied…」—— 运行根本没失败，是这份清单过期了，
+ * 而那些按钮从一开始就点不出任何效果（AGENTS.md：绝不上线一个什么都不做的控件）。
+ *
+ * 所以标成终态而不是弹提示：`stale` 不在 `REVIEWABLE_DIFF_STATUSES` 里，于是角标不再
+ * 计数、Apply all 那一行消失、每条只剩下一句"它是上一次会话的记录"。记录仍然留着 ——
+ * 用户要能看见 Agent 上次提过什么。
+ */
+function markOrphanedDiffsStale(diffs: DiffEntry[]): DiffEntry[] {
+  if (!diffs.some(isReviewableDiff)) return diffs;
+  const next = diffs.map((diff) =>
+    isReviewableDiff(diff) ? { ...diff, status: "stale" as const } : diff
+  );
+  persistDiffs(next);
+  return next;
+}
+
 
 function loadDiffs(expectedWorkspacePath = currentWorkspacePath()): DiffEntry[] {
   if (typeof window === "undefined") return [];

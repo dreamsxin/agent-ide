@@ -620,6 +620,14 @@ export default function DiffView() {
                   {t("diff.reverted.note")}
                 </div>
               )}
+              {/* 上一次会话留下的记录：后端已经不认识它，所以这里没有任何按钮 ——
+                  给一个点了什么都不会发生的 Apply 比不给更糟。 */}
+              {diff.status === "stale" && (
+                <div className="bg-surface-border/20 px-3 py-1 text-xs text-surface-muted">
+                  <div className="font-medium">{t("diff.status.stale")}</div>
+                  <div className="mt-0.5 text-[10px]">{t("diff.stale.hint")}</div>
+                </div>
+              )}
               {diff.status === "failed" && (() => {
                 const failureMessage = diff.applyError || failedMessages.get(diff.id);
                 // 提示和聊天横幅走同一张表：以前这里只认 baseHash 一种，"文件已存在"

@@ -363,6 +363,7 @@ export const EN = {
   "diff.status.rejected": "Rejected",
   "diff.status.failed": "Failed",
   "diff.status.reverted": "Reverted",
+  "diff.status.stale": "From an earlier session",
   "severity.error": "error",
   "severity.warning": "warning",
   "severity.info": "info",
@@ -405,6 +406,8 @@ export const EN = {
   "diff.regenerateAgainstFile": "Regenerate against current file",
   "diff.reverted.note": "Reverted — this is a record of a change the Agent made and you undid",
   "diff.applyFailed": "Apply failed",
+  "diff.stale.hint":
+    "The backend no longer holds this change, so it cannot be applied — it is kept here as a record of what the Agent proposed. Ask for it again to get a fresh change.",
   "diff.empty": "No pending changes",
   "diff.empty.hint": "Code changes suggested by the Agent will appear here.",
 
@@ -1244,6 +1247,7 @@ export const ZH: Record<MessageKey, string> = {
   "diff.status.rejected": "已拒绝",
   "diff.status.failed": "失败",
   "diff.status.reverted": "已撤销",
+  "diff.status.stale": "上一次会话留下的",
   "severity.error": "错误",
   "severity.warning": "警告",
   "severity.info": "提示",
@@ -1286,6 +1290,8 @@ export const ZH: Record<MessageKey, string> = {
   "diff.regenerateAgainstFile": "按当前文件重新生成",
   "diff.reverted.note": "已撤销 —— 这是一条记录：Agent 改过，你撤回了",
   "diff.applyFailed": "应用失败",
+  "diff.stale.hint":
+    "后端手上已经没有这条改动了，应用不了 —— 它留在这里只是一份记录：Agent 当时提过什么。想要的话重新让 Agent 生成一次。",
   "diff.empty": "没有待审查的改动",
   "diff.empty.hint": "Agent 提的代码改动会出现在这里。",
 
