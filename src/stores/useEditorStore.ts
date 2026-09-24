@@ -193,7 +193,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   markDirty: (path, dirty) =>
     set((s) => ({
       openFiles: s.openFiles.map((f) =>
-        f.path === path ? { ...f, isDirty: dirty } : f
+        pathsEqual(f.path, path) ? { ...f, isDirty: dirty } : f
       ),
     })),
 
@@ -234,7 +234,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       set((s) => ({
         saveError: null,
         openFiles: s.openFiles.map((f) =>
-          f.path === activeFile ? { ...f, isDirty: false } : f
+          pathsEqual(f.path, activeFile) ? { ...f, isDirty: false } : f
         ),
       }));
     } catch (e) {
@@ -249,20 +249,24 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   reloadFile: async (path) => {
     if (!isTauriRuntime()) return;
+    // 缓冲区的键必须是**已打开那条页签**的路径：调用方给的可能是 `\` 分隔或盘符大小写
+    // 不同的同一个文件，直接拿它当键会多出一份缓冲区，而页签仍指着旧的那份。
+    const filePath =
+      get().openFiles.find((file) => pathsEqual(file.path, path))?.path ?? normalizeFilePath(path);
     try {
       const content = await invoke<string>("read_file_content", { path });
       set((s) => ({
-        fileContents: { ...s.fileContents, [path]: content },
+        fileContents: { ...s.fileContents, [filePath]: content },
         openFiles: s.openFiles.map((f) =>
           // 重新读成功就清掉 loadError，否则这个标签会永久停在"不可保存"
-          f.path === path ? { ...f, isDirty: false, loadError: undefined } : f
+          pathsEqual(f.path, filePath) ? { ...f, isDirty: false, loadError: undefined } : f
         ),
       }));
     } catch (e) {
       console.error(`Failed to reload ${path}:`, e);
       set((s) => ({
         openFiles: s.openFiles.map((f) =>
-          f.path === path
+          pathsEqual(f.path, filePath)
             ? { ...f, loadError: e instanceof Error ? e.message : String(e) }
             : f
         ),
@@ -297,7 +301,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     await invoke("delete_path", { path });
     // 关闭该文件（如果是打开的文件）
     const s = get();
-    if (s.openFiles.some((f) => f.path === path)) {
+    if (s.openFiles.some((f) => pathsEqual(f.path, path))) {
       s.closeFile(path);
     }
     // 刷新 Explorer
@@ -319,24 +323,32 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   renamePath: async (oldPath, newPath) => {
     if (!isTauriRuntime()) return;
     await invoke("rename_path", { oldPath, newPath });
-    // 更新已打开的文件引用
-    set((s) => ({
-      openFiles: s.openFiles.map((f) =>
-        f.path === oldPath
-          ? { ...f, path: newPath, name: newPath.split(/[/\\]/).pop() || newPath }
-          : f
-      ),
-      activeFile: s.activeFile === oldPath ? newPath : s.activeFile,
-      fileContents: (() => {
-        const contents = { ...s.fileContents };
-        if (contents[oldPath] !== undefined) {
-          contents[newPath] = contents[oldPath];
-          delete contents[oldPath];
-        }
-        return contents;
-      })(),
-      explorerKey: s.explorerKey + 1,
-    }));
+    // 改名前后都按归一化后的路径认：调用方给的可能是 `\` 分隔或盘符大小写不同的同一个
+    // 文件，裸比较会让页签还指着旧名字，而缓冲区里多出一份对不上的内容。
+    const nextPath = normalizeFilePath(newPath);
+    set((s) => {
+      const previousPath =
+        s.openFiles.find((file) => pathsEqual(file.path, oldPath))?.path ??
+        normalizeFilePath(oldPath);
+      return {
+        openFiles: s.openFiles.map((f) =>
+          pathsEqual(f.path, previousPath)
+            ? { ...f, path: nextPath, name: fileNameFromPath(nextPath) }
+            : f
+        ),
+        activeFile:
+          s.activeFile && pathsEqual(s.activeFile, previousPath) ? nextPath : s.activeFile,
+        fileContents: (() => {
+          const contents = { ...s.fileContents };
+          if (contents[previousPath] !== undefined) {
+            contents[nextPath] = contents[previousPath];
+            delete contents[previousPath];
+          }
+          return contents;
+        })(),
+        explorerKey: s.explorerKey + 1,
+      };
+    });
     persistEditorSession();
   },
 
@@ -394,7 +406,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
     if (restoredFiles.length === 0) return;
     const activeFile =
-      saved.activeFile && restoredFiles.some((file) => file.path === saved.activeFile)
+      saved.activeFile && restoredFiles.some((file) => pathsEqual(file.path, saved.activeFile!))
         ? saved.activeFile
         : restoredFiles[0].path;
 

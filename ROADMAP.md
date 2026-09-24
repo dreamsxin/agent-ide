@@ -2245,6 +2245,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The second symptom follows from the first: `EditorTabs` uses `key={file.path}`, so two tabs for one path are two siblings with the same React key. Highlighting and clicks then land on the other one — that is the 「tab 不对」 half, not a separate bug.
    - Fix: the check and the insert are now one synchronous `set`, and the read fills the buffer afterwards. A tab therefore appears immediately (with an empty buffer, never a fabricated comment — the buffer is the source of truth for saving) and a second call finds it and only switches focus.
    - Frontend 332 → 333 (38 files), tsc 0; Rust 579 unchanged.
+188. **`pathsEqual` is now the only way this store compares paths (2026-09-24)**
+   Follow-up to 187, flagged while fixing it: seven sites still compared with a bare `===` while the rest went through the normalizing helpers. On Windows the same file arrives written both ways (`src/app.ts` and `src\app.ts`), so the two kinds of comparison could disagree — the same family of defect as the duplicate tab, one layer down.
+   - Converted: `markDirty`, `saveCurrentFile`, `reloadFile` (both branches), `deletePath`, `renamePath`, and the restore path's active-file check.
+   - **Two of them were more than a comparison.** `reloadFile` used the caller's raw path as the `fileContents` **key**, so a backslash spelling wrote a second buffer while the tab kept pointing at the first; it now resolves the key from the open tab, as `updateFileContent` already did. `renamePath` had the same problem on both sides of the move, plus it re-derived the file name with an inline `split(/[/\\]/)` instead of `fileNameFromPath`.
+   - The test opens a file with `/` and then drives `markDirty` and `reloadFile` with `\`: one tab, one buffer, and the buffer's key is still the tab's path. Case folding is deliberately not asserted — that is `normalizeFilePath`'s business and its own tests'.
+   - Frontend 333 → 334 (38 files), tsc 0; Rust 579 unchanged.
+
 
 
 

@@ -62,6 +62,29 @@ describe("opening the same file twice at once", () => {
     // 内容照样读进来了：去重不能顺手把缓冲区留空
     expect(useEditorStore.getState().fileContents["src/app.ts"]).toBe("const value = 1;\n");
   });
+
+  /**
+   * 同一个文件在 Windows 上会以两种写法出现（`src/app.ts` 和 `src\app.ts`）。store 里
+   * 有一半的比较曾经是裸 `===`，于是"标脏"会落空、"重新读"会另开一份缓冲区，而页签
+   * 还指着旧的那一份 —— 和页签重复是同一族的故障。
+   */
+  it("treats a backslash path as the same file", async () => {
+    invokeMock.mockResolvedValue("const value = 1;\n");
+    await useEditorStore.getState().openFile(tab);
+
+    useEditorStore.getState().markDirty("src\\app.ts", true);
+    expect(useEditorStore.getState().openFiles[0].isDirty).toBe(true);
+
+    invokeMock.mockResolvedValue("const value = 2;\n");
+    await useEditorStore.getState().reloadFile("src\\app.ts");
+
+    const state = useEditorStore.getState();
+    expect(state.openFiles).toHaveLength(1);
+    expect(state.openFiles[0].isDirty).toBe(false);
+    // 缓冲区只有一份，键还是那条页签的路径
+    expect(Object.keys(state.fileContents)).toEqual(["src/app.ts"]);
+    expect(state.fileContents["src/app.ts"]).toBe("const value = 2;\n");
+  });
 });
 
 describe("opening a file that cannot be read", () => {
