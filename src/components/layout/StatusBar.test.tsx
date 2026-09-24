@@ -8,10 +8,13 @@ import { llmTargetFingerprint, UNVERIFIED_LLM_CONNECTION } from "../../stores/ll
 import { useGitStore } from "../../stores/useGitStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore } from "../../stores/useProblemStore";
+import { translate, useLocaleStore } from "../../i18n";
 
 afterEach(cleanup);
 
 beforeEach(() => {
+  // 显式定语言：默认值来自 `navigator.language`，断言里不该赌 jsdom 给什么
+  useLocaleStore.getState().setLocale("zh");
   useProblemStore.setState({ problems: [] });
   useGitStore.setState({ status: null });
   useLayoutStore.setState({
@@ -43,7 +46,9 @@ describe("problems segment", () => {
     render(<StatusBar />);
 
     const label = screen.getByTestId("status-bar-problems").getAttribute("aria-label");
-    expect(label).toContain("2 errors, 1 warning, 0 info");
+    // 断言的是"三个数进到了这句话里"，不是那句英文怎么写的。原来钉的是
+    // "2 errors, 1 warning, 0 info" —— 那串是手写的单复数拼接，只有英文成立。
+    expect(label).toContain(translate("zh", "status.problems", { errors: 2, warnings: 1, info: 0 }));
   });
 
   /**

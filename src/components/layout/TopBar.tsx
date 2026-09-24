@@ -184,14 +184,14 @@ export default function TopBar() {
           type="button"
           onClick={handleLspStatusClick}
           className={`rounded border px-1.5 py-0.5 text-[10px] ${lspStatusClass(lspStatus)}`}
-          title={lspMessage}
+          title={lspMessage ?? t(`lsp.status.${lspStatus}`)}
         >
-          {lspBadgeLabel(lspDetails?.languageId ?? activeTab?.language ?? languageFromPath(activeTab?.path ?? ""))} {lspStatus}
+          {lspBadgeLabel(lspDetails?.languageId ?? activeTab?.language ?? languageFromPath(activeTab?.path ?? ""))} {t(`lsp.short.${lspStatus}`)}
         </button>
         {lspDetailsOpen && (
           <div className="absolute top-10 left-1/2 z-50 w-[360px] -translate-x-1/2 rounded border border-surface-border bg-surface-panel p-3 text-[11px] text-surface-text shadow-xl">
             <div className="mb-2 flex items-center justify-between">
-              <span className="font-semibold">{lspDetails?.languageName ?? "Language Server"}</span>
+              <span className="font-semibold">{lspDetails?.languageName ?? t("lsp.title")}</span>
               <button
                 type="button"
                 onClick={() => setLspDetailsOpen(false)}
@@ -202,28 +202,36 @@ export default function TopBar() {
                 x
               </button>
             </div>
-            <LspDetailRow label="Status" value={lspDetails?.status ?? lspStatus} />
-            <LspDetailRow label="Message" value={lspDetails?.message ?? lspMessage} />
-            <LspDetailRow label="Server" value={lspDetails?.serverPath ?? "-"} />
-            <LspDetailRow label="Source" value={lspDetails?.serverSource ?? "-"} />
-            <LspDetailRow label="Workspace" value={lspDetails?.workspaceRoot ?? (workspacePath || "-")} />
-            <LspDetailRow label="Indexing" value={`${lspDetails?.indexingStatus ?? "unknown"} - ${lspDetails?.indexingMessage ?? "No indexing details."}`} />
+            {/* 这几行的标签键早就在 `lsp.*` 里了，之前只是没接上 —— 键写好了、界面还写着
+                英文字面量。状态那行显示后端原话优先，没有原话就按状态给默认说明。 */}
+            <LspDetailRow label={t("lsp.status")} value={lspDetails?.status ?? t(`lsp.short.${lspStatus}`)} />
             <LspDetailRow
-              label="Config"
+              label={t("lsp.message")}
+              value={lspDetails?.message ?? lspMessage ?? t(`lsp.status.${lspStatus}`)}
+            />
+            <LspDetailRow label={t("lsp.server")} value={lspDetails?.serverPath ?? "-"} />
+            <LspDetailRow label={t("lsp.source")} value={lspDetails?.serverSource ?? "-"} />
+            <LspDetailRow label={t("lsp.workspace")} value={lspDetails?.workspaceRoot ?? (workspacePath || "-")} />
+            <LspDetailRow
+              label={t("lsp.indexing")}
+              value={`${lspDetails?.indexingStatus ?? t("lsp.unknown")} - ${lspDetails?.indexingMessage ?? t("lsp.noIndexingDetails")}`}
+            />
+            <LspDetailRow
+              label={t("lsp.config")}
               value={
                 lspDetails?.workspaceConfigFiles?.length
                   ? lspDetails.workspaceConfigFiles.join(", ")
-                  : "No tsconfig/jsconfig/package.json detected"
+                  : t("lsp.noConfig")
               }
             />
             <div className="mt-2 grid grid-cols-3 gap-2">
-              <LspMetric label="Opened" value={lspDetails?.openedDocuments ?? 0} />
-              <LspMetric label="Changes" value={lspDetails?.changeCount ?? 0} />
-              <LspMetric label="Diagnostics" value={lspDetails?.diagnosticsCount ?? 0} />
+              <LspMetric label={t("lsp.opened")} value={lspDetails?.openedDocuments ?? 0} />
+              <LspMetric label={t("lsp.changes")} value={lspDetails?.changeCount ?? 0} />
+              <LspMetric label={t("lsp.diagnostics")} value={lspDetails?.diagnosticsCount ?? 0} />
             </div>
             {(lspDetails?.status ?? lspStatus) !== "ready" && (
               <div className="mt-2 rounded border border-diff-modify/30 bg-diff-modify/10 p-2">
-                <div className="mb-1 text-[10px] uppercase text-surface-muted">Install</div>
+                <div className="mb-1 text-[10px] uppercase text-surface-muted">{t("lsp.install")}</div>
                 <code className="block select-text break-all font-mono text-[10px] text-surface-text">
                   {lspDetails?.installCommand ?? installCommandForLanguage(activeTab?.language ?? languageFromPath(activeTab?.path ?? ""))}
                 </code>

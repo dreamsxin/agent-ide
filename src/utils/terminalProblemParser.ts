@@ -1,5 +1,8 @@
 import type { ProblemEntry } from "../stores/useProblemStore";
 import { normalizeFilePath } from "./paths";
+// 正则抓不到消息时的兜底那一句会进问题面板，所以它得跟着界面语言。
+// 这个模块不在组件里（`appendAndParseTerminalProblems` 由终端的数据回调调用），现问 store 的语言。
+import { translate, useLocaleStore } from "../i18n";
 
 const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const MAX_BUFFER_LENGTH = 24000;
@@ -61,7 +64,7 @@ export function parseTerminalProblems(output: string, terminalId = "main"): Prob
         column,
         severity,
         source: "test",
-        message: message || "Terminal reported a problem",
+        message: message || translate(useLocaleStore.getState().locale, "problems.terminalFallback"),
       });
     }
   }

@@ -9,6 +9,7 @@ import { llmIndicator, llmTargetFingerprint } from "../../stores/llmConnection";
 import { describeRunUsage } from "../../types/agent";
 import { formatMicrosUsd } from "../../utils/money";
 import StatusDot from "../shared/StatusDot";
+import { useT } from "../../i18n";
 
 /**
  * 每个严重级别的字母和颜色。
@@ -59,6 +60,7 @@ export default function StatusBar() {
   const leftVisible = useLayoutStore((s) => s.leftVisible);
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const setLeftTab = useLayoutStore((s) => s.setLeftTab);
+  const t = useT();
 
   const counts = useMemo(
     () => ({
@@ -84,12 +86,16 @@ export default function StatusBar() {
     if (!leftVisible) toggleLeftPanel();
   };
 
+  // 一句话，参数是三个数：英文是 "N error(s), …"，中文是"N 个错误，…"。
+  // 以前这里按 `count === 1` 现拼单复数，那种拼法只有英文成立。
   const problemLabel =
     counts.error + counts.warning + counts.info === 0
-      ? "No problems"
-      : `${counts.error} error${counts.error === 1 ? "" : "s"}, ` +
-        `${counts.warning} warning${counts.warning === 1 ? "" : "s"}, ` +
-        `${counts.info} info`;
+      ? t("status.noProblems")
+      : t("status.problems", {
+          errors: counts.error,
+          warnings: counts.warning,
+          info: counts.info,
+        });
 
   return (
     <div
@@ -102,15 +108,18 @@ export default function StatusBar() {
             type="button"
             onClick={showSourceControl}
             data-testid="status-bar-branch"
-            aria-label={`On branch ${gitStatus.branch}. Open Source Control.`}
-            title={`On branch ${gitStatus.branch}${
-              gitStatus.upstream ? ` (tracking ${gitStatus.upstream})` : " (no upstream)"
-            } — click to open Source Control`}
+            aria-label={t("status.branch.aria", { branch: gitStatus.branch })}
+            title={t("status.branch.title", {
+              branch: gitStatus.branch,
+              tracking: gitStatus.upstream
+                ? t("status.branch.tracking", { upstream: gitStatus.upstream })
+                : t("status.branch.noUpstream"),
+            })}
             className="flex items-center gap-1 rounded px-1 font-mono hover:bg-surface-border/40 hover:text-surface-text"
           >
             <GitBranch aria-hidden="true" className="h-3 w-3" />
             {gitStatus.branch}
-            {gitStatus.entries.length > 0 && <span title="Uncommitted changes">*</span>}
+            {gitStatus.entries.length > 0 && <span title={t("status.uncommitted")}>*</span>}
             {gitStatus.ahead > 0 && <span>{`\u2191${gitStatus.ahead}`}</span>}
             {gitStatus.behind > 0 && <span>{`\u2193${gitStatus.behind}`}</span>}
           </button>
@@ -120,8 +129,8 @@ export default function StatusBar() {
           type="button"
           onClick={showProblems}
           data-testid="status-bar-problems"
-          aria-label={`${problemLabel}. Open the Problems panel.`}
-          title={`${problemLabel} — click to open the Problems panel`}
+          aria-label={t("status.problems.aria", { summary: problemLabel })}
+          title={t("status.problems.title", { summary: problemLabel })}
           className="flex items-center gap-1.5 rounded px-1 hover:bg-surface-border/40 hover:text-surface-text"
         >
           {(["error", "warning", "info"] as ProblemSeverity[]).map((severity) => (

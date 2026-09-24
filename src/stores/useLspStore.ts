@@ -11,7 +11,14 @@ export interface LspDiagnosticSummary {
 
 interface LspStore {
   status: LspStatus;
-  message: string;
+  /**
+   * 具体那一句说明；`null` = 没有额外的话，界面按 `status` 显示默认说明。
+   *
+   * 以前这里存的是一句英文，而且同一句"还没启动"在这个文件里写了两遍（初始值和
+   * `defaultMessage` 的 default 分支）。按状态给默认说明是**显示**的事，不是 store 的事：
+   * 放在这里就得在 store 里认识界面语言，而 store 是被事件和命令写的，不是被界面写的。
+   */
+  message: string | null;
   diagnosticSummaries: LspDiagnosticSummary[];
   setStatus: (status: LspStatus, message?: string) => void;
   setDiagnosticSummary: (summary: LspDiagnosticSummary) => void;
@@ -19,32 +26,12 @@ interface LspStore {
 
 export const useLspStore = create<LspStore>((set) => ({
   status: "idle",
-  message: "Language server is not initialized.",
+  message: null,
   diagnosticSummaries: [],
-  setStatus: (status, message) =>
-    set({
-      status,
-      message: message ?? defaultMessage(status),
-    }),
+  setStatus: (status, message) => set({ status, message: message ?? null }),
   setDiagnosticSummary: (summary) =>
     set((state) => {
       const next = state.diagnosticSummaries.filter((item) => item.file !== summary.file);
       return { diagnosticSummaries: [summary, ...next].slice(0, 8) };
     }),
 }));
-
-function defaultMessage(status: LspStatus) {
-  switch (status) {
-    case "checking":
-      return "Checking language server...";
-    case "ready":
-      return "Language server ready.";
-    case "unavailable":
-      return "Language server unavailable. Open an LSP-supported file for install guidance.";
-    case "error":
-      return "Language server failed.";
-    case "idle":
-    default:
-      return "Language server is not initialized.";
-  }
-}

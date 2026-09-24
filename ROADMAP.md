@@ -2182,6 +2182,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The footer stopped being three fragments (`Press` + `<kbd>F1</kbd>` + `to toggle this panel`) and became one sentence with `{key}` interpolated. Splitting a sentence around markup forces each half to be translated blind, and Chinese puts the verb elsewhere.
    - `Map<string, Shortcut[]>` → `Map<Shortcut["group"], Shortcut[]>`, because with a `string` key `t(\`shortcut.group.${group}\`)` no longer type-checks as a real key — the loose type was hiding the safety that makes the key table worth having.
    - Frontend 324 unchanged (38 files), tsc 0; Rust 574 unchanged.
+179. **Chinese UI: the status bar and the language-server popup (2026-09-24)**
+   The last of the visible English. 22 keys, and a table that had already been written but never wired.
+   - **The `lsp.*` keys existed since an earlier round; the popup still rendered English literals.** `lsp.status`, `lsp.message`, `lsp.server`, `lsp.noConfig`, `lsp.install`… were all in `messages.ts`, and `TopBar` had `label="Status"` right next to `t("lsp.recentDiagnostics")`. I nearly made it worse by inventing a **second** set (`lsp.row.*`, `lsp.metric.*`) before the duplicate-key compile error caught it; the existing keys are the ones now wired.
+   - **The per-status default message left the store.** `useLspStore` held an English sentence *and* a `defaultMessage(status)` table — with "not initialized" written twice in the same file. `message` is now `string | null`; the display derives the default from `status`. A store written by events and commands should not need to know the UI language.
+   - **The problems summary stopped hand-rolling plurals.** `${n} error${n === 1 ? "" : "s"}` only works in English; it is one key with three numbers now, and the test that pinned the English string asserts the interpolated key instead.
+   - Frontend 324 unchanged (38 files), tsc 0; Rust 574 unchanged.
 
 
 
