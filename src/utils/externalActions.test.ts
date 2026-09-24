@@ -70,10 +70,17 @@ describe("isRefusedAction / summarizeExternalActions", () => {
   });
 
   it("puts the target first and only appends a detail when there is one", () => {
-    expect(describeExternalAction(actions[0])).toBe("https://ok.example");
+    expect(describeExternalAction(actions[0], "（没记下目标）")).toBe("https://ok.example");
     expect(
-      describeExternalAction({ ...actions[0], detail: "Opened it" })
+      describeExternalAction({ ...actions[0], detail: "Opened it" }, "（没记下目标）")
     ).toBe("https://ok.example — Opened it");
+  });
+
+  // 目标为空时那句话由调用方给：这个模块不认识界面语言，而这一行会出现在屏幕上
+  it("falls back to whatever the caller passes when the target is empty", () => {
+    expect(describeExternalAction({ ...actions[0], target: "" }, "（没记下目标）")).toBe(
+      "（没记下目标）"
+    );
   });
 });
 

@@ -401,7 +401,7 @@ export default function DiffView() {
                   )}
                 </div>
                 <div className="mt-0.5 break-words text-[11px] text-surface-muted">
-                  {describeExternalAction(action)}
+                  {describeExternalAction(action, t("diff.external.unknownTarget"))}
                 </div>
               </div>
             ))}

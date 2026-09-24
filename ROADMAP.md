@@ -2167,6 +2167,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **`TaskPipeline` was fully English** — which is what made the four grey status dots read as an unticked checklist: 「还没开始」next to a stage name is unambiguous, `pending` next to it is not. `stageOutputState` now returns a key, and its order **is** the decision: an `error` log wins even while the stage still says active; waiting-for-approval comes next because it is the only state that needs a person. 5 tests pin that order.
    - The stage's role label comes from `agentRoles` (`role.*`) instead of rendering the enum with a `capitalize` class — the third consumer of that single source, after `AgentSelector` and `PipelineEditor`.
    - Frontend 319 → 323 (38 files), tsc 0; Rust 574 unchanged.
+177. **Chinese UI: the last of the .ts copy (2026-09-24)**
+   Six keys, and one sentence that existed eleven times.
+   - **`useGitStore` said the same thing eleven ways.** "Git is available in the Tauri app runtime.", "Git commit is available in…", "Git stage is available in…" — one per action. Naming the action tells the user nothing (they know which button they pressed) while guaranteeing that a translation pass misses ten of them. One `git.needsTauri`, one `needsTauriError()` helper.
+   - **`describeExternalAction` took its fallback from the caller.** It is in a pure data module that must not know the UI language, but `"(unknown target)"` was a sentence on screen — in the one place this product cannot afford to be vague, the record of an action that cannot be undone. The caller now passes `t("diff.external.unknownTarget")`, and a test pins that the fallback is whatever the caller gave.
+   - `useRunProjectTask`'s four log lines went through keys, reusing `tasks.status.*` for the success/failed word rather than embedding the enum.
+   - **A near-miss worth recording**: the eleven git replacements were done with a PowerShell `-replace` round-trip, and `git diff` then showed the new Chinese comment as mojibake. The file was fine — it was the console's output encoding, as AGENTS.md's trap list says. Verified with `grep_content` before touching anything; the diff also stayed hunk-local, which is the evidence that line endings survived.
+   - Frontend 323 → 324 (38 files), tsc 0; Rust 574 unchanged.
 
 
 

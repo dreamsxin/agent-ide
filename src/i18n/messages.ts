@@ -367,6 +367,7 @@ export const EN = {
   "diff.external.forget.title": "Removes them from the durable log and leaves a note that they were cleared. This session's records stay.",
   "diff.external.previousSession": "previous session",
   "diff.external.earlierRun": "earlier run",
+  "diff.external.unknownTarget": "(target not recorded)",
   "diff.applyResult.failed": "Some diffs could not be applied.",
   "diff.applyAll": "Apply All ({count})",
   "diff.rejectAll": "Reject All",
@@ -622,6 +623,12 @@ export const EN = {
     "{failed} of {total} checks failed · {skipped} skipped · sent to Agent",
   "tasks.repair.gaveUp": "Repair gave up after {rounds} round(s): {reason}",
   "tasks.repair.passed": "Checks pass after {rounds} round(s) · {reason}",
+  "tasks.log.running": "Running project task: {label}",
+  "tasks.log.finished": "{label} {status} ({ms} ms)",
+  "tasks.log.failed": "Failed to run project task: {label}",
+  "tasks.log.terminal": "Opened a terminal session for project task: {label}",
+
+  "git.needsTauri": "Git actions need the Tauri app runtime.",
 
   "terminal.tab": "Terminal {label}",
   "terminal.cwd.workspace": "workspace",
@@ -1117,6 +1124,7 @@ export const ZH: Record<MessageKey, string> = {
   "diff.external.forget.title": "把它们从长期日志里删掉，只留一句已清理的说明。这一次会话的记录不动。",
   "diff.external.previousSession": "上一次会话",
   "diff.external.earlierRun": "更早的运行",
+  "diff.external.unknownTarget": "（没记下目标）",
   "diff.applyResult.failed": "有些改动没能应用上。",
   "diff.applyAll": "全部应用（{count}）",
   "diff.rejectAll": "全部拒绝",
@@ -1371,6 +1379,12 @@ export const ZH: Record<MessageKey, string> = {
     "{total} 项检查里有 {failed} 项没过 · 跳过 {skipped} 项 · 已经发给 Agent",
   "tasks.repair.gaveUp": "修了 {rounds} 轮之后放弃：{reason}",
   "tasks.repair.passed": "{rounds} 轮之后检查通过 · {reason}",
+  "tasks.log.running": "正在跑项目命令：{label}",
+  "tasks.log.finished": "{label} {status}（{ms} 毫秒）",
+  "tasks.log.failed": "项目命令没跑起来：{label}",
+  "tasks.log.terminal": "给项目命令开了一个终端：{label}",
+
+  "git.needsTauri": "Git 操作只能在 Tauri 应用里用。",
 
   "terminal.tab": "终端 {label}",
   "terminal.cwd.workspace": "工作区",

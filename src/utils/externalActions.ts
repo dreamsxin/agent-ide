@@ -92,13 +92,17 @@ export function isFromOtherRun(
 }
 
 /**
- * 一行摘要。
+ * 一行摘要：目标在前，有细节才追加。
  *
- * 类别写在前面而不是翻译成句子：`browser_open_refused` 和 `browser_open` 差一个词，
- * 用户扫一列的时候需要它们看起来不一样。
+ * 目标为空时显示什么由调用方给（`unknownTarget`）：这个模块是纯数据层，不认识界面语言，
+ * 而这一句是会出现在屏幕上的话。之前它在这里写死成英文，于是整块记录只有这一处不跟着
+ * 界面语言走 —— 而它恰好出现在最不该让人犯迷糊的地方：一条撤不回的动作记录。
  */
-export function describeExternalAction(action: ExternalActionRecord): string {
-  const target = action.target || "(unknown target)";
+export function describeExternalAction(
+  action: ExternalActionRecord,
+  unknownTarget: string
+): string {
+  const target = action.target || unknownTarget;
   return action.detail ? `${target} — ${action.detail}` : target;
 }
 
