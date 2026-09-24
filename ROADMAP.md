@@ -2276,6 +2276,10 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - When no cap was set at all (provider default applied), the retry sets an explicit 8192 rather than doubling an unknown number.
    - **Accounting is not optional**: both attempts are recorded, and the retry emits an action-log line naming the old and new cap and stating that this request was billed twice. Spending silently is worse than the failure.
    **Test plan.** Unit tests on `retry_output_cap` (triggers, refuses on `stop`, refuses when the window leaves no room, the no-cap-set case); one test per path asserting a single retry with the raised cap; one asserting both attempts are billed. `empty_response_error`'s wording gets a case for "already retried".
+   **Self-review corrections (before any code was written).**
+   - **The wrapper does not go where I first wrote it.** Both empty-response exits are *inside* the response parsers, and re-issuing a request needs the code that builds and sends it. The retry therefore wraps **send + parse at the parser's call site**, not the parser. Consequence, and it is a simplification: the parsers stay untouched, and the decision function keys off the error string they already return.
+   - **No input estimate.** The clamp was written as `window − prompt_estimate − safety`, but the failed attempt returns usage — that is how 122's billing works — so `prompt_tokens` is known exactly. Clamp against the measured value and fall back to the estimate only when usage is absent. One less guess in a formula that decides how much money to spend.
+
 
 
 
