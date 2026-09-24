@@ -15,6 +15,7 @@ import type { LucideIcon } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useT } from "../../i18n";
+import { isAgentBusy } from "../../utils/agentExperience";
 import type { Step } from "../../types/agent";
 
 const statusConfig: Record<
@@ -54,7 +55,9 @@ export default function TaskView({ embedded = false }: { embedded?: boolean }) {
   // 没有任务时说"还没有"，不编一个像任务名的字面量：单步执行 / 续跑 / 修复都不设
   // 标题（它们接的是已有任务），而恢复出来的会话可能根本没有任务。
   const title = currentTask?.title ?? t("plan.noTaskYet");
-  const canRun = agentState === "idle" || agentState === "done" || agentState === "waiting_user" || agentState === "error";
+  // 反过来问「它在忙吗」，而不是把四个空闲状态再抄一遍：抄出来的列表不会报错，只会和别处差
+  // 一个状态（顶栏那份就是这么坏的）。
+  const canRun = !isAgentBusy(agentState);
 
   const updateStepField = async (step: Step, updates: Partial<Step>) => {
     await updateAgentStep({ ...step, ...updates });

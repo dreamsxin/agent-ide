@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import type { AgentRole } from "../../types/agent";
+import { isAgentBusy } from "../../utils/agentExperience";
 import PipelineEditor from "./PipelineEditor";
 
 const ROLES: { id: AgentRole; label: string; desc: string; icon: string }[] = [
@@ -18,7 +19,8 @@ export default function AgentSelector() {
   const activeRole = useAgentStore((s) => s.activeRole);
   const setActiveRole = useAgentStore((s) => s.setActiveRole);
   const pipeline = useAgentStore((s) => s.pipeline);
-  const isRunning = state !== "idle" && state !== "done" && state !== "error";
+  // 同 TopBar：`waiting_user` 是"它在等你"，那时候换角色是合理的
+  const isRunning = isAgentBusy(state);
 
   const [showEditor, setShowEditor] = useState(false);
 

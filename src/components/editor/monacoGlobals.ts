@@ -24,6 +24,7 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { pathsEqual } from "../../utils/paths";
+import { isAgentBusy as agentIsBusy } from "../../utils/agentExperience";
 import {
   AGENT_QUICK_ACTIONS,
   buildActionPrompt,
@@ -84,10 +85,7 @@ export function setCurrentEditor(instance: editor.IStandaloneCodeEditor | null) 
 }
 
 function isAgentBusy() {
-  const state = useAgentStore.getState().state;
-  return (
-    state !== "idle" && state !== "done" && state !== "error" && state !== "waiting_user"
-  );
+  return agentIsBusy(useAgentStore.getState().state);
 }
 
 function log(entry: {

@@ -396,6 +396,53 @@ describe("built-in tool documentation", () => {
     });
 });
 
+describe("what counts as busy", () => {
+    /**
+     * 「Agent 在忙」只能有一份判断。
+     *
+     * 这个列表在七个地方各写过一遍，TopBar 那一份漏了 `waiting_user`：而恢复一次被中断的
+     * 会话恰好落在这个状态上（`normalizeRestoredAgentState`），于是顶栏的「写代码 / 先做
+     * 计划」永久禁用 —— 模式换不回来，Agent 也根本没在跑。手写的那份不会报错，它只是比
+     * 别人多禁用一个状态，所以只能靠不许再手写来挡。
+     *
+     * 扫描只看两件事：不准再出现 `!== "done"` 这种反向清单，以及每个闸门文件都必须真的
+     * 去问 `agentExperience`。正向清单（`=== "idle" || === "done" || …`）没法靠字面量分辨
+     * —— 同一个文件里 `step.status === "done"` 是合法的 —— 所以用"必须引用那份判断"兜住。
+     */
+    it("is decided in one place, not re-spelled per component", () => {
+        const gates = [
+            join("src", "components", "layout", "TopBar.tsx"),
+            join("src", "components", "agent", "ChatView.tsx"),
+            join("src", "components", "agent", "AgentSelector.tsx"),
+            join("src", "components", "agent", "TaskView.tsx"),
+            join("src", "components", "editor", "QuickActions.tsx"),
+            join("src", "components", "editor", "monacoGlobals.ts"),
+            join("src", "components", "shared", "CommandPalette.tsx"),
+            join("src", "hooks", "useFixWithAgent.ts"),
+        ];
+        const sources = new Map(gates.map((file) => [file, readFileSync(file, "utf8")]));
+
+        const handRolled = gates.filter((file) => sources.get(file)!.includes('!== "done"'));
+        expect(
+            handRolled,
+            "these files spell out the run states themselves instead of asking agentExperience"
+        ).toEqual([]);
+
+        const notAsking = gates.filter((file) => {
+            const source = sources.get(file)!;
+            return !source.includes("isAgentBusy") && !source.includes("agentRunIsLive");
+        });
+        expect(
+            notAsking,
+            "these files gate on the agent state but never call the shared predicate"
+        ).toEqual([]);
+
+        const helper = readFileSync(join("src", "utils", "agentExperience.ts"), "utf8");
+        expect(helper).toContain("export function isAgentBusy");
+        expect(helper).toContain("export function agentRunIsLive");
+    });
+});
+
 describe("tool call mode default", () => {
     /**
      * 界面不能把后端的默认档位覆盖掉。

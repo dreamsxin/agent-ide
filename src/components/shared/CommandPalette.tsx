@@ -12,6 +12,7 @@ import type { ProjectTaskDefinition } from "../../stores/useTaskStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import { useT } from "../../i18n";
 import { describeTabs, selectionUrlOrError } from "../../utils/browserTabs";
+import { agentRunIsLive } from "../../utils/agentExperience";
 import type { BrowserTab } from "../../types/browser";
 
 export interface PaletteCommand {
@@ -412,7 +413,9 @@ export function usePaletteCommands(runProjectTask: (task: ProjectTaskDefinition 
         title: t("palette.stop"),
         subtitle: t("palette.stop.sub"),
         group: t("palette.group.agent"),
-        disabled: agentState === "idle" || agentState === "done",
+        // 「停止」只在真的有一次运行时可点：`error`/`done` 都已经结束了，而 `waiting_user`
+        // 还没结束（它在等人回答），所以这里问的是 live 而不是 busy。
+        disabled: !agentRunIsLive(agentState),
         run: () => void stopAgent(),
       },
     ];

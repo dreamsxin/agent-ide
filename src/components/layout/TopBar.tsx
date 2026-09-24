@@ -12,6 +12,7 @@ import ModeSwitch from "../shared/ModeSwitch";
 import type { AgentMode } from "../../types/agent";
 import { useLocaleStore, useT } from "../../i18n";
 import { isTauriRuntime } from "../../utils/tauri";
+import { agentRunIsLive, isAgentBusy } from "../../utils/agentExperience";
 import { getLspStatus, probeLsp, type LspStatusSnapshot } from "../../utils/lspClient";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
@@ -63,8 +64,10 @@ export default function TopBar() {
   const [lspDetailsOpen, setLspDetailsOpen] = useState(false);
   const [lspDetails, setLspDetails] = useState<LspStatusSnapshot | null>(null);
 
-  const isRunning =
-    agentState !== "idle" && agentState !== "done" && agentState !== "error";
+  const isRunning = agentRunIsLive(agentState);
+  // 「等你回答」不是忙：那时 Agent 停着等人，模式当然可以换。恢复一次被中断的会话也
+  // 落在这个状态上，把它算成忙会让这两个按钮再也点不动（见 `isAgentBusy`）。
+  const settingsLocked = isAgentBusy(agentState);
 
   // 监听窗口最大化状态
   useEffect(() => {
@@ -302,7 +305,7 @@ export default function TopBar() {
               key={mode}
               type="button"
               onClick={() => setIdeMode(mode)}
-              disabled={isRunning}
+              disabled={settingsLocked}
               className={`rounded px-2 py-0.5 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                 ideMode === mode
                   ? "bg-accent-blue text-white"

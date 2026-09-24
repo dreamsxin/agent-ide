@@ -13,6 +13,7 @@ import {
   buildTaskFailureFixPrompt,
 } from "../utils/agentRuntimeContext";
 import { ideRuntimeOptionsFor, loadContextOptions } from "../utils/chatContextOptions";
+import { isAgentBusy as agentIsBusy } from "../utils/agentExperience";
 
 export function useFixWithAgent() {
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
@@ -25,11 +26,7 @@ export function useFixWithAgent() {
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const setAgentView = useLayoutStore((s) => s.setAgentView);
 
-  const isAgentBusy =
-    agentState !== "idle" &&
-    agentState !== "done" &&
-    agentState !== "error" &&
-    agentState !== "waiting_user";
+  const isAgentBusy = agentIsBusy(agentState);
 
   const sendFixPrompt = useCallback(
     async (prompt: string) => {

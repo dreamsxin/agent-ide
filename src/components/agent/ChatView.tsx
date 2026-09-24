@@ -6,7 +6,7 @@ import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import PendingChangesCard from "./PendingChangesCard";
 import { buildIdeRuntimeContext } from "../../utils/agentRuntimeContext";
-import { agentStateMessageKey } from "../../utils/agentExperience";
+import { agentStateMessageKey, isAgentBusy } from "../../utils/agentExperience";
 import { useT } from "../../i18n";
 import {
   ideRuntimeOptionsFor,
@@ -319,11 +319,7 @@ export default function ChatView() {
     persistContextOptions(contextOptions);
   }, [contextOptions]);
 
-  const isActing =
-    agentState !== "idle" &&
-    agentState !== "done" &&
-    agentState !== "error" &&
-    agentState !== "waiting_user";
+  const isActing = isAgentBusy(agentState);
 
   const spinning = STATE_SPINNER[agentState] ?? false;
   const isSending = isActing;

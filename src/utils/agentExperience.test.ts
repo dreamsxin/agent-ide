@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DiffEntry, Step } from "../types/agent";
-import { agentStateMessageKey, isAgentBusy, summarizeAgentRun } from "./agentExperience";
+import { agentRunIsLive, agentStateMessageKey, isAgentBusy, summarizeAgentRun } from "./agentExperience";
 import { translate } from "../i18n";
 
 const step = (id: string, status: Step["status"]): Step => ({
@@ -74,5 +74,32 @@ describe("agent experience helpers", () => {
 
     expect(summary.pendingChanges).toBe(0);
     expect(summary.reviewRequired).toBe(false);
+  });
+});
+
+/**
+ * 「忙」和「还有一次运行没结束」是两件事，差的正是 `waiting_user`。
+ *
+ * 顶栏曾经只有一份自己手写的判断，把 `waiting_user` 算成了忙：恢复一次被中断的会话
+ * 就落在这个状态上（见 `normalizeRestoredAgentState`），于是「写代码 / 先做计划」两个
+ * 按钮永久禁用 —— 模式再也换不回来，而 Agent 根本没在跑。
+ */
+describe("busy 和 live 的分界", () => {
+  it("等用户回答的时候不算忙", () => {
+    expect(isAgentBusy("waiting_user")).toBe(false);
+    expect(isAgentBusy("idle")).toBe(false);
+    expect(isAgentBusy("done")).toBe(false);
+    expect(isAgentBusy("error")).toBe(false);
+    for (const state of ["thinking", "planning", "acting", "reviewing"] as const) {
+      expect(isAgentBusy(state)).toBe(true);
+    }
+  });
+
+  it("但那次运行还挂着，所以 Stop 仍然有意义", () => {
+    expect(agentRunIsLive("waiting_user")).toBe(true);
+    expect(agentRunIsLive("acting")).toBe(true);
+    expect(agentRunIsLive("idle")).toBe(false);
+    expect(agentRunIsLive("done")).toBe(false);
+    expect(agentRunIsLive("error")).toBe(false);
   });
 });

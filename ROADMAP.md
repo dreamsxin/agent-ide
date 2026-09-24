@@ -2091,6 +2091,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Not changed, because the claim was wrong**: the spend cap is *not* silently inert. `spendCapStatus` already renders an amber "Not enforced: both prices are required" line, with the reason. I asserted otherwise in a report before reading that block.
    - Both blocks now go through `t()`, so the LLM/permission screen the user named is the second area available in Chinese.
    - Frontend 298 → 299 (35 files); Rust 566 unchanged.
+165. **"Waiting for you" is not "busy" (2026-09-23)**
+   Reported from use: the「写代码 / 先做计划」pair in the top bar could not be clicked, so the IDE mode was stuck on `plan` with no way back. The buttons were `disabled={isRunning}`, and `isRunning` was spelled out by hand in TopBar as "not idle, not done, not error" — which counts `waiting_user` as busy.
+   - **Why it never unsticks.** Restoring an interrupted session normalizes any in-flight state to `waiting_user` (`normalizeRestoredAgentState`), and an Agent question lands there too. In that state the Agent is *waiting for the user*, but the top bar refused the one control that would let him answer in the other mode. Nothing recovers it: switching modes is the action being blocked.
+   - **The same state list was spelled out by hand in seven places.** Five of them excluded `waiting_user` correctly — `ChatView`, `QuickActions`, `monacoGlobals`, `useFixWithAgent`, and `TaskView` (which wrote the *complement* as a positive list: `idle || done || waiting_user || error`). TopBar's copy was the wrong one, and `AgentSelector` shared its omission for role switching. The palette's Stop command was a seventh spelling, and wrong in the other direction: `idle || done` left Stop clickable after an `error`. All of them now call one predicate.
+   - **Two questions, two functions.** `isAgentBusy` gates "can the user act"; `agentRunIsLive` (busy **or** `waiting_user`) gates the Stop button, because a run paused on a question is still live in the backend and cancelling it is meaningful. Collapsing them into one flag is what produced the defect.
+   - **Guarded by a scan, not by an assertion.** `tests/ipc-contract.test.ts` checks two things across the eight gate files: no `!== "done"` reappears, and every one of them actually references `isAgentBusy` or `agentRunIsLive`. The second half is needed because a *positive* list cannot be recognised from the literals — `step.status === "done"` is legitimate in the same file — so the durable rule is "ask the shared predicate", not "avoid this string".
+   - Frontend 300 → 303 (35 files); Rust 566 unchanged.
 
 
 

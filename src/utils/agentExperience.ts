@@ -52,6 +52,26 @@ export function agentStateMessageKey(state: AgentState) {
 }
 
 
+const BUSY_STATES = new Set<AgentState>(["thinking", "planning", "acting", "reviewing"]);
+
+/**
+ * Agent 正在自己干活，界面上一切"要它做事"的入口都得先关掉。
+ *
+ * `waiting_user` **不算**忙：那个状态的意思正好相反 —— 它在等你。一次被中断的会话恢复出来
+ * 也是这个状态（见 `normalizeRestoredAgentState`），所以把它算成忙会留下一个解不开的死结：
+ * 顶栏的「写代码 / 先做计划」两个按钮一直是禁用的，模式换不回来，而 Agent 根本没在跑。
+ * 这个判断曾经在七个地方各写一遍，TopBar 那一份漏了这一条，于是只有它坏。
+ */
 export function isAgentBusy(state: AgentState) {
-  return ["thinking", "planning", "acting", "reviewing"].includes(state);
+  return BUSY_STATES.has(state);
+}
+
+/**
+ * 还有一次没结束的运行 —— 包括它停下来等你回答的时候。
+ *
+ * 和 `isAgentBusy` 差的就是 `waiting_user`：那时后端那次运行还挂着，Stop 仍然有意义，
+ * 但用户已经可以动界面了。两个问题不同，所以是两个函数，而不是一个带参数的。
+ */
+export function agentRunIsLive(state: AgentState) {
+  return isAgentBusy(state) || state === "waiting_user";
 }

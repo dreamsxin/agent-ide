@@ -8,6 +8,7 @@ import {
   buildActionPrompt,
   type AgentQuickActionKey,
 } from "../../utils/agentActions";
+import { isAgentBusy as agentIsBusy } from "../../utils/agentExperience";
 
 /**
  * Floating toolbar above selected text: [Explain | Fix | Refactor | Optimize]
@@ -42,11 +43,7 @@ export default function QuickActions() {
     }
   }, [selectedText, selectedRange, editor, monaco]);
 
-  const isAgentBusy =
-    agentState !== "idle" &&
-    agentState !== "done" &&
-    agentState !== "error" &&
-    agentState !== "waiting_user";
+  const isAgentBusy = agentIsBusy(agentState);
 
   const runQuickAction = async (action: AgentQuickActionKey) => {
     if (!selectedText || isAgentBusy) return;
