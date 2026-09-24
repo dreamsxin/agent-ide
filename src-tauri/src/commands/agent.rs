@@ -877,6 +877,11 @@ fn finish_agent_run(
     claim: crate::agent::orchestrator::RunClaim,
 ) {
     orch.finish_run(claim);
+    // 执行权释放之后才让审查队列决定状态：运行中间 `refresh_review_state` 是不动状态的
+    // （见它的注释），所以这一句是一次运行落到 WaitingUser / Done 的唯一地方。九条退出
+    // 分支共用它，谁也不用自己拼。取消那两条分支在这之后显式设 Idle，顺序上压过这里。
+    orch.refresh_review_state();
+    orch.emit_state_to(events);
     publish_tool_writes(orch, events, permissions);
     publish_external_actions(orch, events, permissions);
     emit_usage_action_log(orch, events, meter);
@@ -2462,6 +2467,84 @@ mod tests {
     /// 这条钉的是 `finish_agent_run` 本身的行为。它是四个运行命令**唯一**的收尾入口
     /// （包括 `repair_workspace`，那条路径以前自己拼装，被漏掉过两次），所以"失败和
     /// 取消也报"这件事靠的是那唯一入口，而不是这条测试 —— 调用点本身仍然要靠读代码。
+    /// 运行还在跑的时候，审查区的动作不许把状态写成"等你处理"。
+    ///
+    /// 用户报告的现象是"改动都应用了，面板还写着等你回答"。`refresh_review_state` 被
+    /// `record_step_result` 和审查区的每个动作共用，而它以前无条件改状态：一次多阶段运行
+    /// 刚产出第一批 diff 就报 `waiting_user`，而 Agent 还在跑；因为 `waiting_user` 不算忙，
+    /// 界面上那一排"要它做事"的按钮也在运行中间解锁了。
+    #[test]
+    fn a_run_in_flight_is_not_reported_as_waiting_for_the_user() {
+        let mut permissions =
+            crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
+        permissions.adopt_cancel(Arc::new(AtomicBool::new(false)));
+        let mut orch = AgentOrchestrator::new();
+        let lease = orch
+            .try_begin_run(Some("run-1".to_string()), &permissions)
+            .expect("a fresh orchestrator hands out the lease");
+        orch.state_mgr.set(AgentState::Acting);
+        orch.diffs.push(crate::agent::state_machine::FileDiff {
+            id: "d1".to_string(),
+            file: "draft.ts".to_string(),
+            base_hash: None,
+            provenance: None,
+            hunks: Vec::new(),
+            status: "pending".to_string(),
+        });
+
+        // 运行中间：产出 diff、用户应用 diff，都会走到这里
+        orch.refresh_review_state();
+        assert_eq!(
+            orch.state_mgr.state,
+            AgentState::Acting,
+            "执行权还在这次运行手里，状态属于运行，不属于审查队列"
+        );
+
+        // 收尾：执行权释放之后才落定
+        let meter = crate::services::llm_client::RunUsageMeter::new(None);
+        let llm = mock_llm("gpt-4o", "mock://settle");
+        let events = RecordingEvents::new();
+        finish_agent_run(&mut orch, &events, &permissions, &meter, &llm, lease.claim);
+        assert_eq!(
+            orch.state_mgr.state,
+            AgentState::WaitingUser,
+            "还有待审查的改动，收尾之后应当是等你处理"
+        );
+        assert!(
+            events
+                .names()
+                .iter()
+                .any(|name| name == "agent-state-changed"),
+            "落定的状态必须发出去，否则界面停在运行中的那一帧：{:?}",
+            events.names()
+        );
+    }
+
+    /// 一次报错的运行不会因为剩下的 diff 被处理完而显示成"已完成"。
+    #[test]
+    fn a_failed_run_stays_failed_after_the_review_queue_empties() {
+        let mut permissions =
+            crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
+        permissions.adopt_cancel(Arc::new(AtomicBool::new(false)));
+        let mut orch = AgentOrchestrator::new();
+        let lease = orch
+            .try_begin_run(Some("run-2".to_string()), &permissions)
+            .expect("a fresh orchestrator hands out the lease");
+        orch.state_mgr
+            .set(AgentState::Error("the model refused".to_string()));
+
+        let meter = crate::services::llm_client::RunUsageMeter::new(None);
+        let llm = mock_llm("gpt-4o", "mock://settle");
+        let events = RecordingEvents::new();
+        finish_agent_run(&mut orch, &events, &permissions, &meter, &llm, lease.claim);
+
+        assert!(
+            matches!(orch.state_mgr.state, AgentState::Error(_)),
+            "失败压过审查队列：实际是 {:?}",
+            orch.state_mgr.state
+        );
+    }
+
     #[test]
     fn finishing_a_run_reports_a_dropped_image_and_stays_quiet_otherwise() {
         let mut permissions =

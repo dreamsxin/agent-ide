@@ -10,10 +10,10 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import {
   agentStateMessageKey,
   isAgentBusy,
+  runDetailMessage,
   summarizeAgentRun,
 } from "../../utils/agentExperience";
 import { useT } from "../../i18n";
-import type { MessageKey } from "../../i18n/messages";
 import type { AgentState } from "../../types/agent";
 
 interface AgentRunSummaryProps {
@@ -40,14 +40,17 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
   const currentTask = useAgentStore((store) => store.currentTask);
   const ideMode = useAgentStore((store) => store.ideMode);
   const mode = useAgentStore((store) => store.mode);
+  // 真的挂着一道题才算"在等你回答"。状态是 `waiting_user` 说明不了这件事：
+  // 那个状态也用来表示"跑完了、改动等你审"，恢复一次被中断的会话同样落在它上面。
+  const hasPendingQuestion = useAgentStore((store) => store.pendingQuestion !== null);
   const summary = summarizeAgentRun(steps, diffs);
   const StatusIcon = statusIcon(state);
-  const detail = runDetail(
-    state,
+  const detail = runDetailMessage({
     summary,
-    t(`topbar.ideMode.${ideMode}`),
-    t(`mode.${mode}`)
-  );
+    hasPendingQuestion,
+    ideModeLabel: t(`topbar.ideMode.${ideMode}`),
+    modeLabel: t(`mode.${mode}`),
+  });
 
   return (
     <section
@@ -121,29 +124,6 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
       )}
     </section>
   );
-}
-
-function runDetail(
-  state: AgentState,
-  summary: ReturnType<typeof summarizeAgentRun>,
-  ideModeLabel: string,
-  modeLabel: string
-): { key: MessageKey; params?: Record<string, string | number> } {
-  if (summary.reviewRequired) {
-    return summary.pendingChanges === 1
-      ? { key: "summary.detail.review.one" }
-      : { key: "summary.detail.review.many", params: { count: summary.pendingChanges } };
-  }
-  if (state === "waiting_user") return { key: "summary.detail.waiting" };
-  if (summary.activeStep) {
-    return { key: "summary.detail.now", params: { title: summary.activeStep.title } };
-  }
-  if (summary.nextStep) {
-    return { key: "summary.detail.next", params: { title: summary.nextStep.title } };
-  }
-  // 两个模式名都借顶栏那两份文案：这里曾经直接渲染枚举值，于是同一个模式在顶栏是
-  // 「先做计划」，在这行是 `plan`。
-  return { key: "summary.detail.mode", params: { ide: ideModeLabel, mode: modeLabel } };
 }
 
 function statusIcon(state: AgentState) {

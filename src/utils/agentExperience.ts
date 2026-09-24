@@ -1,10 +1,26 @@
 import type { AgentState, DiffEntry, Step } from "../types/agent";
+import type { MessageKey } from "../i18n/messages";
 
+/**
+ * 还等着人处理的改动状态 —— 对应后端的 `is_reviewable_diff_status`。
+ *
+ * 前端以前有三份：这里一份、`useAgentStore` 一份、`DiffView` 里还有一个
+ * `isReviewableDiffStatus`。三份都写着同样的三个状态，所以加一个新状态时会有两处忘改，
+ * 而症状是"审查区说没有待办、状态栏说等你处理"这种对不上的界面。
+ */
 const REVIEWABLE_DIFF_STATUSES = new Set<DiffEntry["status"]>([
   "pending",
   "partial",
   "failed",
 ]);
+
+export function isReviewableDiffStatus(status: DiffEntry["status"]): boolean {
+  return REVIEWABLE_DIFF_STATUSES.has(status);
+}
+
+export function isReviewableDiff(diff: DiffEntry): boolean {
+  return isReviewableDiffStatus(diff.status);
+}
 
 export interface AgentRunSummary {
   activeStep: Step | null;
@@ -22,9 +38,7 @@ export function summarizeAgentRun(steps: Step[], diffs: DiffEntry[]): AgentRunSu
   ).length;
   const totalSteps = steps.length;
   const activeStep = steps.find((step) => step.status === "doing") ?? null;
-  const pendingChanges = diffs.filter((diff) =>
-    REVIEWABLE_DIFF_STATUSES.has(diff.status)
-  ).length;
+  const pendingChanges = diffs.filter(isReviewableDiff).length;
 
   return {
     activeStep,
@@ -74,4 +88,41 @@ export function isAgentBusy(state: AgentState) {
  */
 export function agentRunIsLive(state: AgentState) {
   return isAgentBusy(state) || state === "waiting_user";
+}
+
+/**
+ * 状态行第二句：现在到底在等什么。
+ *
+ * **只有真的挂着一道问题时才说"在对话里等你回答"。** 以前这句话只看 `state ===
+ * "waiting_user"`，而那个状态覆盖两件完全不同的事：模型问了你一道题，和这一轮跑完了、
+ * 改动等你审。改动全处理完之后第一个分支不成立，就掉到这句上，于是界面断言对话里有人
+ * 在等 —— 而对话里什么都没有。一次被中断的会话恢复出来也是 `waiting_user`
+ * （见 `normalizeRestoredAgentState`），同样会撞上这句。
+ *
+ * 问题不在挂着时不另编一句"没事了"：那同样是猜。落回模式那一行 —— 它永远是真的。
+ */
+export function runDetailMessage(input: {
+  summary: AgentRunSummary;
+  hasPendingQuestion: boolean;
+  ideModeLabel: string;
+  modeLabel: string;
+}): { key: MessageKey; params?: Record<string, string | number> } {
+  const { summary, hasPendingQuestion, ideModeLabel, modeLabel } = input;
+  if (summary.reviewRequired) {
+    return summary.pendingChanges === 1
+      ? { key: "summary.detail.review.one" }
+      : { key: "summary.detail.review.many", params: { count: summary.pendingChanges } };
+  }
+  if (hasPendingQuestion) {
+    return { key: "summary.detail.waiting" };
+  }
+  if (summary.activeStep) {
+    return { key: "summary.detail.now", params: { title: summary.activeStep.title } };
+  }
+  if (summary.nextStep) {
+    return { key: "summary.detail.next", params: { title: summary.nextStep.title } };
+  }
+  // 两个模式名都借顶栏那两份文案：这里曾经直接渲染枚举值，于是同一个模式在顶栏是
+  // 「先做计划」，在这行是 `plan`。
+  return { key: "summary.detail.mode", params: { ide: ideModeLabel, mode: modeLabel } };
 }

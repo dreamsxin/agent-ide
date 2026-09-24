@@ -846,7 +846,7 @@ export const ZH: Record<MessageKey, string> = {
   "state.planning": "拆步骤",
   "state.acting": "干活中",
   "state.reviewing": "自查中",
-  "state.waiting_user": "等你回答",
+  "state.waiting_user": "等你处理",
   "state.done": "已完成",
   "state.error": "失败",
 

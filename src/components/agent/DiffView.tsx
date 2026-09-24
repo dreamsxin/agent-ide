@@ -1,5 +1,6 @@
 import { useCallback } from "react";
-import { isReviewableDiff, useAgentStore } from "../../stores/useAgentStore";
+import { useAgentStore } from "../../stores/useAgentStore";
+import { isReviewableDiff, isReviewableDiffStatus } from "../../utils/agentExperience";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
@@ -658,10 +659,6 @@ function HunkCount({ label, count, className }: { label: string; count: number; 
       {count} {label}
     </span>
   );
-}
-
-function isReviewableDiffStatus(status: DiffEntry["status"]) {
-  return status === "pending" || status === "partial" || status === "failed";
 }
 
 function getHunkStatusCounts(hunks: DiffHunk[]) {

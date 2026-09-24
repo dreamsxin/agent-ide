@@ -1,5 +1,6 @@
 import { useCallback } from "react";
-import { isReviewableDiff, useAgentStore } from "../../stores/useAgentStore";
+import { useAgentStore } from "../../stores/useAgentStore";
+import { isReviewableDiff } from "../../utils/agentExperience";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import type { DiffEntry } from "../../types/agent";
 

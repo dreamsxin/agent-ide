@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "../utils/tauri";
 import { deriveTaskTitle } from "../utils/agentTaskTitle";
+import { isReviewableDiff } from "../utils/agentExperience";
 import {
   normalizeExternalActions,
   type ExternalActionRecord,
@@ -1876,13 +1877,6 @@ function nextDiffStatus(hunks: DiffEntry["hunks"]): DiffEntry["status"] {
 
 const AGENT_DIFFS_STORAGE_KEY = "agent-ide-agent-diffs";
 const AGENT_SESSION_STORAGE_KEY = "agent-ide-agent-session";
-
-/// 对应后端 `is_reviewable_diff_status`：还能被 Apply/Reject 处理的状态。
-const REVIEWABLE_DIFF_STATUSES = new Set(["pending", "partial", "failed"]);
-
-export function isReviewableDiff(diff: DiffEntry): boolean {
-  return REVIEWABLE_DIFF_STATUSES.has(diff.status);
-}
 
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;

@@ -2480,7 +2480,26 @@ impl AgentOrchestrator {
     }
 
     /// 还有待处理的 diff 时留在 WaitingUser，否则收尾为 Done
+    ///
+    /// **运行还握着执行权时一律不动状态。** 这个方法被审查区的每个动作调用，也被
+    /// `record_step_result` / `record_tool_writes` 调用 —— 后两个发生在运行**中间**。
+    /// 以前无条件写，于是一次多阶段运行刚产出第一批 diff，状态就变成了 `waiting_user`：
+    /// 界面上写着"等你处理"、而 Agent 还在跑下一个阶段，同时因为 `waiting_user` 不算忙
+    /// （见前端 `isAgentBusy`），所有"要它做事"的按钮在运行中间就解锁了。运行结束时由
+    /// `finish_agent_run` 再调一次，那时执行权已经释放，状态才落到这里。
+    ///
+    /// 失败也不被改写：一次报错的运行处理完剩下的 diff 之后不该显示成"已完成"，
+    /// 那和状态机里「Error 压过一切」是同一条规则。
     pub fn refresh_review_state(&mut self) {
+        if self.active_claim.is_some() {
+            return;
+        }
+        if matches!(
+            self.state_mgr.state,
+            crate::agent::state_machine::AgentState::Error(_)
+        ) {
+            return;
+        }
         // 和 `is_reviewable_diff_status` 共用同一份判断：以前这里把三个状态又抄了一遍，
         // 加一个新状态时很容易只改一处，于是"没有待办"和"不能应用"两个概念对不上。
         let has_open_work = self
@@ -2631,6 +2650,11 @@ impl AgentOrchestrator {
     /// Emit the current state to the frontend.
     fn emit_state(&self, events: &dyn RunEvents) {
         events.emit_json("agent-state-changed", self.state_payload());
+    }
+
+    /// 同上，给命令层用（`finish_agent_run` 要在收尾时把落定的状态发出去）。
+    pub fn emit_state_to(&self, events: &dyn RunEvents) {
+        self.emit_state(events);
     }
 
     fn emit_pipeline(&self, events: &dyn RunEvents, pipeline: &[PipelineStage]) {

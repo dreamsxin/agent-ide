@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { DiffEntry, Step } from "../types/agent";
-import { agentRunIsLive, agentStateMessageKey, isAgentBusy, summarizeAgentRun } from "./agentExperience";
+import {
+  agentRunIsLive,
+  agentStateMessageKey,
+  isAgentBusy,
+  runDetailMessage,
+  summarizeAgentRun,
+} from "./agentExperience";
 import { translate } from "../i18n";
 
 const step = (id: string, status: Step["status"]): Step => ({
@@ -59,7 +65,9 @@ describe("agent experience helpers", () => {
   it("maps every state to a message key", () => {
     expect(agentStateMessageKey("waiting_user")).toBe("state.waiting_user");
     expect(agentStateMessageKey("planning")).toBe("state.planning");
-    expect(translate("zh", agentStateMessageKey("waiting_user"))).toBe("等你回答");
+    // 中文这句刻意是中性的：`waiting_user` 同时表示"问你一道题"和"改动等你审"，
+    // 英文 `Waiting for you` 本来就不指定是哪一种，中文以前写成「等你回答」说多了。
+    expect(translate("zh", agentStateMessageKey("waiting_user"))).toBe("等你处理");
     expect(translate("en", agentStateMessageKey("planning"))).toBe("Planning");
     expect(isAgentBusy("acting")).toBe(true);
     expect(isAgentBusy("done")).toBe(false);
@@ -101,5 +109,51 @@ describe("busy 和 live 的分界", () => {
     expect(agentRunIsLive("idle")).toBe(false);
     expect(agentRunIsLive("done")).toBe(false);
     expect(agentRunIsLive("error")).toBe(false);
+  });
+});
+
+/**
+ * 状态行的第二句不许无根据地说"在对话里等你回答"。
+ *
+ * 用户报告：改动已经应用完了，面板还写着这句话。原因是这句只看状态是不是
+ * `waiting_user`，而那个状态同时表示"跑完了、改动等你审"和"被中断的会话恢复出来"。
+ */
+describe("状态行第二句", () => {
+  const idleSummary = summarizeAgentRun([], []);
+
+  it("真的挂着一道题才说在对话里等你回答", () => {
+    expect(
+      runDetailMessage({
+        summary: idleSummary,
+        hasPendingQuestion: true,
+        ideModeLabel: "写代码",
+        modeLabel: "自动落盘",
+      })
+    ).toEqual({ key: "summary.detail.waiting" });
+  });
+
+  it("没有问题挂着就落回模式那一行，而不是编一个不存在的提问", () => {
+    expect(
+      runDetailMessage({
+        summary: idleSummary,
+        hasPendingQuestion: false,
+        ideModeLabel: "写代码",
+        modeLabel: "自动落盘",
+      })
+    ).toEqual({
+      key: "summary.detail.mode",
+      params: { ide: "写代码", mode: "自动落盘" },
+    });
+  });
+
+  it("有待审改动时先说改动，那是用户下一步真正要做的事", () => {
+    expect(
+      runDetailMessage({
+        summary: summarizeAgentRun([], [diff("one", "pending"), diff("two", "failed")]),
+        hasPendingQuestion: true,
+        ideModeLabel: "写代码",
+        modeLabel: "自动落盘",
+      })
+    ).toEqual({ key: "summary.detail.review.many", params: { count: 2 } });
   });
 });
