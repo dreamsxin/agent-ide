@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "../utils/tauri";
 import { deriveTaskTitle } from "../utils/agentTaskTitle";
 import { isReviewableDiff } from "../utils/agentExperience";
+import { translate, useLocaleStore } from "../i18n";
 import {
   normalizeExternalActions,
   type ExternalActionRecord,
@@ -440,15 +441,24 @@ const DEFAULT_PIPELINE: PipelineStage[] = [
  * 一条按流程写，而不是问好。
  *
  * 只有一处定义：初始状态和"新建任务"曾经写着两句不同的话，同一个"刚开始"的界面因此有两种样子。
+ *
+ * 四个页签名字是插值进去的，不在这句里再写一遍：它们在顶栏是 `panel.tab.*`，这里要是自己
+ * 写一遍中文，改了页签名字之后这段说明就开始指一个界面上不存在的东西。
+ *
+ * 语言取的是**这条消息生成那一刻**的界面语言。之后切语言不会重写它 —— 它是聊天记录里的
+ * 一条消息，和其它消息一样带着时间戳，回头改写等于篡改记录。
  */
 function welcomeMessage(): ChatMessage {
+  const locale = useLocaleStore.getState().locale;
   return {
     id: "welcome",
     role: "system",
-    content:
-      "Describe what you want changed and send it. I break it into steps — they show up under **Plan**, " +
-      "where you can run, retry or skip one. Anything I write to files queues under **Changes** for you to " +
-      "review or undo. **New task** starts a fresh one; **Task history** brings an earlier one back.",
+    content: translate(locale, "chat.welcome", {
+      plan: translate(locale, "panel.tab.plan"),
+      changes: translate(locale, "panel.tab.changes"),
+      newTask: translate(locale, "panel.newTask"),
+      history: translate(locale, "panel.taskHistory"),
+    }),
     timestamp: Date.now(),
   };
 }

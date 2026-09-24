@@ -2161,6 +2161,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Matching is on the wording providers actually use (`maximum context length`, `prompt is too long`, `insufficient_quota`, …), lower-cased, and deliberately **not** on HTTP status numbers — `429` collides with token counts and ports.
    - Frontend 315 → 319 (37 files), tsc 0; Rust 574 unchanged.
    - Also fixed the race behind the original screenshot: the store's `catch` sets `state: "error"` *and* the message, but the backend's finish-time `agent-state-changed` can be delivered after the promise rejects. Under 173 that event carried `waiting_user`, overwriting the truth; under 174 it carries `error`, so both sources agree.
+176. **Chinese UI: the plan view and the welcome message (2026-09-24)**
+   The two English blocks the user actually hit while reporting the state bugs. 13 keys.
+   - **The chat's welcome message was the only copy hard-coded in a store** (`useAgentStore.ts`), so the i18n sweep — which walked components — never reached it: one English paragraph in an otherwise Chinese panel. The four tab names are now **interpolated** from `panel.tab.*` / `panel.newTask` / `panel.taskHistory` rather than written out again, so the instructions cannot start naming buttons that no longer exist. Its language is fixed at the moment the message is created: it is a chat message with a timestamp, and rewriting it on a language switch would be editing the transcript.
+   - **`TaskPipeline` was fully English** — which is what made the four grey status dots read as an unticked checklist: 「还没开始」next to a stage name is unambiguous, `pending` next to it is not. `stageOutputState` now returns a key, and its order **is** the decision: an `error` log wins even while the stage still says active; waiting-for-approval comes next because it is the only state that needs a person. 5 tests pin that order.
+   - The stage's role label comes from `agentRoles` (`role.*`) instead of rendering the enum with a `capitalize` class — the third consumer of that single source, after `AgentSelector` and `PipelineEditor`.
+   - Frontend 319 → 323 (38 files), tsc 0; Rust 574 unchanged.
 
 
 

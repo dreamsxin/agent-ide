@@ -1,5 +1,8 @@
 import { useAgentStore } from "../../stores/useAgentStore";
 import { useLogStore } from "../../stores/useLogStore";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
+import { roleLabelKey } from "./agentRoles";
 import type { LogEntry } from "../../types/project";
 import type { PipelineStage } from "../../types/agent";
 
@@ -8,6 +11,7 @@ interface TaskPipelineProps {
 }
 
 export default function TaskPipeline({ stages }: TaskPipelineProps) {
+  const t = useT();
   // 跑过就显示这次运行的阶段，没跑过就显示配置。
   //
   // 两份数据刻意分开：后端会按模式和请求形状给本次运行塑形（Plan 模式换成两个阶段，
@@ -24,14 +28,14 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
   return (
     <div className="p-3 text-xs">
       <div className="text-surface-muted mb-3 font-semibold tracking-wide flex items-center justify-between gap-2">
-        <span>Pipeline</span>
+        <span>{t("pipelineView.title")}</span>
         {pausedStage && (
           <button
             disabled={isStreaming}
             onClick={() => void continueAgentPipeline()}
             className="rounded border border-accent-blue/40 bg-accent-blue/10 px-2 py-0.5 text-[10px] font-normal text-accent-blue hover:bg-accent-blue/20 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Continue
+            {t("pipelineView.continue")}
           </button>
         )}
       </div>
@@ -103,18 +107,18 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
                     {statusText[stage.status]}
                   </span>
                 </div>
-                <div className="text-[10px] text-surface-muted capitalize">
-                  {stage.role}
-                  {stage.pauseBefore ? " · pauses before run" : ""}
+                <div className="text-[10px] text-surface-muted">
+                  {t(roleLabelKey(stage.role))}
+                  {stage.pauseBefore ? ` · ${t("pipelineView.pausesBefore")}` : ""}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-1">
-                  <span className={outputState.className}>{outputState.label}</span>
+                  <span className={outputState.className}>{t(outputState.key)}</span>
                   {sourceSummary && (
                     <span
                       title={sourceSummary}
                       className="max-w-full truncate rounded border border-surface-border bg-surface-base px-1.5 py-0.5 text-[10px] text-surface-muted"
                     >
-                      input: {sourceSummary}
+                      {t("pipelineView.input", { summary: sourceSummary })}
                     </span>
                   )}
                   {diffSummary && (
@@ -122,13 +126,13 @@ export default function TaskPipeline({ stages }: TaskPipelineProps) {
                       title={diffSummary}
                       className="max-w-full truncate rounded border border-accent-blue/30 bg-accent-blue/10 px-1.5 py-0.5 text-[10px] text-accent-blue"
                     >
-                      diff: {diffSummary}
+                      {t("pipelineView.diff", { summary: diffSummary })}
                     </span>
                   )}
                 </div>
                 {latestLog && (
                   <div className="mt-1 truncate text-[10px] text-surface-muted" title={latestLog.message}>
-                    {latestLog.level}: {latestLog.message}
+                    {t("pipelineView.log", { level: latestLog.level, message: latestLog.message })}
                   </div>
                 )}
               </div>
@@ -165,40 +169,50 @@ function latestDiffSummary(logs: LogEntry[]) {
   return [...logs].reverse().find((log) => Boolean(log.diffSummary))?.diffSummary ?? null;
 }
 
-function stageOutputState(stage: PipelineStage, logs: LogEntry[]) {
+/**
+ * 这一阶段现在该显示哪个标签 —— 返回文案键，不返回句子。
+ *
+ * 顺序本身是判断的一部分：**失败压在最前面**（哪怕阶段状态还是 active，只要它的日志里
+ * 出现过 error，这一阶段就已经坏了）；等批准排第二，因为那是唯一需要人动手的状态。
+ * 之前返回的是英文字符串，于是"这一阶段怎么了"这个判断和英文措辞绑在了一起。
+ */
+export function stageOutputState(
+  stage: PipelineStage,
+  logs: LogEntry[]
+): { key: MessageKey; className: string } {
   const base = "rounded border px-1.5 py-0.5 text-[10px]";
   if (stage.status === "failed" || logs.some((log) => log.level === "error")) {
     return {
-      label: "failed",
+      key: "pipelineView.state.failed",
       className: `${base} border-diff-remove/40 bg-diff-remove/10 text-diff-remove`,
     };
   }
   if (stage.status === "paused") {
     return {
-      label: "waiting approval",
+      key: "pipelineView.state.waitingApproval",
       className: `${base} border-diff-modify/40 bg-diff-modify/10 text-diff-modify`,
     };
   }
   if (latestDiffSummary(logs)) {
     return {
-      label: "produced diff",
+      key: "pipelineView.state.producedDiff",
       className: `${base} border-accent-blue/40 bg-accent-blue/10 text-accent-blue`,
     };
   }
   if (stage.status === "completed") {
     return {
-      label: "no diff",
+      key: "pipelineView.state.noDiff",
       className: `${base} border-accent-green/40 bg-accent-green/10 text-accent-green`,
     };
   }
   if (stage.status === "active") {
     return {
-      label: "running",
+      key: "pipelineView.state.running",
       className: `${base} border-accent-blue/40 bg-accent-blue/10 text-accent-blue`,
     };
   }
   return {
-    label: "pending",
+    key: "pipelineView.state.pending",
     className: `${base} border-surface-border bg-surface-base text-surface-muted`,
   };
 }

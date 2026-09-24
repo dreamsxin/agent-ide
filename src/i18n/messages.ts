@@ -739,6 +739,22 @@ export const EN = {
   "pipeline.saved": "Saved ✓",
   "pipeline.reset": "Reset Default",
   "pipeline.newStage": "New Stage",
+
+  "pipelineView.title": "Pipeline",
+  "pipelineView.continue": "Continue",
+  "pipelineView.pausesBefore": "pauses before run",
+  "pipelineView.input": "input: {summary}",
+  "pipelineView.diff": "diff: {summary}",
+  "pipelineView.state.failed": "failed",
+  "pipelineView.state.waitingApproval": "waiting approval",
+  "pipelineView.state.producedDiff": "produced diff",
+  "pipelineView.state.noDiff": "no diff",
+  "pipelineView.state.running": "running",
+  "pipelineView.state.pending": "pending",
+  "pipelineView.log": "{level}: {message}",
+
+  "chat.welcome":
+    "Describe what you want changed and send it. I break it into steps — they show up under **{plan}**, where you can run, retry or skip one. Anything I write to files queues under **{changes}** for you to review or undo. **{newTask}** starts a fresh one; **{history}** brings an earlier one back.",
 } as const;
 
 export type MessageKey = keyof typeof EN;
@@ -1469,5 +1485,21 @@ export const ZH: Record<MessageKey, string> = {
   "pipeline.saved": "已保存 ✓",
   "pipeline.reset": "恢复默认",
   "pipeline.newStage": "新的一步",
+
+  "pipelineView.title": "流水线",
+  "pipelineView.continue": "接着跑",
+  "pipelineView.pausesBefore": "跑之前先停一下",
+  "pipelineView.input": "输入：{summary}",
+  "pipelineView.diff": "改动：{summary}",
+  "pipelineView.state.failed": "失败了",
+  "pipelineView.state.waitingApproval": "等你批准",
+  "pipelineView.state.producedDiff": "产出了改动",
+  "pipelineView.state.noDiff": "没产出改动",
+  "pipelineView.state.running": "正在跑",
+  "pipelineView.state.pending": "还没开始",
+  "pipelineView.log": "{level}：{message}",
+
+  "chat.welcome":
+    "说清楚你想改什么，发过来就行。我会把它拆成步骤放在 **{plan}** 里，每一步都能单独跑、重跑或者跳过。我写进文件的东西会排在 **{changes}** 里等你看或者撤掉。**{newTask}** 重新开一个；**{history}** 把之前的捞回来。",
 };
 
