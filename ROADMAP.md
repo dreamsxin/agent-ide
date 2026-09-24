@@ -2279,6 +2279,9 @@ Current limitation: diff application still uses textual `find` replacement. It n
    **Self-review corrections (before any code was written).**
    - **The wrapper does not go where I first wrote it.** Both empty-response exits are *inside* the response parsers, and re-issuing a request needs the code that builds and sends it. The retry therefore wraps **send + parse at the parser's call site**, not the parser. Consequence, and it is a simplification: the parsers stay untouched, and the decision function keys off the error string they already return.
    - **No input estimate.** The clamp was written as `window − prompt_estimate − safety`, but the failed attempt returns usage — that is how 122's billing works — so `prompt_tokens` is known exactly. Clamp against the measured value and fall back to the estimate only when usage is absent. One less guess in a formula that decides how much money to spend.
+   - **Where the retry actually attaches (traced, not assumed).** The two exits are not in pure parsers: those methods own the request, the cancel flag *and* `usage_meter.record_usage`, so a retry inside them would re-enter code that has already billed the attempt. Tracing the callers: the streaming production path funnels through exactly one place, `agent/executor.rs:111`, and `llm_client.rs:1497` (`stream_chat`) is only an internal wrapper. The non-streaming method's production caller is **not yet identified** — that is the one fact still missing before code, because the retry must exist for both or the same failure behaves differently depending on transport.
+   - **Consequence for the layer question**: if the retry lives in the executor it needs the cap and the window, which it has (it built the config), and `record_usage` keeps working untouched because each attempt is a normal call. That is the leading option, but it is not settled until the non-streaming caller is known.
+
 
 
 
