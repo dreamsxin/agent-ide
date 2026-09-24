@@ -46,6 +46,7 @@ export default function AgentRunSummary({ onOpenChanges, onOpenPlan }: AgentRunS
   const summary = summarizeAgentRun(steps, diffs);
   const StatusIcon = statusIcon(state);
   const detail = runDetailMessage({
+    state,
     summary,
     hasPendingQuestion,
     ideModeLabel: t(`topbar.ideMode.${ideMode}`),

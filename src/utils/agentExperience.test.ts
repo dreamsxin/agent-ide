@@ -121,9 +121,26 @@ describe("busy 和 live 的分界", () => {
 describe("状态行第二句", () => {
   const idleSummary = summarizeAgentRun([], []);
 
+  /**
+   * 用户报告：一次因为上下文超限失败的会话，状态栏写着「等你处理」，下面跟着
+   * 「接下来：Create ...」—— 计划里那一步确实还是 todo，但那次运行已经死了。
+   */
+  it("出错了就说出错了，不说接下来要做什么", () => {
+    expect(
+      runDetailMessage({
+        state: "error",
+        summary: summarizeAgentRun([step("one", "todo")], []),
+        hasPendingQuestion: false,
+        ideModeLabel: "写代码",
+        modeLabel: "自动落盘",
+      })
+    ).toEqual({ key: "summary.detail.failed" });
+  });
+
   it("真的挂着一道题才说在对话里等你回答", () => {
     expect(
       runDetailMessage({
+        state: "waiting_user",
         summary: idleSummary,
         hasPendingQuestion: true,
         ideModeLabel: "写代码",
@@ -135,6 +152,7 @@ describe("状态行第二句", () => {
   it("没有问题挂着就落回模式那一行，而不是编一个不存在的提问", () => {
     expect(
       runDetailMessage({
+        state: "waiting_user",
         summary: idleSummary,
         hasPendingQuestion: false,
         ideModeLabel: "写代码",
@@ -149,6 +167,7 @@ describe("状态行第二句", () => {
   it("有待审改动时先说改动，那是用户下一步真正要做的事", () => {
     expect(
       runDetailMessage({
+        state: "waiting_user",
         summary: summarizeAgentRun([], [diff("one", "pending"), diff("two", "failed")]),
         hasPendingQuestion: true,
         ideModeLabel: "写代码",

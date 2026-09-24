@@ -2147,6 +2147,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The ZH label for `waiting_user` said 「等你回答」while EN said the neutral "Waiting for you"; the translation was claiming more than the original. Now 「等你处理」.
    - Third copy of the reviewable-diff set removed: `agentExperience.ts` now owns `isReviewableDiff` / `isReviewableDiffStatus`, and the store plus `DiffView` import it instead of each spelling out `pending | partial | failed`.
    - Rust 572 → 574 (573 passed + 1 ignored), frontend 311 → 314 (36 files), tsc 0.
+174. **A failed run reported "waiting for you" (2026-09-24)**
+   Reported from use: a session that died on the model's context limit showed 「等你处理」 with 「接下来：Create ...」 underneath. There is nothing for the user to handle, and the "next" step belongs to a run that is dead.
+   - **`send_agent_prompt`'s failure branch never set `AgentState::Error`.** It returned `Err` to the frontend (so the chat's error banner was right) and left the status row showing whatever the run happened to leave behind — and after 173 the finish step settled that into `WaitingUser`/`Done`. `continue_agent_pipeline` had the same gap; `run_agent_step` was the only one that set it.
+   - **The three endings are now one decision.** `finish_agent_run` takes a `RunEnding` — `Finished` (hand the state to the review queue), `Cancelled` (`Idle`), `Failed(&str)` (`Error` with the message) — and emits. That removed two hand-written `set(Idle)` + emit pairs and one hand-written `set(Error)` + emit, the same "assemble your own finish" duplication that ROADMAP 58 and 70 were.
+   - **The status line answers "why did it stop"** before anything else: `state === "error"` → `summary.detail.failed` (「这一轮出错停了 —— 报错原因在对话里」). It used to fall through to "Next: <first todo step>", which is exactly the sentence the user could not act on.
+   - Rust 574 → 574 (573 passed + 1 ignored; one test replaced, one added), frontend 314 → 315 (36 files), tsc 0.
+   - Still open: `waiting_user` continues to mean two things (a question, a review queue). Splitting it into two backend states is a bigger change and is not done here — what is fixed is that no sentence invents a reason any more.
 
 
 

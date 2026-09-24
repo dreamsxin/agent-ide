@@ -540,6 +540,7 @@ pub async fn send_agent_prompt(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Finished,
             );
             orch.record_conversation_turn(&prompt_for_history);
         }
@@ -551,9 +552,8 @@ pub async fn send_agent_prompt(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Cancelled,
             );
-            orch.state_mgr.set(AgentState::Idle);
-            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             return Ok("Agent task cancelled".to_string());
         }
         Err(err) => {
@@ -564,6 +564,7 @@ pub async fn send_agent_prompt(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Failed(&err),
             );
             return Err(err);
         }
@@ -859,7 +860,21 @@ async fn emit_project_memory_warning(
     );
 }
 
-/// 一次运行结束时必须做的三件事，按这个顺序：收尾运行状态、登记工具写入、记账。
+/// 一次运行是怎么结束的 —— 决定收尾之后界面上报什么状态。
+///
+/// 三条结局以前是各分支自己写的：成功那条什么都不设（靠运行中途最后一个事件碰巧是什么），
+/// 取消那条手写 `set(Idle)` 加一次 emit（三个命令各抄一遍），**失败那条什么都不做** ——
+/// 于是一次因为上下文超限失败的运行，状态栏显示的是"等你处理"，而用户什么都处理不了。
+enum RunEnding<'a> {
+    /// 跑完了：状态交给审查队列（还有待审改动 = 等你处理，没有 = 完成）
+    Finished,
+    /// 用户按了 Stop
+    Cancelled,
+    /// 失败：错误原话进状态，界面才能说"出错停了"而不是"接下来要做 X"
+    Failed(&'a str),
+}
+
+/// 一次运行结束时必须做的四件事，按这个顺序：落定运行状态、登记工具写入、记账。
 ///
 /// 三个命令共九条退出分支以前各抄一遍这段。抄漏确实发生了：`run_agent_step` 的
 /// 取消分支和失败分支都没有记账，于是一个跑到一半被取消的步骤花掉的 token 在
@@ -875,12 +890,16 @@ fn finish_agent_run(
     meter: &crate::services::llm_client::RunUsageMeter,
     llm: &crate::services::llm_client::LlmClient,
     claim: crate::agent::orchestrator::RunClaim,
+    ending: RunEnding<'_>,
 ) {
     orch.finish_run(claim);
     // 执行权释放之后才让审查队列决定状态：运行中间 `refresh_review_state` 是不动状态的
-    // （见它的注释），所以这一句是一次运行落到 WaitingUser / Done 的唯一地方。九条退出
-    // 分支共用它，谁也不用自己拼。取消那两条分支在这之后显式设 Idle，顺序上压过这里。
-    orch.refresh_review_state();
+    // （见它的注释），所以这里是一次运行落到终态的唯一地方，九条退出分支共用。
+    match ending {
+        RunEnding::Finished => orch.refresh_review_state(),
+        RunEnding::Cancelled => orch.state_mgr.set(AgentState::Idle),
+        RunEnding::Failed(message) => orch.state_mgr.set(AgentState::Error(message.to_string())),
+    }
     orch.emit_state_to(events);
     publish_tool_writes(orch, events, permissions);
     publish_external_actions(orch, events, permissions);
@@ -1360,8 +1379,8 @@ pub async fn run_agent_step(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Finished,
             );
-            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             orch.emit_review_action_log(
                 &app_handle,
                 "success",
@@ -1383,10 +1402,9 @@ pub async fn run_agent_step(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Cancelled,
             );
             orch.record_step_status(&step, "todo", "Single step execution cancelled");
-            orch.state_mgr.set(AgentState::Idle);
-            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
@@ -1397,14 +1415,13 @@ pub async fn run_agent_step(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Failed(&err),
             );
             let failed = orch.record_step_status(&step, "error", &format!("Error: {}", err));
             let _ = app_handle.emit(
                 "agent-step-update",
                 serde_json::to_value(&failed).unwrap_or_default(),
             );
-            orch.state_mgr.set(AgentState::Error(err.clone()));
-            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             orch.emit_review_action_log(
                 &app_handle,
                 "error",
@@ -1548,6 +1565,7 @@ pub async fn continue_agent_pipeline(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Finished,
             );
             orch.record_continued_turn(&continued_prompt, None);
             Ok("Agent pipeline continued".to_string())
@@ -1560,9 +1578,8 @@ pub async fn continue_agent_pipeline(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Cancelled,
             );
-            orch.state_mgr.set(AgentState::Idle);
-            let _ = app_handle.emit("agent-state-changed", orch.state_payload());
             Ok("Agent task cancelled".to_string())
         }
         Err(err) => {
@@ -1573,6 +1590,7 @@ pub async fn continue_agent_pipeline(
                 &usage_meter,
                 &llm,
                 claim,
+                RunEnding::Failed(&err),
             );
             Err(err)
         }
@@ -1941,6 +1959,10 @@ pub async fn repair_workspace(
         &usage_meter,
         &llm,
         lease.claim,
+        match outcome.as_ref() {
+            Ok(_) => RunEnding::Finished,
+            Err(message) => RunEnding::Failed(message),
+        },
     );
     let outcome = outcome?;
 
@@ -2504,7 +2526,15 @@ mod tests {
         let meter = crate::services::llm_client::RunUsageMeter::new(None);
         let llm = mock_llm("gpt-4o", "mock://settle");
         let events = RecordingEvents::new();
-        finish_agent_run(&mut orch, &events, &permissions, &meter, &llm, lease.claim);
+        finish_agent_run(
+            &mut orch,
+            &events,
+            &permissions,
+            &meter,
+            &llm,
+            lease.claim,
+            RunEnding::Finished,
+        );
         assert_eq!(
             orch.state_mgr.state,
             AgentState::WaitingUser,
@@ -2520,9 +2550,14 @@ mod tests {
         );
     }
 
-    /// 一次报错的运行不会因为剩下的 diff 被处理完而显示成"已完成"。
+    /// 一次失败的运行报的是"出错"，而不是"等你处理"。
+    ///
+    /// 用户报告的现象：一次因为上下文超限失败的会话，状态栏写着「等你处理」、下面还跟着
+    /// 「接下来：Create ...」—— 用户根本无从处理。原因是 `send_agent_prompt` 的失败分支
+    /// 只把错误 `return Err` 给了前端，**从来没有设过 `AgentState::Error`**：状态栏显示的
+    /// 是这次运行中途最后落下的那个值。收尾的三种结局现在由 `RunEnding` 一处决定。
     #[test]
-    fn a_failed_run_stays_failed_after_the_review_queue_empties() {
+    fn a_failed_run_reports_the_failure_not_a_review_prompt() {
         let mut permissions =
             crate::agent::workspace_tools::WorkspaceToolPermissions::new(Vec::new(), false, false);
         permissions.adopt_cancel(Arc::new(AtomicBool::new(false)));
@@ -2530,14 +2565,30 @@ mod tests {
         let lease = orch
             .try_begin_run(Some("run-2".to_string()), &permissions)
             .expect("a fresh orchestrator hands out the lease");
-        orch.state_mgr
-            .set(AgentState::Error("the model refused".to_string()));
+        // 失败之前这次运行已经跑到 Acting，审查区是空的 —— 正是"收尾会算成 Done"的那种局面
+        orch.state_mgr.set(AgentState::Acting);
 
         let meter = crate::services::llm_client::RunUsageMeter::new(None);
         let llm = mock_llm("gpt-4o", "mock://settle");
         let events = RecordingEvents::new();
-        finish_agent_run(&mut orch, &events, &permissions, &meter, &llm, lease.claim);
+        finish_agent_run(
+            &mut orch,
+            &events,
+            &permissions,
+            &meter,
+            &llm,
+            lease.claim,
+            RunEnding::Failed("context window exceeded"),
+        );
 
+        assert!(
+            matches!(orch.state_mgr.state, AgentState::Error(ref message) if message == "context window exceeded"),
+            "失败要连原话一起进状态：实际是 {:?}",
+            orch.state_mgr.state
+        );
+
+        // 之后处理掉剩下的改动也不能把这次失败洗成"已完成"
+        orch.refresh_review_state();
         assert!(
             matches!(orch.state_mgr.state, AgentState::Error(_)),
             "失败压过审查队列：实际是 {:?}",
@@ -2588,6 +2639,7 @@ mod tests {
             &meter,
             &dropped,
             lease.claim,
+            RunEnding::Finished,
         );
         let phases = action_log_summaries(&events)
             .into_iter()
@@ -2635,6 +2687,7 @@ mod tests {
             &meter,
             &clean,
             lease.claim,
+            RunEnding::Finished,
         );
         assert!(
             !action_log_summaries(&events)

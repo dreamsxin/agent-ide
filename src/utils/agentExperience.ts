@@ -93,6 +93,10 @@ export function agentRunIsLive(state: AgentState) {
 /**
  * 状态行第二句：现在到底在等什么。
  *
+ * **出错排在最前面。** 一次因为上下文超限失败的运行，以前会显示成「接下来：Create ...」——
+ * 计划里还留着没跑的步骤，而那次运行已经死了；用户看到的是一句"下一步要做什么"，
+ * 完全不知道自己该干什么。失败的时候唯一有用的信息是"它停了，原因在对话里"。
+ *
  * **只有真的挂着一道问题时才说"在对话里等你回答"。** 以前这句话只看 `state ===
  * "waiting_user"`，而那个状态覆盖两件完全不同的事：模型问了你一道题，和这一轮跑完了、
  * 改动等你审。改动全处理完之后第一个分支不成立，就掉到这句上，于是界面断言对话里有人
@@ -102,12 +106,16 @@ export function agentRunIsLive(state: AgentState) {
  * 问题不在挂着时不另编一句"没事了"：那同样是猜。落回模式那一行 —— 它永远是真的。
  */
 export function runDetailMessage(input: {
+  state: AgentState;
   summary: AgentRunSummary;
   hasPendingQuestion: boolean;
   ideModeLabel: string;
   modeLabel: string;
 }): { key: MessageKey; params?: Record<string, string | number> } {
-  const { summary, hasPendingQuestion, ideModeLabel, modeLabel } = input;
+  const { state, summary, hasPendingQuestion, ideModeLabel, modeLabel } = input;
+  if (state === "error") {
+    return { key: "summary.detail.failed" };
+  }
   if (summary.reviewRequired) {
     return summary.pendingChanges === 1
       ? { key: "summary.detail.review.one" }
