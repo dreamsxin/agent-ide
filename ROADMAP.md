@@ -2257,6 +2257,26 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **188 introduced a `!` non-null assertion** (`pathsEqual(file.path, saved.activeFile!)`) because the narrowing from `saved.activeFile &&` does not survive into the callback. Silencing the type checker is on this project's trap list, so the check now hoists the value into a local.
    - Fixing it turned up something better: the restore path returned **the archived spelling** as `activeFile`, not the restored tab's own path. With a `\`-spelled archive that is a string no tab has, so the editor would open with nothing selected. It now returns the matched tab's path.
    - Frontend 334 unchanged (38 files), tsc 0; Rust 579 unchanged.
+190. **DESIGN — raise the output cap and retry once (尚未实施, 2026-09-25)**
+   Written before the code on purpose: the last two rounds each shipped a defect that a design pass would have caught (183's example stopped matching the form's fields; 188 silenced the type checker), and this change touches money.
+   **Problem.** A reasoning model can spend the whole output budget thinking and return empty content with `finish_reason=length`. 186 made the banner say what to do; the run still dies and the user must visit Settings and re-send. 122 established the other half: that truncated empty answer is **already billed** as completion tokens.
+   **Every path this touches** (the whole-picture list, not just the line that fails):
+   - `llm_client.rs:1765` — streaming parser's empty-response exit.
+   - `llm_client.rs:1928` — non-streaming parser's empty-response exit.
+   - `llm_client.rs:1382` and `:2407` — the two places that already read `max_output_tokens` to build/clamp a request. A retry cap that disagrees with these would send one number and report another.
+   - `empty_response_error` — its text tells the user to raise the cap; after a retry it must not claim that if we already did.
+   - Cost accounting: `record_usage` path and the per-run cost cap — two billed attempts, both counted, and the cap must be able to stop the retry.
+   - `runFailureHint` → `failure.hint.outputCap` (frontend): the hint must not tell the user to do something the Agent already did.
+   - CLI: `LLM_MAX_OUTPUT` is the other way this cap is set; the retry must behave the same there.
+   **Decisions.**
+   - **No funnel refactor.** The two exits sit inside their own parsers with no common funnel. Merging them is a restructuring of the request path, which would turn a verifiable bug fix into a risky rewrite. Instead each path gets a thin "retry once" wrapper, and the decision lives in one pure function `retry_output_cap(error, current_cap, model_window, prompt_estimate) -> Option<u32>` so the parts that are easy to get wrong (trigger, doubling, clamping) exist once and are unit-tested.
+   - Trigger: truncation **and** empty content only. Never on `finish_reason=stop` with empty content — 2545 already documents that raising the cap is the wrong advice there.
+   - Exactly **one** retry. Two would double a bill the user never approved and hide a systematic misconfiguration behind spend.
+   - New cap = `min(current × 2, window − prompt_estimate − safety)`. If that is not strictly greater than the current cap, **do not retry** — a retry that cannot succeed is a purchase with no chance of delivery.
+   - When no cap was set at all (provider default applied), the retry sets an explicit 8192 rather than doubling an unknown number.
+   - **Accounting is not optional**: both attempts are recorded, and the retry emits an action-log line naming the old and new cap and stating that this request was billed twice. Spending silently is worse than the failure.
+   **Test plan.** Unit tests on `retry_output_cap` (triggers, refuses on `stop`, refuses when the window leaves no room, the no-cap-set case); one test per path asserting a single retry with the raised cap; one asserting both attempts are billed. `empty_response_error`'s wording gets a case for "already retried".
+
 
 
 
