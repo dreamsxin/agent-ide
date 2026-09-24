@@ -20,6 +20,18 @@ describe("失败原因 → 可操作提示", () => {
     );
   });
 
+  /**
+   * 用户报告的那一次：推理模型把 4096 的输出预算全花在思考上，content 是空的。
+   * 这和上下文超限是相反的解法（调大输出，而不是少发上下文），所以必须分开认。
+   */
+  it("输出预算被思考吃光不会被当成上下文超限", () => {
+    const real =
+      "LLM response had no message content and no tool calls. 1 choice(s) returned [choice 0: finish_reason=length, content_chars=0, reasoning_chars=12654, tool_calls=0]. finish_reason=length means the output was cut off at the output limit; a large reasoning_chars with empty content means the model spent the whole output budget on reasoning. This request sent max_tokens=4096; raise the output cap so the model has room for its reasoning *and* an answer.";
+    expect(runFailureHint(real)).toBe("failure.hint.outputCap");
+    expect(translate("zh", "failure.hint.outputCap")).toContain("Max output");
+  });
+
+
   it("key、限流、额度、网络各归各类", () => {
     expect(runFailureHint("401 Unauthorized: Incorrect API key provided")).toBe(
       "failure.hint.auth"

@@ -17,6 +17,18 @@ import type { MessageKey } from "../i18n/messages";
 export type RunFailureHint = MessageKey | null;
 
 const HINTS: { key: MessageKey; markers: string[] }[] = [
+  {
+    // 推理模型把整个输出预算花在思考上：content 是空的、finish_reason 是 length。
+    // 这句话是后端自己写的（`llm_client::empty_response_error`），措辞稳定。
+    // 它必须排在上下文超限前面：两者都在说 token，但一个要调小输入、一个要调大输出，
+    // 指错方向比不给提示更糟。
+    key: "failure.hint.outputCap",
+    markers: [
+      "no message content and no tool calls",
+      "finish_reason=length",
+      "spent the whole output budget on reasoning",
+    ],
+  },
   // 应用改动被拒绝的三类原话（`agent/diff_apply.rs`）。它们排在提供方错误前面：
   // 这几句是我们自己写的，措辞稳定，不会和模型报错撞词。
   {

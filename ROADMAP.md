@@ -2233,6 +2233,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Lines are prefixed `[ui:{level}]` against the Agent's `[{level}]` / `[state]`: one file, and you still need to know which side produced a line. The timestamp is the entry's own `time`, not the moment the command arrived, so the file's order matches what the panel showed.
    - `append_ui_log` returns nothing and the frontend does not await it (`void invoke(...).catch(() => {})`). A log that reports its own failure interrupts the thing the user actually asked for; the same reasoning as the ignored write error in 180.
    - Rust 578 → 579 passed (+1 ignored); frontend 331 unchanged, tsc 0.
+186. **The output-cap failure had no Chinese way out (2026-09-24)**
+   Reported from a real run: a reasoning model spent all 4096 output tokens thinking, returned empty content with `finish_reason=length`, and the banner showed the backend's (accurate, English) diagnosis with no hint above it.
+   - `runFailureHint` now recognises it as its own class, `failure.hint.outputCap`, matched on the backend's own stable wording (`no message content and no tool calls`, `finish_reason=length`, `spent the whole output budget on reasoning`).
+   - **It is checked before the context-limit class, and that order is the point**: both failures talk about tokens, but one is fixed by sending *less input* and the other by allowing *more output*. A hint pointing at the compression mode here would send the user the wrong way, which is worse than no hint. The test pins the real message against `outputCap`.
+   - **Still open, and the more valuable fix**: the Agent could raise the cap and retry once itself instead of ending the run and asking the user to visit Settings. It is not done here because a retry re-bills the attempt (a truncated empty answer is already charged as completion tokens, see 122) and that decision needs its own round.
+   - Frontend 331 → 332 (38 files), tsc 0; Rust 579 unchanged.
+
 
 
 
