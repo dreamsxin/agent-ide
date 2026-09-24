@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "../../utils/tauri";
 import { Plug, RefreshCw, Trash2 } from "lucide-react";
+import { useT } from "../../i18n";
 
 type McpServerConfig = {
   name: string;
@@ -46,6 +47,7 @@ const EMPTY_DRAFT = { name: "", command: "", args: "" };
  * 发现到的工具会以 `mcp__{server}__{tool}` 注入到下一次 Agent 运行的原生工具列表。
  */
 export default function McpPanel() {
+  const t = useT();
   const available = isTauriRuntime();
   const [servers, setServers] = useState<McpServerConfig[]>([]);
   const [tools, setTools] = useState<McpToolDescriptor[]>([]);
@@ -86,7 +88,7 @@ export default function McpPanel() {
     const command = draft.command.trim();
     if (!name || !command) return;
     if (servers.some((server) => server.name === name)) {
-      setError(`Server '${name}' already exists`);
+      setError(t("mcp.duplicate", { name }));
       return;
     }
     const args = draft.args.trim() ? draft.args.trim().split(/\s+/) : [];
@@ -95,7 +97,7 @@ export default function McpPanel() {
       { name, command, args, env: {}, cwd: null, enabled: true, autoApprove: [] },
     ]);
     setDraft(EMPTY_DRAFT);
-  }, [draft, persist, servers]);
+  }, [draft, persist, servers, t]);
 
   const handleDiscover = useCallback(async () => {
     setBusy(true);
@@ -137,7 +139,8 @@ export default function McpPanel() {
   if (!available) {
     return (
       <div className="mt-4 border-t border-surface-border pt-3 text-[10px] text-surface-muted">
-        MCP servers require the Tauri runtime. Run <code className="rounded bg-surface-border/50 px-1">npm run tauri -- dev</code>.
+        {t("mcp.needsTauri")}{" "}
+        <code className="rounded bg-surface-border/50 px-1">npm run tauri -- dev</code>
       </div>
     );
   }
@@ -147,7 +150,7 @@ export default function McpPanel() {
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-1.5 text-[11px] font-medium text-surface-text">
           <Plug size={12} />
-          MCP Servers
+          {t("mcp.title")}
         </div>
         <button
           type="button"
@@ -156,15 +159,17 @@ export default function McpPanel() {
           className="flex items-center gap-1 rounded border border-accent-purple/50 px-2 py-1 text-[10px] text-accent-purple hover:bg-accent-purple/10 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <RefreshCw size={10} className={busy ? "animate-spin" : ""} />
-          {busy ? "Connecting..." : "Discover Tools"}
+          {busy ? t("mcp.connecting") : t("mcp.discover")}
         </button>
       </div>
 
       <div className="space-y-1">
         {servers.length === 0 && (
           <div className="text-[10px] text-surface-muted">
-            No MCP servers configured. Example: <code className="rounded bg-surface-border/50 px-1">npx</code> with args{" "}
-            <code className="rounded bg-surface-border/50 px-1">-y @modelcontextprotocol/server-filesystem .</code>
+            {t("mcp.empty")}{" "}
+            <code className="rounded bg-surface-border/50 px-1">
+              npx -y @modelcontextprotocol/server-filesystem .
+            </code>
           </div>
         )}
         {servers.map((server) => {
@@ -200,17 +205,20 @@ export default function McpPanel() {
                     title={status.error ?? undefined}
                   >
                     {!status.connected
-                      ? status.error ?? "failed"
+                      ? status.error ?? t("mcp.status.failed")
                       : status.error
-                        ? `${status.toolCount} tool(s), ${status.error}`
-                        : `${status.toolCount} tool(s)`}
+                        ? t("mcp.status.toolsWithError", {
+                            count: status.toolCount,
+                            error: status.error,
+                          })
+                        : t("mcp.status.tools", { count: status.toolCount })}
                   </span>
                 )}
                 <button
                   type="button"
                   onClick={() => void persist(servers.filter((entry) => entry.name !== server.name))}
                   className="ml-auto text-diff-remove hover:opacity-80"
-                  title={`Remove ${server.name}`}
+                  title={t("mcp.remove", { name: server.name })}
                 >
                   <Trash2 size={11} />
                 </button>
@@ -227,19 +235,19 @@ export default function McpPanel() {
         <input
           value={draft.name}
           onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))}
-          placeholder="name"
+          placeholder={t("mcp.field.name")}
           className="rounded border border-surface-border bg-surface-bg px-1.5 py-1 text-[10px] text-surface-text"
         />
         <input
           value={draft.command}
           onChange={(event) => setDraft((prev) => ({ ...prev, command: event.target.value }))}
-          placeholder="command"
+          placeholder={t("mcp.field.command")}
           className="rounded border border-surface-border bg-surface-bg px-1.5 py-1 text-[10px] text-surface-text"
         />
         <input
           value={draft.args}
           onChange={(event) => setDraft((prev) => ({ ...prev, args: event.target.value }))}
-          placeholder="args"
+          placeholder={t("mcp.field.args")}
           className="rounded border border-surface-border bg-surface-bg px-1.5 py-1 text-[10px] text-surface-text"
         />
       </div>
@@ -249,21 +257,22 @@ export default function McpPanel() {
         disabled={!draft.name.trim() || !draft.command.trim()}
         className="mt-1 w-full rounded border border-surface-border py-1 text-[10px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
       >
-        Add Server
+        {t("mcp.add")}
       </button>
 
       {tools.length > 0 && (
         <div className="mt-2 space-y-0.5 rounded border border-surface-border/60 bg-surface-panel/60 p-1.5">
           <div className="text-[10px] text-surface-muted">
-            {tools.filter((tool) => tool.autoApproved).length} of {tools.length} tool(s) auto-approved.
-            Only auto-approved tools are exposed to the Agent unless the permission preset grants
-            command execution.
+            {t("mcp.autoApprove.summary", {
+              approved: tools.filter((tool) => tool.autoApproved).length,
+              total: tools.length,
+            })}
           </div>
           {tools.map((tool) => (
             <label
               key={tool.qualifiedName}
               className="flex cursor-pointer items-start gap-1.5 text-[10px] text-surface-text"
-              title={`Auto-approve ${tool.tool} on server ${tool.server}`}
+              title={t("mcp.autoApprove.title", { tool: tool.tool, server: tool.server })}
             >
               <input
                 type="checkbox"

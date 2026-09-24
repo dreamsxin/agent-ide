@@ -807,6 +807,25 @@ export const EN = {
   "badge.pendingChanges": "{count} change(s) waiting for review",
   "badge.externalActions": "{count} external action(s) that cannot be undone",
 
+  "mcp.title": "MCP servers",
+  "mcp.needsTauri": "MCP servers need the Tauri app runtime. Run:",
+  "mcp.empty": "No MCP servers configured. For example, command npx with args:",
+  "mcp.discover": "Discover tools",
+  "mcp.connecting": "Connecting...",
+  "mcp.duplicate": "A server called '{name}' is already configured",
+  "mcp.remove": "Remove {name}",
+  "mcp.field.name": "name",
+  "mcp.field.command": "command",
+  "mcp.field.args": "args",
+  "mcp.add": "Add server",
+  "mcp.status.failed": "failed",
+  "mcp.status.tools": "{count} tool(s)",
+  "mcp.status.toolsWithError": "{count} tool(s), {error}",
+  "mcp.autoApprove.summary":
+    "{approved} of {total} tool(s) auto-approved. Only auto-approved tools are exposed to the Agent unless the permission preset grants command execution.",
+  "mcp.autoApprove.title": "Auto-approve {tool} on server {server}",
+
+
 
 
 
@@ -1661,6 +1680,25 @@ export const ZH: Record<MessageKey, string> = {
   "pending.reviewByHunk": "逐块审查",
   "badge.pendingChanges": "{count} 处改动等你决定",
   "badge.externalActions": "{count} 个已经发生、撤不回的外部动作",
+
+  "mcp.title": "MCP 服务器",
+  "mcp.needsTauri": "MCP 服务器只能在 Tauri 应用里用。运行：",
+  "mcp.empty": "还没配置 MCP 服务器。举个例子，命令填 npx，参数填：",
+  "mcp.discover": "发现工具",
+  "mcp.connecting": "连接中…",
+  "mcp.duplicate": "已经有一个叫「{name}」的服务器了",
+  "mcp.remove": "删掉 {name}",
+  "mcp.field.name": "名字",
+  "mcp.field.command": "命令",
+  "mcp.field.args": "参数",
+  "mcp.add": "添加服务器",
+  "mcp.status.failed": "连不上",
+  "mcp.status.tools": "{count} 个工具",
+  "mcp.status.toolsWithError": "{count} 个工具，{error}",
+  "mcp.autoApprove.summary":
+    "{total} 个工具里自动批准了 {approved} 个。除非权限预设放开了执行命令，只有自动批准的工具才会交给 Agent。",
+  "mcp.autoApprove.title": "自动批准 {server} 上的 {tool}",
+
 
 
 

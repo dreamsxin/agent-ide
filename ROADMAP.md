@@ -2213,6 +2213,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **`changesBadge()` returned a built English sentence** for the Changes tab tooltip. It is a pure function in a data module; it now returns `hintKey` + `{ count }`, and the Plan badge says `hintKey: null` instead of an empty string that the caller had to `|| undefined` away.
    - **I wrote that this closed the component sweep, then checked.** It does not: `McpPanel` is still English, and `lsp.close` / `lsp.closeDetails` already existed in the table and were never wired — the same "invented a key that was already there" mistake as the LSP round, caught this time by the duplicate-key compile error. Both are now wired; `McpPanel` is the next round.
    - Frontend 329 → 331 (38 files), tsc 0; Rust 579 unchanged.
+183. **Chinese UI: the MCP panel (2026-09-24)**
+   18 keys, the file named as next in 182.
+   - Two sentences were **wrapped around `<code>` spans** (`MCP servers require the Tauri runtime. Run <code>…</code>.` and `No MCP servers configured. Example: <code>npx</code> with args <code>…</code>`). Both are now a complete clause ending in a colon, followed by one code span — the markup follows the sentence instead of cutting it in half, and the example became a single copy-pasteable line.
+   - The connection status was three template strings (`failed`, `{n} tool(s)`, `{n} tool(s), {error}`). They are three keys now; the middle one is the count-and-measure-word case that cannot survive a fragment split.
+   - `Server '{name}' already exists` was our own sentence stored in the same `error` state that also holds the backend's raw text. Same split as `ProjectMemoryCard`: our sentence goes through a key, anything from the backend stays verbatim.
+   - The auto-approve summary keeps its second half — "only auto-approved tools are exposed to the Agent unless the permission preset grants command execution" — because that sentence is the only place the panel says what the checkbox actually authorizes.
+   - Frontend 331 unchanged (38 files), tsc 0; Rust 579 unchanged.
+
 
 
 
