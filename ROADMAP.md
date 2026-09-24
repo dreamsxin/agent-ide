@@ -2134,6 +2134,11 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `refusal_is_environmental()` now accepts the three refusals that depend on the machine (foreground denied, foreground timed out, point occluded) and nothing else. Size mismatch, out-of-frame coordinates and "could not measure that window" still fail the test, because those mean **the call itself was wrong** — widening this to "any error" would make the test nod at the thing it exists to catch.
    - The invariant being tested did not change and is still asserted on every refusal path: `assert_eq!(seen(), nothing())` — if it was refused, not one event was injected.
    - Rust 572 unchanged (571 passed + 1 ignored) locally; the four tests now exercise the refusal branch on CI instead of failing.
+172. **A `cfg(windows)`-only symbol was called from platform-neutral code (2026-09-24)**
+   The non-Windows CI job failed to compile: `workspace_tools.rs:3580` calls `computer::window_class`, which was re-exported under `#[cfg(windows)]` only. The five local gates cannot catch this — they all run on Windows, where the symbol exists.
+   - The non-Windows `platform` module now provides `window_class` returning `None`, exactly like its `describe_window` and `window_pid` neighbours, and the re-export is no longer gated. The call site is *correct* and not merely compiling: the same `verify` call receives `describe_window` → `None` on those platforms, so it refuses with "the approved window has closed" before the class is ever compared, and no input is sent.
+   - Audited the other two gated re-exports rather than fixing only the reported one: `input::send_gesture` already has a non-Windows stub that refuses, and `computer::list_windows_with_handles` is only called from inside capture's own `#[cfg(windows)]` module. `window_class` was the only gap.
+   - **Not verifiable locally**: `cargo check --target x86_64-unknown-linux-gnu` dies in `openssl-sys`'s build script on a Windows host, so the Linux job is the only real proof. Windows gates re-run clean (571 passed + 1 ignored).
 
 
 

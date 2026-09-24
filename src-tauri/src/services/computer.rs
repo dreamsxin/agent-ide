@@ -358,13 +358,21 @@ mod platform {
     pub fn window_pid(_handle: isize) -> Option<u32> {
         None
     }
+
+    /// 非 Windows 上没有窗口类名。
+    ///
+    /// 必须有这一份：调用方（`workspace_tools` 的点击/滚动路径）是平台无关的代码，只把
+    /// 类名当作身份校验的一项传给 `ApprovedWindow::verify`。那边同一次校验里的
+    /// `describe_window` 在这些平台上返回 `None`，所以校验会先以"窗口已经不在了"拒绝，
+    /// 类名取不到不会让任何一下发出去。
+    pub fn window_class(_handle: isize) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(windows)]
 pub use platform::list_windows_with_handles;
-#[cfg(windows)]
-pub use platform::window_class;
-pub use platform::{describe_window, list_windows, window_pid};
+pub use platform::{describe_window, list_windows, window_class, window_pid};
 
 /// 造一个真实窗口，给那些非得有窗口才测得到的东西用。
 ///
