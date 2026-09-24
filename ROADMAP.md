@@ -2098,6 +2098,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Two questions, two functions.** `isAgentBusy` gates "can the user act"; `agentRunIsLive` (busy **or** `waiting_user`) gates the Stop button, because a run paused on a question is still live in the backend and cancelling it is meaningful. Collapsing them into one flag is what produced the defect.
    - **Guarded by a scan, not by an assertion.** `tests/ipc-contract.test.ts` checks two things across the eight gate files: no `!== "done"` reappears, and every one of them actually references `isAgentBusy` or `agentRunIsLive`. The second half is needed because a *positive* list cannot be recognised from the literals — `step.status === "done"` is legitimate in the same file — so the durable rule is "ask the shared predicate", not "avoid this string".
    - Frontend 300 → 303 (35 files); Rust 566 unchanged.
+166. **Chinese UI: the bottom dock (2026-09-24)**
+   The Commands panel and the terminal, ~60 strings. Two decisions worth keeping:
+   - **A status line is either our sentence or the backend's.** `verifyStatus` used to be a `string` built by concatenation, so a language switch left the previous language on screen and `${failed} of ${total}` baked English word order into the panel. It is now a `StatusLine`: `{kind:"message", key, params}` for our own text, `{kind:"raw", text}` for a backend refusal like "requires Auto mode", which must appear verbatim — it is the only thing that tells the user to go switch modes. `verificationStatus` / `repairStatus` / `backendStatus` are pure and live in `taskVerification.ts` with 6 tests asserting the **key**, not the sentence.
+   - **The terminal's translator goes through a ref.** `runQueuedCommands`, `runInitialCommand` and `handleTaskOutput` are all dependencies of the effect that spawns and kills the real shell. Putting `t` in their dependency arrays — the obvious first version, which I wrote and then found in review — means switching language kills every open terminal and loses whatever was running in it. `tRef.current` keeps the current language at the moment a log line is written without changing any callback's identity.
+   - The shell name became a kind (`"cmd" | "posix"`) instead of a display string: `cmd.exe` is a program name and must not be translated, "system shell" must be. One string could not hold both. The duplicated `navigator.userAgent.includes("Windows")` check collapsed into `onWindows()` while I was there.
+   - A dead branch went with it: `exitCode === null ? "" : ...` guarded a value produced by `Number(...)`, which is never null.
+   - 52 new tasks.*/terminal.* keys. Frontend 303 → 309 (36 files); Rust 566 unchanged.
 
 
 

@@ -6,23 +6,19 @@ import { isTauriRuntime } from "../../utils/tauri";
 import { useProjectTasks } from "../../hooks/useProjectTasks";
 import { useRunProjectTask } from "../../hooks/useRunProjectTask";
 import { useFixWithAgent } from "../../hooks/useFixWithAgent";
-
-type VerificationReport = {
-  failed: number;
-  skipped: string[];
-  repairPrompt: string | null;
-  results: { command: string; exitCode: number | null }[];
-};
-
-type RepairWorkspaceReport = {
-  iterations: number;
-  stopReason: string;
-  checksFailed: boolean;
-  results: { command: string; exitCode: number | null }[];
-};
+import { useT } from "../../i18n";
+import {
+  backendStatus,
+  repairStatus,
+  verificationStatus,
+  type RepairWorkspaceReport,
+  type StatusLine,
+  type VerificationReport,
+} from "./taskVerification";
 
 
 export default function TasksPanel() {
+  const t = useT();
   const lastTask = useTaskStore((s) => s.lastTask);
   const taskRuns = useTaskStore((s) => s.taskRuns);
   const taskRunHistory = useTaskStore((s) => s.taskRunHistory);
@@ -33,7 +29,8 @@ export default function TasksPanel() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [repairing, setRepairing] = useState(false);
-  const [verifyStatus, setVerifyStatus] = useState<string | null>(null);
+  // 存键而不是句子：切语言时这一行要跟着变，存成字符串就会留着上一种语言
+  const [verifyStatus, setVerifyStatus] = useState<StatusLine | null>(null);
 
   const selectedRun = useMemo(
     () => taskRunHistory.find((run) => run.runId === selectedRunId) ?? taskRunHistory[0],
@@ -46,7 +43,7 @@ export default function TasksPanel() {
       id: run.taskId,
       label: run.label,
       command: run.command,
-      description: "Run from command history.",
+      description: t("tasks.history.description"),
       source: "history",
     };
     void runProjectTask(task);
@@ -62,17 +59,12 @@ export default function TasksPanel() {
       const report = await invoke<VerificationReport>("verify_workspace", {
         request: { commands: tasks.map((item) => item.command) },
       });
-      const skipped = report.skipped.length > 0 ? ` · skipped ${report.skipped.length}` : "";
-      setVerifyStatus(
-        report.failed === 0
-          ? `All ${report.results.length} check(s) passed${skipped}`
-          : `${report.failed} of ${report.results.length} check(s) failed${skipped} · sent to Agent`
-      );
+      setVerifyStatus(verificationStatus(report));
       if (report.repairPrompt) {
         await sendFixPrompt(report.repairPrompt);
       }
     } catch (error) {
-      setVerifyStatus(error instanceof Error ? error.message : String(error));
+      setVerifyStatus(backendStatus(error));
     } finally {
       setVerifying(false);
     }
@@ -97,14 +89,9 @@ export default function TasksPanel() {
           modelOverride: useAgentStore.getState().chatModelOverride,
         },
       });
-      const rounds = `${report.iterations} round(s)`;
-      setVerifyStatus(
-        report.checksFailed
-          ? `Repair gave up after ${rounds}: ${report.stopReason}`
-          : `Checks pass after ${rounds} · ${report.stopReason}`
-      );
+      setVerifyStatus(repairStatus(report));
     } catch (error) {
-      setVerifyStatus(error instanceof Error ? error.message : String(error));
+      setVerifyStatus(backendStatus(error));
     } finally {
       setRepairing(false);
     }
@@ -115,10 +102,10 @@ export default function TasksPanel() {
 
       <div className="flex items-center justify-between gap-3 border-b border-surface-border px-3 py-1.5">
         <div className="min-w-0">
-          <div className="font-semibold text-surface-text">Commands</div>
+          <div className="font-semibold text-surface-text">{t("tasks.title")}</div>
           <div className="truncate text-[11px] text-surface-muted">
-            {tasks.length} discovered ·{" "}
-            {usingFallback ? "fallback commands" : "workspace configuration"}
+            {t("tasks.discovered", { count: tasks.length })} ·{" "}
+            {usingFallback ? t("tasks.source.fallback") : t("tasks.source.workspace")}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -127,25 +114,23 @@ export default function TasksPanel() {
             disabled={!isTauriRuntime() || verifying || repairing || isAgentBusy || tasks.length === 0}
             data-testid="verify-all"
 
-            title="Run every discovered check; long-running commands like dev/watch are skipped"
+            title={t("tasks.verify.title")}
             className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {verifying ? "Verifying..." : "Verify All"}
+            {verifying ? t("tasks.verifying") : t("tasks.verify")}
           </button>
           <button
             onClick={() => void repairAll()}
             disabled={!isTauriRuntime() || verifying || repairing || isAgentBusy || tasks.length === 0}
             data-testid="repair-all"
-            title="Run the checks, let the Agent fix failures and re-run, up to 2 rounds. Applies its own fixes, so it requires Auto mode."
+            title={t("tasks.repair.title")}
             className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {repairing ? "Repairing..." : "Auto Repair"}
+            {repairing ? t("tasks.repairing") : t("tasks.repair")}
           </button>
 
           <div className="max-w-[280px] truncate text-[11px] text-surface-muted">
-            {usingFallback
-              ? "No workspace tasks discovered yet. Showing fallback commands."
-              : "Tasks discovered from the current workspace configuration."}
+            {usingFallback ? t("tasks.hint.fallback") : t("tasks.hint.workspace")}
           </div>
         </div>
       </div>
@@ -155,33 +140,33 @@ export default function TasksPanel() {
           而截断掉的正是原因。 */}
       {verifyStatus && (
         <div className="border-b border-surface-border px-2 py-1.5 text-[11px] leading-relaxed text-surface-muted whitespace-pre-wrap break-words">
-          {verifyStatus}
+          {verifyStatus.kind === "raw" ? verifyStatus.text : t(verifyStatus.key, verifyStatus.params)}
         </div>
       )}
 
       {!isTauriRuntime() && (
         <div className="border-b border-surface-border px-3 py-2 text-[11px] text-diff-modify">
-          Project tasks run in the Tauri app runtime.
+          {t("tasks.needsTauri")}
         </div>
       )}
 
       {error && (
         <div className="border-b border-surface-border px-3 py-2 text-[11px] text-diff-remove">
-          Failed to discover workspace tasks: {error}
+          {t("tasks.discoverFailed", { error })}
         </div>
       )}
 
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(260px,0.38fr)_minmax(360px,1fr)]">
         <div className="min-w-0 border-r border-surface-border">
           <div className="grid grid-cols-[minmax(120px,0.9fr)_minmax(180px,1.3fr)_72px] border-b border-surface-border bg-surface-panel/70 px-3 py-1 text-[10px] uppercase text-surface-muted">
-            <span>Command</span>
-            <span>Script</span>
-            <span className="text-right">Status</span>
+            <span>{t("tasks.col.command")}</span>
+            <span>{t("tasks.col.script")}</span>
+            <span className="text-right">{t("tasks.col.status")}</span>
           </div>
           <div className="h-full overflow-auto">
             {loading && (
               <div className="px-3 py-4 text-center text-[11px] text-surface-muted">
-                Loading workspace commands...
+                {t("tasks.loading")}
               </div>
             )}
             {tasks.map((task) => {
@@ -203,8 +188,10 @@ export default function TasksPanel() {
                     {task.command}
                   </span>
                   <span className="text-right">
+                    {/* 没跑过就显示来源。来源是 `package.json` 这类文件名，不翻：
+                        翻过去用户就对不上自己项目里的那个文件了。 */}
                     <span className={statusClass(runState?.status ?? task.source)}>
-                      {runState?.status ?? task.source}
+                      {runState ? t(`tasks.status.${runState.status}`) : task.source}
                     </span>
                     {runState?.status === "failed" && (
                       <button
@@ -216,7 +203,7 @@ export default function TasksPanel() {
                         data-testid="fix-with-agent"
                         className="ml-1 rounded border border-accent-blue/40 px-1 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        Fix
+                        {t("tasks.fix")}
                       </button>
                     )}
                   </span>
@@ -229,20 +216,20 @@ export default function TasksPanel() {
         <div className="grid min-w-0 grid-rows-[minmax(96px,0.38fr)_minmax(120px,1fr)]">
           <div className="min-h-0 border-b border-surface-border">
             <div className="flex items-center justify-between gap-2 border-b border-surface-border px-3 py-1.5">
-              <span data-testid="run-history" className="font-semibold text-surface-text">Run History</span>
+              <span data-testid="run-history" className="font-semibold text-surface-text">{t("tasks.history")}</span>
               {taskRunHistory.length > 0 && (
                 <button
                   onClick={clearTaskRunHistory}
                   className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Clear
+                  {t("tasks.history.clear")}
                 </button>
               )}
             </div>
             <div className="h-full overflow-auto">
               {taskRunHistory.length === 0 ? (
                 <div className="px-3 py-4 text-center text-[11px] text-surface-muted">
-                  No command runs yet.
+                  {t("tasks.history.empty")}
                 </div>
               ) : (
                 taskRunHistory.map((run) => (
@@ -259,7 +246,9 @@ export default function TasksPanel() {
                     <span className="min-w-0 truncate font-semibold text-surface-text">
                       {run.label}
                     </span>
-                    <span className={statusClass(run.status)}>{run.status}</span>
+                    <span className={statusClass(run.status)}>
+                      {t(`tasks.status.${run.status}`)}
+                    </span>
                     <span className="font-mono text-[10px] text-surface-muted">
                       {formatDuration(run.durationMs)}
                     </span>
@@ -272,12 +261,14 @@ export default function TasksPanel() {
           <div className="min-h-0">
             <div className="flex items-center gap-2 border-b border-surface-border px-3 py-1.5">
               <span className="min-w-0 flex-1 truncate font-semibold text-surface-text">
-                {selectedRun ? selectedRun.label : "Output"}
+                {selectedRun ? selectedRun.label : t("tasks.output")}
               </span>
                   {selectedRun && (
                 <>
                   <span className="font-mono text-[10px] text-surface-muted">
-                    exit {selectedRun.exitCode ?? "unknown"}
+                    {t("tasks.exit", {
+                      code: selectedRun.exitCode ?? t("tasks.exit.unknown"),
+                    })}
                   </span>
                   <button
                     onClick={() => rerunHistoryEntry(selectedRun)}
@@ -285,7 +276,7 @@ export default function TasksPanel() {
                     data-testid="run-history-rerun"
                     className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    Rerun
+                    {t("tasks.rerun")}
                   </button>
                   {selectedRun.status === "failed" && (
                     <button
@@ -294,14 +285,14 @@ export default function TasksPanel() {
                       data-testid="run-history-fix-with-agent"
                       className="rounded border border-accent-blue/40 px-1.5 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/10 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      Fix with Agent
+                      {t("tasks.fixWithAgent")}
                     </button>
                   )}
                 </>
               )}
             </div>
             <pre className="h-full overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[10px] leading-relaxed text-surface-text">
-              {selectedRun?.output?.trim() || "Select a run to inspect command output."}
+              {selectedRun?.output?.trim() || t("tasks.output.empty")}
             </pre>
           </div>
         </div>
@@ -309,7 +300,8 @@ export default function TasksPanel() {
 
       {lastTask && (
         <div className="border-t border-surface-border px-3 py-2 text-[11px] text-surface-muted">
-          Last queued: <span className="font-mono text-surface-text">{lastTask.command}</span>
+          {t("tasks.lastQueued")}{" "}
+          <span className="font-mono text-surface-text">{lastTask.command}</span>
         </div>
       )}
     </div>

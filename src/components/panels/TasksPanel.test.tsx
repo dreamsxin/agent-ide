@@ -44,11 +44,15 @@ vi.mock("../../stores/useTaskStore", () => ({
 }));
 
 import TasksPanel from "./TasksPanel";
+import { translate, useLocaleStore } from "../../i18n";
 
 describe("TasksPanel auto repair", () => {
   beforeEach(() => {
     invoke.mockReset();
     sendFixPrompt.mockReset();
+    // 显式定语言：默认值来自 `navigator.language`，jsdom 给什么不是这几个用例该赌的事。
+    // 断言里也不写死英文句子，而是查同一个键 —— 要检查的是接线，不是文案。
+    useLocaleStore.getState().setLocale("en");
   });
 
   // 这个仓库没有 vitest setup 文件，RTL 的自动清理不会注册，
@@ -82,7 +86,11 @@ describe("TasksPanel auto repair", () => {
     // 修复循环自己落盘，不该再走一遍 Fix with Agent 的提示词路径
     expect(sendFixPrompt).not.toHaveBeenCalled();
     await waitFor(() =>
-      expect(screen.getByText(/Checks pass after 1 round\(s\)/)).toBeTruthy()
+      expect(
+        screen.getByText(
+          translate("en", "tasks.repair.passed", { rounds: 1, reason: "checks passed" })
+        )
+      ).toBeTruthy()
     );
   });
 
@@ -101,7 +109,12 @@ describe("TasksPanel auto repair", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/Repair gave up after 2 round\(s\): iteration budget exhausted/)
+        screen.getByText(
+          translate("en", "tasks.repair.gaveUp", {
+            rounds: 2,
+            reason: "iteration budget exhausted",
+          })
+        )
       ).toBeTruthy()
     );
   });

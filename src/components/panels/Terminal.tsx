@@ -12,12 +12,23 @@ import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useThemeStore, type Theme } from "../../stores/useThemeStore";
+import { useT } from "../../i18n";
 import { Plus, RotateCcw, X } from "lucide-react";
+
+/**
+ * 哪种 shell。存种类而不是存一个显示名：显示名里有一半要翻（"system shell"），
+ * 另一半不能翻（`cmd.exe` 是程序名），混在一个字符串里就没法分开处理。
+ */
+type ShellKind = "cmd" | "posix";
+
+function onWindows() {
+  return navigator.userAgent.includes("Windows");
+}
 
 interface TerminalProps {
   terminalId: string;
   cwd: string;
-  profile: string;
+  profile: ShellKind;
   initialCommand?: string;
   taskId?: string;
   taskLabel?: string;
@@ -29,7 +40,7 @@ interface TerminalSession {
   id: string;
   label: string;
   cwd: string;
-  profile: string;
+  profile: ShellKind;
   version: number;
   initialCommand?: string;
   taskId?: string;
@@ -39,6 +50,7 @@ interface TerminalSession {
 }
 
 export default function TerminalPanel() {
+  const t = useT();
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const pendingSessionRequestCount = useTaskStore((s) => s.pendingTerminalSessionRequests.length);
   const consumeTerminalSessionRequests = useTaskStore((s) => s.consumeTerminalSessionRequests);
@@ -136,36 +148,37 @@ export default function TerminalPanel() {
                   ? "border-accent-blue/50 bg-accent-blue/10 text-surface-text"
                   : "border-surface-border text-surface-muted hover:text-surface-text"
               }`}
-              title={`${session.profile} - ${session.cwd || "workspace"}`}
+              title={`${shellLabel(session.profile, t)} - ${session.cwd || t("terminal.cwd.workspace")}`}
             >
               <span>{">"}</span>
-              <span className="truncate">Terminal {session.label}</span>
+              <span className="truncate">{t("terminal.tab", { label: session.label })}</span>
             </button>
           ))}
         </div>
         <span className="hidden max-w-[40%] truncate font-mono text-[10px] text-surface-muted md:inline">
-          {activeSession?.profile} · {activeSession?.cwd || "No workspace"}
+          {activeSession && shellLabel(activeSession.profile, t)} ·{" "}
+          {activeSession?.cwd || t("terminal.noWorkspace")}
         </span>
         {activeSession && (
           <>
             <button
               onClick={() => void restartSession(activeSession.id)}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
-              title="Restart terminal"
+              title={t("terminal.restart")}
             >
               <RotateCcw aria-hidden="true" className="h-3 w-3" />
             </button>
             <button
               onClick={createSession}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-surface-text"
-              title="New terminal"
+              title={t("terminal.new")}
             >
               <Plus aria-hidden="true" className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={() => closeSession(activeSession.id)}
               className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-surface-muted hover:text-diff-remove"
-              title="Close terminal"
+              title={t("terminal.close")}
             >
               <X aria-hidden="true" className="h-3.5 w-3.5" />
             </button>
@@ -210,6 +223,16 @@ function TerminalSessionView({
   const xtermRef = useRef<XtermTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const theme = useThemeStore((state) => state.theme);
+  const t = useT();
+  /**
+   * 翻译函数走 ref，不进任何回调的依赖数组。
+   *
+   * 下面三个回调都被那个 spawn / kill 真 shell 的 effect 依赖着，只要它们的身份跟着语言变，
+   * 切一次语言就会杀掉并重开一个终端 —— 正在跑的命令连输出一起没了。用 ref 拿到的还是当前
+   * 语言，写日志那一刻翻译，行为不变。
+   */
+  const tRef = useRef(t);
+  tRef.current = t;
   const readyRef = useRef(false);
   const initialCommandRef = useRef(initialCommand);
   const outputBufferRef = useRef("");
@@ -237,7 +260,7 @@ function TerminalSessionView({
           time: new Date().toLocaleTimeString(),
           level: "error",
           source: "system",
-          message: `Failed to run project task: ${queued.command}`,
+          message: tRef.current("terminal.log.commandFailed", { command: queued.command }),
           details: String(err),
         });
       });
@@ -257,7 +280,7 @@ function TerminalSessionView({
         time: new Date().toLocaleTimeString(),
         level: "error",
         source: "system",
-        message: `Failed to run project task: ${command}`,
+        message: tRef.current("terminal.log.commandFailed", { command }),
         details: String(err),
       });
     });
@@ -291,7 +314,11 @@ function TerminalSessionView({
         time: new Date().toLocaleTimeString(),
         level: status === "success" ? "success" : "error",
         source: "system",
-        message: `${taskLabel ?? taskId} ${status}${exitCode === null ? "" : ` (exit ${exitCode})`}`,
+        message: tRef.current("terminal.log.taskFinished", {
+          label: taskLabel ?? taskId,
+          status: tRef.current(`tasks.status.${status}`),
+          code: exitCode,
+        }),
         details: output.slice(-4000),
       });
     },
@@ -338,7 +365,12 @@ function TerminalSessionView({
     term.loadAddon(webLinksAddon);
     try {
       term.open(containerRef.current);
-      term.writeln(`\x1b[90mStarting ${profile} in ${cwd || "workspace"}...\x1b[0m`);
+      term.writeln(
+        `\x1b[90m${tRef.current("terminal.starting", {
+          profile: shellLabel(profile, tRef.current),
+          cwd: cwd || tRef.current("terminal.cwd.workspace"),
+        })}\x1b[0m`
+      );
       requestAnimationFrame(() => {
         try {
           fitAddon.fit();
@@ -404,7 +436,7 @@ function TerminalSessionView({
           runQueuedCommands();
           return;
         }
-        term.writeln(`\r\n\x1b[31mTerminal failed to start: ${msg}\x1b[0m`);
+        term.writeln(`\r\n\x1b[31m${tRef.current("terminal.startFailed", { error: msg })}\x1b[0m`);
         setStartupError(msg);
       });
 
@@ -473,7 +505,7 @@ function TerminalSessionView({
     >
       {!isTauriRuntime() && (
         <div className="h-full flex items-center justify-center text-xs text-surface-muted">
-          Terminal is available in the Tauri app runtime.
+          {t("terminal.needsTauri")}
         </div>
       )}
       {isTauriRuntime() && startupError && (
@@ -546,15 +578,20 @@ function createTerminalSession(
     id,
     label,
     cwd,
-    profile: navigator.userAgent.includes("Windows") ? "cmd.exe" : "system shell",
+    profile: onWindows() ? "cmd" : "posix",
     version: 0,
     initialCommand,
     ...taskMeta,
   };
 }
 
+/** `cmd.exe` 是程序名，照写；另一边说不清具体是哪个 shell，所以那句是可翻的 */
+function shellLabel(kind: ShellKind, t: ReturnType<typeof useT>) {
+  return kind === "cmd" ? "cmd.exe" : t("terminal.profile.systemShell");
+}
+
 function buildTrackedCommand(command: string, marker: string) {
-  if (navigator.userAgent.includes("Windows")) {
+  if (onWindows()) {
     const escapedCommand = command.replace(/"/g, '\\"');
     return `cmd /v:on /c "${escapedCommand} & echo ${marker}:!ERRORLEVEL!"`;
   }
