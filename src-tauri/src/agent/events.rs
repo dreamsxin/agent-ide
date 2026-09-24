@@ -21,6 +21,13 @@ pub trait RunEvents: Send + Sync {
 impl RunEvents for tauri::AppHandle {
     fn emit_json(&self, event: &str, payload: Value) {
         use tauri::Emitter;
+        // 同一个出口再落一份到磁盘：界面那个日志面板关窗即失，而排查"点了按钮只得到
+        // 一句没用的话"这类问题，唯一的依据就是当时那条记录。哪些事件值得记、记多少，
+        // 由 `run_log` 决定（见那边的模块文档）。
+        //
+        // 记在 emit **之前**：窗口已经关掉的时候 `emit` 会失败，而那种时候的记录恰好
+        // 最值得留下来。
+        crate::services::run_log::record(event, &payload);
         // 发送失败（窗口已关闭之类）不该打断运行，和改造前的 `let _ =` 一致
         let _ = self.emit(event, payload);
     }

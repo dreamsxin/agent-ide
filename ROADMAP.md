@@ -2188,6 +2188,15 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The per-status default message left the store.** `useLspStore` held an English sentence *and* a `defaultMessage(status)` table — with "not initialized" written twice in the same file. `message` is now `string | null`; the display derives the default from `status`. A store written by events and commands should not need to know the UI language.
    - **The problems summary stopped hand-rolling plurals.** `${n} error${n === 1 ? "" : "s"}` only works in English; it is one key with three numbers now, and the test that pinned the English string asserts the interpolated key instead.
    - Frontend 324 unchanged (38 files), tsc 0; Rust 574 unchanged.
+180. **Run records now land on disk (2026-09-24)**
+   Asked for while debugging an apply failure: 「你加个本地磁盘，这样才能做调试」. The Logs panel only lives in memory — close the window and the evidence is gone, and there is no way to hand it to anyone. `npm run tauri -- dev`'s console output sits in one terminal on one machine and cannot be scrolled back to afterwards.
+   - `services/run_log.rs` appends to `<config dir>/logs/agent-ide.log`, hooked into the **one** place every backend event leaves through: `impl RunEvents for AppHandle`. Written *before* `emit`, because a failed emit (window already closed) is exactly when the record matters most.
+   - **Only diagnostic events are recorded.** Action logs keep timestamp, level, phase, stage, summary and details; state changes keep one word; everything else is skipped. `agent-diff-ready` carries whole file contents and `agent-stream-token` carries every token — logging those copies the workspace and the model's output into a file that then has nothing readable left in it.
+   - Bounded: 2 MB, then rotate to `.log.1` and keep exactly one old file. `details` is truncated at 2000 **characters**, not bytes — a Chinese character is three bytes and a byte cut leaves a broken glyph — with a `[+N chars]` marker so a truncated record says so.
+   - A write failure is ignored on purpose: the user wants the change, not the record of the change.
+   - This covers the reported case. `apply_diffs` already emits a `diff_apply` action log whose details come from `format_apply_result_details`, so the refusal (`Refusing to overwrite existing file: hello.txt`) is now on disk.
+   - **Known gap**: entries created by the frontend (`useLogStore.addLog` in the terminal and task runs) never reach the backend, so they are not in the file. Recording them needs a command; not built.
+   - Rust 574 → 579 (578 passed + 1 ignored); frontend unchanged.
 
 
 

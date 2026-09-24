@@ -15,6 +15,8 @@ pub mod mcp;
 pub mod problem_parser;
 pub mod project_memory;
 pub mod project_tasks;
+/// 把运行记录落到磁盘。界面那个日志面板关窗即失，排查问题要的就是它。形状见模块文档。
+pub mod run_log;
 pub mod verification;
 /// 取一个网址的正文给模型看：URL 校验、跳转策略、正文提取。形状见模块文档。
 pub mod web_fetch;
