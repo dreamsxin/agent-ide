@@ -14,7 +14,7 @@ import PanelLoading from "./components/shared/PanelLoading";
 import { useLayoutStore, maxBottomHeight } from "./stores/useLayoutStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
 import { useAppBootstrap } from "./hooks/useAppBootstrap";
-import useShortcuts from "./hooks/useShortcuts";
+import useShortcuts, { type Shortcut } from "./hooks/useShortcuts";
 import { useProjectTasks } from "./hooks/useProjectTasks";
 import { useRunProjectTask } from "./hooks/useRunProjectTask";
 
@@ -119,10 +119,12 @@ export default function App() {
 
   useAppBootstrap();
 
-  const allShortcuts = [
+  const allShortcuts: Shortcut[] = [
     ...shortcuts,
-    { id: "help", keys: "F1", label: "Shortcuts Help",
-      group: "General", scope: "global" as const,
+    // F1 这条不在 `useShortcuts` 里：它开的是那个帮助弹窗自己，而弹窗的开关是 App 的状态。
+    // 类型写出来是为了别再漏字段 —— 这里以前写的是 `label`，而接口已经换成了 `labelKey`。
+    { id: "help", keys: "F1", labelKey: "shortcut.help",
+      group: "general", scope: "global" as const,
       handler: () => setHelpVisible((v) => !v) },
   ];
 

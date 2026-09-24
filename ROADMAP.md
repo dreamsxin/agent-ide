@@ -2174,6 +2174,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `useRunProjectTask`'s four log lines went through keys, reusing `tasks.status.*` for the success/failed word rather than embedding the enum.
    - **A near-miss worth recording**: the eleven git replacements were done with a PowerShell `-replace` round-trip, and `git diff` then showed the new Chinese comment as mojibake. The file was fine — it was the console's output encoding, as AGENTS.md's trap list says. Verified with `grep_content` before touching anything; the diff also stayed hunk-local, which is the evidence that line endings survived.
    - Frontend 323 → 324 (38 files), tsc 0; Rust 574 unchanged.
+178. **Chinese UI: the shortcuts help (2026-09-24)**
+   24 keys, one duplicated table removed, one no-op deleted.
+   - **The group names existed twice**: `useShortcuts` tagged each shortcut `group: "Panels"`, and `ShortcutsHelp` kept a `GROUP_LABELS` map that translated "Panels" → "Panel". Two tables, one of which silently renamed the other. Groups are now ids (`panels` / `git` / `navigation` / `editor` / `general`) and the display name comes from `shortcut.group.*`.
+   - `Shortcut.label` became `labelKey: MessageKey`. That turned the missing conversion in `App.tsx` — the F1 entry is declared there, not in the hook — into a **compile error** instead of an English row in an otherwise Chinese list. `allShortcuts` is now explicitly `Shortcut[]` so the next one fails the same way.
+   - **Deleted a no-op**: `s.keys.replace("Ctrl", "Ctrl").replace("Shift", "Shift")`. It reads like key-name localisation and does nothing at all.
+   - The footer stopped being three fragments (`Press` + `<kbd>F1</kbd>` + `to toggle this panel`) and became one sentence with `{key}` interpolated. Splitting a sentence around markup forces each half to be translated blind, and Chinese puts the verb elsewhere.
+   - `Map<string, Shortcut[]>` → `Map<Shortcut["group"], Shortcut[]>`, because with a `string` key `t(\`shortcut.group.${group}\`)` no longer type-checks as a real key — the loose type was hiding the safety that makes the key table worth having.
+   - Frontend 324 unchanged (38 files), tsc 0; Rust 574 unchanged.
 
 
 
