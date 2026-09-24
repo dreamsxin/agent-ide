@@ -750,17 +750,29 @@ mod injection_tests {
             }
             Err(error) => {
                 println!("injection path not exercised here: {}", error);
-                // 这台机器/这个会话不让置前：那就必须是**拒绝**，而不是硬发出去。
-                // 认的是"置前"这一类拒绝，不是任意错误 —— 尺寸不符、被遮挡都有自己的话术，
-                // 混在一起会让这条测试对任何失败都点头。
+                // 这台机器/这个会话不让这一下发出去：那就必须是**拒绝**，而不是硬发出去。
                 assert!(
-                    error.contains("front"),
-                    "置前失败时唯一可接受的结果是拒绝，实际是：{}",
+                    refusal_is_environmental(&error),
+                    "环境拒绝之外的失败说明这次调用本身就是错的，实际是：{}",
                     error
                 );
                 assert_eq!(seen(), nothing(), "既然拒绝了，就不该有任何一下被发出去");
             }
         }
+    }
+
+    /// 这条拒绝是"环境不让"，而不是"调用写错了"。
+    ///
+    /// 三种环境拒绝：置前被拒、等置前超时、瞄的点上不是这个窗口。前两种带 front，第三种
+    /// 带 covering。CI 的 runner 有桌面会话但没有真实显示输出，窗口能建起来、置前也能过，
+    /// 而 `WindowFromPoint` 返回的根窗口不是它 —— 于是四条测试整批走第三种。原来只认
+    /// front，所以在本机全绿、在 CI 全红。
+    ///
+    /// 不能放宽成"任何错误都算"：尺寸不符、坐标越界、量不到窗口，这些是**调用方给错了
+    /// 参数**，把它们也算成环境拒绝，这条测试就会对自己要守的东西点头。真正的不变量由
+    /// 调用点那句 `assert_eq!(seen(), nothing())` 守着 —— 拒绝了就一下都不许发出去。
+    fn refusal_is_environmental(error: &str) -> bool {
+        error.contains("front") || error.contains("covering")
     }
 
     /// 窗口矩形相对的 (x, y) 落在客户区里 —— 见 `sending` 里那段理由。

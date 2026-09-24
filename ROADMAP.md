@@ -2129,6 +2129,11 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `runPipeline` (`null` = never run) now holds the run's stages. `pipeline` is only written by `get_pipeline` / `update_pipeline` / `reset_pipeline` / `fetchPipeline`. `TaskPipeline` reads `runPipeline ?? pipeline`; editors read only `pipeline`.
    - Session persistence saves and restores `runPipeline`. A snapshot written by an older build only has `pipeline`, so it restores as "never run" — deliberately no fallback: the persisted session is per-workspace and short-lived, and a shim here would have to guess whether that array was a config or a run. `startNewSession`, `resumeSession`, `forkSession` and `deleteSession` clear `runPipeline` without touching `pipeline` (they used to reset the *configuration* to the default, which is the same defect in the other direction).
    - Frontend 309 → 311 (36 files), tsc 0; Rust 572 unchanged.
+171. **The injection tests only accepted one of three environment refusals (2026-09-24)**
+   All four `services::input::injection_tests` failed on CI while passing locally. The runner has a desktop session but no real display output, so the window is created, `SetForegroundWindow` succeeds — and then `WindowFromPoint` reports a different root window, which `send_gesture` correctly refuses with "Something is covering (200, 180)…". The test only accepted refusals containing `front`, so a legitimate refusal read as a failure.
+   - `refusal_is_environmental()` now accepts the three refusals that depend on the machine (foreground denied, foreground timed out, point occluded) and nothing else. Size mismatch, out-of-frame coordinates and "could not measure that window" still fail the test, because those mean **the call itself was wrong** — widening this to "any error" would make the test nod at the thing it exists to catch.
+   - The invariant being tested did not change and is still asserted on every refusal path: `assert_eq!(seen(), nothing())` — if it was refused, not one event was injected.
+   - Rust 572 unchanged (571 passed + 1 ignored) locally; the four tests now exercise the refusal branch on CI instead of failing.
 
 
 
