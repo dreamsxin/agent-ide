@@ -92,7 +92,7 @@ function HunkBlock({
       {findings.slice(0, 3).map((finding) => (
         <div key={finding.id} className="flex gap-1">
           <span className={problemSeverityClass(finding.severity)}>
-            {t(`diff.severity.${finding.severity}`)}
+            {t(`severity.${finding.severity}`)}
           </span>
           <span className="min-w-0 flex-1 truncate">
             {finding.source}: {finding.message}
