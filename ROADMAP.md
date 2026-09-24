@@ -2197,6 +2197,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - This covers the reported case. `apply_diffs` already emits a `diff_apply` action log whose details come from `format_apply_result_details`, so the refusal (`Refusing to overwrite existing file: hello.txt`) is now on disk.
    - **Known gap**: entries created by the frontend (`useLogStore.addLog` in the terminal and task runs) never reach the backend, so they are not in the file. Recording them needs a command; not built.
    - Rust 574 → 579 (578 passed + 1 ignored); frontend unchanged.
+181. **`Failed to apply diff.` threw away the only useful sentence (2026-09-24)**
+   The reported screenshot: 「点击 Apply all，报错了：这次运行失败了 / Failed to apply diff.」 The backend returns `ApplyDiffError { diffId, file, message }` per failure and the banner rendered a count. The reason — `Refusing to overwrite existing file: hello.txt` — was already in the payload, already in the Diff view's per-file block, and dropped on the floor in the one place the user was looking.
+   - Three call sites (`applyAllDiffs`, `applyDiff`, `applyDiffHunk`) built three different count sentences. All three now call `applyFailureSummary(result.failed)`, which joins `file: message`. **Not translated, on purpose**: both halves are data, and the backend's wording is the accurate part. Capped at 3 lines plus `(+N)` so the banner cannot grow into a screenful.
+   - The actionable half goes through the existing hint table rather than a second one: `runFailureHint` gained the three refusals `diff_apply.rs` can produce (new file already exists, file gone, diff generated against an older version of the file). The chat banner and the Diff view now read the **same** table — `DiffView`'s private `isHashMismatch` is deleted, which also means "file already exists" stopped being a dead end: it was the one refusal with no way out on screen.
+   - **Ordering is load-bearing and tested.** `replace_unique`'s message appends the hunk's first 200 characters, so model-written code lands in the haystack; `"File not found: x"` inside a changed line would otherwise match the missing-file hint and point at the wrong problem. The stale-diff markers are checked first, and a test pins that case.
+   - `diff.staleHint` moved into the `failure.hint.*` namespace with its text intact, so there is one hint table and not a key per render site.
+   - Frontend 324 → 329 (38 files), tsc 0; Rust 579 unchanged.
+
 
 
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runFailureHint } from "./runFailure";
+import { applyFailureSummary, runFailureHint } from "./runFailure";
 import { translate } from "../i18n";
 
 describe("失败原因 → 可操作提示", () => {
@@ -42,4 +42,63 @@ describe("失败原因 → 可操作提示", () => {
     expect(runFailureHint("")).toBeNull();
     expect(runFailureHint(null)).toBeNull();
   });
+
+  /**
+   * 用户报告的那一次：点 Apply all 报 "Failed to apply diff."，没有原因。
+   * 后端拒绝的三类都有出路，提示要说出那条出路，不能只说"失败了"。
+   */
+  it("应用被拒绝的三类各有一句出路", () => {
+    expect(runFailureHint("Refusing to overwrite existing file: D:\\work\\a\\src\\new.ts")).toBe(
+      "failure.hint.fileExists"
+    );
+    expect(runFailureHint("File not found: D:\\work\\a\\src\\gone.ts")).toBe(
+      "failure.hint.missingFile"
+    );
+    expect(
+      runFailureHint(
+        "File changed since diff was generated for src/a.ts: expected baseHash ab12, got cd34"
+      )
+    ).toBe("failure.hint.staleDiff");
+  });
+
+  /**
+   * hunk 锚点对不上的原话后面跟着模型生成的前 200 个字符。那段文本里可能出现
+   * 别的 marker（"file not found" 完全可能是被改的那行代码），所以陈旧这一类
+   * 必须先匹配 —— 否则给出的建议指向另一件事。
+   */
+  it("锚点对不上时不被 hunk 内容里的字眼带跑", () => {
+    expect(
+      runFailureHint(
+        'Original content matched more than once in src/a.ts: throw new Error("File not found: x")'
+      )
+    ).toBe("failure.hint.staleDiff");
+  });
 });
+
+describe("应用失败的横幅", () => {
+  /**
+   * 以前这里写的是 `Failed to apply N diff(s).`：后端给了文件名和原因，横幅
+   * 只留一个数字。用户看到的就是这句，什么都推断不出来。
+   */
+  it("后端自己那句话要留在横幅上", () => {
+    const summary = applyFailureSummary([
+      { file: "src/new.ts", message: "Refusing to overwrite existing file: D:\\work\\a\\src\\new.ts" },
+    ]);
+    expect(summary).toContain("src/new.ts");
+    expect(summary).toContain("Refusing to overwrite existing file");
+  });
+
+  it("多条一行一条，超出的只报个数", () => {
+    const summary = applyFailureSummary(
+      ["a", "b", "c", "d", "e"].map((name) => ({ file: `${name}.ts`, message: `boom ${name}` }))
+    );
+    expect(summary?.split("\n")).toHaveLength(4);
+    expect(summary).toContain("boom a");
+    expect(summary).toContain("(+2)");
+  });
+
+  it("没有失败就没有横幅", () => {
+    expect(applyFailureSummary([])).toBeNull();
+  });
+});
+

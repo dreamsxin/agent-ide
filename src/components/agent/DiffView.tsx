@@ -5,6 +5,7 @@ import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore, type ProblemEntry } from "../../stores/useProblemStore";
 import type { DiffEntry, DiffHunk } from "../../types/agent";
 import { hunkBanner, hunkKind } from "./diffPresentation";
+import { runFailureHint } from "../../utils/runFailure";
 import { useT } from "../../i18n";
 import type { MessageKey } from "../../i18n/messages";
 import {
@@ -619,21 +620,25 @@ export default function DiffView() {
                   {t("diff.reverted.note")}
                 </div>
               )}
-              {diff.status === "failed" && (
+              {diff.status === "failed" && (() => {
+                const failureMessage = diff.applyError || failedMessages.get(diff.id);
+                // 提示和聊天横幅走同一张表：以前这里只认 baseHash 一种，"文件已存在"
+                // 之类的拒绝就只有一句英文原话，没有出路。
+                const hint = runFailureHint(failureMessage ?? null);
+                return (
                 <div className="bg-diff-remove/10 px-3 py-1 text-xs text-diff-remove">
                   <div className="font-medium">{t("diff.applyFailed")}</div>
-                  {(diff.applyError || failedMessages.get(diff.id)) && (
-                    <div className="mt-0.5 break-words text-[11px]">
-                      {diff.applyError || failedMessages.get(diff.id)}
-                    </div>
+                  {failureMessage && (
+                    <div className="mt-0.5 break-words text-[11px]">{failureMessage}</div>
                   )}
-                  {isHashMismatch(diff.applyError || failedMessages.get(diff.id)) && (
+                  {hint && (
                     <div className="mt-1 rounded border border-diff-remove/30 bg-surface-base/70 px-2 py-1 text-[10px] text-surface-muted">
-                      {t("diff.staleHint")}
+                      {t(hint)}
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
             </div>
             );
           })
@@ -646,11 +651,6 @@ export default function DiffView() {
       </div>
     </div>
   );
-}
-
-function isHashMismatch(message?: string) {
-  if (!message) return false;
-  return message.includes("baseHash") || message.includes("File changed since diff was generated");
 }
 
 function HunkCount({ label, count, className }: { label: string; count: number; className: string }) {

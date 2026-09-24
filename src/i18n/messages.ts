@@ -382,7 +382,6 @@ export const EN = {
   "diff.regenerateAgainstFile": "Regenerate against current file",
   "diff.reverted.note": "Reverted — this is a record of a change the Agent made and you undid",
   "diff.applyFailed": "Apply failed",
-  "diff.staleHint": "The file changed after the Agent generated this diff. Ask the Agent to regenerate the change against the current file before applying.",
   "diff.empty": "No pending changes",
   "diff.empty.hint": "Code changes suggested by the Agent will appear here.",
 
@@ -753,6 +752,13 @@ export const EN = {
     "The provider says this account is out of quota. Check billing on their side.",
   "failure.hint.network":
     "The request never reached the provider. Check the endpoint on the active profile, and your network or proxy.",
+  "failure.hint.staleDiff":
+    "The file changed after the Agent generated this diff. Ask the Agent to regenerate the change against the current file before applying.",
+  "failure.hint.fileExists":
+    "The Agent proposed this as a new file, but a file with that name already exists — apply will not overwrite it. Open the file to see whether the change is already there; otherwise rename or delete it, or ask the Agent to rewrite the change as an edit of the existing file.",
+  "failure.hint.missingFile":
+    "The file this change edits is no longer on disk — it was moved, renamed or deleted after the diff was generated. Ask the Agent to redo the change against the current workspace.",
+
 
   "question.title": "The Agent needs a decision",
   "question.subtitle": "Your answer, not an approval",
@@ -1186,7 +1192,6 @@ export const ZH: Record<MessageKey, string> = {
   "diff.regenerateAgainstFile": "按当前文件重新生成",
   "diff.reverted.note": "已撤销 —— 这是一条记录：Agent 改过，你撤回了",
   "diff.applyFailed": "应用失败",
-  "diff.staleHint": "这份 diff 生成之后文件又变了。让 Agent 按当前文件重新生成一次，再应用。",
   "diff.empty": "没有待审查的改动",
   "diff.empty.hint": "Agent 提的代码改动会出现在这里。",
 
@@ -1553,6 +1558,13 @@ export const ZH: Record<MessageKey, string> = {
   "failure.hint.quota": "提供方说这个账号额度用完了。要去他们那边看账单。",
   "failure.hint.network":
     "请求没到提供方那里。检查当前 profile 的端点地址，以及你的网络或代理。",
+  "failure.hint.staleDiff":
+    "这份 diff 生成之后文件又变了。让 Agent 按当前文件重新生成一次，再应用。",
+  "failure.hint.fileExists":
+    "Agent 把这条当成新建文件，但同名文件已经在了 —— 应用不会覆盖它。先打开那个文件看看改动是不是已经在里面了；要么把它改名或删掉，要么让 Agent 按现有文件改一遍重新生成这条改动。",
+  "failure.hint.missingFile":
+    "这条改动要改的文件已经不在磁盘上了 —— diff 生成之后它被移动、改名或删除了。让 Agent 按当前工作区重做这条改动。",
+
 
   "question.title": "Agent 要你定一下",
   "question.subtitle": "这是回答，不是授权",

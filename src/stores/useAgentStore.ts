@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isTauriRuntime } from "../utils/tauri";
 import { deriveTaskTitle } from "../utils/agentTaskTitle";
 import { isReviewableDiff } from "../utils/agentExperience";
+import { applyFailureSummary } from "../utils/runFailure";
 import { translate, useLocaleStore } from "../i18n";
 import {
   normalizeExternalActions,
@@ -1277,9 +1278,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         persistDiffs(diffs);
         return {
           lastApplyResult: result,
-          error: result.failed.length > 0
-            ? `Failed to apply ${result.failed.length} diff${result.failed.length === 1 ? "" : "s"}.`
-            : null,
+          error: applyFailureSummary(result.failed),
           diffs,
         };
       });
@@ -1349,7 +1348,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         persistDiffs(diffs);
         return {
           lastApplyResult: result,
-          error: result.failed.length > 0 ? "Failed to apply diff." : null,
+          error: applyFailureSummary(result.failed),
           diffs,
         };
       });
@@ -1388,7 +1387,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         persistDiffs(diffs);
         return {
           lastApplyResult: result,
-          error: result.failed.length > 0 ? "Failed to apply hunk." : null,
+          error: applyFailureSummary(result.failed),
           diffs,
         };
       });

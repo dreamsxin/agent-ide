@@ -17,6 +17,29 @@ import type { MessageKey } from "../i18n/messages";
 export type RunFailureHint = MessageKey | null;
 
 const HINTS: { key: MessageKey; markers: string[] }[] = [
+  // 应用改动被拒绝的三类原话（`agent/diff_apply.rs`）。它们排在提供方错误前面：
+  // 这几句是我们自己写的，措辞稳定，不会和模型报错撞词。
+  {
+    // 锚点对不上和 baseHash 对不上是同一件事的两种表现：diff 是照旧文件生成的。
+    // 这一条必须排在最前：它的原话后面跟着 hunk 的前 200 个字符，那段模型生成的
+    // 文本里完全可能出现别的 marker，先匹配到别人就会给出一句不对的建议。
+    key: "failure.hint.staleDiff",
+    markers: [
+      "file changed since diff was generated",
+      "basehash",
+      "original content is empty",
+      "original content matched more than once",
+      "original content not found",
+    ],
+  },
+  {
+    key: "failure.hint.fileExists",
+    markers: ["refusing to overwrite existing file"],
+  },
+  {
+    key: "failure.hint.missingFile",
+    markers: ["file not found"],
+  },
   {
     // 上下文超限：这是最常见的一类，也是最需要提示的 —— 它的解法全在界面上
     key: "failure.hint.contextLimit",
@@ -72,3 +95,32 @@ export function runFailureHint(error: string | null): RunFailureHint {
   }
   return null;
 }
+
+/** 一次应用里最多在横幅上写几条原话；再多就只给个数字，横幅不能长成一屏。 */
+const MAX_LISTED_FAILURES = 3;
+
+/**
+ * 把"哪些改动没应用上、为什么"拼成横幅要显示的那段话。
+ *
+ * 以前三处写的是 `Failed to apply N diff(s).` / `Failed to apply diff.` —— 后端
+ * 明明给了 `file` 和 `message`（"Refusing to overwrite existing file: ..."），
+ * 横幅把它们全丢掉，只留一个数字。用户报告的就是这个："报错了，只写 Failed to
+ * apply diff.，不知道为什么"。
+ *
+ * 这里不翻译也不改写原话：原话是唯一准确的信息，可操作的建议由 `runFailureHint`
+ * 在它下面另起一行给。拼出来的是 `文件: 原话`，两边都是数据，不是需要翻译的文案。
+ */
+export function applyFailureSummary(
+  failed: { file: string; message: string }[]
+): string | null {
+  if (failed.length === 0) return null;
+  const lines = failed
+    .slice(0, MAX_LISTED_FAILURES)
+    .map((failure) => `${failure.file}: ${failure.message}`);
+  const hidden = failed.length - lines.length;
+  if (hidden > 0) {
+    lines.push(`(+${hidden})`);
+  }
+  return lines.join("\n");
+}
+
