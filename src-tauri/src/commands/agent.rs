@@ -3459,6 +3459,19 @@ pub async fn get_project_memory(
     crate::services::project_memory::project_memory_info()
 }
 
+/// 把界面自己产生的一条日志也写进磁盘日志。
+///
+/// 后端事件走 `impl RunEvents for AppHandle` 落盘，但终端、任务运行、git 这些记录只在
+/// 前端产生，于是那份文件里少了半边 —— 而"命令为什么失败"恰恰只有前端知道。
+///
+/// 不返回错误：写日志失败不该让界面弹东西（用户要的是那次操作，不是它的记录），格式与
+/// 轮转都交给 `run_log`，这里只是把载荷递过去 —— 多一条自己的写文件路径就会多一份
+/// 和 2 MB 上限不一致的实现。
+#[tauri::command]
+pub async fn append_ui_log(entry: serde_json::Value) {
+    crate::services::run_log::record("ui-log", &entry);
+}
+
 /// 撤销某一轮对话改的文件。
 ///
 /// 和 `undo_last_apply` 的区别是按**轮**算账：一轮里可能落盘好几次，而用户记得的是

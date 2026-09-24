@@ -2195,7 +2195,7 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - Bounded: 2 MB, then rotate to `.log.1` and keep exactly one old file. `details` is truncated at 2000 **characters**, not bytes — a Chinese character is three bytes and a byte cut leaves a broken glyph — with a `[+N chars]` marker so a truncated record says so.
    - A write failure is ignored on purpose: the user wants the change, not the record of the change.
    - This covers the reported case. `apply_diffs` already emits a `diff_apply` action log whose details come from `format_apply_result_details`, so the refusal (`Refusing to overwrite existing file: hello.txt`) is now on disk.
-   - **Known gap**: entries created by the frontend (`useLogStore.addLog` in the terminal and task runs) never reach the backend, so they are not in the file. Recording them needs a command; not built.
+   - **Known gap**: entries created by the frontend (`useLogStore.addLog` in the terminal and task runs) never reach the backend, so they are not in the file. Recording them needs a command; **built in 185**.
    - Rust 574 → 579 (578 passed + 1 ignored); frontend unchanged.
 181. **`Failed to apply diff.` threw away the only useful sentence (2026-09-24)**
    The reported screenshot: 「点击 Apply all，报错了：这次运行失败了 / Failed to apply diff.」 The backend returns `ApplyDiffError { diffId, file, message }` per failure and the banner rendered a count. The reason — `Refusing to overwrite existing file: hello.txt` — was already in the payload, already in the Diff view's per-file block, and dropped on the floor in the one place the user was looking.
@@ -2227,6 +2227,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Why not a banner with a "re-run" button**: re-running needs the original prompt, and the prompt that produced a three-file diff is usually not the one you would send now. An honest record plus an empty action row says more than a button that guesses.
    - The framing was the actual defect the user hit: a stale list is not a failed run, and `state: "error"` made the panel say something untrue about the Agent.
    - Frontend 331 unchanged (38 files, two tests rewritten), tsc 0; Rust 579 unchanged — `stale` is frontend-only and the comment on `DiffEntry.status` says so.
+185. **The disk log was missing the half only the frontend knows (2026-09-24)**
+   Closes the gap 180 recorded. The Logs panel's own entries — terminal output, task runs, git — are created in `useLogStore.addLog` and never crossed the bridge, so `agent-ide.log` held the Agent's side of a session and nothing about the command that failed next to it.
+   - `line_for` gained one more event, `"ui-log"`, so the **same** pure function decides what a line looks like and the same `record()` handles the 2 MB rotation and the 2000-character `details` cut. A second write path in the frontend would have drifted from the first within one change.
+   - Lines are prefixed `[ui:{level}]` against the Agent's `[{level}]` / `[state]`: one file, and you still need to know which side produced a line. The timestamp is the entry's own `time`, not the moment the command arrived, so the file's order matches what the panel showed.
+   - `append_ui_log` returns nothing and the frontend does not await it (`void invoke(...).catch(() => {})`). A log that reports its own failure interrupts the thing the user actually asked for; the same reasoning as the ignored write error in 180.
+   - Rust 578 → 579 passed (+1 ignored); frontend 331 unchanged, tsc 0.
+
 
 
 

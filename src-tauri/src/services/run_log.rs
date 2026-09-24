@@ -83,6 +83,33 @@ pub fn line_for(event: &str, payload: &Value) -> Option<String> {
                 state
             ))
         }
+        // 界面自己产生的日志（终端、任务运行、git）。它们从来不经过后端，所以在这份文件
+        // 里原本是一片空白 —— 而"命令跑失败了"这类记录恰恰只有前端知道。前缀写 `ui:`：
+        // 同一个文件里要能分清哪一条是 Agent 干的、哪一条是界面记的。
+        "ui-log" => {
+            let level = payload
+                .get("level")
+                .and_then(Value::as_str)
+                .unwrap_or("info");
+            let source = payload
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("system");
+            let message = payload.get("message").and_then(Value::as_str).unwrap_or("");
+            let details = payload.get("details").and_then(Value::as_str).unwrap_or("");
+            // 时间戳用界面那一条自己的（`time`），不是收到命令的时刻：排查时要对上
+            // 日志面板里看到的顺序。
+            let timestamp = payload
+                .get("time")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+            let mut line = format!("{} [ui:{}] {} {}", timestamp, level, source, message);
+            if !details.is_empty() {
+                line.push_str(&format!("\n    {}", truncate_chars(details, MAX_DETAILS)));
+            }
+            Some(line)
+        }
         _ => None,
     }
 }
@@ -186,6 +213,29 @@ mod tests {
         let line =
             line_for("agent-state-changed", &json!({ "state": "waiting_user" })).expect("recorded");
         assert!(line.contains("[state] waiting_user"));
+    }
+
+    /// 界面那半边的记录：终端、任务运行、git 都只在前端产生，而它们正是
+    /// "命令为什么失败"的唯一线索。前缀要能和 Agent 自己的记录区分开。
+    #[test]
+    fn a_ui_log_keeps_its_own_timestamp_source_and_details() {
+        let line = line_for(
+            "ui-log",
+            &json!({
+                "time": "2026-09-24T11:22:33Z",
+                "level": "error",
+                "source": "system",
+                "message": "npm test failed",
+                "details": "1 test failed: apply_diffs",
+            }),
+        )
+        .expect("recorded");
+
+        assert!(line.contains("2026-09-24T11:22:33Z"));
+        assert!(line.contains("[ui:error]"));
+        assert!(line.contains("system"));
+        assert!(line.contains("npm test failed"));
+        assert!(line.contains("1 test failed: apply_diffs"));
     }
 
     #[test]
