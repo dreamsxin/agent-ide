@@ -1,4 +1,5 @@
 import type { PerformanceMetrics } from "../../utils/incrementalRenderer";
+import { useT } from "../../i18n";
 
 interface PerformanceMetricsPanelProps {
   metrics: PerformanceMetrics | null;
@@ -7,6 +8,7 @@ interface PerformanceMetricsPanelProps {
 }
 
 export default function PerformanceMetricsPanel({ metrics, onReset, onClose }: PerformanceMetricsPanelProps) {
+  const t = useT();
   if (!metrics) return null;
 
   const memory = metrics.memoryUsage >= 1024
@@ -16,25 +18,25 @@ export default function PerformanceMetricsPanel({ metrics, onReset, onClose }: P
   return (
     <div className="absolute right-2 top-2 z-10 w-52 rounded border border-surface-border bg-surface-panel/95 p-2 text-[10px] shadow-lg backdrop-blur-sm">
       <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold text-surface-text">
-        <span>Editor performance</span>
-        <button type="button" onClick={onReset} title="Reset performance metrics" className="ml-auto text-surface-muted hover:text-surface-text">Reset</button>
+        <span>{t("perf.title")}</span>
+        <button type="button" onClick={onReset} title={t("perf.reset.title")} className="ml-auto text-surface-muted hover:text-surface-text">{t("perf.reset")}</button>
         <button
           type="button"
           onClick={onClose}
-          title="Close performance overlay"
-          aria-label="Close performance overlay"
+          title={t("perf.close")}
+          aria-label={t("perf.close")}
           className="text-surface-muted hover:text-surface-text"
         >
           ×
         </button>
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-surface-muted">
-        <Metric label="FPS" value={metrics.fps.toFixed(1)} />
-        <Metric label="Frame" value={`${metrics.frameTime.toFixed(1)} ms`} />
-        <Metric label="Render" value={`${metrics.renderTime.toFixed(1)} ms`} />
-        <Metric label="Memory" value={memory} />
-        <Metric label="Dropped" value={String(metrics.droppedFrames)} />
-        <Metric label="Frames" value={String(metrics.totalFrames)} />
+        <Metric label={t("perf.fps")} value={metrics.fps.toFixed(1)} />
+        <Metric label={t("perf.frame")} value={`${metrics.frameTime.toFixed(1)} ms`} />
+        <Metric label={t("perf.render")} value={`${metrics.renderTime.toFixed(1)} ms`} />
+        <Metric label={t("perf.memory")} value={memory} />
+        <Metric label={t("perf.dropped")} value={String(metrics.droppedFrames)} />
+        <Metric label={t("perf.frames")} value={String(metrics.totalFrames)} />
       </div>
     </div>
   );

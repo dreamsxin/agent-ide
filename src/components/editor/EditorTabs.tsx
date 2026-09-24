@@ -1,6 +1,8 @@
 import { useEditorStore } from "../../stores/useEditorStore";
+import { useT } from "../../i18n";
 
 export default function EditorTabs() {
+  const t = useT();
   const openFiles = useEditorStore((s) => s.openFiles);
   const activeFile = useEditorStore((s) => s.activeFile);
   const setActiveFile = useEditorStore((s) => s.setActiveFile);
@@ -11,7 +13,7 @@ export default function EditorTabs() {
   return (
     <div
       role="tablist"
-      aria-label="Open files"
+      aria-label={t("editor.tabs.openFiles")}
       className="flex items-center bg-surface-panel border-b border-surface-border overflow-x-auto no-select"
     >
       {openFiles.map((file) => (
@@ -42,8 +44,8 @@ export default function EditorTabs() {
           {/* 读取失败过的标签必须看得出来：它的缓冲区不代表磁盘上的文件，也不能保存 */}
           {file.loadError && (
             <span
-              title={`Failed to load: ${file.loadError}. This tab cannot be saved.`}
-              aria-label={`${file.name} failed to load and cannot be saved`}
+              title={t("editor.tab.loadFailed", { error: file.loadError })}
+              aria-label={t("editor.tab.loadFailed.aria", { name: file.name })}
               className="flex-shrink-0 font-mono text-[10px] leading-none text-diff-remove"
             >
               !
@@ -54,8 +56,8 @@ export default function EditorTabs() {
               e.stopPropagation();
               closeFile(file.path);
             }}
-            aria-label={`Close ${file.name}`}
-            title={`Close ${file.name}`}
+            aria-label={t("editor.tab.close", { name: file.name })}
+            title={t("editor.tab.close", { name: file.name })}
             className="opacity-0 group-hover:opacity-100 text-surface-muted hover:text-surface-text ml-0.5 flex-shrink-0"
           >
             ×

@@ -25,8 +25,11 @@ import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useLogStore } from "../../stores/useLogStore";
 import { pathsEqual } from "../../utils/paths";
 import { isAgentBusy as agentIsBusy } from "../../utils/agentExperience";
+import { translate, useLocaleStore } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
 import {
   AGENT_QUICK_ACTIONS,
+  agentActionLabel,
   buildActionPrompt,
   type AgentQuickActionKey,
 } from "../../utils/agentActions";
@@ -88,6 +91,15 @@ function isAgentBusy() {
   return agentIsBusy(useAgentStore.getState().state);
 }
 
+/**
+ * 这个模块不在 React 里（Monaco 的注册是模块级的），拿不到 `useT`，所以现问 store 的语言。
+ * 每次真正要出文案时才调用 —— 注册只发生一次，如果在注册时就把句子算出来，之后切语言
+ * 右键菜单和灯泡会一直是旧语言。
+ */
+function t(key: MessageKey, params?: Record<string, string | number>) {
+  return translate(useLocaleStore.getState().locale, key, params);
+}
+
 function log(entry: {
   level: "info" | "warn" | "error" | "success";
   source: "agent" | "git" | "fs" | "system";
@@ -131,8 +143,8 @@ export async function runAgentSelectionAction(action: AgentQuickActionKey) {
     log({
       level: "warn",
       source: "agent",
-      message: "Agent is busy; the selection action was not sent.",
-      details: "Wait for the current run to finish, or press Stop.",
+      message: t("editor.busy.message"),
+      details: t("editor.busy.details"),
     });
     return;
   }
@@ -331,18 +343,18 @@ async function applyLspCodeAction(
     log({
       level: "error",
       source: "system",
-      message: `Code action failed: ${title}`,
+      message: t("editor.codeAction.failed", { title }),
       details,
     });
 
   const activeEditor = currentEditor;
   if (!activeEditor) {
-    failed("No active editor to apply the workspace edit to.");
+    failed(t("editor.codeAction.noEditor"));
     return;
   }
   try {
     if (!applyWorkspaceEdit(activeEditor, monaco, edit)) {
-      failed("Monaco rejected the workspace edit.");
+      failed(t("editor.codeAction.rejected"));
       return;
     }
     syncWorkspaceEditToStore(monaco, edit);
@@ -350,8 +362,8 @@ async function applyLspCodeAction(
     log({
       level: "success",
       source: "system",
-      message: `Code action applied: ${title}`,
-      details: `${edit.edits.length} edit(s) applied.`,
+      message: t("editor.codeAction.applied", { title }),
+      details: t("editor.codeAction.editCount", { count: edit.edits.length }),
     });
   } catch (error) {
     failed(String(error));
@@ -366,12 +378,12 @@ function registerAgentLightbulb(monaco: Monaco) {
       if (isAgentBusy() || !readSelection()) return empty;
       return {
         actions: AGENT_QUICK_ACTIONS.map((act) => ({
-          title: `${act.icon} ${act.label} with Agent`,
+          title: agentActionLabel(act),
           kind: "refactor.rewrite",
           diagnostics: [],
           command: {
             id: `agent-ide.lightbulb-${act.key}`,
-            title: `${act.label} with Agent`,
+            title: agentActionLabel(act, false),
           },
         })),
         dispose: () => {},

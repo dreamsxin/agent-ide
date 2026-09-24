@@ -9,11 +9,13 @@ import {
   type AgentQuickActionKey,
 } from "../../utils/agentActions";
 import { isAgentBusy as agentIsBusy } from "../../utils/agentExperience";
+import { useT } from "../../i18n";
 
 /**
  * Floating toolbar above selected text: [Explain | Fix | Refactor | Optimize]
  */
 export default function QuickActions() {
+  const t = useT();
   const selectedText = useEditorStore((s) => s.selectedText);
   const selectedRange = useEditorStore((s) => s.selectedRange);
   const activeFile = useEditorStore((s) => s.activeFile);
@@ -100,7 +102,7 @@ export default function QuickActions() {
             className="flex items-center gap-1 px-2 py-1 text-xs text-surface-muted hover:text-surface-text hover:bg-surface-border/50 rounded transition-colors whitespace-nowrap"
           >
             <span>{action.icon}</span>
-            <span>{action.label}</span>
+            <span>{t(action.labelKey)}</span>
           </button>
         ))}
       </div>

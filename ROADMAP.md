@@ -2105,6 +2105,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The shell name became a kind (`"cmd" | "posix"`) instead of a display string: `cmd.exe` is a program name and must not be translated, "system shell" must be. One string could not hold both. The duplicated `navigator.userAgent.includes("Windows")` check collapsed into `onWindows()` while I was there.
    - A dead branch went with it: `exitCode === null ? "" : ...` guarded a value produced by `Number(...)`, which is never null.
    - 52 new tasks.*/terminal.* keys. Frontend 303 → 309 (36 files); Rust 566 unchanged.
+167. **Chinese UI: the editor chrome (2026-09-24)**
+   Tabs, the save-error bar, the welcome panel, the performance overlay, the quick actions and the Monaco code-action log — 33 keys.
+   - **A quick action's name is a key, its prompt is not.** `AgentQuickAction.label` became `labelKey`; `prompt` stays English because it is sent to the model, not shown to the user. The composed menu title ("💡 Explain with Agent") was assembled in three places and Chinese puts the verb after the subject (「让 Agent 讲讲」), so the composition now lives in one `agentActionLabel()`.
+   - **`monacoGlobals.ts` cannot use `useT`** — it is module-level, which is the whole point of that file. It reads the locale from the store at the moment a sentence is needed, not at registration time, so a language switch is picked up by the lightbulb and the busy warning.
+   - **Monaco caches an action's label at registration**, so the F12 and right-click labels keep the language they were registered in until the editor remounts. That is Monaco's, not ours; noted rather than worked around.
+   - `EditorContainer` uses a `tRef` for the same reason as the terminal: the LSP effect would otherwise restart the language server on a language switch.
+   - Frontend 309 unchanged (36 files), tsc 0; Rust 566 unchanged.
 
 
 

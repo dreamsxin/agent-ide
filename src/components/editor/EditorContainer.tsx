@@ -12,6 +12,7 @@ import {
 } from "./monacoGlobals";
 import {
   AGENT_QUICK_ACTIONS,
+  agentActionLabel,
   type AgentQuickActionKey,
 } from "../../utils/agentActions";
 import EditorTabs from "./EditorTabs";
@@ -26,6 +27,7 @@ import {
   ensureOpenFileModels,
 } from "../../utils/typescriptSemantic";
 import { useLspDiagnostics } from "../../hooks/useLspDiagnostics";
+import { useT } from "../../i18n";
 import { useIncrementalRendering } from "../../hooks/useIncrementalRendering";
 import PerformanceMetricsPanel from "./PerformanceMetricsPanel";
 import {
@@ -75,6 +77,14 @@ const WELCOME_CODE = `//  Welcome to Agent IDE
 `;
 
 export default function EditorContainer() {
+  const t = useT();
+  /**
+   * 翻译函数走 ref，不进依赖数组：下面那个 effect 会去起语言服务器，`t` 一变它就重跑一遍。
+   * Monaco 的 action 标签也只在注册那一刻取一次（切语言后右键菜单仍是旧语言，那是 Monaco
+   * 的缓存，不是这里能改的），所以进依赖数组只有坏处。
+   */
+  const tRef = useRef(t);
+  tRef.current = t;
   const activeFile = useEditorStore((s) => s.activeFile);
   const openFiles = useEditorStore((s) => s.openFiles);
   const fileContents = useEditorStore((s) => s.fileContents);
@@ -220,7 +230,7 @@ export default function EditorContainer() {
 
       const definitionDisposable = editorInst.addAction({
         id: "agent-ide.go-to-definition",
-        label: "Go to Definition",
+        label: tRef.current("editor.goToDefinition"),
         keybindings: [monacoInst.KeyCode.F12],
         contextMenuGroupId: "navigation",
         contextMenuOrder: 1,
@@ -236,7 +246,7 @@ export default function EditorContainer() {
       for (const act of AGENT_QUICK_ACTIONS) {
         const disposable = editorInst.addAction({
           id: `agent-ide.${act.key}-selection`,
-          label: `${act.icon} ${act.label} with Agent`,
+          label: agentActionLabel(act),
           contextMenuGroupId: "agent",
           contextMenuOrder: AGENT_QUICK_ACTIONS.indexOf(act) + 1,
           precondition: "editorHasSelection",
@@ -263,7 +273,7 @@ export default function EditorContainer() {
     const languageId = activeTab ? activeTab.language || detectLanguage(activeTab.path) : "typescript";
     if (!isLspLanguage(languageId)) {
       setLspReady(false);
-      setLspStatus("idle", "Open a TypeScript/JavaScript, Go, Python, or Rust file to start a language server.");
+      setLspStatus("idle", tRef.current("editor.lsp.unsupported"));
       return;
     }
     lspOpenedFilesRef.current.clear();
@@ -345,8 +355,8 @@ export default function EditorContainer() {
           <span className="min-w-0 flex-1 break-words">{saveError}</span>
           <button
             onClick={clearSaveError}
-            aria-label="Dismiss save error"
-            title="Dismiss"
+            aria-label={t("editor.saveError.dismiss")}
+            title={t("editor.dismiss")}
             className="flex-shrink-0 text-surface-muted hover:text-surface-text"
           >
             ×
@@ -367,7 +377,7 @@ export default function EditorContainer() {
             <Suspense
               fallback={
                 <div className="flex items-center justify-center h-full text-surface-muted text-sm">
-                  Loading editor...
+                  {t("editor.loading")}
                 </div>
               }
             >
@@ -416,9 +426,9 @@ export default function EditorContainer() {
                   Agent IDE
                 </h2>
                 <p className="text-sm text-surface-muted max-w-md leading-relaxed">
-                  AI-powered development environment.
+                  {t("editor.welcome.line1")}
                   <br />
-                  Open a file or start a conversation with your Agent.
+                  {t("editor.welcome.line2")}
                 </p>
                 <pre className="mt-6 text-left text-xs font-mono text-surface-muted bg-surface-panel p-4 rounded-lg inline-block max-w-lg overflow-auto">
                   {WELCOME_CODE}
