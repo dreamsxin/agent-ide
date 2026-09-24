@@ -689,6 +689,17 @@ export const EN = {
   "summary.detail.next": "Next: {title}",
   "summary.detail.mode": "{ide} mode · {mode} permissions",
 
+  "failure.hint.contextLimit":
+    "This request was larger than the model's context window. Tighten the compression mode above the chat box, untick a few context items, or switch to a profile with a bigger window.",
+  "failure.hint.auth":
+    "The provider rejected the API key. Check the key on the active profile in Settings.",
+  "failure.hint.rateLimit":
+    "The provider is rate limiting this key. Wait a moment and send again, or switch profile.",
+  "failure.hint.quota":
+    "The provider says this account is out of quota. Check billing on their side.",
+  "failure.hint.network":
+    "The request never reached the provider. Check the endpoint on the active profile, and your network or proxy.",
+
   "question.title": "The Agent needs a decision",
   "question.subtitle": "Your answer, not an approval",
   "question.custom.placeholder": "Or type your own answer",
@@ -1410,6 +1421,14 @@ export const ZH: Record<MessageKey, string> = {
   "summary.detail.now": "正在做：{title}",
   "summary.detail.next": "接下来：{title}",
   "summary.detail.mode": "{ide}模式 · {mode}权限",
+
+  "failure.hint.contextLimit":
+    "这次请求超出了模型的上下文上限。可以把聊天框上方的压缩模式调紧、在上下文清单里少选几项，或者换一个上下文窗口更大的 profile。",
+  "failure.hint.auth": "提供方拒绝了这个 API key。去设置里检查当前 profile 上的 key。",
+  "failure.hint.rateLimit": "提供方在限流这个 key。等一下再发，或者换一个 profile。",
+  "failure.hint.quota": "提供方说这个账号额度用完了。要去他们那边看账单。",
+  "failure.hint.network":
+    "请求没到提供方那里。检查当前 profile 的端点地址，以及你的网络或代理。",
 
   "question.title": "Agent 要你定一下",
   "question.subtitle": "这是回答，不是授权",

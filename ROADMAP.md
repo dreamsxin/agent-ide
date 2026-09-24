@@ -2154,6 +2154,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **The status line answers "why did it stop"** before anything else: `state === "error"` → `summary.detail.failed` (「这一轮出错停了 —— 报错原因在对话里」). It used to fall through to "Next: <first todo step>", which is exactly the sentence the user could not act on.
    - Rust 574 → 574 (573 passed + 1 ignored; one test replaced, one added), frontend 314 → 315 (36 files), tsc 0.
    - Still open: `waiting_user` continues to mean two things (a question, a review queue). Splitting it into two backend states is a bigger change and is not done here — what is fixed is that no sentence invents a reason any more.
+175. **The failure reason said what happened, never what to do (2026-09-24)**
+   Follow-up to the same report: 「没有失败原因提示，用户都不知道如何处理」. The provider's message is accurate and stays verbatim — `This model's maximum context length is 128000 tokens, however you requested 132518` — but it does not say that the compression mode, the context checklist and the profile's window are all one click away.
+   - `runFailure.ts` classifies the raw message into one of five kinds (context limit, key rejected, rate limited, out of quota, never reached the provider) and returns a **message key**; the chat's error banner renders that hint above the untouched original.
+   - **Unrecognised failures get no hint.** A generic "check your configuration" reads like a diagnosis while saying nothing, and the raw text below is the only accurate thing on screen. The test pins this: two real unmatched messages return `null`.
+   - Matching is on the wording providers actually use (`maximum context length`, `prompt is too long`, `insufficient_quota`, …), lower-cased, and deliberately **not** on HTTP status numbers — `429` collides with token counts and ports.
+   - Frontend 315 → 319 (37 files), tsc 0; Rust 574 unchanged.
+   - Also fixed the race behind the original screenshot: the store's `catch` sets `state: "error"` *and* the message, but the backend's finish-time `agent-state-changed` can be delivered after the promise rejects. Under 173 that event carried `waiting_user`, overwriting the truth; under 174 it carries `error`, so both sources agree.
 
 
 

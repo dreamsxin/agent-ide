@@ -7,6 +7,7 @@ import { useLogStore } from "../../stores/useLogStore";
 import PendingChangesCard from "./PendingChangesCard";
 import { buildIdeRuntimeContext } from "../../utils/agentRuntimeContext";
 import { agentStateMessageKey, isAgentBusy } from "../../utils/agentExperience";
+import { runFailureHint } from "../../utils/runFailure";
 import { useT } from "../../i18n";
 import {
   ideRuntimeOptionsFor,
@@ -284,6 +285,8 @@ export default function ChatView() {
 
   const agentState = useAgentStore((s) => s.state);
   const agentError = useAgentStore((s) => s.error);
+  // 认得出来的失败给一句可操作提示；认不出来就只有原话（编一句通用建议比不说更糟）
+  const failureHint = runFailureHint(agentError);
   const agentMode = useAgentStore((s) => s.mode);
   const ideMode = useAgentStore((s) => s.ideMode);
   const streamContent = useAgentStore((s) => s.streamContent);
@@ -856,13 +859,23 @@ export default function ChatView() {
         </div>
 
         {/* 运行失败原因 — 没有这块的话，用户只能看到一个 Retry 按钮，
-            完全不知道失败在哪。错误文本一直存在 store 里，之前没有任何地方渲染。 */}
+            完全不知道失败在哪。错误文本一直存在 store 里，之前没有任何地方渲染。
+            原话下面不动，上面加一句"你可以做什么"：提供方的报错只说发生了什么
+            （`maximum context length is 128000 tokens...`），不说怎么办。 */}
         {agentError && (
           <div
             data-testid="agent-error-banner"
             className="mb-2 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1.5"
           >
             <div className="mb-0.5 text-[10px] font-medium text-diff-remove">{t("chat.runFailed")}</div>
+            {failureHint && (
+              <div
+                data-testid="agent-error-hint"
+                className="mb-1 text-[11px] leading-relaxed text-surface-text"
+              >
+                {t(failureHint)}
+              </div>
+            )}
             <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-surface-text">
               {agentError}
             </pre>
