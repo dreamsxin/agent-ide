@@ -2251,6 +2251,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Two of them were more than a comparison.** `reloadFile` used the caller's raw path as the `fileContents` **key**, so a backslash spelling wrote a second buffer while the tab kept pointing at the first; it now resolves the key from the open tab, as `updateFileContent` already did. `renamePath` had the same problem on both sides of the move, plus it re-derived the file name with an inline `split(/[/\\]/)` instead of `fileNameFromPath`.
    - The test opens a file with `/` and then drives `markDirty` and `reloadFile` with `\`: one tab, one buffer, and the buffer's key is still the tab's path. Case folding is deliberately not asserted — that is `normalizeFilePath`'s business and its own tests'.
    - Frontend 333 → 334 (38 files), tsc 0; Rust 579 unchanged.
+189. **Two defects found reviewing this session's own work (2026-09-24)**
+   Both were mine, from 183 and 188.
+   - **183 broke the MCP example's mapping to the form.** Rewriting `Example: <code>npx</code> with args <code>…</code>` into one clause plus one code span left the sentence saying "command npx with args:" while the code span held the whole command line, so `npx` appeared twice and the args label described something that was not the args. The three inputs on that panel are name / command / args; the example has to map onto them. The code span now holds only the arguments.
+   - **188 introduced a `!` non-null assertion** (`pathsEqual(file.path, saved.activeFile!)`) because the narrowing from `saved.activeFile &&` does not survive into the callback. Silencing the type checker is on this project's trap list, so the check now hoists the value into a local.
+   - Fixing it turned up something better: the restore path returned **the archived spelling** as `activeFile`, not the restored tab's own path. With a `\`-spelled archive that is a string no tab has, so the editor would open with nothing selected. It now returns the matched tab's path.
+   - Frontend 334 unchanged (38 files), tsc 0; Rust 579 unchanged.
+
 
 
 

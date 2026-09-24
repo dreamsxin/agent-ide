@@ -168,7 +168,7 @@ export default function McpPanel() {
           <div className="text-[10px] text-surface-muted">
             {t("mcp.empty")}{" "}
             <code className="rounded bg-surface-border/50 px-1">
-              npx -y @modelcontextprotocol/server-filesystem .
+              -y @modelcontextprotocol/server-filesystem .
             </code>
           </div>
         )}

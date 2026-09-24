@@ -405,10 +405,14 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }
 
     if (restoredFiles.length === 0) return;
-    const activeFile =
-      saved.activeFile && restoredFiles.some((file) => pathsEqual(file.path, saved.activeFile!))
-        ? saved.activeFile
-        : restoredFiles[0].path;
+    // 取**恢复出来那条页签自己的**路径，而不是存档里那句写法：存档可能是 `\` 分隔的同一个
+    // 文件，照抄回去会让 activeFile 指着一个 openFiles 里不存在的字符串。
+    // （顺带去掉一个 `!` 非空断言 —— 用断言让类型检查闭嘴是这个项目踩过的坑。）
+    const savedActive = saved.activeFile;
+    const matchedActive = savedActive
+      ? restoredFiles.find((file) => pathsEqual(file.path, savedActive))
+      : undefined;
+    const activeFile = matchedActive?.path ?? restoredFiles[0].path;
 
     set({
       openFiles: restoredFiles,
