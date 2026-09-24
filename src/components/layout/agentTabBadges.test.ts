@@ -6,7 +6,8 @@ describe("changesBadge", () => {
     expect(changesBadge(3, 0)).toEqual({
       text: "3",
       tone: "pending",
-      hint: "3 change(s) waiting for review",
+      hintKey: "badge.pendingChanges",
+      hintParams: { count: 3 },
     });
   });
 
@@ -16,7 +17,8 @@ describe("changesBadge", () => {
     expect(changesBadge(0, 2)).toEqual({
       text: "2",
       tone: "external",
-      hint: "2 external action(s) that cannot be undone",
+      hintKey: "badge.externalActions",
+      hintParams: { count: 2 },
     });
   });
 

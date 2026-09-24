@@ -4,6 +4,8 @@ import { FileText } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { isTauriRuntime } from "../../utils/tauri";
 import { normalizeProjectMemoryInfo, type ProjectMemoryInfo } from "../../types/agent";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
 
 /**
  * 项目记忆（`AGENTS.md`）的状态，和唯一能改变它的那个动作。
@@ -16,20 +18,25 @@ import { normalizeProjectMemoryInfo, type ProjectMemoryInfo } from "../../types/
  * 改动照样进审查区、照样能撤销。所以这里没有任何新权限。
  */
 export default function ProjectMemoryCard() {
+  const t = useT();
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
   const isStreaming = useAgentStore((s) => s.isStreaming);
   const [info, setInfo] = useState<ProjectMemoryInfo | null>(null);
+  // 后端原话（`catch`）和"载荷读不懂"是两件事：前者不翻译 —— 原话是唯一准确的信息；
+  // 后者是我们自己的判断，走 key。
   const [error, setError] = useState<string | null>(null);
+  const [unreadable, setUnreadable] = useState(false);
   const [sent, setSent] = useState(false);
 
   const load = useCallback(async () => {
     if (!isTauriRuntime()) return;
     setError(null);
+    setUnreadable(false);
     try {
       const parsed = normalizeProjectMemoryInfo(await invoke("get_project_memory"));
       if (!parsed) {
         // 读不懂就说读不懂，而不是渲染成"没有项目记忆" —— 后者会让用户去建一个已经存在的文件
-        setError("The project memory status could not be read.");
+        setUnreadable(true);
         return;
       }
       setInfo(parsed);
@@ -55,15 +62,16 @@ export default function ProjectMemoryCard() {
   }
 
   const actionable = info?.workspaceOpen === true;
+  const state = projectMemoryMessage(info, unreadable);
 
   return (
     <div className="rounded border border-surface-border bg-surface-panel p-3">
       <div className="flex items-center gap-1.5 text-[11px] font-medium text-surface-text">
         <FileText aria-hidden="true" className="h-3.5 w-3.5" />
-        Project memory (AGENTS.md)
+        {t("memory.title")}
       </div>
       <p className="mt-1 text-[10px] leading-relaxed text-surface-muted">
-        {describe(info, error)}
+        {error ?? t(state.key, state.params)}
       </p>
       {actionable && info && (
         <button
@@ -74,17 +82,14 @@ export default function ProjectMemoryCard() {
             // 提前显示成功会在"没配模型"时说一句彻头彻尾的假话
             void sendPrompt({ prompt: info.draftPrompt }).then(() => setSent(true));
           }}
-          title="Ask the Agent to inspect this repo and propose the file as a reviewable change"
+          title={t("memory.draftTitle")}
           className="mt-2 rounded border border-surface-border px-2 py-1 text-[10px] text-surface-text hover:bg-surface-border/30 disabled:opacity-40"
         >
-          {info.exists ? "Update it with the Agent" : "Draft it with the Agent"}
+          {info.exists ? t("memory.update") : t("memory.draft")}
         </button>
       )}
       {sent && (
-        <p className="mt-1.5 text-[10px] text-surface-muted">
-          Sent — the draft shows up in Chat, and the file itself arrives in the review area as a
-          normal change you can reject.
-        </p>
+        <p className="mt-1.5 text-[10px] text-surface-muted">{t("memory.sent")}</p>
       )}
     </div>
   );
@@ -93,23 +98,25 @@ export default function ProjectMemoryCard() {
 /**
  * 一句话说清此刻是哪一种状态。
  *
- * 四种状态必须区分开：没打开工作区、读不出来、没有这份文件、有但尾部被丢掉。前三种在
- * "规则没生效"上结果一样，而用户要做的事完全不同。
+ * 五种状态必须区分开：载荷读不懂、还在读、没打开工作区、没有这份文件、有但尾部被丢掉。
+ * 前三种在"规则没生效"上结果一样，而用户要做的事完全不同。
  *
  * "装得下"也不敢说成"全都发出去了"：上下文预算会按配额再削一次（项目记忆那一节占 15%），
  * 聊天里还能把这一节整个关掉 —— 说成"全部发送"就又是一句用户没法验证的假话。
+ *
+ * 返回 key 而不是句子：这几句里有三句带数字或路径，写死中文就等于把它们锁在一种语言里。
  */
-function describe(info: ProjectMemoryInfo | null, error: string | null): string {
-  if (error) return error;
-  if (!info) return "Reading the project memory status…";
-  if (!info.workspaceOpen) {
-    return "No workspace is open, so there is no project memory to read yet. Open a workspace folder first.";
-  }
-  if (!info.exists) {
-    return `No AGENTS.md in this workspace, so every run starts without your project's conventions — the Agent guesses the build commands and the layout. It would go to ${info.path}.`;
-  }
+export function projectMemoryMessage(
+  info: ProjectMemoryInfo | null,
+  unreadable: boolean
+): { key: MessageKey; params?: Record<string, string | number> } {
+  if (unreadable) return { key: "memory.unreadable" };
+  if (!info) return { key: "memory.loading" };
+  if (!info.workspaceOpen) return { key: "memory.noWorkspace" };
+  if (!info.exists) return { key: "memory.missing", params: { path: info.path } };
   if (info.truncated) {
-    return `AGENTS.md is ${info.bytes} bytes, but only the first ${info.limit} reach a run — everything after that is dropped, and the tail is where the last rules you wrote are. Shorten it, or have the Agent tighten it.`;
+    return { key: "memory.truncated", params: { bytes: info.bytes, limit: info.limit } };
   }
-  return `AGENTS.md is ${info.bytes} of ${info.limit} bytes, so it fits the injection bound. A tight context budget can still trim it, and Chat can switch project memory off for one run.`;
+  return { key: "memory.fits", params: { bytes: info.bytes, limit: info.limit } };
 }
+

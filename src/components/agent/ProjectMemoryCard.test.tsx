@@ -11,9 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
-import ProjectMemoryCard from "./ProjectMemoryCard";
+import ProjectMemoryCard, { projectMemoryMessage } from "./ProjectMemoryCard";
 import { useAgentStore } from "../../stores/useAgentStore";
 import { normalizeProjectMemoryInfo } from "../../types/agent";
+import { translate } from "../../i18n";
 
 afterEach(cleanup);
 
@@ -47,11 +48,11 @@ describe("ProjectMemoryCard", () => {
     render(<ProjectMemoryCard />);
 
     await waitFor(() => {
-      expect(screen.getByText(/No workspace is open/)).toBeDefined();
+      expect(screen.getByText(translate("en", "memory.noWorkspace"))).toBeDefined();
     });
     expect(screen.queryByText(/7000/)).toBeNull();
     // 没有可做的动作：那个按钮会把提示词指向一个用户没打开的目录
-    expect(screen.queryByText("Update it with the Agent")).toBeNull();
+    expect(screen.queryByText(translate("en", "memory.update"))).toBeNull();
   });
 
   it("says a project has no memory file, and where it would go", async () => {
@@ -60,11 +61,14 @@ describe("ProjectMemoryCard", () => {
     render(<ProjectMemoryCard />);
 
     await waitFor(() => {
-      expect(screen.getByText(/No AGENTS\.md in this workspace/)).toBeDefined();
+      // 说清它该在哪：用户要知道该去哪个路径新建，而不是自己猜工作区根在哪
+      expect(
+        screen.getByText(
+          translate("en", "memory.missing", { path: "C:\\work\\project\\AGENTS.md" })
+        )
+      ).toBeDefined();
     });
-    // 说清它该在哪：用户要知道该去哪个路径新建，而不是自己猜工作区根在哪
-    expect(screen.getByText(/C:\\work\\project\\AGENTS\.md/)).toBeDefined();
-    expect(screen.getByText("Draft it with the Agent")).toBeDefined();
+    expect(screen.getByText(translate("en", "memory.draft"))).toBeDefined();
   });
 
   /**
@@ -77,12 +81,11 @@ describe("ProjectMemoryCard", () => {
     render(<ProjectMemoryCard />);
 
     await waitFor(() => {
-      expect(screen.getByText(/9200 bytes/)).toBeDefined();
+      expect(
+        screen.getByText(translate("en", "memory.truncated", { bytes: 9200, limit: 8000 }))
+      ).toBeDefined();
     });
-    await waitFor(() => {
-      expect(screen.getByText(/only the first 8000/)).toBeDefined();
-    });
-    expect(screen.getByText("Update it with the Agent")).toBeDefined();
+    expect(screen.getByText(translate("en", "memory.update"))).toBeDefined();
   });
 
   it("says the file fits without claiming it always reaches the model whole", async () => {
@@ -90,12 +93,12 @@ describe("ProjectMemoryCard", () => {
 
     render(<ProjectMemoryCard />);
 
-    await waitFor(() => {
-      expect(screen.getByText(/1200 of 8000 bytes/)).toBeDefined();
-    });
     // "装得下"是事实；"每次都完整发出去"不是 —— 上下文预算和聊天里的开关都能再削它
-    expect(screen.getByText(/fits the injection bound/)).toBeDefined();
-    expect(screen.getByText(/context budget can still trim it/)).toBeDefined();
+    await waitFor(() => {
+      expect(
+        screen.getByText(translate("en", "memory.fits", { bytes: 1200, limit: 8000 }))
+      ).toBeDefined();
+    });
   });
 
   /** 按钮发的必须是后端给的那段提示词：前端自己编一段就会和后端的上限、文件名说不到一起。 */
@@ -105,10 +108,11 @@ describe("ProjectMemoryCard", () => {
     useAgentStore.setState({ sendPrompt } as never);
 
     render(<ProjectMemoryCard />);
+    const label = translate("en", "memory.draft");
     await waitFor(() => {
-      expect(screen.getByText("Draft it with the Agent")).toBeDefined();
+      expect(screen.getByText(label)).toBeDefined();
     });
-    screen.getByText("Draft it with the Agent").click();
+    screen.getByText(label).click();
 
     await waitFor(() => {
       expect(sendPrompt).toHaveBeenCalledWith({
@@ -116,7 +120,7 @@ describe("ProjectMemoryCard", () => {
       });
     });
     // 落地方式也要说清：文件是当成一次可拒绝的改动进审查区的
-    expect(screen.getByText(/review area as a\s+normal change you can reject/)).toBeDefined();
+    expect(screen.getByText(translate("en", "memory.sent"))).toBeDefined();
   });
 
   /** 读不懂的载荷不能渲染成"没有项目记忆"：那会让用户去新建一个已经存在的文件。 */
@@ -126,11 +130,44 @@ describe("ProjectMemoryCard", () => {
     render(<ProjectMemoryCard />);
 
     await waitFor(() => {
-      expect(screen.getByText(/could not be read/)).toBeDefined();
+      expect(screen.getByText(translate("en", "memory.unreadable"))).toBeDefined();
     });
-    expect(screen.queryByText("Draft it with the Agent")).toBeNull();
+    expect(screen.queryByText(translate("en", "memory.draft"))).toBeNull();
   });
 });
+
+/**
+ * 五种状态各对一个 key：钉的是"状态 → 说哪一句"，不是那一句怎么写。
+ * 中英两张表各自表述，测措辞就等于把翻译也钉死。
+ */
+describe("projectMemoryMessage", () => {
+  const base = {
+    workspaceOpen: true,
+    exists: true,
+    path: "C:\\p\\AGENTS.md",
+    bytes: 1200,
+    limit: 8000,
+    truncated: false,
+    draftPrompt: "x",
+  };
+
+  it("tells the five states apart", () => {
+    expect(projectMemoryMessage(null, true).key).toBe("memory.unreadable");
+    expect(projectMemoryMessage(null, false).key).toBe("memory.loading");
+    expect(projectMemoryMessage({ ...base, workspaceOpen: false }, false).key).toBe(
+      "memory.noWorkspace"
+    );
+    expect(projectMemoryMessage({ ...base, exists: false }, false).key).toBe("memory.missing");
+    expect(projectMemoryMessage({ ...base, truncated: true }, false).key).toBe("memory.truncated");
+    expect(projectMemoryMessage(base, false).key).toBe("memory.fits");
+  });
+
+  /** 读不懂优先于一切：有陈旧的 `info` 在手上也不能拿它当现状说。 */
+  it("reports an unreadable payload even when an older reading is still held", () => {
+    expect(projectMemoryMessage(base, true).key).toBe("memory.unreadable");
+  });
+});
+
 
 describe("normalizeProjectMemoryInfo", () => {
   it("refuses a payload without the prompt or the path", () => {

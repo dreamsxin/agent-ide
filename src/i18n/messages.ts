@@ -156,6 +156,29 @@ export const EN = {
   "chat.input.error": "Something failed — say what to try instead…",
   "chat.input.plan": "Describe what you want; the Agent drafts a plan first (Shift+Enter for a newline)",
   "chat.input.default": "Tell the Agent what to do — {mode} (Shift+Enter for a newline)",
+  "chat.profile.title": "Which LLM profile this chat run uses",
+  "chat.profile.none": "No provider configured",
+  "chat.compression.title": "How much context this chat run packs",
+  "chat.compression.focused": "Mode: Focused",
+  "chat.compression.compact": "Mode: Compact",
+  "chat.compression.budgeted": "Mode: Budgeted",
+  "chat.compression.full": "Mode: Full",
+  "chat.model.placeholder": "Model for this chat (default: {model})",
+  "chat.model.label": "Model for this chat",
+  "chat.model.unset": "unset",
+  "chat.model.reset": "Reset",
+  "chat.model.resetTitle": "Go back to the profile's model",
+  "chat.model.note":
+    "Only the model name changes. The key, endpoint, spend and token caps, context budget and per-token prices still come from this profile — the cost shown for the run may be priced at the wrong rate.",
+  "chat.budget.title":
+    "Counts only the context sections listed below. The real request also carries the system prompt, the tool schemas, your own prompt, the pending diffs sent for review, and — inside a pipeline — the messages earlier stages accumulated, so it is always larger than this. The measured row below, when present, is not comparable: that is the provider's count for the largest single call of the last run, and it includes the model's output.",
+  "chat.budget.estimated": "Estimated input budget (tokens)",
+  "chat.budget.selectedContext": "selected context",
+  "chat.budget.unknown": "unknown",
+  "chat.budget.trimmed": "trimmed",
+  "chat.budget.notCounted": "Not counted: {items} — the real request is larger.",
+  "chat.usage.peak": "Provider-measured peak request",
+  "chat.usage.contextTokens": "context tokens",
   "chat.context.title": "See and choose what the Agent is given as context",
   "chat.context.activeFile": "Current file",
   "chat.context.selection": "Selected text",
@@ -759,6 +782,35 @@ export const EN = {
   "failure.hint.missingFile":
     "The file this change edits is no longer on disk — it was moved, renamed or deleted after the diff was generated. Ask the Agent to redo the change against the current workspace.",
 
+  "memory.title": "Project memory (AGENTS.md)",
+  "memory.unreadable": "The project memory status could not be read.",
+  "memory.loading": "Reading the project memory status…",
+  "memory.noWorkspace":
+    "No workspace is open, so there is no project memory to read yet. Open a workspace folder first.",
+  "memory.missing":
+    "No AGENTS.md in this workspace, so every run starts without your project's conventions — the Agent guesses the build commands and the layout. It would go to {path}.",
+  "memory.truncated":
+    "AGENTS.md is {bytes} bytes, but only the first {limit} reach a run — everything after that is dropped, and the tail is where the last rules you wrote are. Shorten it, or have the Agent tighten it.",
+  "memory.fits":
+    "AGENTS.md is {bytes} of {limit} bytes, so it fits the injection bound. A tight context budget can still trim it, and Chat can switch project memory off for one run.",
+  "memory.draftTitle":
+    "Ask the Agent to inspect this repo and propose the file as a reviewable change",
+  "memory.update": "Update it with the Agent",
+  "memory.draft": "Draft it with the Agent",
+  "memory.sent":
+    "Sent — the draft shows up in Chat, and the file itself arrives in the review area as a normal change you can reject.",
+
+  "chat.suggestions.title": "Suggested next steps",
+  "pending.waiting": "{count} file(s) waiting for review",
+  "pending.nothingWritten": "nothing written to disk yet",
+  "pending.reviewByHunk": "Review hunk by hunk",
+  "badge.pendingChanges": "{count} change(s) waiting for review",
+  "badge.externalActions": "{count} external action(s) that cannot be undone",
+
+
+
+
+
 
   "question.title": "The Agent needs a decision",
   "question.subtitle": "Your answer, not an approval",
@@ -968,6 +1020,29 @@ export const ZH: Record<MessageKey, string> = {
   "chat.input.error": "刚才失败了 —— 说说换个什么做法…",
   "chat.input.plan": "说清想做成什么，Agent 会先给出计划（Shift+Enter 换行）",
   "chat.input.default": "告诉 Agent 要做什么 —— 当前{mode}（Shift+Enter 换行）",
+  "chat.profile.title": "这次对话用哪个 LLM profile",
+  "chat.profile.none": "还没配置任何提供方",
+  "chat.compression.title": "这次对话打包多少上下文",
+  "chat.compression.focused": "模式：聚焦",
+  "chat.compression.compact": "模式：精简",
+  "chat.compression.budgeted": "模式：按预算",
+  "chat.compression.full": "模式：完整",
+  "chat.model.placeholder": "这次对话用的模型（默认：{model}）",
+  "chat.model.label": "这次对话用的模型",
+  "chat.model.unset": "未设置",
+  "chat.model.reset": "还原",
+  "chat.model.resetTitle": "回到 profile 里的模型",
+  "chat.model.note":
+    "只换模型名字。key、端点、花费和 token 上限、上下文预算、每 token 单价都还是这个 profile 的 —— 所以这次运行显示的成本可能是按错的价算的。",
+  "chat.budget.title":
+    "只统计下面列出的那几节上下文。真实请求还带着系统提示词、工具 schema、你自己那句话、发去复核的待审改动，流水线里还有前面阶段累积的消息，所以它一定比这个数大。下面那行提供方测到的数字不能拿来比：那是上一次运行里最大一次调用的统计，而且含模型的输出。",
+  "chat.budget.estimated": "预计输入预算（token）",
+  "chat.budget.selectedContext": "已选上下文",
+  "chat.budget.unknown": "未知",
+  "chat.budget.trimmed": "已裁剪",
+  "chat.budget.notCounted": "没算进去的：{items} —— 真实请求比这个大。",
+  "chat.usage.peak": "提供方测到的最大一次请求",
+  "chat.usage.contextTokens": "上下文 token",
   "chat.context.title": "看一眼并挑选发给 Agent 的上下文",
   "chat.context.activeFile": "当前文件",
   "chat.context.selection": "选中的文本",
@@ -1564,6 +1639,32 @@ export const ZH: Record<MessageKey, string> = {
     "Agent 把这条当成新建文件，但同名文件已经在了 —— 应用不会覆盖它。先打开那个文件看看改动是不是已经在里面了；要么把它改名或删掉，要么让 Agent 按现有文件改一遍重新生成这条改动。",
   "failure.hint.missingFile":
     "这条改动要改的文件已经不在磁盘上了 —— diff 生成之后它被移动、改名或删除了。让 Agent 按当前工作区重做这条改动。",
+
+  "memory.title": "项目记忆（AGENTS.md）",
+  "memory.unreadable": "读不出项目记忆的状态。",
+  "memory.loading": "正在读项目记忆的状态……",
+  "memory.noWorkspace": "还没打开工作区，所以现在没有项目记忆可读。先打开一个工作区目录。",
+  "memory.missing":
+    "这个工作区里没有 AGENTS.md，所以每次运行都不带你这个项目的规矩 —— 构建命令和目录结构全靠 Agent 猜。它会建在 {path}。",
+  "memory.truncated":
+    "AGENTS.md 有 {bytes} 字节，但只有前 {limit} 字节会进到运行里 —— 后面的被丢掉，而尾部正是你最后写的那几条规则。精简它，或者让 Agent 帮你压一压。",
+  "memory.fits":
+    "AGENTS.md 是 {bytes} / {limit} 字节，没超注入上限。上下文预算紧的时候还可能再削它，聊天里也能为某一次运行把项目记忆整个关掉。",
+  "memory.draftTitle": "让 Agent 看一遍这个仓库，把这份文件当成一条可复核的改动提上来",
+  "memory.update": "让 Agent 更新它",
+  "memory.draft": "让 Agent 起草它",
+  "memory.sent": "已发出 —— 草稿会在聊天里出现，文件本身会当成一条可以拒绝的普通改动进审查区。",
+
+  "chat.suggestions.title": "接下来可以做",
+  "pending.waiting": "{count} 个文件等着你看",
+  "pending.nothingWritten": "还没写进磁盘",
+  "pending.reviewByHunk": "逐块审查",
+  "badge.pendingChanges": "{count} 处改动等你决定",
+  "badge.externalActions": "{count} 个已经发生、撤不回的外部动作",
+
+
+
+
 
 
   "question.title": "Agent 要你定一下",

@@ -3,6 +3,7 @@ import { useAgentStore } from "../../stores/useAgentStore";
 import { isReviewableDiff } from "../../utils/agentExperience";
 import { useLayoutStore } from "../../stores/useLayoutStore";
 import type { DiffEntry } from "../../types/agent";
+import { useT } from "../../i18n";
 
 /**
  * 对话流里的「有改动待审查」卡片。
@@ -15,6 +16,7 @@ import type { DiffEntry } from "../../types/agent";
  * 会以为事情做完了，或者以为什么都没做 —— 两种误解都出现过。
  */
 export default function PendingChangesCard() {
+  const t = useT();
   const diffs = useAgentStore((s) => s.diffs);
   const applyDiff = useAgentStore((s) => s.applyDiff);
   const rejectDiff = useAgentStore((s) => s.rejectDiff);
@@ -34,9 +36,9 @@ export default function PendingChangesCard() {
     >
       <div className="mb-1.5 flex items-center gap-2">
         <span className="font-medium text-surface-text">
-          {pending.length} file{pending.length === 1 ? "" : "s"} waiting for review
+          {t("pending.waiting", { count: pending.length })}
         </span>
-        <span className="text-[11px] text-surface-muted">nothing written to disk yet</span>
+        <span className="text-[11px] text-surface-muted">{t("pending.nothingWritten")}</span>
       </div>
 
       <div className="space-y-1">
@@ -52,14 +54,14 @@ export default function PendingChangesCard() {
               onClick={() => void applyDiff(diff.id)}
               className="rounded px-1.5 py-0.5 text-[11px] text-diff-add hover:bg-diff-add/10"
             >
-              Apply
+              {t("diff.apply")}
             </button>
             <button
               type="button"
               onClick={() => void rejectDiff(diff.id)}
               className="rounded px-1.5 py-0.5 text-[11px] text-diff-remove hover:bg-diff-remove/10"
             >
-              Reject
+              {t("diff.reject")}
             </button>
           </div>
         ))}
@@ -72,7 +74,7 @@ export default function PendingChangesCard() {
           onClick={() => void applyAllDiffs()}
           className="rounded bg-accent-blue px-2 py-0.5 text-[11px] text-white hover:bg-accent-blue/80"
         >
-          Apply all ({pending.length})
+          {t("diff.applyAll", { count: pending.length })}
         </button>
         {/* 深度审查（逐 hunk、provenance、baseHash）在 Changes 面板，这里只给入口 */}
         <button
@@ -80,7 +82,7 @@ export default function PendingChangesCard() {
           onClick={openReview}
           className="rounded border border-surface-border px-2 py-0.5 text-[11px] text-surface-muted hover:text-surface-text"
         >
-          Review hunk by hunk
+          {t("pending.reviewByHunk")}
         </button>
       </div>
     </div>

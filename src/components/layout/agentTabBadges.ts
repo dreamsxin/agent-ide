@@ -9,13 +9,21 @@
  * 两者不合并成一个数字：待审改动是"你可以决定要不要"，外部动作是"已经发生、撤不回"。
  * 用同一个计数会把这两件事说成一件。
  */
+import type { MessageKey } from "../../i18n/messages";
+
 export type ChangesBadgeTone = "pending" | "external";
 
 export interface ChangesBadge {
   text: string;
   tone: ChangesBadgeTone;
-  /** 给 `title` 用的说明，点开之前就该知道角标在说什么 */
-  hint: string;
+  /**
+   * 给 `title` 用的说明，点开之前就该知道角标在说什么。
+   *
+   * 给的是 key + 数字，不是句子：这是个纯函数，不该知道界面语言，而这两句都带数字
+   * —— 中英文里数字前后的量词位置不一样，拼好的句子没法翻译。
+   */
+  hintKey: MessageKey;
+  hintParams: { count: number };
 }
 
 /**
@@ -30,7 +38,8 @@ export function changesBadge(
     return {
       text: String(pendingChanges),
       tone: "pending",
-      hint: `${pendingChanges} change(s) waiting for review`,
+      hintKey: "badge.pendingChanges",
+      hintParams: { count: pendingChanges },
     };
   }
   if (performedExternal > 0) {
@@ -38,7 +47,8 @@ export function changesBadge(
     return {
       text: String(performedExternal),
       tone: "external",
-      hint: `${performedExternal} external action(s) that cannot be undone`,
+      hintKey: "badge.externalActions",
+      hintParams: { count: performedExternal },
     };
   }
   return null;

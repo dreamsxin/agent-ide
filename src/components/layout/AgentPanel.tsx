@@ -68,7 +68,8 @@ export default function AgentPanel() {
 
   const badgeFor = (view: PrimaryViewId) => {
     if (view === "plan" && summary.totalSteps > 0) {
-      return { text: String(summary.totalSteps), tone: "plan" as const, hint: "" };
+      // 步骤数不需要解释：数字旁边就是 Plan 这个页签名
+      return { text: String(summary.totalSteps), tone: "plan" as const, hintKey: null };
     }
     if (view === "changes" && changes) return changes;
     return null;
@@ -107,7 +108,7 @@ export default function AgentPanel() {
                 <span className="truncate">{label}</span>
                 {badge !== null && (
                   <span
-                    title={badge.hint || undefined}
+                    title={badge.hintKey ? t(badge.hintKey, badge.hintParams) : undefined}
                     className={`min-w-4 rounded px-1 py-0.5 text-center font-mono text-[9px] leading-none ${
                       badge.tone === "pending"
                         ? "bg-diff-modify/15 text-diff-modify"

@@ -571,7 +571,7 @@ export default function ChatView() {
         {ghostSuggestions.length > 0 && (
           <div className="space-y-1.5 rounded border border-surface-border bg-surface-base/50 p-2 text-xs">
             <div className="text-[10px] font-semibold uppercase tracking-wide text-surface-muted">
-              Suggested next steps
+              {t("chat.suggestions.title")}
             </div>
             {ghostSuggestions.map((suggestion) => (
               <div
@@ -633,10 +633,10 @@ export default function ChatView() {
             onChange={(event) => setChatProfileId(event.target.value || null)}
             disabled={isSending || llmProfiles.length === 0}
             className="min-w-0 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
-            title="LLM profile for this chat run"
+            title={t("chat.profile.title")}
           >
             {llmProfiles.length === 0 ? (
-              <option value="">No provider configured</option>
+              <option value="">{t("chat.profile.none")}</option>
             ) : (
               llmProfiles.map((profile) => (
                 <option key={profile.id} value={profile.id}>
@@ -650,12 +650,12 @@ export default function ChatView() {
             onChange={(event) => setChatContextCompression(event.target.value as ContextCompressionMode)}
             disabled={isSending}
             className="rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
-            title="Context compression mode for this chat run"
+            title={t("chat.compression.title")}
           >
-            <option value="focused">Mode: Focused</option>
-            <option value="compact">Mode: Compact</option>
-            <option value="budgeted">Mode: Budgeted</option>
-            <option value="full">Mode: Full</option>
+            <option value="focused">{t("chat.compression.focused")}</option>
+            <option value="compact">{t("chat.compression.compact")}</option>
+            <option value="budgeted">{t("chat.compression.budgeted")}</option>
+            <option value="full">{t("chat.compression.full")}</option>
           </select>
         </div>
         {/*
@@ -671,8 +671,10 @@ export default function ChatView() {
               // 一个 provider 都没配时和 profile 选择框一起禁用：那时换模型名毫无意义，
               // 请求连发都发不出去
               disabled={isSending || llmProfiles.length === 0}
-              placeholder={`Model for this chat (default: ${activeProfileModel || "unset"})`}
-              aria-label="Model for this chat"
+              placeholder={t("chat.model.placeholder", {
+                model: activeProfileModel || t("chat.model.unset"),
+              })}
+              aria-label={t("chat.model.label")}
               className="min-w-0 flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
             />
             {chatModelOverride && (
@@ -681,17 +683,15 @@ export default function ChatView() {
                 onClick={() => setChatModelOverride(null)}
                 disabled={isSending}
                 className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-muted hover:bg-surface-border/30"
-                title="Go back to the profile's model"
+                title={t("chat.model.resetTitle")}
               >
-                Reset
+                {t("chat.model.reset")}
               </button>
             )}
           </div>
           {chatModelOverride && (
             <p className="mt-1 text-[10px] leading-relaxed text-surface-muted">
-              Only the model name changes. The key, endpoint, spend and token caps, context budget
-              and per-token prices still come from this profile — the cost shown for the run may be
-              priced at the wrong rate.
+              {t("chat.model.note")}
             </p>
           )}
         </div>
@@ -702,23 +702,23 @@ export default function ChatView() {
           // 虚假信心。真正把它们算进来要另一条路（见 ROADMAP 119），不是改这一行文案。
           <div
             className="mb-1.5 px-0.5 text-[10px] text-surface-muted"
-            title="Counts only the context sections listed below. The real request also carries the system prompt, the tool schemas, your own prompt, the pending diffs sent for review, and — inside a pipeline — the messages earlier stages accumulated, so it is always larger than this. The measured row below, when present, is not comparable: that is the provider's count for the largest single call of the last run, and it includes the model's output."
+            title={t("chat.budget.title")}
           >
-            Estimated input budget:{" "}
+            {t("chat.budget.estimated")}{" "}
             <span className="font-mono text-surface-text">
               {/* 两个都没有就是"不知道窗口"，不能显示 0 —— 那是一个看着精确的假数字，
                   而设置面板对同一份配置显示的是 unknown（见 utils/contextBudget.ts） */}
               {contextEstimate?.inputBudgetTokens?.toLocaleString() ??
                 selectedProfile?.effectiveInputTokens?.toLocaleString() ??
-                "unknown"}
+                t("chat.budget.unknown")}
             </span>{" "}
 
-            tokens · selected context{" "}
+            · {t("chat.budget.selectedContext")}{" "}
             <span className="font-mono text-surface-text">
               {estimatedSelectedTokens.toLocaleString()}
             </span>
             {contextEstimate?.trimmed ? (
-              <span className="text-diff-remove"> · trimmed</span>
+              <span className="text-diff-remove"> · {t("chat.budget.trimmed")}</span>
             ) : null}
             {/*
               漏了什么要**显示出来**，不能只放在上面那个 title 悬浮里：不悬浮的人看不到，
@@ -727,7 +727,7 @@ export default function ChatView() {
             */}
             {contextEstimate?.notCounted?.length ? (
               <div className="mt-0.5 text-[10px] text-surface-muted">
-                Not counted: {contextEstimate.notCounted.join(", ")} — the real request is larger.
+                {t("chat.budget.notCounted", { items: contextEstimate.notCounted.join("、") })}
               </div>
             ) : null}
           </div>
@@ -741,7 +741,7 @@ export default function ChatView() {
         */}
         {contextUsage && selectedProfile?.maxContextTokens ? (
           <div className="mb-1.5 border-t border-surface-border/60 px-0.5 pt-1 text-[10px] text-surface-muted">
-            Provider-measured peak request:{" "}
+            {t("chat.usage.peak")}{" "}
             <span className="font-mono text-surface-text">
               {contextUsage.peakTotalTokens.toLocaleString()}
             </span>
@@ -749,7 +749,7 @@ export default function ChatView() {
             <span className="font-mono text-surface-text">
               {selectedProfile.maxContextTokens.toLocaleString()}
             </span>{" "}
-            context tokens ·{" "}
+            {t("chat.usage.contextTokens")} ·{" "}
             <span className="font-mono text-surface-text">
               {Math.round((contextUsage.peakTotalTokens / selectedProfile.maxContextTokens) * 100)}%
             </span>

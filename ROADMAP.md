@@ -2204,6 +2204,17 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Ordering is load-bearing and tested.** `replace_unique`'s message appends the hunk's first 200 characters, so model-written code lands in the haystack; `"File not found: x"` inside a changed line would otherwise match the missing-file hint and point at the wrong problem. The stale-diff markers are checked first, and a test pins that case.
    - `diff.staleHint` moved into the `failure.hint.*` namespace with its text intact, so there is one hint table and not a key per render site.
    - Frontend 324 → 329 (38 files), tsc 0; Rust 579 unchanged.
+182. **Chinese UI: the chat panel's input row, the pending-changes card and the tab badge (2026-09-24)**
+   38 keys, and a scan that corrected my own assumption about what was left.
+   - **The input row's four controls** (profile select, compression mode, model override, the estimate and measured-usage rows) were the block a user stares at before every single prompt, and they were entirely English under an otherwise Chinese panel. The compression mode names live in exactly one place, so nothing had to be de-duplicated here.
+   - **The estimate line stopped being a sentence split around markup.** It read `Estimated input budget: <n> tokens · selected context <n>`, i.e. two English fragments wrapped around styled numbers. Translating a fragment blind is how a measure word ends up on the wrong side of a number; it is now label-then-value twice, each label a complete phrase (`chat.budget.estimated` carries the unit).
+   - **`ProjectMemoryCard.describe()` returned five hard-coded sentences**, three of them interpolating a path or two byte counts — the pattern this sweep keeps replacing. It is now `projectMemoryMessage()` returning **key + params**, and the two-branch error state was split: the backend's own `catch` text stays verbatim and untranslated, while "the payload could not be read" is our judgement and goes through a key. The card's tests now assert the state → key mapping and build expected text with `translate("en", …)`, so editing the English copy no longer breaks them.
+   - **`PendingChangesCard` had never been swept at all** — the card that announces "the Agent changed files, decide now" was fully English. Its Apply / Reject / Apply all labels now come from the existing `diff.*` keys rather than three new ones.
+   - **`changesBadge()` returned a built English sentence** for the Changes tab tooltip. It is a pure function in a data module; it now returns `hintKey` + `{ count }`, and the Plan badge says `hintKey: null` instead of an empty string that the caller had to `|| undefined` away.
+   - **I wrote that this closed the component sweep, then checked.** It does not: `McpPanel` is still English, and `lsp.close` / `lsp.closeDetails` already existed in the table and were never wired — the same "invented a key that was already there" mistake as the LSP round, caught this time by the duplicate-key compile error. Both are now wired; `McpPanel` is the next round.
+   - Frontend 329 → 331 (38 files), tsc 0; Rust 579 unchanged.
+
+
 
 
 
