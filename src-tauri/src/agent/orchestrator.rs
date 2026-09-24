@@ -1748,9 +1748,13 @@ impl AgentOrchestrator {
         );
         // 只在用户没有自定义流水线时才按请求形状裁剪。显式配置过阶段的人
         // 不该被悄悄改掉，那比多花点 token 更糟。
+        //
+        // "没配过"必须按内容判断。这里曾经写 `pipeline.is_empty()`，而后端启动时就把
+        // 这份配置填成了默认的四个阶段，于是条件永远不成立、`direct_pipeline()` 从来
+        // 没被走到过 —— `task_shape` 那套分类一直在算，算出来的 `Direct` 没人用。
         let shape = crate::agent::task_shape::classify(&prompt);
         let trim_to_direct = ide_mode == IdeMode::Code
-            && pipeline.is_empty()
+            && crate::agent::multi_agent::pipeline_matches_default(&pipeline)
             && shape == crate::agent::task_shape::TaskShape::Direct;
         let pipeline = if ide_mode == IdeMode::Plan {
             reset_pipeline_status(&plan_pipeline())
@@ -6024,6 +6028,122 @@ mod tests {
         orchestrator.finish_run(next.claim);
         registry.cancel_active_run();
         assert!(!next.cancel.load(Ordering::SeqCst));
+    }
+
+    /// 一句话的改动不该跑满四个阶段。
+    ///
+    /// 这是那个"从来没生效过"的裁剪路径的回归测试：判断用户有没有自己配过流水线，以前
+    /// 写的是 `pipeline.is_empty()`，而后端启动时就把配置填成了默认四阶段，所以条件永远
+    /// 不成立 —— `task_shape` 把 prompt 判成 `Direct` 也没人理，每次都是 4 次模型调用。
+    /// 之前没有任何测试走到 `begin_planning` 这一层，所以分类器那八个测试全绿也说明不了
+    /// 裁剪真的会发生。
+    #[test]
+    fn a_one_spot_change_on_the_default_pipeline_runs_only_implement() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+
+        let events = crate::agent::events::RecordingEvents::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        let context =
+            crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref());
+        let sources = crate::services::context::ContextSourceOptions {
+            include_project_tree: false,
+            include_git_diff: false,
+            include_project_memory: false,
+        };
+
+        let run = orchestrator.begin_planning(
+            "创建 hello.txt 内容为 world".to_string(),
+            &context,
+            ContextCompressionMode::Focused,
+            None,
+            &sources,
+            crate::agent::multi_agent::default_pipeline(),
+            IdeMode::Code,
+            &events,
+        );
+
+        assert_eq!(run.pipeline.len(), 1, "{:?}", run.pipeline);
+        assert_eq!(
+            run.pipeline[0].role,
+            crate::agent::multi_agent::AgentRole::Coder
+        );
+        // 跳过阶段这件事必须说出来，否则用户只看到"怎么只跑了一步"
+        assert!(
+            events.names().iter().any(|name| name == "agent-action-log"),
+            "{:?}",
+            events.names()
+        );
+    }
+
+    /// 用户自己配过流水线就照他配的跑，哪怕请求很小。
+    ///
+    /// 这里改的是 `pause_before` —— 它的意思是"这一步开跑前停下来等我"，那是明确的运行
+    /// 意图；替他把这一步裁掉，等于把他要求的那次暂停悄悄取消了。
+    #[test]
+    fn a_customised_pipeline_is_never_trimmed() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+
+        let events = crate::agent::events::RecordingEvents::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        let context =
+            crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref());
+        let sources = crate::services::context::ContextSourceOptions {
+            include_project_tree: false,
+            include_git_diff: false,
+            include_project_memory: false,
+        };
+        let mut customised = crate::agent::multi_agent::default_pipeline();
+        customised[1].pause_before = true;
+
+        let run = orchestrator.begin_planning(
+            "创建 hello.txt 内容为 world".to_string(),
+            &context,
+            ContextCompressionMode::Focused,
+            None,
+            &sources,
+            customised,
+            IdeMode::Code,
+            &events,
+        );
+
+        assert_eq!(run.pipeline.len(), 4, "{:?}", run.pipeline);
+        assert!(run.pipeline[1].pause_before);
+    }
+
+    /// Plan 模式不参与裁剪：它换的是**产出形态**（设计文档，不是 diff）。
+    #[test]
+    fn plan_mode_keeps_its_own_pipeline_even_for_a_one_spot_change() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+
+        let events = crate::agent::events::RecordingEvents::new();
+        let mut orchestrator = AgentOrchestrator::new();
+        let context =
+            crate::services::context::AgentContext::new(env.root.to_string_lossy().as_ref());
+        let sources = crate::services::context::ContextSourceOptions {
+            include_project_tree: false,
+            include_git_diff: false,
+            include_project_memory: false,
+        };
+
+        let run = orchestrator.begin_planning(
+            "创建 hello.txt 内容为 world".to_string(),
+            &context,
+            ContextCompressionMode::Focused,
+            None,
+            &sources,
+            crate::agent::multi_agent::default_pipeline(),
+            IdeMode::Plan,
+            &events,
+        );
+
+        assert_eq!(run.pipeline.len(), 2, "{:?}", run.pipeline);
+        assert_eq!(
+            run.pipeline[0].role,
+            crate::agent::multi_agent::AgentRole::Designer
+        );
     }
 
     /// 阶段跑完的瞬间用户点了 Stop：结果一点都不能落地。

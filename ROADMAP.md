@@ -2118,6 +2118,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **`runDetail` returns a key and params.** Its mode line rendered the enum values, so a mode read 「先做计划」in the top bar and `plan` in the same window; both labels now come from `topbar.ideMode.*` and `mode.*`.
    - Counts that used a trailing "s" (`{n} change(s)`, `{n} stage(s)`) became singular/plural key pairs.
    - Frontend 309 unchanged (36 files), tsc 0; Rust 566 unchanged.
+169. **The single-stage shortcut never once fired (2026-09-24)**
+   Reported from use: 「写代码模式，为何还会拆成步骤到 plan?」Every Code-mode prompt, however small, ran Design → Implement → Test → Review — four model calls to rename one variable.
+   - **The condition asked the wrong question.** `begin_planning` trimmed to `direct_pipeline()` only when `pipeline.is_empty()`, standing in for "the user has not configured a pipeline". But `AgentGlobalState::new()` fills `pipeline_stages` with `default_pipeline()` at startup and `reset_pipeline` puts it back, so the run always carries four stages. The condition was never true in the desktop app: `direct_pipeline()` and every `TaskShape::Direct` the classifier produced were dead weight. `task_shape.rs`'s own header documents the measured case it exists for — "创建 hello.txt 内容为 world" costing 5 calls, 11 295 tokens and an unwanted 18-line `test_hello.py` — which is exactly what still shipped.
+   - **It now compares content**: `pipeline_matches_default()` — empty, or the same roles and the same `pause_before` as the default. Stage *names* are deliberately not compared (display strings, and about to be translated), but `pause_before` is: "stop before this stage and ask me" is an explicit run instruction, and trimming that stage away would silently cancel the pause the user asked for.
+   - **Nothing had ever called `begin_planning` from a test**, which is why this survived: the classifier had eight passing tests of its own and none of them reached the caller. Three were added — default pipeline plus a one-spot prompt trims to a single Implement stage; a pipeline with `pause_before` set is left alone; Plan mode keeps its own two-stage pipeline — plus three unit tests on the new predicate.
+   - Rust 566 → 572; frontend unchanged.
 
 
 
