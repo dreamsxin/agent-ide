@@ -2112,6 +2112,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Monaco caches an action's label at registration**, so the F12 and right-click labels keep the language they were registered in until the editor remounts. That is Monaco's, not ours; noted rather than worked around.
    - `EditorContainer` uses a `tRef` for the same reason as the terminal: the LSP effect would otherwise restart the language server on a language switch.
    - Frontend 309 unchanged (36 files), tsc 0; Rust 566 unchanged.
+168. **Chinese UI: the agent panel's status row, roles and question box (2026-09-24)**
+   `AgentRunSummary`, `AgentSelector`, `PipelineEditor`, `QuestionDialog` — 41 keys.
+   - **The five roles were listed twice.** `AgentSelector` held name + description + icon, `PipelineEditor` held name + icon, so the same role could be called two things and a half-finished translation would leave one table English. `agentRoles.ts` now holds the ids and icons — icons are not text — and hands out `role.*` / `role.*.desc` keys.
+   - **`runDetail` returns a key and params.** Its mode line rendered the enum values, so a mode read 「先做计划」in the top bar and `plan` in the same window; both labels now come from `topbar.ideMode.*` and `mode.*`.
+   - Counts that used a trailing "s" (`{n} change(s)`, `{n} stage(s)`) became singular/plural key pairs.
+   - Frontend 309 unchanged (36 files), tsc 0; Rust 566 unchanged.
 
 
 

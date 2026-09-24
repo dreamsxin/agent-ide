@@ -2,17 +2,12 @@ import { useState } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
 import type { AgentRole } from "../../types/agent";
 import { isAgentBusy } from "../../utils/agentExperience";
+import { useT } from "../../i18n";
+import { AGENT_ROLES, roleDescKey, roleLabelKey } from "./agentRoles";
 import PipelineEditor from "./PipelineEditor";
 
-const ROLES: { id: AgentRole; label: string; desc: string; icon: string }[] = [
-  { id: "architect", label: "Architect", desc: "Design architecture & plan tasks", icon: "🏗" },
-  { id: "designer", label: "Designer", desc: "Draft SDD artifacts", icon: "📐" },
-  { id: "coder", label: "Coder", desc: "Write and modify code", icon: "💻" },
-  { id: "tester", label: "Tester", desc: "Write and run tests", icon: "🧪" },
-  { id: "reviewer", label: "Reviewer", desc: "Review code quality & security", icon: "🔍" },
-];
-
 export default function AgentSelector() {
+  const t = useT();
   const mode = useAgentStore((s) => s.mode);
   const ideMode = useAgentStore((s) => s.ideMode);
   const state = useAgentStore((s) => s.state);
@@ -32,15 +27,15 @@ export default function AgentSelector() {
   return (
     <div className="p-3 text-xs">
       <div className="text-surface-muted mb-2 font-semibold tracking-wide flex items-center justify-between">
-        <span>Agent Roles</span>
+        <span>{t("selector.title")}</span>
         {isRunning && (
-          <span className="text-[10px] text-accent-blue animate-pulse">Busy</span>
+          <span className="text-[10px] text-accent-blue animate-pulse">{t("selector.busy")}</span>
         )}
       </div>
 
       {/* 角色卡片 */}
       <div className="space-y-1.5">
-        {ROLES.map((role) => {
+        {AGENT_ROLES.map((role) => {
           const isActive = activeRole === role.id;
           return (
             <div
@@ -57,15 +52,15 @@ export default function AgentSelector() {
               <span className="text-sm mt-0.5 flex-shrink-0">{role.icon}</span>
               <div className="min-w-0">
                 <div className="font-medium text-surface-text">
-                  {role.label}
+                  {t(roleLabelKey(role.id))}
                   {isActive && (
                     <span className="ml-1.5 text-[10px] text-accent-blue font-normal">
-                      active
+                      {t("selector.active")}
                     </span>
                   )}
                 </div>
                 <div className="text-[10px] text-surface-muted leading-tight">
-                  {role.desc}
+                  {t(roleDescKey(role.id))}
                 </div>
               </div>
               <div className="ml-auto flex-shrink-0">
@@ -84,17 +79,18 @@ export default function AgentSelector() {
       <div className="mt-3 pt-2 border-t border-surface-border">
         <div className="flex items-center justify-between">
           <div className="text-surface-muted text-[10px]">
-            Pipeline: {pipeline.map((s) => s.name).join(" → ")}
+            {t("selector.pipeline", { stages: pipeline.map((s) => s.name).join(" → ") })}
           </div>
           <button
             onClick={() => setShowEditor(!showEditor)}
             className="text-[10px] text-accent-blue hover:text-accent-blue/80 flex-shrink-0"
           >
-            {showEditor ? "Close" : "Edit"}
+            {showEditor ? t("selector.close") : t("selector.edit")}
           </button>
         </div>
         <div className="text-surface-muted text-[10px] mt-1">
-          IDE: <span className="text-accent-blue">{ideMode}</span> · Permission: <span className="text-accent-blue">{mode}</span>
+          {t("selector.ide")}: <span className="text-accent-blue">{t(`topbar.ideMode.${ideMode}`)}</span>{" "}
+          · {t("selector.permission")}: <span className="text-accent-blue">{t(`mode.${mode}`)}</span>
         </div>
       </div>
 

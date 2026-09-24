@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useT } from "../../i18n";
 
 /**
  * 模型问用户一道选择题的提示框。
@@ -14,6 +15,7 @@ import { useAgentStore } from "../../stores/useAgentStore";
  * Esc 走**不回答**而不是随便选一项：随手关掉绝不能变成一个被当成用户偏好的答案。
  */
 export default function QuestionDialog() {
+  const t = useT();
   const pendingQuestion = useAgentStore((s) => s.pendingQuestion);
   const pendingConfirm = useAgentStore((s) => s.pendingConfirm);
   const answerQuestion = useAgentStore((s) => s.answerQuestion);
@@ -63,9 +65,9 @@ export default function QuestionDialog() {
           </span>
           <div>
             <div id="agent-question-title" className="text-sm font-semibold text-surface-text">
-              The Agent needs a decision
+              {t("question.title")}
             </div>
-            <div className="text-[11px] text-surface-muted">Your answer, not an approval</div>
+            <div className="text-[11px] text-surface-muted">{t("question.subtitle")}</div>
           </div>
         </div>
 
@@ -96,8 +98,8 @@ export default function QuestionDialog() {
               autoFocus
               value={custom}
               onChange={(event) => setCustom(event.target.value)}
-              placeholder="Or type your own answer"
-              aria-label="Your own answer"
+              placeholder={t("question.custom.placeholder")}
+              aria-label={t("question.custom.aria")}
               className="flex-1 rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text"
             />
             <button
@@ -106,7 +108,7 @@ export default function QuestionDialog() {
               disabled={!custom.trim()}
               className="rounded bg-accent-blue px-3 py-1.5 text-xs text-white font-medium hover:bg-accent-blue/80 disabled:opacity-40 transition-colors"
             >
-              Send
+              {t("question.send")}
             </button>
           </form>
         </div>
@@ -116,7 +118,7 @@ export default function QuestionDialog() {
             onClick={() => void dismissQuestion()}
             className="rounded border border-surface-border px-4 py-1.5 text-xs text-surface-muted hover:bg-surface-border/30 transition-colors"
           >
-            Don't answer
+            {t("question.dismiss")}
           </button>
         </div>
       </div>
