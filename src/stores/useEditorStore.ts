@@ -107,10 +107,30 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       path: normalizeFilePath(tab.path),
       name: tab.name || fileNameFromPath(tab.path),
     };
-    const s = get();
-    const exists = s.openFiles.find((f) => pathsEqual(f.path, normalizedTab.path));
-    if (exists) {
-      set({ activeFile: exists.path });
+    // 先同步占位，再去读盘。
+    //
+    // 以前是"查一遍 openFiles → await 读文件 → 追加"，而这中间的 await 让检查和插入
+    // 不再是一步：在文件树上双击（或鼠标点一下又按一次回车）会连发两次 openFile，两次
+    // 都在对方插入之前查到"还没打开"，于是同一个文件出现两个页签。页签的 React key 就是
+    // 路径，两个同 key 的兄弟节点会让高亮和点击落到另一个上 —— 这就是"tab 不对"。
+    let alreadyOpen = false;
+    set((prev) => {
+      const exists = prev.openFiles.find((f) => pathsEqual(f.path, normalizedTab.path));
+      if (exists) {
+        alreadyOpen = true;
+        return { activeFile: exists.path };
+      }
+      return {
+        openFiles: [...prev.openFiles, normalizedTab],
+        activeFile: normalizedTab.path,
+        // 占位内容是空串而不是伪造的一行注释：缓冲区是保存的事实来源
+        fileContents: {
+          ...prev.fileContents,
+          [normalizedTab.path]: prev.fileContents[normalizedTab.path] ?? "",
+        },
+      };
+    });
+    if (alreadyOpen) {
       persistEditorSession();
       return;
     }
@@ -129,8 +149,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }
 
     set((prev) => ({
-      openFiles: [...prev.openFiles, { ...normalizedTab, loadError }],
-      activeFile: normalizedTab.path,
+      openFiles: prev.openFiles.map((f) =>
+        pathsEqual(f.path, normalizedTab.path) ? { ...f, loadError } : f
+      ),
       fileContents: { ...prev.fileContents, [normalizedTab.path]: content },
     }));
     persistEditorSession();

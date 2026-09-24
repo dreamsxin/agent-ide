@@ -2239,6 +2239,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **It is checked before the context-limit class, and that order is the point**: both failures talk about tokens, but one is fixed by sending *less input* and the other by allowing *more output*. A hint pointing at the compression mode here would send the user the wrong way, which is worse than no hint. The test pins the real message against `outputCap`.
    - **Still open, and the more valuable fix**: the Agent could raise the cap and retry once itself instead of ending the run and asking the user to visit Settings. It is not done here because a retry re-bills the attempt (a truncated empty answer is already charged as completion tokens, see 122) and that decision needs its own round.
    - Frontend 331 → 332 (38 files), tsc 0; Rust 579 unchanged.
+187. **Clicking a file in the tree could open it twice (2026-09-24)**
+   Reported: 「点击左边文件树里的文件，打开的文件 tab 不对，重复了」. Two symptoms, one cause.
+   - `openFile` looked for an existing tab, then **awaited the file read**, then appended. A double-click — or a click followed by Enter, which `openTreeFile` deliberately wires to the same action — fires it twice; both calls pass the "not open yet" check before either inserts, so one path gets two tabs.
+   - The second symptom follows from the first: `EditorTabs` uses `key={file.path}`, so two tabs for one path are two siblings with the same React key. Highlighting and clicks then land on the other one — that is the 「tab 不对」 half, not a separate bug.
+   - Fix: the check and the insert are now one synchronous `set`, and the read fills the buffer afterwards. A tab therefore appears immediately (with an empty buffer, never a fabricated comment — the buffer is the source of truth for saving) and a second call finds it and only switches focus.
+   - Frontend 332 → 333 (38 files), tsc 0; Rust 579 unchanged.
+
 
 
 

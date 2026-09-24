@@ -41,6 +41,29 @@ beforeEach(() => {
 
 const tab = { path: "src/app.ts", name: "app.ts", isDirty: false, language: "typescript" };
 
+describe("opening the same file twice at once", () => {
+  /**
+   * 用户报告：在文件树里点一个文件，页签重复了、而且点了不对。
+   *
+   * 双击（或点一下再按回车）会连发两次 `openFile`。检查"是否已打开"和插入页签之间
+   * 曾经隔着一次读盘 await，两次调用都查到"还没打开"，于是同一个路径插了两条。页签的
+   * React key 就是路径，两个同 key 的兄弟节点会让高亮和点击落到另一个上。
+   */
+  it("opens one tab, not two", async () => {
+    invokeMock.mockResolvedValue("const value = 1;\n");
+
+    await Promise.all([
+      useEditorStore.getState().openFile(tab),
+      useEditorStore.getState().openFile(tab),
+    ]);
+
+    expect(useEditorStore.getState().openFiles).toHaveLength(1);
+    expect(useEditorStore.getState().activeFile).toBe("src/app.ts");
+    // 内容照样读进来了：去重不能顺手把缓冲区留空
+    expect(useEditorStore.getState().fileContents["src/app.ts"]).toBe("const value = 1;\n");
+  });
+});
+
 describe("opening a file that cannot be read", () => {
   /**
    * 以前失败时把 `// Failed to load: <path>` 写进缓冲区。缓冲区是保存的事实来源，
