@@ -709,7 +709,12 @@ The draft must be specific enough for a later code-mode Agent run to implement i
 }
 ```
 
-If you cannot produce valid JSON, use Agent IDE diff/new-file blocks. Use explanations only when no code change is needed."#
+If you cannot produce valid JSON, use Agent IDE diff/new-file blocks. Use explanations only when no code change is needed.
+
+Your answer has a finite output budget and is cut off without warning when it runs out.
+So when you are writing several files, emit **one `agent-changes` block per file** instead
+of one block holding them all. Every complete block is kept even if a later one is cut off;
+a single block that holds seven files loses all seven. Put the files that matter first."#
         }
         AgentRole::Reviewer => {
             r#"Review the actual pending diffs, not just prior text. Use this structure:
@@ -1044,6 +1049,10 @@ pub fn was_cut_off(diagnostics: &[String]) -> bool {
 ///
 /// 用我们自己的话先说清"回答被截断了、这块没用上"，再让 serde 那类原话跟在后面：
 /// 原话说的是第几行第几列，用户没法从中知道该调什么。
+///
+/// 出路的顺序是有意的：先说"一次少要几个文件"。调大 Max output 常常没用 ——
+/// 每次请求的实际上限是 `max_context_tokens - prompt - margin`
+/// （`llm_client::window_limited_output_tokens`），已经被窗口夹住时把设置调多大都一样。
 fn cut_off_block_diagnostic(block_type: &str, file: &str) -> String {
     let target = if file.trim().is_empty() {
         format!("`{}` block", block_type)
@@ -1052,7 +1061,9 @@ fn cut_off_block_diagnostic(block_type: &str, file: &str) -> String {
     };
     format!(
         "The {} was cut off: the response {}, so nothing in it was used. \
-         Raise the output limit, or ask for fewer files in one turn.",
+         Ask for fewer files in one turn, and one block per file — then a cut-off costs only \
+         the last file. Raising Max output does not help when it is already being clamped to \
+         fit the context window; this run's action log says whether it was.",
         target, CUT_OFF_MARKER
     )
 }
@@ -2267,6 +2278,35 @@ const value = 2;
             .diagnostics
             .iter()
             .any(|item| item.contains("was cut off")));
+    }
+
+    #[test]
+    fn complete_blocks_survive_a_cut_off_later_block() {
+        // 这是"一个文件一个块"这条提示存在的理由：前面写完的块照样落地，
+        // 被截断的只赔掉最后一个文件。一个块装七个文件则七个全丢。
+        let response = r#"```agent-changes
+{
+  "version": 1,
+  "changes": [
+    { "type": "create", "file": "dynproxy/protocol.py", "content": "MAGIC = b'DPX1'\n" }
+  ]
+}
+```
+
+```agent-changes
+{
+  "version": 1,
+  "changes": [
+    { "type": "create", "file": "dynproxy/server.py", "content": "import asyncio"#;
+
+        let parsed = parse_diffs_with_diagnostics(response);
+
+        assert_eq!(parsed.diffs.len(), 1);
+        assert_eq!(parsed.diffs[0].file, "dynproxy/protocol.py");
+        assert!(parsed
+            .diagnostics
+            .iter()
+            .any(|item| item.contains(CUT_OFF_MARKER)));
     }
 
     #[test]

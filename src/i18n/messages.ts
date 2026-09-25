@@ -773,7 +773,7 @@ export const EN = {
   "failure.hint.outputCap":
     "The model used its whole output budget on reasoning and had nothing left for the answer. The Agent already retried once with double the limit — and that request was billed twice, so check the run's action log. Raise Max output further on this profile in Settings and send again; this is the output cap, not the context window, so trimming context will not help.",
   "failure.hint.cutOff":
-    "The answer stopped in the middle, so the changes it was describing were never created — nothing reached disk. Raise Max output on this profile in Settings, or ask for fewer files in one turn, then send again.",
+    "The answer stopped in the middle, so the changes it was describing were never created — nothing reached disk. Ask for a few files at a time and send again. Raising Max output only helps if it is not already being clamped to fit the context window; the run's action log says whether it was, and a shorter context (or a bigger Max context) is what gives the budget back.",
   "failure.hint.auth":
     "The provider rejected the API key. Check the key on the active profile in Settings.",
   "failure.hint.rateLimit":
@@ -1665,7 +1665,7 @@ export const ZH: Record<MessageKey, string> = {
   "failure.hint.outputCap":
     "模型把整个输出预算花在思考上，没给答案留下余量。Agent 已经用两倍上限自动重试过一次 —— 那次请求被计了两次费，详情在这次运行的 action log 里。到设置里把这个 profile 的 Max output 再调大一些，然后重发；卡住的是输出上限，不是上下文窗口，少发上下文没有用。",
   "failure.hint.cutOff":
-    "回答写到一半就断了，它正在描述的那些改动一个都没有生成，磁盘上什么都没写。到设置里把这个 profile 的 Max output 调大，或者一次少要几个文件，然后重发。",
+    "回答写到一半就断了，它正在描述的那些改动一个都没有生成，磁盘上什么都没写。一次少要几个文件，然后重发。调大 Max output 只在它没有被上下文窗口夹住时才有用 —— 这次运行的 action log 里写了有没有被夹；真正能把预算还回来的是缩短上下文，或者调大 Max context。",
   "failure.hint.auth": "提供方拒绝了这个 API key。去设置里检查当前 profile 上的 key。",
   "failure.hint.rateLimit": "提供方在限流这个 key。等一下再发，或者换一个 profile。",
   "failure.hint.quota": "提供方说这个账号额度用完了。要去他们那边看账单。",
