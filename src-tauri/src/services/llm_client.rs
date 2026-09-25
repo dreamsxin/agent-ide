@@ -1602,10 +1602,8 @@ impl LlmClient {
         };
         // 先记账后重试：这次抬高意味着同一个请求被计两次费，命令层和 CLI 会把它写进
         // action log。记录在前，是因为重试本身也可能失败。
-        self.record_output_raise(OutputRaise {
-            from: self.config.max_output_tokens,
-            to: raised,
-        });
+        let from = self.config.max_output_tokens;
+        self.record_output_raise(OutputRaise { from, to: raised });
         let mut retried = self.clone();
         // `config` 是私有字段，所以这件事只能在 impl 内部做；`usage_meter` 是 `Arc`，
         // 克隆出来的这份记进同一个计量器 —— 两次尝试都会被计费，不用额外记一次。
@@ -1613,6 +1611,13 @@ impl LlmClient {
         retried
             .stream_chat_cloud(retry_messages, cancel_flag, tx)
             .await
+            .map_err(|err| {
+                // 重试也空手回来时，错误里报的是**抬高后**的上限。用户在设置里填的是旧值，
+                // 看到一个自己没配过的数字只会觉得这句话不可信 —— 所以这里必须说出
+                // "这已经是第二次"，顺带说明两次都计了费。action log 里有同一件事，
+                // 但用户先看到的是这个横幅。
+                format!("{}\n\n{}", err, second_attempt_note(from, raised))
+            })
     }
 
     /// 本地模型流式请求
@@ -2632,6 +2637,26 @@ const RETRY_OUTPUT_FLOOR: u32 = 8192;
 /// 抬到这里就不再抬：超过这个数还装不下答案，问题不在上限上。
 const RETRY_OUTPUT_CEILING: u32 = 65_536;
 
+/// 重试之后仍然空手而回时，附在错误后面的那句话。
+///
+/// 单独一个纯函数：真正的路径要起 HTTP 服务才能驱动，而这句话里有两个数字和一笔账，
+/// 写错了没人会发现。要说清三件事 —— 这是第二次、上限被我们改过（用户在设置里看到的
+/// 还是旧值）、两次都付了钱。
+fn second_attempt_note(from: Option<u32>, to: u32) -> String {
+    match from {
+        Some(from) => format!(
+            "This was already a second attempt: the output limit was raised automatically from \
+             {from} to {to} after the first reply came back empty, so the number above is ours, \
+             not the one in your profile — and both requests were billed.",
+        ),
+        None => format!(
+            "This was already a second attempt: no output limit was set, so after the first reply \
+             came back empty it was sent again with an explicit {to} — the number above is ours, \
+             not one from your profile — and both requests were billed.",
+        ),
+    }
+}
+
 /// 把"我们替你抬高了上限并重发了一次"讲给用户听。返回 `None` 表示这次运行没发生过。
 ///
 /// 必须说出被计费两次：被截断的那次空回答照样按 completion 计费（见 122），悄悄花掉
@@ -3162,6 +3187,21 @@ mod tests {
     #[test]
     fn no_raise_means_no_report() {
         assert!(output_raise_report(&[]).is_none());
+    }
+
+    /// 重试也失败时，横幅上报的是**我们**改过的上限。不说出这一点，用户看到的就是一个
+    /// 和自己设置对不上的数字，而那笔第二次的账更是无从解释。
+    #[test]
+    fn a_failed_retry_says_the_number_is_ours_and_that_both_were_billed() {
+        let note = second_attempt_note(Some(4096), 8192);
+        assert!(note.contains("4096"), "{}", note);
+        assert!(note.contains("8192"), "{}", note);
+        assert!(note.contains("both requests were billed"), "{}", note);
+
+        // 从未设过上限时没有旧值可报，但"这个数字是我们填的"和那笔账照样要说
+        let unset = second_attempt_note(None, 8192);
+        assert!(unset.contains("8192"), "{}", unset);
+        assert!(unset.contains("both requests were billed"), "{}", unset);
     }
 
     fn cloud_config(provider: &str, model: &str, max_output_tokens: Option<u32>) -> LlmConfig {
