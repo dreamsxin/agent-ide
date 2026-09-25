@@ -982,6 +982,16 @@ pub fn parse_diffs_with_diagnostics(response: &str) -> ParsedDiffs {
                 i += 1;
             }
 
+            // 没等到收尾的 ``` 就到了回答末尾：这个块是被截断的，不是写完的。
+            // 必须整块丢掉。`new`/`code` 块会拿它生成新建文件 diff，Auto 模式直接落盘，
+            // 等于把半个文件写上去；`agent-changes` 块只会得到 serde 的
+            // "EOF while parsing a string at line 50 column 10856"，说了第几列，
+            // 说不出"回答被截断了"——真实运行里用户看到的就是这句加一行 0 new diffs。
+            if i >= lines.len() {
+                diagnostics.push(cut_off_block_diagnostic(&block_type, &file));
+                break;
+            }
+
             match block_type.as_str() {
                 "agent-changes" => {
                     let content = block_lines.join("\n");
@@ -1009,6 +1019,24 @@ pub fn parse_diffs_with_diagnostics(response: &str) -> ParsedDiffs {
     }
 
     ParsedDiffs { diffs, diagnostics }
+}
+
+/// 一个没有收尾 ``` 的代码块该怎么跟用户说。
+///
+/// 用我们自己的话先说清"回答被截断了、这块没用上"，再让 serde 那类原话跟在后面：
+/// 原话说的是第几行第几列，用户没法从中知道该调什么。措辞里带上 "was cut off"，
+/// 前端 `runFailure.ts` 靠它归类给出"调大 Max output / 少要几个文件"的建议。
+fn cut_off_block_diagnostic(block_type: &str, file: &str) -> String {
+    let target = if file.trim().is_empty() {
+        format!("`{}` block", block_type)
+    } else {
+        format!("`{}` block for {}", block_type, file)
+    };
+    format!(
+        "The {} was cut off: the response ended before the block closed, so nothing in it was used. \
+         Raise the output limit, or ask for fewer files in one turn.",
+        target
+    )
 }
 
 /// 检测代码块类型和文件名: 返回 (类型, 文件名)
@@ -2200,6 +2228,41 @@ const value = 2;
             .diagnostics
             .iter()
             .any(|item| item.contains("version must be 1")));
+    }
+
+    #[test]
+    fn a_cut_off_agent_changes_block_says_it_was_cut_off() {
+        // 真实运行的形状：输出上限把 JSON 截在字符串中间，收尾的 ``` 永远没来。
+        let response = r#"```agent-changes
+{
+  "version": 1,
+  "changes": [
+    {
+      "type": "create",
+      "file": "dynproxy/protocol.py",
+      "content": "'''Wire format for the tunnel.\n\nMAGIC = b'DPX1'"#;
+
+        let parsed = parse_diffs_with_diagnostics(response);
+
+        assert!(parsed.diffs.is_empty());
+        assert!(parsed
+            .diagnostics
+            .iter()
+            .any(|item| item.contains("was cut off")));
+    }
+
+    #[test]
+    fn a_cut_off_new_file_block_writes_nothing() {
+        // 这一类最危险：截断的块以前会变成一个新建文件 diff，Auto 模式直接落盘半个文件。
+        let response = "```new:src/half.ts\nexport function half() {\n  return 1";
+
+        let parsed = parse_diffs_with_diagnostics(response);
+
+        assert!(parsed.diffs.is_empty());
+        assert!(parsed
+            .diagnostics
+            .iter()
+            .any(|item| item.contains("src/half.ts") && item.contains("was cut off")));
     }
 
     #[test]

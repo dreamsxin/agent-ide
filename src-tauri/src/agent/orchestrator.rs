@@ -1985,6 +1985,7 @@ impl AgentOrchestrator {
                 }
                 run.transcript.extend(stage_messages);
 
+                let mut stage_diagnostics: Vec<String> = Vec::new();
                 let generated_diff_count = if run.ide_mode == IdeMode::Plan {
                     self.handle_plan_stage_response(
                         events,
@@ -2014,27 +2015,36 @@ impl AgentOrchestrator {
                             Some(self.summarize_pending_diffs()),
                         );
                     }
+                    stage_diagnostics = parsed.diagnostics;
                     generated_diff_count
                 };
                 mark_pipeline_stage(&mut run.pipeline, stage_index, "completed");
+                let artifact_noun = if run.ide_mode == IdeMode::Plan {
+                    "artifact"
+                } else {
+                    "diff"
+                };
+                let (level, summary) = completion_log(
+                    &format!("{} stage", stage.name),
+                    artifact_noun,
+                    generated_diff_count,
+                    &stage_diagnostics,
+                );
+                // 一条产物都没有时，把诊断也放进 stage_complete 的详情里：
+                // 只看这一条就能知道为什么是空的，不用去翻上一条 warn
+                let details = if stage_diagnostics.is_empty() {
+                    response.clone()
+                } else {
+                    format!("{}\n\n{}", stage_diagnostics.join("\n"), response)
+                };
                 self.emit_action_log(
                     events,
-                    "success",
+                    level,
                     "stage_complete",
                     Some(stage.role.to_string()),
                     Some(&stage.name),
-                    &format!(
-                        "{} stage completed with {} new {}{}",
-                        stage.name,
-                        generated_diff_count,
-                        if run.ide_mode == IdeMode::Plan {
-                            "artifact"
-                        } else {
-                            "diff"
-                        },
-                        if generated_diff_count == 1 { "" } else { "s" }
-                    ),
-                    &response,
+                    &summary,
+                    &details,
                     Some(run.context_summary.clone()),
                     Some(self.summarize_pending_diffs()),
                 );
@@ -2144,11 +2154,30 @@ impl AgentOrchestrator {
 
         if self.mode == AgentMode::Auto {
             // Auto mode applies diffs immediately.
+            // 先数清有多少个待应用：apply 之后状态已经被翻过，事后分不清"应用成功"
+            // 和"本来就没有东西可应用"。真实运行里 0 个 diff 也报了
+            // `[success] Auto mode applied pending diffs`，等于谎报了一次落盘。
+            let pending_before = self
+                .diffs
+                .iter()
+                .filter(|diff| diff.status == "pending")
+                .count();
             let blocked = self.apply_diffs_to_fs()?;
-            let (level, summary, details) = if blocked.is_empty() {
+            let (level, summary, details) = if pending_before == 0 {
+                (
+                    "info",
+                    "Nothing to apply: this run produced no changes".to_string(),
+                    "Auto mode had no pending diffs to write.".to_string(),
+                )
+            } else if blocked.is_empty() {
+                let applied = pending_before;
                 (
                     "success",
-                    "Auto mode applied pending diffs".to_string(),
+                    format!(
+                        "Auto mode applied {} pending diff{}",
+                        applied,
+                        if applied == 1 { "" } else { "s" }
+                    ),
                     "Agent auto mode completed filesystem apply.".to_string(),
                 )
             } else {
@@ -3195,6 +3224,39 @@ fn format_context_sources(sources: &ContextSourceOptions) -> String {
     )
 }
 
+/// 一个阶段/单步跑完之后，该报什么级别、写哪句话。
+///
+/// 以前两处都恒为 `success`。真实运行里出现过 `[warn] agent_changes_validation`
+/// （JSON 被截断）紧跟一条 `[success] Implement stage completed with 0 new diffs`：
+/// 一个文件都没生成，日志里抢眼的却是 success。产物为 0 **且**有诊断，就不是成功。
+///
+/// 产物为 0 但没有诊断是另一回事：Review 这类阶段本来就不该产出 diff，那仍是成功。
+///
+/// `subject` 是 "Implement stage" / "Step" 这种主语，两个入口的措辞由此保持一致。
+pub(crate) fn completion_log(
+    subject: &str,
+    artifact_noun: &str,
+    generated_count: usize,
+    diagnostics: &[String],
+) -> (&'static str, String) {
+    if generated_count == 0 && !diagnostics.is_empty() {
+        return (
+            "warn",
+            format!("{} produced no usable {}s", subject, artifact_noun),
+        );
+    }
+    (
+        "success",
+        format!(
+            "{} completed with {} new {}{}",
+            subject,
+            generated_count,
+            artifact_noun,
+            if generated_count == 1 { "" } else { "s" }
+        ),
+    )
+}
+
 fn attach_stage_provenance(
     diffs: &mut [crate::agent::state_machine::FileDiff],
     role: &str,
@@ -4151,6 +4213,25 @@ mod tests {
             }],
             status: "pending".to_string(),
         }
+    }
+
+    #[test]
+    fn nothing_produced_plus_a_diagnostic_is_not_a_success() {
+        let diagnostics = vec!["The `agent-changes` block was cut off".to_string()];
+
+        let (level, summary) = completion_log("Implement stage", "diff", 0, &diagnostics);
+
+        assert_eq!(level, "warn");
+        assert!(summary.contains("no usable diffs"));
+    }
+
+    #[test]
+    fn nothing_produced_without_a_diagnostic_is_still_a_success() {
+        // Review 这类阶段本来就不产出 diff，0 个不是问题
+        let (level, summary) = completion_log("Review stage", "diff", 0, &[]);
+
+        assert_eq!(level, "success");
+        assert!(summary.contains("0 new diffs"));
     }
 
     #[test]

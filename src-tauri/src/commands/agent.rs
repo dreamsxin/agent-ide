@@ -1382,17 +1382,13 @@ pub async fn run_agent_step(
                 claim,
                 RunEnding::Finished,
             );
-            orch.emit_review_action_log(
-                &app_handle,
-                "success",
-                "plan_run_step",
-                &format!(
-                    "Step completed with {} new diff{}",
-                    outcome.new_diffs,
-                    if outcome.new_diffs == 1 { "" } else { "s" }
-                ),
-                &response,
+            let (level, summary) = crate::agent::orchestrator::completion_log(
+                "Step",
+                "diff",
+                outcome.new_diffs,
+                &outcome.diagnostics,
             );
+            orch.emit_review_action_log(&app_handle, level, "plan_run_step", &summary, &response);
             Ok("Agent step completed".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {
