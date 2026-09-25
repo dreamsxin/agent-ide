@@ -2302,6 +2302,19 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The hint now states that a retry happened, that **the request was billed twice**, and points at the run's action log for the numbers; the advice becomes "raise it **further**". The billing sentence matters most: a user who is never told cannot reconcile their invoice, and the action log is the only place with the two caps.
    - No test change: the hint is looked up by key, and `runFailure.test.ts` asserts the key rather than the wording — which is why a copy change like this costs nothing.
    - Frontend 334 unchanged (38 files), tsc 0; Rust 585 unchanged.
+192. **DESIGN — the chat panel never shows that the pipeline was edited (尚未实施, 2026-09-25)**
+   User-reported and still open from earlier: 「流水线编辑了，chat 面板里看不出来」. You edit the pipeline in the Pipeline editor, go back to Chat, and nothing there distinguishes a four-stage default run from the three-stage one you just configured — the first evidence arrives after the run starts and the Plan view fills in.
+   **Whole-picture list.**
+   - `useAgentStore`: `pipeline` (the configured one) and `runPipeline` (the one a live run is using) are already separate — that separation exists because a run used to overwrite the configuration. The marker must read `pipeline`, since the point is to show the config *before* a run.
+   - The comparison rule already exists on the backend: `multi_agent.rs::pipeline_matches_default` compares `role` and `pause_before` and deliberately **not** `name`, because names are display strings about to be translated. A second rule on the frontend that disagrees would let the panel say "custom" while the backend runs the default. So the frontend helper must mirror it exactly, including "empty means default".
+   - `PipelineEditor` is where the edit happens; the marker is a read-only mirror, not a second place to change it.
+   - i18n: two keys (the marker and its tooltip), and the count goes through params — `{count} 步` versus `{count} steps` is exactly the measure-word case the sweep keeps hitting.
+   **Decisions.**
+   - **A read-only marker, not the composer toolbar.** The three design questions about an editable input-row toolbar (what belongs there, how it behaves when the window narrows, whether permission tier moves there) are still unanswered, and ZCode's composer — checked earlier — has **no** pipeline indicator to copy. Shipping a marker now answers the reported complaint without pre-committing the toolbar design.
+   - It appears **only** when the configured pipeline differs from the default. A permanent "4 steps" badge on the default path is noise, and noise is what makes the informative case invisible.
+   - The tooltip says where to change it and that it applies to the next run — a marker that explains nothing just moves the confusion.
+   **Test plan.** Unit tests on the mirror helper: default → matches; a removed or reordered stage → differs; a **renamed** stage → still matches (names are display-only, and this is the assertion that keeps the two rules aligned); empty → matches.
+
 
 
 
