@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
-import { useAgentStore } from "./useAgentStore";
+import { useAgentStore, pipelineMatchesDefault } from "./useAgentStore";
 import {
   llmIndicator,
   llmTargetFingerprint,
@@ -66,6 +66,56 @@ function testProfile(overrides: Partial<LlmProfile> & { id: string }): LlmProfil
     ...overrides,
   };
 }
+
+describe("pipelineMatchesDefault", () => {
+  const stage = (role: string, name: string) => ({ role, name, status: "pending" }) as never;
+
+  it("treats the default four stages, and an empty list, as default", () => {
+    expect(
+      pipelineMatchesDefault([
+        stage("architect", "Design"),
+        stage("coder", "Implement"),
+        stage("tester", "Test"),
+        stage("reviewer", "Review"),
+      ])
+    ).toBe(true);
+    // 空的也算默认：后端 `pipeline_matches_default` 同样这么认，两边必须一致
+    expect(pipelineMatchesDefault([])).toBe(true);
+  });
+
+  /**
+   * 把前后端两套规则钉在一起的那条断言：`name` 是会被翻译的显示字符串，拿它比较会让
+   * "改了个名字"被当成"换了流水线" —— 界面说自定义，后端照默认跑。
+   */
+  it("still counts as default when a stage was only renamed", () => {
+    expect(
+      pipelineMatchesDefault([
+        stage("architect", "设计"),
+        stage("coder", "写码"),
+        stage("tester", "测"),
+        stage("reviewer", "复核"),
+      ])
+    ).toBe(true);
+  });
+
+  it("differs when a stage is removed or reordered", () => {
+    expect(
+      pipelineMatchesDefault([
+        stage("architect", "Design"),
+        stage("coder", "Implement"),
+        stage("reviewer", "Review"),
+      ])
+    ).toBe(false);
+    expect(
+      pipelineMatchesDefault([
+        stage("coder", "Implement"),
+        stage("architect", "Design"),
+        stage("tester", "Test"),
+        stage("reviewer", "Review"),
+      ])
+    ).toBe(false);
+  });
+});
 
 describe("testLlmConnection", () => {
   beforeEach(() => {

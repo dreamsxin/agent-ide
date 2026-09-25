@@ -435,6 +435,21 @@ const DEFAULT_PIPELINE: PipelineStage[] = [
 ];
 
 /**
+ * 配置里的流水线是不是就是默认那条。
+ *
+ * 只比 `role`：`name` 是会被翻译的显示字符串，拿它比较会让"改了个名字"被当成"换了流水线"。
+ * 这是后端 `multi_agent.rs::pipeline_matches_default` 的镜像 —— 两边判断不一致的话，界面会
+ * 说"自定义"而后端照默认跑，那比不显示更坏。空数组同样视为默认（后端也这么认）。
+ */
+export function pipelineMatchesDefault(pipeline: PipelineStage[]): boolean {
+  if (pipeline.length === 0) return true;
+  return (
+    pipeline.length === DEFAULT_PIPELINE.length &&
+    pipeline.every((stage, index) => stage.role === DEFAULT_PIPELINE[index].role)
+  );
+}
+
+/**
  * 空聊天区里那条欢迎消息。
  *
  * 它同时是唯一的"这东西怎么用"说明：面板上四个页签加两个图标按钮，没有任何地方解释它们

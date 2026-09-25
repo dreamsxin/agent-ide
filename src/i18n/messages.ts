@@ -806,6 +806,9 @@ export const EN = {
     "Sent — the draft shows up in Chat, and the file itself arrives in the review area as a normal change you can reject.",
 
   "chat.suggestions.title": "Suggested next steps",
+  "chat.pipeline.custom": "Pipeline: {count} steps",
+  "chat.pipeline.customTitle":
+    "This chat will run your edited pipeline ({count} steps) instead of the default four. Change it in the Agent selector above the chat box; it applies to the next run.",
   "pending.waiting": "{count} file(s) waiting for review",
   "pending.nothingWritten": "nothing written to disk yet",
   "pending.reviewByHunk": "Review hunk by hunk",
@@ -1685,6 +1688,9 @@ export const ZH: Record<MessageKey, string> = {
   "memory.sent": "已发出 —— 草稿会在聊天里出现，文件本身会当成一条可以拒绝的普通改动进审查区。",
 
   "chat.suggestions.title": "接下来可以做",
+  "chat.pipeline.custom": "流水线：{count} 步",
+  "chat.pipeline.customTitle":
+    "这次对话会按你改过的流水线跑（{count} 步），不是默认的四步。要改去聊天框上方的 Agent 选择器里改，改动对下一次运行生效。",
   "pending.waiting": "{count} 个文件等着你看",
   "pending.nothingWritten": "还没写进磁盘",
   "pending.reviewByHunk": "逐块审查",

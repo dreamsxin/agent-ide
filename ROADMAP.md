@@ -2318,6 +2318,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Adopt: a conditional marker is clickable, and the click does the obvious thing.** Their Plan marker (`V4ComposerModeControls.tsx@188-214`) appears only when `planEnabled` and clicking it turns Plan off. Ours becomes a button that opens the Pipeline editor — the marker says "this differs", the click takes you to where it is changed. A tooltip alone would leave the user hunting.
    - **Adapt: markers need a collapse order.** `useComposerToolbarFit.ts@4-45` measures a hidden clone and drops controls by an explicit `data-composer-collapse-priority` (CUA → mode → Plan marker → thought label). Our input row lives in a side panel and is narrower than theirs, so the marker must be the **first** thing that gives up its text (icon/count only) rather than pushing the model select off the row. Not building their measuring machinery for one marker; just choosing the shrink order deliberately.
    - **Reject, deliberately**: their visible counts are raw digits with only the `aria-label` going through `formatMessage` (`ConversationBackgroundWorkTrigger.tsx@119-141`). Our rule is the opposite — the visible count goes through i18n params — because a bare digit next to translated text is exactly how measure words end up on the wrong side. Recorded so this reads as a choice, not an oversight.
+   **IMPLEMENTED (2026-09-25), with one deviation.**
+   - `pipelineMatchesDefault` mirrors the backend rule and compares **only `role`**; the test that a renamed stage still counts as default is the one keeping the two in step. Empty counts as default, as it does on the backend.
+   - The marker sits next to the compression select, appears only when the configured pipeline differs, and gives up its text first (`min-w-0 truncate`) rather than pushing the model select off the row.
+   - **Deviation from the ZCode borrowing**: it is **not** clickable. `PipelineEditor` is mounted inside `AgentSelector` (`AgentSelector.tsx:100`), so making the marker open it needs new shared open/close state between two components — more machinery than a marker justifies. The tooltip names the Agent selector as the place to change it instead. Recorded because the design said "clickable".
+   - Frontend 334 → 337 (38 files), tsc 0; Rust 586 unchanged.
+   - **Self-inflicted break worth recording**: my first edit replaced the opening `/**` of `welcomeMessage`'s doc comment, leaving its body as loose code — 40 syntax errors. `tsc` caught it before anything was committed, which is the whole point of running the gate before the commit rather than after.
+
 
 
 

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { useAgentStore } from "../../stores/useAgentStore";
+import { useAgentStore, pipelineMatchesDefault } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
@@ -264,6 +264,8 @@ export default function ChatView() {
   const ghostSuggestions = useAgentStore((s) => s.ghostSuggestions);
   const setGhostSuggestions = useAgentStore((s) => s.setGhostSuggestions);
   const dismissGhostSuggestion = useAgentStore((s) => s.dismissGhostSuggestion);
+  // 配置里的那条，不是运行中那条（`runPipeline`）：这个标记要说的正是"下一次会怎么跑"
+  const pipeline = useAgentStore((s) => s.pipeline);
   const updateActiveSddMarkdown = useAgentStore((s) => s.updateActiveSddMarkdown);
   const saveActiveSdd = useAgentStore((s) => s.saveActiveSdd);
   const promoteSddToCodePrompt = useAgentStore((s) => s.promoteSddToCodePrompt);
@@ -657,6 +659,20 @@ export default function ChatView() {
             <option value="budgeted">{t("chat.compression.budgeted")}</option>
             <option value="full">{t("chat.compression.full")}</option>
           </select>
+          {/*
+            改过流水线之后，聊天面板以前完全看不出来 —— 第一个证据要等运行开始、Plan 视图
+            填出来才有。只在和默认不同时出现：默认路径上常驻一个"4 步"是噪音，而噪音正是
+            让有信息的那一次被忽略的原因。
+            窄到挤不下时它先放弃文字（`truncate` + `min-w-0`），而不是把模型选择挤出这一行。
+          */}
+          {!pipelineMatchesDefault(pipeline) && (
+            <span
+              className="min-w-0 truncate rounded border border-accent-purple/40 px-1.5 py-1 text-[10px] text-accent-purple"
+              title={t("chat.pipeline.customTitle", { count: pipeline.length })}
+            >
+              {t("chat.pipeline.custom", { count: pipeline.length })}
+            </span>
+          )}
         </div>
         {/*
           临时换模型：不用为"试一下另一个模型"存一个 profile（存了还会顺带把它设成全局活跃的）。
