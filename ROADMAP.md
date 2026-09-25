@@ -2314,6 +2314,11 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - It appears **only** when the configured pipeline differs from the default. A permanent "4 steps" badge on the default path is noise, and noise is what makes the informative case invisible.
    - The tooltip says where to change it and that it applies to the next run — a marker that explains nothing just moves the confusion.
    **Test plan.** Unit tests on the mirror helper: default → matches; a removed or reordered stage → differs; a **renamed** stage → still matches (names are display-only, and this is the assertion that keeps the two rules aligned); empty → matches.
+   **Re-checked ZCode after its update (2026-09-25).** Still **no** pipeline/steps indicator in its composer (`step|pipeline|chain` has zero hits in `packages/ui/src/v4/composer/` and `prompt-editor/`), and no "differs from default" helper anywhere in `packages/ui/src`. So there is nothing to copy for the feature itself — but three things next to it are worth taking:
+   - **Adopt: a conditional marker is clickable, and the click does the obvious thing.** Their Plan marker (`V4ComposerModeControls.tsx@188-214`) appears only when `planEnabled` and clicking it turns Plan off. Ours becomes a button that opens the Pipeline editor — the marker says "this differs", the click takes you to where it is changed. A tooltip alone would leave the user hunting.
+   - **Adapt: markers need a collapse order.** `useComposerToolbarFit.ts@4-45` measures a hidden clone and drops controls by an explicit `data-composer-collapse-priority` (CUA → mode → Plan marker → thought label). Our input row lives in a side panel and is narrower than theirs, so the marker must be the **first** thing that gives up its text (icon/count only) rather than pushing the model select off the row. Not building their measuring machinery for one marker; just choosing the shrink order deliberately.
+   - **Reject, deliberately**: their visible counts are raw digits with only the `aria-label` going through `formatMessage` (`ConversationBackgroundWorkTrigger.tsx@119-141`). Our rule is the opposite — the visible count goes through i18n params — because a bare digit next to translated text is exactly how measure words end up on the wrong side. Recorded so this reads as a choice, not an oversight.
+
 
 
 
