@@ -806,6 +806,8 @@ export const EN = {
     "Sent — the draft shows up in Chat, and the file itself arrives in the review area as a normal change you can reject.",
 
   "chat.suggestions.title": "Suggested next steps",
+  "logs.file.title":
+    "The same entries are appended to this file, rotated at 2 MB, so they survive closing the window and can be sent to someone else.",
   "chat.pipeline.custom": "Pipeline: {count} steps",
   "chat.pipeline.customTitle":
     "This chat will run your edited pipeline ({count} steps) instead of the default four. Change it in the Agent selector above the chat box; it applies to the next run.",
@@ -1688,6 +1690,8 @@ export const ZH: Record<MessageKey, string> = {
   "memory.sent": "已发出 —— 草稿会在聊天里出现，文件本身会当成一条可以拒绝的普通改动进审查区。",
 
   "chat.suggestions.title": "接下来可以做",
+  "logs.file.title":
+    "同样的记录会追加到这个文件里，2 MB 轮转。关掉窗口它还在，也可以直接发给别人看。",
   "chat.pipeline.custom": "流水线：{count} 步",
   "chat.pipeline.customTitle":
     "这次对话会按你改过的流水线跑（{count} 步），不是默认的四步。要改去聊天框上方的 Agent 选择器里改，改动对下一次运行生效。",

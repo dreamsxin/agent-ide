@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useLogStore } from "../../stores/useLogStore";
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "../../utils/tauri";
 import { useT } from "../../i18n";
 import type { MessageKey } from "../../i18n/messages";
 
@@ -23,6 +25,18 @@ export default function LogView() {
   const clearLogs = useLogStore((s) => s.clearLogs);
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // 面板这份只在内存 + localStorage 里，磁盘那份才是关掉窗口还在、能发给别人看的。
+  // 路径必须在界面上给出来：知道有这个文件却找不到它，等于没有。
+  const [logPath, setLogPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void invoke<string>("run_log_path")
+      .then(setLogPath)
+      .catch(() => {
+        // 拿不到就不显示：这一行是帮忙的，不该自己变成一条错误
+      });
+  }, []);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -38,6 +52,12 @@ export default function LogView() {
           <div className="text-2xl mb-2">📋</div>
           <div>{t("logs.empty")}</div>
           <div className="text-[10px] mt-1">{t("logs.empty.hint")}</div>
+          {/* 空面板正是最需要这条路径的时候：这一次没记录，不等于磁盘上那份也空 */}
+          {logPath && (
+            <div className="mt-2 break-all text-[10px] text-surface-muted/70" title={t("logs.file.title")}>
+              {logPath}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -50,6 +70,14 @@ export default function LogView() {
         <span className="text-surface-muted text-[10px] font-mono">
           {t("logs.entries", { count: logs.length })}
         </span>
+        {logPath && (
+          <span
+            className="min-w-0 flex-1 truncate px-2 text-left text-[10px] font-mono text-surface-muted/60"
+            title={t("logs.file.title")}
+          >
+            {logPath}
+          </span>
+        )}
         <button
           onClick={clearLogs}
           className="text-surface-muted hover:text-surface-text text-[10px] px-1"

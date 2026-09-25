@@ -2324,6 +2324,13 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - **Deviation from the ZCode borrowing**: it is **not** clickable. `PipelineEditor` is mounted inside `AgentSelector` (`AgentSelector.tsx:100`), so making the marker open it needs new shared open/close state between two components — more machinery than a marker justifies. The tooltip names the Agent selector as the place to change it instead. Recorded because the design said "clickable".
    - Frontend 334 → 337 (38 files), tsc 0; Rust 586 unchanged.
    - **Self-inflicted break worth recording**: my first edit replaced the opening `/**` of `welcomeMessage`'s doc comment, leaving its body as loose code — 40 syntax errors. `tsc` caught it before anything was committed, which is the whole point of running the gate before the commit rather than after.
+193. **The disk log was unfindable (2026-09-25)**
+   180 started writing `agent-ide.log` because the user asked for something they could read after a failure — but nothing in the app ever said **where** it is, and the config directory differs per platform. Knowing a file exists without being able to find it is the same as not having it.
+   - `run_log_path` returns `run_log::log_path()`; the Logs panel shows it in the toolbar, and **also in the empty state** — an empty panel is exactly when you need it, because "this session logged nothing" does not mean the file is empty.
+   - The path comes from the backend rather than being assembled in the frontend: a second, subtly different path would point at a directory that is always empty, and the user would conclude the logging never worked.
+   - The tooltip says what the file is (same entries, 2 MB rotation, survives closing the window, can be handed to someone else). Failing to fetch it shows nothing rather than an error — a convenience line must not become a fault of its own.
+   - Rust 586 unchanged (the command is a one-line wrapper over a tested function), fmt/clippy clean; frontend 337 unchanged, tsc 0.
+
 
 
 

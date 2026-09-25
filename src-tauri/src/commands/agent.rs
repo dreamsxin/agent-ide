@@ -3473,6 +3473,15 @@ pub async fn append_ui_log(entry: serde_json::Value) {
     crate::services::run_log::record("ui-log", &entry);
 }
 
+/// 磁盘日志在哪。
+///
+/// 知道有这个文件却找不到它等于没有：配置目录随平台而变，而用户正是在"出问题了"
+/// 的时候需要它。路径由 `run_log` 给，不在前端拼 —— 拼错的那一份会指向一个空目录。
+#[tauri::command]
+pub async fn run_log_path() -> String {
+    crate::services::run_log::log_path().display().to_string()
+}
+
 /// 撤销某一轮对话改的文件。
 ///
 /// 和 `undo_last_apply` 的区别是按**轮**算账：一轮里可能落盘好几次，而用户记得的是
