@@ -1966,6 +1966,7 @@ impl AgentOrchestrator {
         match outcome {
             Ok(outcome) => {
                 let response = outcome.text;
+                let output_continuations = outcome.output_continuations;
                 self.steps[step_index].status = "done".to_string();
                 self.steps[step_index].logs.push(format!(
                     "{} response: {}...",
@@ -2048,12 +2049,20 @@ impl AgentOrchestrator {
                     &stage_diagnostics,
                 );
                 // 一条产物都没有时，把诊断也放进 stage_complete 的详情里：
-                // 只看这一条就能知道为什么是空的，不用去翻上一条 warn
-                let details = if stage_diagnostics.is_empty() {
+                // 只看这一条就能知道为什么是空的，不用去翻上一条 warn。
+                // 续写过也必须写在这里 —— 那是实打实多发出去的请求，用户有权看到。
+                let mut details = if stage_diagnostics.is_empty() {
                     response.clone()
                 } else {
                     format!("{}\n\n{}", stage_diagnostics.join("\n"), response)
                 };
+                if output_continuations > 0 {
+                    details = format!(
+                        "The answer was cut off by the output limit and resumed {} time(s); \
+                         each resume was a separately billed request.\n\n{}",
+                        output_continuations, details
+                    );
+                }
                 self.emit_action_log(
                     events,
                     level,

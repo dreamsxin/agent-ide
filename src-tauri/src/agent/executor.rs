@@ -56,6 +56,24 @@ pub trait ToolInvoker: Send + Sync {
 /// （`RunUsageMeter`），这个常量只是防死循环的兜底。
 pub const MAX_TOOL_ITERATIONS: usize = 12;
 
+/// 一个 stage 最多续写几次。
+///
+/// 每次续写都要把整段上下文连同那半截回答再发一遍：既是一次完整计费，又让这一次
+/// 请求剩下的输出空间更小（输出上限是 `窗口 - prompt`）。所以这里比 ZCode 的 3 更保守，
+/// 取 2 —— 够补完一个被切断的块，又不会在预算本来就紧的会话里滚成三四次全量请求。
+const MAX_OUTPUT_CONTINUATIONS: usize = 2;
+
+/// 让模型接着写下去的那句话。
+///
+/// 刻意不让它重新解释或从头再来：重来会把已经写好的块再写一遍，等于花两倍的钱
+/// 拿同一份东西，而且很可能再一次被切在同一个地方。
+const OUTPUT_CONTINUATION_PROMPT: &str =
+    "Your previous answer was cut off by the output limit mid-block. Resume exactly where it \
+     stopped — no apology, no recap, do not repeat any block you already finished. If the cut \
+     happened inside an `agent-changes` block, continue that JSON from the exact character it \
+     ended on so the block closes. Then keep going with the remaining files, one block per file, \
+     and stop early rather than being cut off again.";
+
 /// 从模型返回的工具调用中挑出需要真正执行的外部工具调用。
 /// 内置输出协议工具（`emit_agent_changes` / `emit_sdd_draft`）不在其中。
 fn select_external_calls(
@@ -141,6 +159,7 @@ async fn stream_with_tool_loop(
                     transcript,
                     tool_rounds,
                     hit_round_cap: false,
+                    output_continuations: 0,
                 });
             }
         };
@@ -179,6 +198,7 @@ async fn stream_with_tool_loop(
                 transcript,
                 tool_rounds,
                 hit_round_cap,
+                output_continuations: 0,
             });
         }
 
@@ -249,6 +269,7 @@ async fn stream_with_tool_loop(
         transcript,
         tool_rounds,
         hit_round_cap: false,
+        output_continuations: 0,
     })
 }
 
@@ -401,6 +422,11 @@ pub struct StageOutcome {
     /// "第 N 轮还想调工具但被拦下"在消息上长得一样 —— 而对调用方来说前者是完整答案，
     /// 后者是一段被截断的探索。子 Agent 把这个标志转述给主 Agent（`format_for_caller`）。
     pub hit_round_cap: bool,
+    /// 因为回答被输出预算切断而续写了几次。
+    ///
+    /// 每次续写都是一次完整计费的请求，所以这个数字必须能报给用户 ——
+    /// "这次为什么贵了一倍"只能由它回答。
+    pub output_continuations: usize,
 }
 
 /// 把上游 stage 的消息线程裁进预算。
@@ -757,7 +783,50 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
         "Prior stage work is in the messages above, including the actual tool results rather than a retelling of them. Run this stage now."
     }));
 
-    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx, MAX_TOOL_ITERATIONS).await
+    let mut outcome = stream_with_tool_loop(
+        llm,
+        messages.clone(),
+        invoker,
+        cancel_flag.clone(),
+        tx.clone(),
+        MAX_TOOL_ITERATIONS,
+    )
+    .await?;
+
+    // 输出预算用光时回答会被当场切断，没有任何提示。这里不重试、也不调大上限
+    // （被窗口夹住时调大没用，见 `llm_client::window_limited_output_tokens`），
+    // 而是把已经写出来的部分留在对话里，另起一条"接着写"的消息续上去：续写的文本
+    // 直接拼在后面，第一次没闭合的 JSON 块因此能被补完。
+    //
+    // 代价要说清楚：每次续写都要把整段上下文连同这半截回答再发一遍，所以既多花钱、
+    // 又让剩余的输出空间更小。因此上限很低，而且续不出东西就立刻停。
+    let mut continuations = 0;
+    while continuations < MAX_OUTPUT_CONTINUATIONS
+        && unterminated_fence_diagnostic(&outcome.text, "agent-changes").is_some()
+    {
+        continuations += 1;
+        let mut resumed = messages.clone();
+        resumed.push(ChatMessage::assistant(outcome.text.clone()));
+        resumed.push(ChatMessage::user(OUTPUT_CONTINUATION_PROMPT.to_string()));
+        let next = stream_with_tool_loop(
+            llm,
+            resumed,
+            invoker,
+            cancel_flag.clone(),
+            tx.clone(),
+            MAX_TOOL_ITERATIONS,
+        )
+        .await?;
+        if next.text.trim().is_empty() {
+            break;
+        }
+        outcome.text.push_str(&next.text);
+        outcome.transcript.extend(next.transcript);
+        outcome.tool_rounds += next.tool_rounds;
+        outcome.hit_round_cap |= next.hit_round_cap;
+    }
+    outcome.output_continuations = continuations;
+    Ok(outcome)
 }
 
 /// 从 LLM 响应中解析 diff 块
