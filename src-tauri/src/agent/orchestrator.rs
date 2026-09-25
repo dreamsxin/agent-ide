@@ -2018,6 +2018,25 @@ impl AgentOrchestrator {
                     stage_diagnostics = parsed.diagnostics;
                     generated_diff_count
                 };
+                // 被截断而且一个产物都没有：这一步其实什么也没做成，必须当失败报出去。
+                // 只记一条 warn 不够 —— Chat 面板不渲染 action log，运行"成功"结束时
+                // 那里一句解释都不会出现，用户只看到 Done，然后发现文件根本没生成。
+                if generated_diff_count == 0 && executor::was_cut_off(&stage_diagnostics) {
+                    let message = format!(
+                        "{} stage produced nothing: {}",
+                        stage.name,
+                        stage_diagnostics.join("\n")
+                    );
+                    self.record_stage_failure(
+                        run,
+                        stage_index,
+                        stage,
+                        step_index,
+                        &message,
+                        events,
+                    );
+                    return Err(message);
+                }
                 mark_pipeline_stage(&mut run.pipeline, stage_index, "completed");
                 let artifact_noun = if run.ide_mode == IdeMode::Plan {
                     "artifact"
@@ -2050,22 +2069,7 @@ impl AgentOrchestrator {
                 );
             }
             Err(e) => {
-                self.steps[step_index].status = "error".to_string();
-                self.steps[step_index].logs.push(format!("Error: {}", e));
-                mark_pipeline_stage(&mut run.pipeline, stage_index, "failed");
-                self.emit_step(events, step_index);
-                self.emit_pipeline(events, &run.pipeline);
-                self.emit_action_log(
-                    events,
-                    "error",
-                    "stage_error",
-                    Some(stage.role.to_string()),
-                    Some(&stage.name),
-                    &format!("{} stage failed", stage.name),
-                    &e,
-                    Some(run.context_summary.clone()),
-                    Some(self.summarize_pending_diffs()),
-                );
+                self.record_stage_failure(run, stage_index, stage, step_index, &e, events);
                 return Err(e);
             }
         }
@@ -2080,6 +2084,40 @@ impl AgentOrchestrator {
         self.emit_state(events);
 
         Ok(())
+    }
+
+    /// 把一个阶段记成失败：step 状态、pipeline 标记、事件、action log 一起落地。
+    ///
+    /// 模型报错和"回答被截断所以什么都没产出"走同一条路，用户看到的形状才一致 ——
+    /// 后者以前走的是成功路径，于是界面上只有一个 Done。
+    #[allow(clippy::too_many_arguments)]
+    fn record_stage_failure(
+        &mut self,
+        run: &mut PipelineRun,
+        stage_index: usize,
+        stage: &PipelineStage,
+        step_index: usize,
+        error: &str,
+        events: &dyn RunEvents,
+    ) {
+        self.steps[step_index].status = "error".to_string();
+        self.steps[step_index]
+            .logs
+            .push(format!("Error: {}", error));
+        mark_pipeline_stage(&mut run.pipeline, stage_index, "failed");
+        self.emit_step(events, step_index);
+        self.emit_pipeline(events, &run.pipeline);
+        self.emit_action_log(
+            events,
+            "error",
+            "stage_error",
+            Some(stage.role.to_string()),
+            Some(&stage.name),
+            &format!("{} stage failed", stage.name),
+            error,
+            Some(run.context_summary.clone()),
+            Some(self.summarize_pending_diffs()),
+        );
     }
 
     /// 所有阶段跑完后的收尾，同步完成。

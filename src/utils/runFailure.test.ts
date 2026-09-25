@@ -32,6 +32,18 @@ describe("失败原因 → 可操作提示", () => {
   });
 
 
+  /**
+   * 真实运行里的那一次：模型的 agent-changes 块被输出上限截在字符串中间，
+   * 6 个计划里的文件一个都没生成，而运行报的是成功。现在它是一次失败，
+   * 提示要说出"改动没生成"，而不是复用"答案是空的"那一句。
+   */
+  it("回答被截断和答案为空分开认", () => {
+    const real =
+      "Implement stage produced nothing: The `agent-changes` block was cut off: the response ended before the block closed, so nothing in it was used. Raise the output limit, or ask for fewer files in one turn.";
+    expect(runFailureHint(real)).toBe("failure.hint.cutOff");
+    expect(translate("zh", "failure.hint.cutOff")).toContain("Max output");
+  });
+
   it("key、限流、额度、网络各归各类", () => {
     expect(runFailureHint("401 Unauthorized: Incorrect API key provided")).toBe(
       "failure.hint.auth"

@@ -1021,11 +1021,29 @@ pub fn parse_diffs_with_diagnostics(response: &str) -> ParsedDiffs {
     ParsedDiffs { diffs, diagnostics }
 }
 
+/// 截断诊断里固定出现的这段话。
+///
+/// 三个地方靠同一段话认出"这次是被截断的"：`was_cut_off`（后端据此把运行判成失败）、
+/// `cut_off_block_diagnostic`（生成这句话）、前端 `runFailure.ts`（据此给建议）。
+/// 改措辞必须三处一起改，所以这里只有一份常量。
+///
+/// 特意不用"was cut off"这种短语：`empty_response_error` 里已经有一句
+/// "the output was cut off at the output limit"，前端按短语归类会把两类认混，
+/// 而那两类的建议不一样（一个是答案空的，一个是改动没生成）。
+pub const CUT_OFF_MARKER: &str = "ended before the block closed";
+
+/// 这批诊断里有没有"回答被截断"。
+///
+/// 截断和别的校验诊断不是一回事：路径不合法只废掉一条改动，被截断则意味着
+/// 模型的话没说完，这次的产物本身不完整，不该当成一次跑完的运行。
+pub fn was_cut_off(diagnostics: &[String]) -> bool {
+    diagnostics.iter().any(|item| item.contains(CUT_OFF_MARKER))
+}
+
 /// 一个没有收尾 ``` 的代码块该怎么跟用户说。
 ///
 /// 用我们自己的话先说清"回答被截断了、这块没用上"，再让 serde 那类原话跟在后面：
-/// 原话说的是第几行第几列，用户没法从中知道该调什么。措辞里带上 "was cut off"，
-/// 前端 `runFailure.ts` 靠它归类给出"调大 Max output / 少要几个文件"的建议。
+/// 原话说的是第几行第几列，用户没法从中知道该调什么。
 fn cut_off_block_diagnostic(block_type: &str, file: &str) -> String {
     let target = if file.trim().is_empty() {
         format!("`{}` block", block_type)
@@ -1033,9 +1051,9 @@ fn cut_off_block_diagnostic(block_type: &str, file: &str) -> String {
         format!("`{}` block for {}", block_type, file)
     };
     format!(
-        "The {} was cut off: the response ended before the block closed, so nothing in it was used. \
+        "The {} was cut off: the response {}, so nothing in it was used. \
          Raise the output limit, or ask for fewer files in one turn.",
-        target
+        target, CUT_OFF_MARKER
     )
 }
 

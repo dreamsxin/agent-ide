@@ -1389,6 +1389,14 @@ pub async fn run_agent_step(
                 &outcome.diagnostics,
             );
             orch.emit_review_action_log(&app_handle, level, "plan_run_step", &summary, &response);
+            // 被截断而且没产出：把原因回给前端。这一条只留在日志里是不够的 ——
+            // Chat 面板不渲染 action log，命令返回 Ok 时那里一句解释都不会出现。
+            if outcome.new_diffs == 0 && crate::agent::executor::was_cut_off(&outcome.diagnostics) {
+                return Err(format!(
+                    "This step produced nothing: {}",
+                    outcome.diagnostics.join("\n")
+                ));
+            }
             Ok("Agent step completed".to_string())
         }
         Err(err) if is_cancelled_error(&err) => {

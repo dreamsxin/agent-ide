@@ -29,6 +29,14 @@ const HINTS: { key: MessageKey; markers: string[] }[] = [
       "spent the whole output budget on reasoning",
     ],
   },
+  {
+    // 回答写到一半被截断、代码块没收尾。这句话由后端 `executor::CUT_OFF_MARKER`
+    // 生成，两边必须一致。刻意不匹配 "cut off" 这个短语：上面那条输出预算的原话里
+    // 也有 "the output was cut off at the output limit"，两类的建议不一样
+    // （一个是答案空的，一个是改动一个都没生成）。
+    key: "failure.hint.cutOff",
+    markers: ["ended before the block closed"],
+  },
   // 应用改动被拒绝的三类原话（`agent/diff_apply.rs`）。它们排在提供方错误前面：
   // 这几句是我们自己写的，措辞稳定，不会和模型报错撞词。
   {
