@@ -1985,8 +1985,7 @@ impl AgentOrchestrator {
                 }
                 run.transcript.extend(stage_messages);
 
-                let mut stage_diagnostics: Vec<String> = Vec::new();
-                let generated_diff_count = if run.ide_mode == IdeMode::Plan {
+                let (generated_diff_count, stage_diagnostics) = if run.ide_mode == IdeMode::Plan {
                     self.handle_plan_stage_response(
                         events,
                         stage,
@@ -2015,8 +2014,7 @@ impl AgentOrchestrator {
                             Some(self.summarize_pending_diffs()),
                         );
                     }
-                    stage_diagnostics = parsed.diagnostics;
-                    generated_diff_count
+                    (generated_diff_count, parsed.diagnostics)
                 };
                 // 被截断而且一个产物都没有：这一步其实什么也没做成，必须当失败报出去。
                 // 只记一条 warn 不够 —— Chat 面板不渲染 action log，运行"成功"结束时
@@ -2090,7 +2088,6 @@ impl AgentOrchestrator {
     ///
     /// 模型报错和"回答被截断所以什么都没产出"走同一条路，用户看到的形状才一致 ——
     /// 后者以前走的是成功路径，于是界面上只有一个 Done。
-    #[allow(clippy::too_many_arguments)]
     fn record_stage_failure(
         &mut self,
         run: &mut PipelineRun,
@@ -2192,23 +2189,18 @@ impl AgentOrchestrator {
 
         if self.mode == AgentMode::Auto {
             // Auto mode applies diffs immediately.
-            // 先数清有多少个待应用：apply 之后状态已经被翻过，事后分不清"应用成功"
-            // 和"本来就没有东西可应用"。真实运行里 0 个 diff 也报了
-            // `[success] Auto mode applied pending diffs`，等于谎报了一次落盘。
-            let pending_before = self
-                .diffs
-                .iter()
-                .filter(|diff| diff.status == "pending")
-                .count();
-            let blocked = self.apply_diffs_to_fs()?;
-            let (level, summary, details) = if pending_before == 0 {
+            // 落盘条数由 `apply_diffs_to_fs` 自己报，不在这里另抄一份 "pending" 过滤 ——
+            // 两处条件一旦分叉，日志里的数字就和真正写进磁盘的对不上。
+            let (applied, blocked) = self.apply_diffs_to_fs()?;
+            // 真实运行里 0 个 diff 也报了 `[success] Auto mode applied pending diffs`，
+            // 等于谎报了一次落盘，所以"什么都没有"必须是独立的一支
+            let (level, summary, details) = if applied == 0 && blocked.is_empty() {
                 (
                     "info",
                     "Nothing to apply: this run produced no changes".to_string(),
                     "Auto mode had no pending diffs to write.".to_string(),
                 )
             } else if blocked.is_empty() {
-                let applied = pending_before;
                 (
                     "success",
                     format!(
@@ -2272,7 +2264,9 @@ impl AgentOrchestrator {
     ///
     /// 之后如果把 orchestrator 拆成多把锁（见 ROADMAP 的锁粒度条目），
     /// `diffs` 和 `undo_stack` 必须共用一把，或者这里显式按固定顺序取两把。
-    pub fn apply_diffs_to_fs(&mut self) -> Result<Vec<String>, String> {
+    /// 返回 `(实际写进磁盘的条数, 因为不允许新建而被拦下的文件)`。条数由这里报出去，
+    /// 调用方不要另抄一份 "pending" 过滤 —— 两处条件分叉时日志数字就会开始骗人。
+    pub fn apply_diffs_to_fs(&mut self) -> Result<(usize, Vec<String>), String> {
         let mut blocked: Vec<String> = Vec::new();
         let applicable: Vec<crate::agent::state_machine::FileDiff> = self
             .diffs
@@ -2315,7 +2309,7 @@ impl AgentOrchestrator {
                 .join("; "));
         }
 
-        Ok(blocked)
+        Ok((result.applied.len(), blocked))
     }
 
     /// 拒绝一个 diff 里所有还没决定的 hunk。
@@ -2622,8 +2616,13 @@ impl AgentOrchestrator {
         response: &str,
         prompt: &str,
         context_summary: String,
-    ) -> usize {
+    ) -> (usize, Vec<String>) {
         if stage.role == AgentRole::Designer {
+            // 被截断的草稿不是一份草稿。Plan 模式不走 diff 解析，截断只能在这里自己判，
+            // 否则 `sdd_draft` 会照报 success，界面上留下一份半截的设计文档。
+            if let Some(diagnostic) = executor::unterminated_fence_diagnostic(response, "sdd") {
+                return (0, vec![diagnostic]);
+            }
             let artifact = executor::parse_sdd_artifact(
                 response,
                 prompt,
@@ -2647,7 +2646,7 @@ impl AgentOrchestrator {
                 Some(context_summary),
                 None,
             );
-            1
+            (1, Vec::new())
         } else if stage.role == AgentRole::Reviewer {
             let findings = executor::extract_review_findings(response);
             if !findings.is_empty() {
@@ -2660,9 +2659,9 @@ impl AgentOrchestrator {
                     );
                 }
             }
-            0
+            (0, Vec::new())
         } else {
-            0
+            (0, Vec::new())
         }
     }
 
@@ -4311,8 +4310,9 @@ mod tests {
         orchestrator.allow_file_create = false;
         orchestrator.diffs = vec![edit, create];
 
-        let blocked = orchestrator.apply_diffs_to_fs().unwrap();
+        let (applied, blocked) = orchestrator.apply_diffs_to_fs().unwrap();
 
+        assert_eq!(applied, 1, "被拦下的新建文件不算进落盘条数");
         assert_eq!(blocked, vec!["created.ts".to_string()]);
         // 编辑已有文件照常应用
         assert_eq!(orchestrator.diffs[0].status, "applied");
@@ -4335,8 +4335,9 @@ mod tests {
         orchestrator.allow_file_create = true;
         orchestrator.diffs = vec![create];
 
-        let blocked = orchestrator.apply_diffs_to_fs().unwrap();
+        let (applied, blocked) = orchestrator.apply_diffs_to_fs().unwrap();
 
+        assert_eq!(applied, 1);
         assert!(blocked.is_empty());
         assert_eq!(orchestrator.diffs[0].status, "applied");
         assert_eq!(

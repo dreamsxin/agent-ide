@@ -9,9 +9,7 @@
 //! 矛盾的。判错的代价也不对称 —— 误判成 Direct 只是少了几段复核（改动仍然要人工
 //! 审查才落盘），误判成 Full 只是多花钱，所以宁可在拿不准时给 Full。
 //!
-//! Direct 的判据是"正好点名一个文件"。真实运行里踩过反面：
-//! 「帮写一个动态代理隧道方案。」没点名任何文件，却被判成 Direct，
-//! Design/Test/Review 全被跳过，而 planner 随后把它摊成 8 个文件。
+//! Direct 的判据是"正好点名一个文件"；踩过的反面案例记在 `classify` 里。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskShape {

@@ -39,7 +39,11 @@ describe("失败原因 → 可操作提示", () => {
    */
   it("回答被截断和答案为空分开认", () => {
     const real =
-      "Implement stage produced nothing: The `agent-changes` block was cut off: the response ended before the block closed, so nothing in it was used. Ask for fewer files in one turn, and one block per file — then a cut-off costs only the last file. Raising Max output does not help when it is already being clamped to fit the context window; this run's action log says whether it was.";
+      "Implement stage produced nothing: The `agent-changes` block was cut off: " +
+      "the response ended before the block closed, so nothing in it was used. " +
+      "Ask for fewer files in one turn, and one block per file — then a cut-off costs only " +
+      "the last file. Raising Max output does not help when it is already being clamped to " +
+      "fit the context window; this run's action log says whether it was.";
     expect(runFailureHint(real)).toBe("failure.hint.cutOff");
     expect(translate("zh", "failure.hint.cutOff")).toContain("Max output");
   });

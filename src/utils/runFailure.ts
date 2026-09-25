@@ -16,6 +16,16 @@ import type { MessageKey } from "../i18n/messages";
  */
 export type RunFailureHint = MessageKey | null;
 
+/**
+ * 后端截断诊断里固定出现的这段话，来源是 `agent/executor.rs` 的 `CUT_OFF_MARKER`。
+ *
+ * 两份字面量必须一字不差。刻意不匹配 "cut off" 这个短语：输出预算那条原话里也有
+ * "the output was cut off at the output limit"，两类的建议不一样（一个是答案空的，
+ * 一个是改动一个都没生成）。也必须排在 contextLimit 前面 —— 这句话自己就含
+ * "fit the context window"，排在后面会被归成上下文超限，给出相反的建议。
+ */
+const CUT_OFF_MARKER = "ended before the block closed";
+
 const HINTS: { key: MessageKey; markers: string[] }[] = [
   {
     // 推理模型把整个输出预算花在思考上：content 是空的、finish_reason 是 length。
@@ -30,12 +40,9 @@ const HINTS: { key: MessageKey; markers: string[] }[] = [
     ],
   },
   {
-    // 回答写到一半被截断、代码块没收尾。这句话由后端 `executor::CUT_OFF_MARKER`
-    // 生成，两边必须一致。刻意不匹配 "cut off" 这个短语：上面那条输出预算的原话里
-    // 也有 "the output was cut off at the output limit"，两类的建议不一样
-    // （一个是答案空的，一个是改动一个都没生成）。
+    // 回答写到一半被截断、代码块没收尾。措辞与顺序约束见 CUT_OFF_MARKER 的注释。
     key: "failure.hint.cutOff",
-    markers: ["ended before the block closed"],
+    markers: [CUT_OFF_MARKER],
   },
   // 应用改动被拒绝的三类原话（`agent/diff_apply.rs`）。它们排在提供方错误前面：
   // 这几句是我们自己写的，措辞稳定，不会和模型报错撞词。

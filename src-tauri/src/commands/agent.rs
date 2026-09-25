@@ -1373,6 +1373,26 @@ pub async fn run_agent_step(
                     if outcome.new_diffs == 1 { "" } else { "s" }
                 ),
             );
+            let (level, summary) = crate::agent::orchestrator::completion_log(
+                "Step",
+                "diff",
+                outcome.new_diffs,
+                &outcome.diagnostics,
+            );
+            // 被截断而且没产出：这一步什么都没做成，状态和返回值必须一起说失败。
+            // 判定要排在 `finish_agent_run` 之前 —— 那里是运行落终态的唯一地方，
+            // 先按 Finished 收尾再返回 Err 会同时留下一个 done 的步骤、一个
+            // Finished 的运行和一个错误返回值，前端先亮成功再弹错误。
+            let cut_off = outcome.new_diffs == 0 && executor::was_cut_off(&outcome.diagnostics);
+            let failure = cut_off.then(|| {
+                format!(
+                    "This step produced nothing: {}",
+                    outcome.diagnostics.join("\n")
+                )
+            });
+            if let Some(message) = &failure {
+                orch.record_step_status(&step, "error", message);
+            }
             finish_agent_run(
                 &mut orch,
                 &app_handle,
@@ -1380,22 +1400,14 @@ pub async fn run_agent_step(
                 &usage_meter,
                 &llm,
                 claim,
-                RunEnding::Finished,
-            );
-            let (level, summary) = crate::agent::orchestrator::completion_log(
-                "Step",
-                "diff",
-                outcome.new_diffs,
-                &outcome.diagnostics,
+                match &failure {
+                    Some(message) => RunEnding::Failed(message),
+                    None => RunEnding::Finished,
+                },
             );
             orch.emit_review_action_log(&app_handle, level, "plan_run_step", &summary, &response);
-            // 被截断而且没产出：把原因回给前端。这一条只留在日志里是不够的 ——
-            // Chat 面板不渲染 action log，命令返回 Ok 时那里一句解释都不会出现。
-            if outcome.new_diffs == 0 && crate::agent::executor::was_cut_off(&outcome.diagnostics) {
-                return Err(format!(
-                    "This step produced nothing: {}",
-                    outcome.diagnostics.join("\n")
-                ));
+            if let Some(message) = failure {
+                return Err(message);
             }
             Ok("Agent step completed".to_string())
         }

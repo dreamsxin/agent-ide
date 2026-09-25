@@ -1045,7 +1045,23 @@ pub fn was_cut_off(diagnostics: &[String]) -> bool {
     diagnostics.iter().any(|item| item.contains(CUT_OFF_MARKER))
 }
 
-/// 一个没有收尾 ``` 的代码块该怎么跟用户说。
+/// 整段回答里有没有一个开了没关的围栏块。
+///
+/// Plan 模式的产物是 markdown（`sdd` 围栏），`detect_block_start` 不认这种块，
+/// 所以 `parse_diffs_with_diagnostics` 那条截断判断在 Plan 下永远不成立 ——
+/// 被截断的草稿会照样报成功。这里只数围栏行：奇数就说明有一块没收尾。
+pub fn unterminated_fence_diagnostic(response: &str, block_type: &str) -> Option<String> {
+    let fences = response
+        .lines()
+        .filter(|line| line.trim().starts_with("```"))
+        .count();
+    if fences % 2 == 0 {
+        return None;
+    }
+    Some(cut_off_block_diagnostic(block_type, ""))
+}
+
+/// 一个没有收尾围栏的代码块该怎么跟用户说。
 ///
 /// 用我们自己的话先说清"回答被截断了、这块没用上"，再让 serde 那类原话跟在后面：
 /// 原话说的是第几行第几列，用户没法从中知道该调什么。
@@ -2278,6 +2294,16 @@ const value = 2;
             .diagnostics
             .iter()
             .any(|item| item.contains("was cut off")));
+    }
+
+    #[test]
+    fn the_cut_off_wording_is_pinned_for_the_frontend() {
+        // 前端 `runFailure.ts` 按这句话的字面量归类。用 CUT_OFF_MARKER 断言等于让常量
+        // 自证（恒真）：改词之后两边测试全绿，线上却会因为消息里含 "fit the context
+        // window" 被归到 contextLimit，给出"少发上下文"这句相反的建议。所以这里写死字面量。
+        let diagnostic = cut_off_block_diagnostic("agent-changes", "");
+        assert!(diagnostic.contains("ended before the block closed"));
+        assert_eq!(CUT_OFF_MARKER, "ended before the block closed");
     }
 
     #[test]
