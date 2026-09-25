@@ -1070,6 +1070,16 @@ pub struct OutputClamp {
     pub sent: u32,
 }
 
+/// 一次被我们自己抬高的输出上限：原值（没设过就是 `None`）+ 重试用的值。
+///
+/// 不能复用 `OutputClamp`：那个结构的含义是"你要这么多、我们只发了这么少"，命令层那句话
+/// 是有方向的。把一次抬高塞进去，日志会告诉用户我们削了他的上限 —— 比不写更糟。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputRaise {
+    pub from: Option<u32>,
+    pub to: u32,
+}
+
 /// 工具回合里为了装进窗口而削掉的一段历史。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryTrim {
@@ -1243,6 +1253,9 @@ pub struct LlmClient {
     /// 本次运行里按剩余窗口下调过的输出上限。和 `image_drops` 同理：不说出来，用户只会看到
     /// 一次比预期短的回答，而设置里那个数字还写着原值
     output_clamps: Arc<Mutex<Vec<OutputClamp>>>,
+    /// 本次运行里被我们自己抬高的输出上限。和上面几个同一个理由，外加一条：抬高意味着
+    /// 同一个请求被计了两次费，不说出来就是悄悄花钱
+    output_raises: Arc<Mutex<Vec<OutputRaise>>>,
     /// 本次运行里为了装进窗口而丢掉的历史。和上面两个同一个理由：不说出来，
     /// 用户只会看到模型把刚读过的文件又读一遍
     history_trims: Arc<Mutex<Vec<HistoryTrim>>>,
@@ -1279,6 +1292,7 @@ impl LlmClient {
             reasoning_rejected: Arc::new(AtomicBool::new(false)),
             image_drops: Arc::new(Mutex::new(Vec::new())),
             output_clamps: Arc::new(Mutex::new(Vec::new())),
+            output_raises: Arc::new(Mutex::new(Vec::new())),
             history_trims: Arc::new(Mutex::new(Vec::new())),
             request_recorder: None,
         }
@@ -1310,6 +1324,21 @@ impl LlmClient {
     fn record_image_drop(&self, drop: ImageDrop) {
         if let Ok(mut drops) = self.image_drops.lock() {
             drops.push(drop);
+        }
+    }
+
+    /// 本次运行里被抬高过的输出上限。命令层和 CLI 在运行结束时读它。
+    pub fn output_raises(&self) -> Vec<OutputRaise> {
+        self.output_raises
+            .lock()
+            .map(|raises| raises.clone())
+            .unwrap_or_default()
+    }
+
+    /// 记下一次抬高。同 `record_image_drop`：锁中毒不该连带让这次运行失败。
+    fn record_output_raise(&self, raise: OutputRaise) {
+        if let Ok(mut raises) = self.output_raises.lock() {
+            raises.push(raise);
         }
     }
 
@@ -1552,7 +1581,38 @@ impl LlmClient {
         }
 
         // 云端模型流式请求
-        self.stream_chat_cloud(messages, cancel_flag, tx).await
+        //
+        // 推理模型可能把整个输出预算花在思考上：回来的 content 是空的、finish_reason 是
+        // length。以前到这里就结束了，用户拿到一句"去设置里把 Max output 调大"然后自己重发
+        // —— 而我们完全知道该调到多少。这里替他抬一次并重发一次。
+        //
+        // 包在这个位置的三个理由：这是流式和非流式**唯一**的共同入口（`stream_chat_cloud`
+        // 内部才分叉），`self.config` 在这一层可见，而那个空响应出口只在**什么都没发出去**
+        // 时才到达，所以重试不会把已经推给界面的内容再推一遍。
+        let retry_messages = messages.clone();
+        let error = match self
+            .stream_chat_cloud(messages, cancel_flag.clone(), tx.clone())
+            .await
+        {
+            Ok(output) => return Ok(output),
+            Err(error) => error,
+        };
+        let Some(raised) = retry_output_cap(&error, self.config.max_output_tokens) else {
+            return Err(error);
+        };
+        // 先记账后重试：这次抬高意味着同一个请求被计两次费，命令层和 CLI 会把它写进
+        // action log。记录在前，是因为重试本身也可能失败。
+        self.record_output_raise(OutputRaise {
+            from: self.config.max_output_tokens,
+            to: raised,
+        });
+        let mut retried = self.clone();
+        // `config` 是私有字段，所以这件事只能在 impl 内部做；`usage_meter` 是 `Arc`，
+        // 克隆出来的这份记进同一个计量器 —— 两次尝试都会被计费，不用额外记一次。
+        retried.config.max_output_tokens = Some(raised);
+        retried
+            .stream_chat_cloud(retry_messages, cancel_flag, tx)
+            .await
     }
 
     /// 本地模型流式请求
@@ -2542,6 +2602,60 @@ fn finish_reason_is_truncation(finish_reason: Option<&str>) -> bool {
 ///
 /// 单独一个纯函数而不是在两处各拼一遍：流式和非流式是同一个失败，两边措辞不一致的话，用户
 /// 会以为自己碰到的是两个不同的问题。
+/// 这次空回答该不该抬高上限重试，抬到多少 —— 不该重试就返回 `None`。
+///
+/// 纯函数是因为这里最容易出错的三件事（触发条件、翻倍、上界）都只该有一份，而真正的
+/// 请求路径要起 HTTP 服务才能驱动，那一层的判断缺陷会长期没人看见。
+///
+/// 只认"截断 **且** 什么都没说"：`finish_reason=stop` 配空内容是另一回事（见
+/// `empty_response_error` 里那一支），那时抬高上限是指错方向。
+fn retry_output_cap(error: &str, current: Option<u32>) -> Option<u32> {
+    let haystack = error.to_ascii_lowercase();
+    if !haystack.contains("no message content and no tool calls")
+        || !haystack.contains("finish_reason=length")
+    {
+        return None;
+    }
+    match current {
+        // 从来没设过上限：供应商的默认值往往只有几 k，而我们不知道它是多少，
+        // 所以给一个明确的、推理模型够用的值，而不是翻倍一个未知数
+        None => Some(RETRY_OUTPUT_FLOOR),
+        // 上限已经很大还被思考吃光，就不是"配置小了"这类问题了。再翻一倍只是
+        // 第二次付钱买同一个失败。
+        Some(cap) if cap >= RETRY_OUTPUT_CEILING => None,
+        Some(cap) => Some(cap.saturating_mul(2).min(RETRY_OUTPUT_CEILING)),
+    }
+}
+
+/// 没设过上限时重试用的值：推理模型一般 8k 起步。
+const RETRY_OUTPUT_FLOOR: u32 = 8192;
+/// 抬到这里就不再抬：超过这个数还装不下答案，问题不在上限上。
+const RETRY_OUTPUT_CEILING: u32 = 65_536;
+
+/// 把"我们替你抬高了上限并重发了一次"讲给用户听。返回 `None` 表示这次运行没发生过。
+///
+/// 必须说出被计费两次：被截断的那次空回答照样按 completion 计费（见 122），悄悄花掉
+/// 第二笔钱比那次失败本身更糟。
+pub fn output_raise_report(raises: &[OutputRaise]) -> Option<(String, String)> {
+    let raise = raises.last()?;
+    let summary = format!("Raised the output limit to {} and retried once", raise.to);
+    let details = match raise.from {
+        Some(from) => format!(
+            "The model used its whole {from}-token output budget on reasoning and returned nothing, \
+             so this request was sent again with {} — and billed twice. Set Max output to at least \
+             {} on this profile to avoid paying for the first attempt.",
+            raise.to, raise.to
+        ),
+        None => format!(
+            "No output limit was set, so the provider's own default applied and the model used all \
+             of it on reasoning. The request was sent again with {} — and billed twice. Set Max \
+             output explicitly on this profile to avoid paying for the first attempt.",
+            raise.to
+        ),
+    };
+    Some((summary, details))
+}
+
 fn empty_response_error(
     config: &LlmConfig,
     choice_count: usize,
@@ -2982,6 +3096,73 @@ mod image_wire_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 用户报告的那一次的原话：4096 的预算被思考吃光，content 是空的。
+    #[test]
+    fn a_truncated_empty_answer_earns_one_retry_at_double_the_cap() {
+        let error = empty_response_error(
+            &cloud_config("openai", "o3-mini", Some(4096)),
+            1,
+            "choice 0: finish_reason=length, content_chars=0, reasoning_chars=12654, tool_calls=0",
+            Some("length"),
+        );
+        assert_eq!(retry_output_cap(&error, Some(4096)), Some(8192));
+    }
+
+    /// `finish_reason=stop` 配空内容是另一回事：那时抬高上限指错了方向，而重试要真花一笔钱。
+    #[test]
+    fn a_self_stopped_empty_answer_is_not_retried() {
+        let error = empty_response_error(
+            &cloud_config("openai", "gpt-4o", Some(4096)),
+            1,
+            "choice 0: finish_reason=stop, content_chars=0, reasoning_chars=0, tool_calls=0",
+            Some("stop"),
+        );
+        assert_eq!(retry_output_cap(&error, Some(4096)), None);
+    }
+
+    /// 没设过上限：供应商默认值是未知数，给一个明确的值而不是翻倍一个未知数。
+    #[test]
+    fn a_missing_cap_retries_at_an_explicit_floor() {
+        let error = empty_response_error(
+            &cloud_config("openai", "o3-mini", None),
+            1,
+            "choice 0: finish_reason=length, content_chars=0, reasoning_chars=9000, tool_calls=0",
+            Some("length"),
+        );
+        assert_eq!(retry_output_cap(&error, None), Some(RETRY_OUTPUT_FLOOR));
+    }
+
+    /// 上限已经很大还装不下答案就不是"配置小了"，再翻一倍只是第二次付钱买同一个失败。
+    #[test]
+    fn an_already_large_cap_is_not_doubled_again() {
+        let error = empty_response_error(
+            &cloud_config("openai", "o3-mini", Some(RETRY_OUTPUT_CEILING)),
+            1,
+            "choice 0: finish_reason=length, content_chars=0, reasoning_chars=70000, tool_calls=0",
+            Some("length"),
+        );
+        assert_eq!(retry_output_cap(&error, Some(RETRY_OUTPUT_CEILING)), None);
+    }
+
+    /// 抬高必须说出被计费两次：被截断的那次空回答照样按 completion 计费。
+    #[test]
+    fn the_raise_report_says_the_request_was_billed_twice() {
+        let (summary, details) = output_raise_report(&[OutputRaise {
+            from: Some(4096),
+            to: 8192,
+        }])
+        .expect("reported");
+        assert!(summary.contains("8192"), "{}", summary);
+        assert!(details.contains("4096"), "{}", details);
+        assert!(details.contains("billed twice"), "{}", details);
+    }
+
+    /// 没发生过就不该有这句话：一条假的"我们抬高过上限"会让用户去查一笔不存在的账。
+    #[test]
+    fn no_raise_means_no_report() {
+        assert!(output_raise_report(&[]).is_none());
+    }
 
     fn cloud_config(provider: &str, model: &str, max_output_tokens: Option<u32>) -> LlmConfig {
         LlmConfig {

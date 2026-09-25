@@ -934,6 +934,7 @@ fn emit_degradation_log(
         crate::services::llm_client::image_degradation_report(&llm.image_drops()),
         crate::services::llm_client::history_trim_report(&llm.history_trims()),
         crate::services::llm_client::output_clamp_report(&llm.output_clamps()),
+        crate::services::llm_client::output_raise_report(&llm.output_raises()),
         crate::services::llm_client::reasoning_degradation_report(
             llm.reasoning_was_rejected(),
             llm.requested_reasoning_effort(),
