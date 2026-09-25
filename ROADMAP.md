@@ -2330,6 +2330,14 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - The path comes from the backend rather than being assembled in the frontend: a second, subtly different path would point at a directory that is always empty, and the user would conclude the logging never worked.
    - The tooltip says what the file is (same entries, 2 MB rotation, survives closing the window, can be handed to someone else). Failing to fetch it shows nothing rather than an error — a convenience line must not become a fault of its own.
    - Rust 586 unchanged (the command is a one-line wrapper over a tested function), fmt/clippy clean; frontend 337 unchanged, tsc 0.
+194. **Two defects the first real run exposed, that no unit test could (2026-09-25)**
+   The user started `npm run tauri -- dev`; reading `~/.agent-ide/logs/agent-ide.log` (445 lines) was the first evidence from a real session rather than from tests. Both defects are mine, from 185 and 193, and both are the kind that only appear once two writers share one file.
+   - **Every backend-driven entry was recorded twice.** `[info] prompt Agent prompt received` at line 8 and `[ui:info] agent Agent prompt received` at line 18 are **word for word** the same, including the whole context-budget block; the same happened for `pipeline_shape`. Cause: `impl RunEvents for AppHandle` already writes the event, and `useAgentBridge` mirrors that event into the Logs panel, from where 185 wrote it again. Consequence beyond noise: the file grows twice as fast, so the 2 MB rotation discards history twice as early, and a reader has to work out which two lines are one event.
+     Fix: `shouldRecordOnDisk(source)` skips `source === "agent"`. The rule keys on **who produced the entry**, not on whether the text looks similar — content comparison would eventually fold two genuinely different events into one.
+   - **Two timestamp formats in one file.** The backend writes `2026-09-24T12:12:16.287+00:00`; the frontend was passing the entry's display `time`, which is a local clock string with no date (`20:12:16`) — eight hours apart from the lines around it. Sorting the file by time was impossible. My 185 comment said the entry's own timestamp was used "so the file's order matches the panel"; the direction was right but I never checked the format. The disk write now generates `new Date().toISOString()` itself and leaves the panel's human-readable `time` alone.
+   - **What this says about the gates**: five green gates and 337 frontend tests said nothing about either defect, because both live in the interaction between two writers and a file. The smoke loop is not a formality.
+   - Frontend 337 → 339 (39 files, new `useLogStore.test.ts`), tsc 0; Rust 586 unchanged, fmt/clippy clean.
+
 
 
 

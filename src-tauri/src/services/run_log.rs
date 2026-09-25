@@ -97,8 +97,9 @@ pub fn line_for(event: &str, payload: &Value) -> Option<String> {
                 .unwrap_or("system");
             let message = payload.get("message").and_then(Value::as_str).unwrap_or("");
             let details = payload.get("details").and_then(Value::as_str).unwrap_or("");
-            // 时间戳用界面那一条自己的（`time`），不是收到命令的时刻：排查时要对上
-            // 日志面板里看到的顺序。
+            // 时间戳用界面那一条自己带的（`time`，前端按 ISO-8601 UTC 生成，和上面
+            // 后端那几支同一种格式）。真机日志里曾经混进过本地时刻 `20:12:16`：同一个
+            // 文件两种格式、还差一个时区，想按时间排一遍都做不到。
             let timestamp = payload
                 .get("time")
                 .and_then(Value::as_str)
