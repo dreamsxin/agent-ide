@@ -8,6 +8,10 @@
 //! 这里刻意只用启发式、不额外调一次 LLM 去分类：为省调用而先花一次调用是自相
 //! 矛盾的。判错的代价也不对称 —— 误判成 Direct 只是少了几段复核（改动仍然要人工
 //! 审查才落盘），误判成 Full 只是多花钱，所以宁可在拿不准时给 Full。
+//!
+//! Direct 的判据是"正好点名一个文件"。真实运行里踩过反面：
+//! 「帮写一个动态代理隧道方案。」没点名任何文件，却被判成 Direct，
+//! Design/Test/Review 全被跳过，而 planner 随后把它摊成 8 个文件。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskShape {
@@ -65,8 +69,14 @@ pub fn classify(prompt: &str) -> TaskShape {
     {
         return TaskShape::Full;
     }
-    // 提到两个及以上文件名的请求几乎都要协调改动，不适合单阶段
-    if count_file_mentions(trimmed) > 1 {
+    // Direct 的定义就是"改一个点"，所以必须**正好**提到一个文件。
+    //
+    // 这里以前只拦 ">1"，于是一个文件都没提的请求也算 Direct：真实运行里
+    // 「帮写一个动态代理隧道方案。」14 个字、不含任何 broad marker、没有文件名，
+    // 被判成 Direct 跳掉了 Design/Test/Review，planner 随后把它摊成 8 个文件。
+    // 一个文件都没点名，意味着目标根本没被限定住，那是单点改动的反面；
+    // 日志里那句话也正是 "Single-file request"，规则得和它说的一致。
+    if count_file_mentions(trimmed) != 1 {
         return TaskShape::Full;
     }
     TaskShape::Direct
@@ -130,6 +140,18 @@ mod tests {
     fn multi_file_requests_keep_the_full_pipeline() {
         assert_eq!(
             classify("move the parser from a.ts to b.ts"),
+            TaskShape::Full
+        );
+    }
+
+    #[test]
+    fn a_request_naming_no_file_is_not_single_file() {
+        // 真实运行：这一句被判成 Direct，Design/Test/Review 全跳，planner 摊出 8 个文件
+        assert_eq!(classify("帮写一个动态代理隧道方案。"), TaskShape::Full);
+        assert_eq!(classify("build a socks5 tunnel"), TaskShape::Full);
+        // 代价也钉住：没点名文件的小活儿现在也走完整流水线
+        assert_eq!(
+            classify("add a test for the greet function"),
             TaskShape::Full
         );
     }
