@@ -2295,6 +2295,12 @@ Current limitation: diff application still uses textual `find` replacement. It n
    - `OutputRaise` + `output_raise_report` are wired into **both** drains — `commands/agent.rs` (action log) and `cli/mod.rs` (stderr) — because a degradation that only surfaces on one of the two surfaces is how "the desktop says it, the CLI stays silent" defects start.
    - **Step 4 deliberately not done**: `empty_response_error` still advises raising the cap when a *retried* attempt also comes back empty. That advice is accurate for the second attempt (its cap really is the raised one) and the action-log line already says a raise happened, so the wording change is cosmetic; it is recorded here rather than silently dropped.
    - Rust 579 → 585 passed (+1 ignored), fmt/clippy clean; frontend untouched.
+191. **The banner hint had to change the moment the Agent started retrying (2026-09-25)**
+   Last item on 190's whole-picture list, and the reason that list exists: the frontend hint added in 186 said 「去设置里把 Max output 调大（推理模型一般要 8k 以上）再发一次」. After 190 the Agent raises the cap and retries by itself, so that sentence became two kinds of wrong at once — it advises the user to do what already happened, and 8k is now the value we *already* used and that still failed.
+   - The hint now states that a retry happened, that **the request was billed twice**, and points at the run's action log for the numbers; the advice becomes "raise it **further**". The billing sentence matters most: a user who is never told cannot reconcile their invoice, and the action log is the only place with the two caps.
+   - No test change: the hint is looked up by key, and `runFailure.test.ts` asserts the key rather than the wording — which is why a copy change like this costs nothing.
+   - Frontend 334 unchanged (38 files), tsc 0; Rust 585 unchanged.
+
 
 
 
