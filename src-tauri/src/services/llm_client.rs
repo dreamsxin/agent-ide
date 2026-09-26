@@ -2141,6 +2141,33 @@ fn strip_parameter(body: &mut serde_json::Value, parameter: &str) -> bool {
     removed
 }
 
+/// mock provider 的截断剧本：任务里带上这个词，第一次就回一个没收尾的块。
+///
+/// 为什么要在 mock 里演这一出：续写循环（`executor::run_with_output_continuation`）
+/// 只有回答真被截断才会跑，而真实截断取决于供应商的输出上限，进不了 CI。
+/// 这是唯一不依赖网络、也不依赖"恰好被切断"的验证路径。
+const MOCK_CUT_OFF_TASK: &str = "cut-off-smoke";
+
+/// 续写指令认定：直接拿 executor 那份常量当针，不另抄一段措辞。
+///
+/// 抄一段"Resume exactly where it"这种片段就又多了一处会漂移的字面量 —— 这个仓库
+/// 已经为同类问题吃过一次亏（见 `executor::CUT_OFF_MARKER` 的注释）。
+fn is_output_continuation_request(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .contains(crate::agent::executor::OUTPUT_CONTINUATION_PROMPT)
+    })
+}
+
+/// 被输出上限切在字符串中间的前半段：`agent-changes` 块没有收尾的围栏
+const MOCK_CUT_OFF_HEAD: &str = "```agent-changes\n{\n  \"version\": 1,\n  \"changes\": [\n    \
+     {\n      \"type\": \"create\",\n      \"file\": \"resumed.txt\",\n      \
+     \"content\": \"first half";
+
+/// 续写补上的后半段：和前半段拼起来才是一个完整的块
+const MOCK_CUT_OFF_TAIL: &str = " second half\\n\"\n    }\n  ]\n}\n```";
+
 async fn stream_mock_chat(
     messages: Vec<ChatMessage>,
     cancel_flag: Arc<AtomicBool>,
@@ -2206,6 +2233,14 @@ Capture a lightweight design artifact before implementation.
 - The SDD can be saved under docs/design.
 ```"#
                 .to_string()
+        } else if is_output_continuation_request(&messages) {
+            // 第二次：把上一次没收尾的块补完。拼在前半段后面就是一个合法的块。
+            MOCK_CUT_OFF_TAIL.to_string()
+        } else if messages
+            .iter()
+            .any(|message| message.content.contains(MOCK_CUT_OFF_TASK))
+        {
+            MOCK_CUT_OFF_HEAD.to_string()
         } else if user.contains("Repair iteration") {
             mock_diff_response("changed", "fixed")
         } else {

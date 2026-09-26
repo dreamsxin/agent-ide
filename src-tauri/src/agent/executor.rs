@@ -67,7 +67,10 @@ const MAX_OUTPUT_CONTINUATIONS: usize = 2;
 ///
 /// 刻意不让它重新解释或从头再来：重来会把已经写好的块再写一遍，等于花两倍的钱
 /// 拿同一份东西，而且很可能再一次被切在同一个地方。
-const OUTPUT_CONTINUATION_PROMPT: &str =
+///
+/// `pub(crate)`：mock provider 靠认出这句话来演"第二次把块补完"，那是续写循环
+/// 唯一不依赖真实供应商输出上限的验证方式。两边共用一份常量，措辞改了不会漂移。
+pub(crate) const OUTPUT_CONTINUATION_PROMPT: &str =
     "Your previous answer was cut off by the output limit mid-block. Resume exactly where it \
      stopped — no apology, no recap, do not repeat any block you already finished. If the cut \
      happened inside an `agent-changes` block, continue that JSON from the exact character it \
@@ -2375,6 +2378,44 @@ const value = 2;
             .diagnostics
             .iter()
             .any(|item| item.contains("was cut off")));
+    }
+
+    /// 续写循环端到端跑一遍：第一次回答被切在字符串中间，第二次把块补完。
+    ///
+    /// 这条补上的正是之前两次只能写"没有单测"的那个缺口。走的是真的
+    /// `LlmClient`（mock 端点），所以覆盖的是整条路：截断判定 → 追加续写消息 →
+    /// 拼接 → 解析出 diff。剧本在 `llm_client` 的 mock provider 里。
+    #[test]
+    fn a_cut_off_answer_is_resumed_until_the_block_closes() {
+        let mut config = crate::services::llm_client::LlmConfig::openai(
+            "test-key".to_string(),
+            "mock-model".to_string(),
+        );
+        config.endpoint = "mock://cut-off".to_string();
+        let llm = crate::services::llm_client::LlmClient::new(config);
+        // rx 要活到请求结束：mock 流会往里发 token
+        let (tx, _rx) = mpsc::channel::<String>(16);
+        let outcome = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(execute_step(
+                &llm,
+                "cut-off-smoke",
+                "",
+                None,
+                Arc::new(AtomicBool::new(false)),
+                tx,
+            ))
+            .expect("续写之后这一步应当成功");
+
+        assert_eq!(outcome.output_continuations, 1, "应当续写了一次");
+        let parsed = parse_diffs_with_diagnostics(&outcome.text);
+        assert_eq!(parsed.diffs.len(), 1, "补完的块应当解析出一个 diff");
+        assert_eq!(parsed.diffs[0].file, "resumed.txt");
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "块已经闭合，不该再报截断：{:?}",
+            parsed.diagnostics
+        );
     }
 
     #[test]
