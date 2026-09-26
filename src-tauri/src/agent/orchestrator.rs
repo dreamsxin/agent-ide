@@ -4291,7 +4291,8 @@ mod tests {
         let ok = make_diff("ok.ts", "const value = 1;", "const value = 2;");
         let fail = make_diff("fail.ts", "const missing = 1;", "const missing = 2;");
         let mut orchestrator = AgentOrchestrator::new();
-        orchestrator.diffs = vec![ok.clone(), fail.clone()];
+        orchestrator.diffs = vec![ok, fail];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
 
         let err = orchestrator.apply_diffs_to_fs().unwrap_err();
 
@@ -4319,6 +4320,7 @@ mod tests {
         let mut orchestrator = AgentOrchestrator::new();
         orchestrator.allow_file_create = false;
         orchestrator.diffs = vec![edit, create];
+        crate::agent::diff_apply::stamp_base_hashes(&mut orchestrator.diffs);
 
         let (applied, blocked) = orchestrator.apply_diffs_to_fs().unwrap();
 

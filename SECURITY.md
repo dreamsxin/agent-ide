@@ -461,7 +461,8 @@ Safety mechanisms during diff application:
 - Ambiguous original matches (hunk text appears more than once) are rejected — the file is not modified.
 - New-file hunks that would overwrite an existing file are rejected.
 - Mixed new-file and edit hunks in the same diff are rejected.
-- Optional `baseHash` validation rejects stale edit diffs if the file content hash no longer matches the hash recorded when the diff was generated.
+- `baseHash` validation rejects stale edit diffs if the file content hash no longer matches the hash recorded when the diff was generated. An edit diff carrying **no** hash at all is rejected too: every diff-producing path stamps one, so a missing hash means the target could not be read at generation time — there is no basis for judging whether it changed since.
+- Whitespace-insensitive hunk matching is the last resort, fires only when exactly one window matches, and takes its indentation from the file rather than from the model's quote.
 - Partial-apply failures are reported structurally: `ApplyDiffsResult { applied, failed }` — each failed diff includes the diff ID, file path, and error message. The failed file content is not modified.
 - Failed hunks within a multi-hunk diff prevent the entire file from being written (atomic per file).
 

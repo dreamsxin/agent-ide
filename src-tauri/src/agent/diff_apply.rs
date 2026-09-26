@@ -113,7 +113,18 @@ fn validate_base_hash(
     file_path: &std::path::Path,
 ) -> Result<(), String> {
     let Some(expected) = diff.base_hash.as_deref() else {
-        return Ok(());
+        // 走到这里说明：这是一次编辑（新建在上面就返回了）、文件确实在磁盘上，
+        // 却没有生成时的指纹 —— 没有任何依据判断这期间文件变过没有。
+        //
+        // 每条产出 diff 的路径都会 `stamp_base_hashes`，所以正常不会出现；真会出现的是
+        // "生成时目标不存在或读不出来、apply 时却存在了"，而那恰恰是最该拦的一种：
+        // 锚点匹配挡不住它，2026-09-26 加的按缩进容错还让匹配比以前更松。
+        return Err(format!(
+            "No baseHash recorded for {}: the file could not be read when this diff was \
+             generated, so there is no way to tell whether it changed since. Ask the Agent to \
+             regenerate the change against the current file.",
+            file_path.display()
+        ));
     };
     let actual = content_hash(content);
     if actual == expected {
@@ -977,12 +988,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 给测试里的 diff 补上生成时的指纹。
+    ///
+    /// 生产里每条产出 diff 的路径都会 `stamp_base_hashes`，所以"没有指纹"在生产中
+    /// 只会出现在异常情况（生成时读不到文件），apply 现在直接拒绝。测试的夹具得和
+    /// 生产形状一致，否则测的是一条真实运行里不存在的路径。
+    fn stamped(mut diff: FileDiff, on_disk: &str) -> FileDiff {
+        diff.base_hash = Some(content_hash(on_disk));
+        diff
+    }
+
     #[test]
     fn apply_diff_to_path_updates_existing_file() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const value = 1;\nconsole.log(value);\n").unwrap();
-        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        let before = "const value = 1;\nconsole.log(value);\n";
+        std::fs::write(&path, before).unwrap();
+        let diff = stamped(
+            make_diff("edit.ts", "const value = 1;", "const value = 2;"),
+            before,
+        );
 
         let written = apply_diff_to_path(&path, &diff).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -993,12 +1018,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 没有生成时指纹的编辑必须被拒绝，而不是只靠锚点匹配硬写。
+    ///
+    /// 会走到这里的是"生成时目标读不出来、apply 时却在磁盘上"：那期间文件被谁建出来了，
+    /// 而 diff 是照着不存在的文件想出来的。按缩进容错之后锚点匹配更松，更需要这道拦。
+    #[test]
+    fn apply_diff_to_path_refuses_an_edit_without_a_base_hash() {
+        let dir = temp_dir();
+        let path = dir.join("edit.ts");
+        std::fs::write(&path, "const value = 1;\n").unwrap();
+        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        assert!(diff.base_hash.is_none());
+
+        let err = apply_diff_to_path(&path, &diff).unwrap_err();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(err.contains("No baseHash recorded"), "{}", err);
+        assert_eq!(content, "const value = 1;\n", "拒绝的时候不能动文件");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn apply_diff_to_path_reports_missing_original() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const value = 1;\n").unwrap();
-        let diff = make_diff("edit.ts", "const value = 9;", "const value = 2;");
+        let before = "const value = 1;\n";
+        std::fs::write(&path, before).unwrap();
+        let diff = stamped(
+            make_diff("edit.ts", "const value = 9;", "const value = 2;"),
+            before,
+        );
 
         let err = apply_diff_to_path(&path, &diff).unwrap_err();
 
@@ -1013,8 +1062,14 @@ mod tests {
         env.write_file("src/ok.ts", "const value = 1;\n");
         env.write_file("src/fail.ts", "const other = 1;\n");
 
-        let ok_diff = make_diff("src/ok.ts", "const value = 1;", "const value = 2;");
-        let fail_diff = make_diff("src/fail.ts", "const missing = 1;", "const value = 2;");
+        let ok_diff = stamped(
+            make_diff("src/ok.ts", "const value = 1;", "const value = 2;"),
+            "const value = 1;\n",
+        );
+        let fail_diff = stamped(
+            make_diff("src/fail.ts", "const missing = 1;", "const value = 2;"),
+            "const other = 1;\n",
+        );
 
         let result = apply_pending_diffs(&[ok_diff.clone(), fail_diff.clone()]);
 
@@ -1039,8 +1094,12 @@ mod tests {
     fn apply_diff_to_path_rejects_ambiguous_original_without_writing() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const value = 1;\nconst value = 1;\n").unwrap();
-        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        let before = "const value = 1;\nconst value = 1;\n";
+        std::fs::write(&path, before).unwrap();
+        let diff = stamped(
+            make_diff("edit.ts", "const value = 1;", "const value = 2;"),
+            before,
+        );
 
         let err = apply_diff_to_path(&path, &diff).unwrap_err();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -1069,8 +1128,12 @@ mod tests {
     fn apply_diff_to_path_keeps_file_unchanged_when_later_hunk_fails() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const first = 1;\nconst second = 1;\n").unwrap();
-        let mut diff = make_diff("edit.ts", "const first = 1;", "const first = 2;");
+        let before = "const first = 1;\nconst second = 1;\n";
+        std::fs::write(&path, before).unwrap();
+        let mut diff = stamped(
+            make_diff("edit.ts", "const first = 1;", "const first = 2;"),
+            before,
+        );
         diff.hunks.push(DiffHunk {
             old_start: 2,
             old_lines: 1,
