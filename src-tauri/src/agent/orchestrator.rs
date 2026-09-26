@@ -730,7 +730,8 @@ pub async fn drive_repair(
             cancel.clone(),
             tx,
         )
-        .await?;
+        .await?
+        .text;
 
         let (applied_count, failed_count) = orch
             .lock()

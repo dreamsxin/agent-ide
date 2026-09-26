@@ -1332,7 +1332,9 @@ pub async fn run_agent_step(
     publish_tool_writes(&mut orch, &app_handle, &tool_permissions);
     publish_external_actions(&mut orch, &app_handle, &tool_permissions);
     match response {
-        Ok(response) => {
+        Ok(step_outcome) => {
+            let response = step_outcome.text;
+            let output_continuations = step_outcome.output_continuations;
             // 业务逻辑在 orchestrator 里，这里只做加锁 + 事件 + action log
             let outcome = orch.record_step_success(
                 &step,
@@ -1405,7 +1407,23 @@ pub async fn run_agent_step(
                     None => RunEnding::Finished,
                 },
             );
-            orch.emit_review_action_log(&app_handle, level, "plan_run_step", &summary, &response);
+            // 续写过就必须写进详情：那是实打实多发出去的、单独计费的请求
+            let step_details = if output_continuations > 0 {
+                format!(
+                    "The answer was cut off by the output limit and resumed {} time(s); \
+                     each resume was a separately billed request.\n\n{}",
+                    output_continuations, response
+                )
+            } else {
+                response.clone()
+            };
+            orch.emit_review_action_log(
+                &app_handle,
+                level,
+                "plan_run_step",
+                &summary,
+                &step_details,
+            );
             if let Some(message) = failure {
                 return Err(message);
             }

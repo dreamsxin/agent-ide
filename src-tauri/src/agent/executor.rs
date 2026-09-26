@@ -329,6 +329,61 @@ file content here
 
 Respond now with the implementation."#;
 
+/// 跑一次模型，并在回答被输出预算切断时续写补完。
+///
+/// 输出预算用光时回答会被当场切断，没有任何提示。这里不重试、也不调大上限
+/// （被窗口夹住时调大没用，见 `llm_client::window_limited_output_tokens`），
+/// 而是把已经写出来的部分留在对话里，另起一条"接着写"的消息续上去：续写的文本
+/// 直接拼在后面，第一次没闭合的块因此能被补完。
+///
+/// 代价要说清楚：每次续写都要把整段上下文连同这半截回答再发一遍，所以既多花钱、
+/// 又让剩余的输出空间更小。因此上限很低，而且续不出东西就立刻停。
+async fn run_with_output_continuation(
+    llm: &LlmClient,
+    messages: Vec<ChatMessage>,
+    invoker: Option<&dyn ToolInvoker>,
+    cancel_flag: Arc<AtomicBool>,
+    tx: mpsc::Sender<String>,
+) -> Result<StageOutcome, String> {
+    let mut outcome = stream_with_tool_loop(
+        llm,
+        messages.clone(),
+        invoker,
+        cancel_flag.clone(),
+        tx.clone(),
+        MAX_TOOL_ITERATIONS,
+    )
+    .await?;
+
+    let mut continuations = 0;
+    while continuations < MAX_OUTPUT_CONTINUATIONS
+        && unterminated_fence_diagnostic(&outcome.text, "agent-changes").is_some()
+    {
+        continuations += 1;
+        let mut resumed = messages.clone();
+        resumed.push(ChatMessage::assistant(outcome.text.clone()));
+        resumed.push(ChatMessage::user(OUTPUT_CONTINUATION_PROMPT.to_string()));
+        let next = stream_with_tool_loop(
+            llm,
+            resumed,
+            invoker,
+            cancel_flag.clone(),
+            tx.clone(),
+            MAX_TOOL_ITERATIONS,
+        )
+        .await?;
+        if next.text.trim().is_empty() {
+            break;
+        }
+        outcome.text.push_str(&next.text);
+        outcome.transcript.extend(next.transcript);
+        outcome.tool_rounds += next.tool_rounds;
+        outcome.hit_round_cap |= next.hit_round_cap;
+    }
+    outcome.output_continuations = continuations;
+    Ok(outcome)
+}
+
 /// 执行单个步骤：调用 LLM 生成代码变更
 pub async fn execute_step(
     llm: &LlmClient,
@@ -337,7 +392,7 @@ pub async fn execute_step(
     invoker: Option<&dyn ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
-) -> Result<String, String> {
+) -> Result<StageOutcome, String> {
     let messages = vec![
         ChatMessage::system(EXECUTOR_PROMPT),
         ChatMessage::user(format!(
@@ -346,9 +401,9 @@ pub async fn execute_step(
         )),
     ];
 
-    stream_with_tool_loop(llm, messages, invoker, cancel_flag, tx, MAX_TOOL_ITERATIONS)
-        .await
-        .map(|outcome| outcome.text)
+    // 单步、修复循环和 CLI 都走这里，所以续写不是 stage 专属的能力：
+    // 被切断的回答在哪条路径上都同样会把改动全丢掉。
+    run_with_output_continuation(llm, messages, invoker, cancel_flag, tx).await
 }
 
 /// 跑一个只读子 Agent，返回它最后那段文字、用掉的轮数，以及是不是撞了轮数上限。
@@ -783,50 +838,7 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
         "Prior stage work is in the messages above, including the actual tool results rather than a retelling of them. Run this stage now."
     }));
 
-    let mut outcome = stream_with_tool_loop(
-        llm,
-        messages.clone(),
-        invoker,
-        cancel_flag.clone(),
-        tx.clone(),
-        MAX_TOOL_ITERATIONS,
-    )
-    .await?;
-
-    // 输出预算用光时回答会被当场切断，没有任何提示。这里不重试、也不调大上限
-    // （被窗口夹住时调大没用，见 `llm_client::window_limited_output_tokens`），
-    // 而是把已经写出来的部分留在对话里，另起一条"接着写"的消息续上去：续写的文本
-    // 直接拼在后面，第一次没闭合的 JSON 块因此能被补完。
-    //
-    // 代价要说清楚：每次续写都要把整段上下文连同这半截回答再发一遍，所以既多花钱、
-    // 又让剩余的输出空间更小。因此上限很低，而且续不出东西就立刻停。
-    let mut continuations = 0;
-    while continuations < MAX_OUTPUT_CONTINUATIONS
-        && unterminated_fence_diagnostic(&outcome.text, "agent-changes").is_some()
-    {
-        continuations += 1;
-        let mut resumed = messages.clone();
-        resumed.push(ChatMessage::assistant(outcome.text.clone()));
-        resumed.push(ChatMessage::user(OUTPUT_CONTINUATION_PROMPT.to_string()));
-        let next = stream_with_tool_loop(
-            llm,
-            resumed,
-            invoker,
-            cancel_flag.clone(),
-            tx.clone(),
-            MAX_TOOL_ITERATIONS,
-        )
-        .await?;
-        if next.text.trim().is_empty() {
-            break;
-        }
-        outcome.text.push_str(&next.text);
-        outcome.transcript.extend(next.transcript);
-        outcome.tool_rounds += next.tool_rounds;
-        outcome.hit_round_cap |= next.hit_round_cap;
-    }
-    outcome.output_continuations = continuations;
-    Ok(outcome)
+    run_with_output_continuation(llm, messages, invoker, cancel_flag, tx).await
 }
 
 /// 从 LLM 响应中解析 diff 块
