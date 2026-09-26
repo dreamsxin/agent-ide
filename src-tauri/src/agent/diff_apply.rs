@@ -387,7 +387,115 @@ fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, S
         return Ok(result);
     }
 
+    // 最后一招：逐行忽略缩进定位。模型经常把引用的那段重新缩进（或文件本身的缩进变了），
+    // 这时逐字节、整体 trim、CRLF 折叠全都对不上 —— 和 CRLF 那次一样，模型引用得没错、
+    // 锚点也没错，卡住的是用户根本看不见的空白。
+    //
+    // 只在**唯一命中**时替换；命中多处仍然按"匹配到多处"拒绝，否则一个孤零零的 `}`
+    // 就能被挪到任意位置。替换文本按缩进差平移，块内相对缩进保持不变 —— Python 这类
+    // 空白敏感的语言靠的就是这一点。
+    match replace_unique_ignoring_indentation(text, original, updated) {
+        IndentMatch::Replaced(result) => return Ok(result),
+        IndentMatch::Ambiguous => return Err("Original content matched more than once".to_string()),
+        IndentMatch::NotFound => {}
+    }
+
     Err("Could not find original content".to_string())
+}
+
+/// 忽略缩进的定位结果。"没找到"和"找到多处"必须分开：前者继续往下走，
+/// 后者要立刻拒绝，不能退化成"没找到"再被别的分支瞎猜。
+enum IndentMatch {
+    Replaced(String),
+    Ambiguous,
+    NotFound,
+}
+
+/// 逐行按 `trim()` 定位原文，按缩进差平移替换内容写回。
+fn replace_unique_ignoring_indentation(text: &str, original: &str, updated: &str) -> IndentMatch {
+    let original_lines: Vec<&str> = original
+        .lines()
+        .skip_while(|line| line.trim().is_empty())
+        .collect();
+    let original_lines: Vec<&str> = match original_lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+    {
+        Some(last) => original_lines[..=last].to_vec(),
+        None => return IndentMatch::NotFound,
+    };
+    let text_lines: Vec<&str> = text.lines().collect();
+    if original_lines.is_empty() || text_lines.len() < original_lines.len() {
+        return IndentMatch::NotFound;
+    }
+
+    let matches: Vec<usize> = (0..=text_lines.len() - original_lines.len())
+        .filter(|start| {
+            text_lines[*start..*start + original_lines.len()]
+                .iter()
+                .zip(original_lines.iter())
+                .all(|(line, expected)| line.trim() == expected.trim())
+        })
+        .collect();
+    let start = match matches.as_slice() {
+        [only] => *only,
+        [] => return IndentMatch::NotFound,
+        _ => return IndentMatch::Ambiguous,
+    };
+
+    // 缩进按位置从**文件**那一段逐行取，不做"缩进差平移"。平移只在两边缩进步长一致时
+    // 才成立，而"模型用 2 空格、文件用 4 空格"是常见组合，平移会写出 6 空格这种两边都
+    // 没有的缩进。沿用文件的缩进，等于"只改内容、不动这一段的排版"。
+    let window = &text_lines[start..start + original_lines.len()];
+    let file_indents: Vec<&str> = window.iter().map(|line| leading_whitespace(line)).collect();
+    let original_indents: Vec<&str> = original_lines
+        .iter()
+        .map(|line| leading_whitespace(line))
+        .collect();
+    let mut rebuilt: Vec<String> = text_lines[..start]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect();
+    for (index, line) in updated.lines().enumerate() {
+        if line.trim().is_empty() {
+            rebuilt.push(line.to_string());
+            continue;
+        }
+        let indent = match file_indents.get(index) {
+            Some(file_indent) => (*file_indent).to_string(),
+            // updated 比 original 长：多出来的行没有对应的文件行，就把模型相对最后一行
+            // 多出来的那截缩进接在文件最后一行的缩进后面
+            None => {
+                let base_model = original_indents.last().copied().unwrap_or("");
+                let base_file = file_indents.last().copied().unwrap_or("");
+                let extra = leading_whitespace(line)
+                    .strip_prefix(base_model)
+                    .unwrap_or("");
+                format!("{}{}", base_file, extra)
+            }
+        };
+        rebuilt.push(format!("{}{}", indent, line.trim_start()));
+    }
+    rebuilt.extend(
+        text_lines[start + original_lines.len()..]
+            .iter()
+            .map(|line| (*line).to_string()),
+    );
+
+    // 按文件原本的行尾写回，别顺手把整个文件的行尾改掉
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut result = rebuilt.join(newline);
+    if text.ends_with('\n') {
+        result.push_str(newline);
+    }
+    IndentMatch::Replaced(result)
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    let end = line
+        .find(|ch: char| !ch.is_whitespace())
+        .unwrap_or(line.len());
+    &line[..end]
 }
 
 /// 忽略 CRLF/LF 差异定位原文，并保持文件原有行尾写回替换内容
@@ -786,6 +894,52 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&self.config_dir);
         }
+    }
+
+    #[test]
+    fn a_reindented_quote_still_applies_and_keeps_the_files_indentation() {
+        // 模型把引用的那段重新缩进（4 空格 → 2 空格）。以前逐字节、整体 trim、CRLF
+        // 三条路都对不上，一次本该成功的应用报成 "Could not find original content"。
+        let text = "class A:\n    def run(self):\n        return 1\n";
+        let original = "  def run(self):\n    return 1";
+        let updated = "  def run(self):\n    return 2";
+
+        let result = replace_unique(text, original, updated).expect("按缩进差平移后应当命中");
+
+        assert_eq!(result, "class A:\n    def run(self):\n        return 2\n");
+    }
+
+    #[test]
+    fn a_reindented_quote_matching_twice_is_refused() {
+        // 两处 trim 后一模一样：这时候挪哪一处都是猜，必须拒绝
+        let text = "if a:\n    return None\nif b:\n        return None\n";
+        let original = "return None";
+
+        let err = replace_unique(text, original, "return 0").unwrap_err();
+
+        assert!(err.contains("matched more than once"));
+    }
+
+    #[test]
+    fn indentation_tolerance_does_not_invent_a_match() {
+        // 原文和目标都不在场仍然是错误：那才是模型引用了不存在的代码
+        let text = "fn main() {\n    println!(\"hi\");\n}\n";
+
+        let err = replace_unique(text, "    let missing = 1;", "    let missing = 2;").unwrap_err();
+
+        assert!(err.contains("Could not find original content"));
+    }
+
+    #[test]
+    fn indentation_tolerance_keeps_crlf_endings() {
+        let text = "class A:\r\n    def run(self):\r\n        return 1\r\n";
+        let original = "  def run(self):\n    return 1";
+
+        let result =
+            replace_unique(text, original, "  def run(self):\n    return 2").expect("应当命中");
+
+        assert!(result.contains("\r\n"), "文件本来是 CRLF，写回不能改成 LF");
+        assert!(result.contains("        return 2"));
     }
 
     fn make_diff(file: &str, original: &str, updated: &str) -> FileDiff {
