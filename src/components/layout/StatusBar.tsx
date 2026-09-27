@@ -7,6 +7,7 @@ import { useLayoutStore } from "../../stores/useLayoutStore";
 import { useProblemStore, type ProblemSeverity } from "../../stores/useProblemStore";
 import { llmIndicator, llmTargetFingerprint } from "../../stores/llmConnection";
 import { describeRunUsage } from "../../types/agent";
+import { isReviewableDiff } from "../../utils/agentExperience";
 import { formatMicrosUsd } from "../../utils/money";
 import StatusDot from "../shared/StatusDot";
 import { useT } from "../../i18n";
@@ -60,7 +61,16 @@ export default function StatusBar() {
   const leftVisible = useLayoutStore((s) => s.leftVisible);
   const toggleLeftPanel = useLayoutStore((s) => s.toggleLeftPanel);
   const setLeftTab = useLayoutStore((s) => s.setLeftTab);
+  const rightVisible = useLayoutStore((s) => s.rightVisible);
+  const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
+  const setAgentView = useLayoutStore((s) => s.setAgentView);
+  const diffs = useAgentStore((s) => s.diffs);
   const t = useT();
+
+  const pendingReviewCount = useMemo(
+    () => diffs.filter(isReviewableDiff).length,
+    [diffs]
+  );
 
   const counts = useMemo(
     () => ({
@@ -84,6 +94,14 @@ export default function StatusBar() {
   const showSourceControl = () => {
     setLeftTab("git");
     if (!leftVisible) toggleLeftPanel();
+  };
+
+  // 待审改动必须在**面板之外**也看得见。真实事故：一次运行留下 10 个待审改动，
+  // 而唯一说这件事的卡片只活在对话流里（Agent 面板展开 + task 标签），用户在别的
+  // 标签上什么都看不到，关掉应用就以为白跑了一趟。状态栏是唯一一直在视野里的地方。
+  const showPendingChanges = () => {
+    setAgentView("changes");
+    if (!rightVisible) toggleRightPanel();
   };
 
   // 一句话，参数是三个数：英文是 "N error(s), …"，中文是"N 个错误，…"。
@@ -173,6 +191,18 @@ export default function StatusBar() {
           />
           {llm.label}
         </span>
+
+        {pendingReviewCount > 0 && (
+          <button
+            type="button"
+            onClick={showPendingChanges}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-accent-blue hover:bg-surface-hover"
+            title={t("pending.nothingWritten")}
+            aria-label={t("status.pendingReview", { count: pendingReviewCount })}
+          >
+            {t("status.pendingReview", { count: pendingReviewCount })}
+          </button>
+        )}
 
         <StatusDot state={agentState} />
       </div>
