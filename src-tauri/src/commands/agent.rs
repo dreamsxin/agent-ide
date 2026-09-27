@@ -3142,6 +3142,18 @@ pub async fn adopt_restored_diffs(
     Ok(orch.adopt_restored_diffs(diffs, &app_handle))
 }
 
+/// 清掉改动面板里已经没有决定要做的记录，返回清掉了几条。
+///
+/// 前后端要一起清：只清前端那份，重启之后 `adopt_restored_diffs` 会把它们又交回来。
+#[tauri::command]
+pub async fn forget_settled_diffs(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<usize, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    Ok(orch.forget_settled_diffs(&app_handle))
+}
+
 /// 读回撤不回的外部动作。
 ///
 /// 和 `get_agent_diffs` 同一个位置：前端刷新后还能把"这次运行动了外面什么"拿回来，

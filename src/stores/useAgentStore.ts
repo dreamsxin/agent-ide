@@ -199,6 +199,8 @@ interface AgentStore {
   setGhostSuggestions: (suggestions: GhostSuggestion[]) => void;
   dismissGhostSuggestion: (id: string) => void;
   restoreDiffs: (workspacePath?: string) => Promise<void>;
+  /** 清掉已经没有决定要做的记录（applied / rejected / reverted / stale），待审的一条不动 */
+  forgetSettledDiffs: () => Promise<void>;
   /** 从后端读回撤不回的外部动作（`get_agent_external_actions`）。 */
   refreshExternalActions: () => Promise<void>;
   /** 忘掉更早会话留下的外部动作记录；这一次会话的不受影响。 */
@@ -645,6 +647,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       console.warn("[AgentStore] restoreDiffs failed:", err);
       // 交回失败时也不能留着一排点不动的按钮
       set({ diffs: markOrphanedDiffsStale(persisted) });
+    }
+  },
+  forgetSettledDiffs: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      // 后端也要清：只清前端那份的话，重启之后 `adopt_restored_diffs` 会把它们又交回来。
+      // 清完重新读一遍，界面上剩什么由后端那份唯一的记录说了算。
+      await invoke<number>("forget_settled_diffs");
+      const refreshed = await invoke<DiffEntry[]>("get_agent_diffs");
+      set({ diffs: refreshed });
+      persistDiffs(refreshed);
+    } catch (err: unknown) {
+      // 清不掉要说出来：静默失败会让用户以为记录没了，而它还在
+      set({ error: `Could not clear the settled change records: ${String(err)}` });
     }
   },
   refreshExternalActions: async () => {

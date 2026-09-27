@@ -2627,6 +2627,64 @@ impl AgentOrchestrator {
         adopted
     }
 
+    /// 清掉已经没有决定要做的记录，返回清掉了几条。
+    ///
+    /// 改动列表原本只增不减：`applied` / `rejected` / `reverted` / `stale` 一条都删不掉，
+    /// 「新任务」也不清它（`startNewSession` 重置 steps 和对话，`diffs` 不在其中），于是
+    /// 前端那份持久化撞到 200 条上限后开始静默丢最老的。
+    ///
+    /// 两条边界：
+    /// - **待审的一律不动**（`pending` / `partial` / `failed`）。一个"清空"顺手把等你
+    ///   决定的改动抹掉，等于替用户做了决定 —— 那些该走 Reject。
+    /// - **还挂在撤销栈上的 `applied` 不删**。快照虽然在栈里、文件照样能还原，但卡片没了
+    ///   之后状态就回不去 `pending`，界面会说"什么都没撤销"而磁盘其实已经变了。
+    pub fn forget_settled_diffs(&mut self, events: &dyn RunEvents) -> usize {
+        let undoable: std::collections::HashSet<&str> = self
+            .undo_stack
+            .iter()
+            .flat_map(|checkpoint| checkpoint.diff_ids.iter().map(|id| id.as_str()))
+            .collect();
+        let before = self.diffs.len();
+        let mut kept = Vec::with_capacity(before);
+        for diff in std::mem::take(&mut self.diffs) {
+            let settled = matches!(
+                diff.status.as_str(),
+                "applied" | "rejected" | "reverted" | "stale"
+            );
+            if settled && !undoable.contains(diff.id.as_str()) {
+                continue;
+            }
+            kept.push(diff);
+        }
+        let forgotten = before - kept.len();
+        self.diffs = kept;
+        if forgotten == 0 {
+            return 0;
+        }
+        self.refresh_review_state();
+        events.emit_json(
+            "agent-diff-ready",
+            serde_json::to_value(&self.diffs).unwrap_or_default(),
+        );
+        self.emit_action_log(
+            events,
+            "info",
+            "diffs_forgotten",
+            None,
+            None,
+            &format!(
+                "Cleared {} settled change record{}",
+                forgotten,
+                if forgotten == 1 { "" } else { "s" }
+            ),
+            "Changes still waiting for review were kept, and so was anything the undo stack \
+             still refers to.",
+            None,
+            Some(self.summarize_pending_diffs()),
+        );
+        forgotten
+    }
+
     pub fn refresh_review_state(&mut self) {
         if self.active_claim.is_some() {
             return;
@@ -4351,6 +4409,54 @@ mod tests {
     ///
     /// 真实事故：一次跑完的运行留下 10 个待审改动，重启后后端一条不剩，界面上只剩一排
     /// 点不动的记录。内容一直在前端的持久化里，缺的只是这条交回来的通道。
+    /// 清理只清"已经没有决定要做的"，等你决定的一条都不许动。
+    #[test]
+    fn forgetting_settled_records_keeps_everything_still_waiting() {
+        let events = crate::agent::events::RecordingEvents::default();
+        let mut orchestrator = AgentOrchestrator::new();
+        let mut applied = make_diff("done.ts", "old", "new");
+        applied.status = "applied".to_string();
+        let mut rejected = make_diff("no.ts", "old", "new");
+        rejected.status = "rejected".to_string();
+        let mut stale = make_diff("old-session.ts", "old", "new");
+        stale.status = "stale".to_string();
+        let waiting = make_diff("waiting.ts", "old", "new");
+        let waiting_id = waiting.id.clone();
+        orchestrator.diffs = vec![applied, rejected, stale, waiting];
+
+        let forgotten = orchestrator.forget_settled_diffs(&events);
+
+        assert_eq!(forgotten, 3);
+        assert_eq!(orchestrator.diffs.len(), 1);
+        assert_eq!(orchestrator.diffs[0].id, waiting_id);
+    }
+
+    /// 还能撤销的 `applied` 不能清：卡片没了之后状态回不去 `pending`，
+    /// 界面会说"什么都没撤销"，而磁盘其实已经变了。
+    #[test]
+    fn a_record_the_undo_stack_still_needs_is_kept() {
+        let events = crate::agent::events::RecordingEvents::default();
+        let mut orchestrator = AgentOrchestrator::new();
+        let mut applied = make_diff("done.ts", "old", "new");
+        applied.status = "applied".to_string();
+        let applied_id = applied.id.clone();
+        orchestrator.diffs = vec![applied];
+        orchestrator.push_undo_checkpoint(
+            "Apply",
+            vec![crate::agent::diff_apply::FileSnapshot {
+                file: "done.ts".to_string(),
+                path: std::path::PathBuf::from("done.ts"),
+                previous: Some("old".to_string()),
+                move_back_to: None,
+            }],
+            vec![applied_id.clone()],
+            None,
+        );
+
+        assert_eq!(orchestrator.forget_settled_diffs(&events), 0);
+        assert_eq!(orchestrator.diffs.len(), 1);
+    }
+
     #[test]
     fn restored_changes_come_back_as_applicable_without_a_fresh_stamp() {
         let events = crate::agent::events::RecordingEvents::default();

@@ -409,6 +409,9 @@ export const EN = {
   "diff.stale.hint":
     "The backend no longer holds this change, so it cannot be applied — it is kept here as a record of what the Agent proposed. Ask for it again to get a fresh change.",
   "diff.empty": "No pending changes",
+  "diff.clearSettled": "Clear {count} settled",
+  "diff.clearSettled.title":
+    "Removes records that have nothing left to decide — applied, rejected, reverted or from an earlier session. Changes still waiting for review are kept, and so is anything Undo Apply still needs.",
   "diff.empty.hint": "Code changes suggested by the Agent will appear here.",
 
   "explorer.title": "Explorer",
@@ -1306,6 +1309,9 @@ export const ZH: Record<MessageKey, string> = {
   "diff.stale.hint":
     "后端手上已经没有这条改动了，应用不了 —— 它留在这里只是一份记录：Agent 当时提过什么。想要的话重新让 Agent 生成一次。",
   "diff.empty": "没有待审查的改动",
+  "diff.clearSettled": "清掉 {count} 条已完结",
+  "diff.clearSettled.title":
+    "清掉已经没有决定要做的记录 —— 已应用、已拒绝、已撤销，以及上一次会话留下的。等你审查的改动一条不动，Undo Apply 还需要的那些也会留着。",
   "diff.empty.hint": "Agent 提的代码改动会出现在这里。",
 
   "explorer.title": "文件树",

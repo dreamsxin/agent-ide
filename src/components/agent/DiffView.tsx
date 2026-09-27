@@ -253,6 +253,7 @@ export default function DiffView() {
   const applyDiff = useAgentStore((s) => s.applyDiff);
   const applyDiffHunk = useAgentStore((s) => s.applyDiffHunk);
   const rejectAllDiffs = useAgentStore((s) => s.rejectAllDiffs);
+  const forgetSettledDiffs = useAgentStore((s) => s.forgetSettledDiffs);
   const undoLastApply = useAgentStore((s) => s.undoLastApply);
   const pendingUndo = useAgentStore((s) => s.pendingUndo);
   const error = useAgentStore((s) => s.error);
@@ -269,6 +270,9 @@ export default function DiffView() {
   // 文件，只数 pending 会少报。
   const pendingDiffs = diffs.filter(isReviewableDiff);
   const hasPending = pendingDiffs.length > 0;
+  // 已经没有决定要做的那些。它们原本一条都删不掉，列表只增不减，
+  // 前端持久化撞到 200 条上限后开始静默丢最老的。
+  const settledCount = diffs.length - pendingDiffs.length;
   const failedMessages = new Map(
     (lastApplyResult?.failed ?? []).map((item) => [item.diffId, item.message])
   );
@@ -432,6 +436,16 @@ export default function DiffView() {
             ))}
           </div>
         </div>
+      )}
+
+      {settledCount > 0 && (
+        <button
+          onClick={() => void forgetSettledDiffs()}
+          className="flex-shrink-0 rounded border border-surface-border px-2 py-1 text-xs text-surface-muted transition-colors hover:bg-surface-hover"
+          title={t("diff.clearSettled.title")}
+        >
+          {t("diff.clearSettled", { count: settledCount })}
+        </button>
       )}
 
       {(hasPending || pendingUndo) && (

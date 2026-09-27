@@ -77,6 +77,7 @@ pub fn run() {
             commands::agent::get_agent_steps,
             commands::agent::get_agent_diffs,
             commands::agent::adopt_restored_diffs,
+            commands::agent::forget_settled_diffs,
             commands::agent::get_agent_external_actions,
             commands::agent::forget_earlier_external_actions,
             commands::agent::get_agent_sdd_artifacts,
