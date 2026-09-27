@@ -1107,7 +1107,29 @@ pub fn parse_diffs_with_diagnostics(response: &str) -> ParsedDiffs {
         i += 1;
     }
 
-    ParsedDiffs { diffs, diagnostics }
+    // 最后过一遍：没指名文件的改动一律不放出去，并说清楚丢掉了什么。
+    //
+    // `parse_agent_changes` 自己校验路径，但旧的 ```diff / ```new 围栏那条路不会 ——
+    // 而 Reviewer 的提示词恰恰只教了那一套。真实运行里因此产出过一条 `file` 为空的 diff：
+    // 空路径解析成工作区根目录，apply 时拿一个目录当文件读，界面上只留一句
+    // "File not found: D:\work\test"。宁可这里少给一条，也不要放出一条没人能应用、
+    // 报错还指向别处的记录。
+    let mut named = Vec::with_capacity(diffs.len());
+    for diff in diffs {
+        if is_valid_relative_file_path(diff.file.trim()) {
+            named.push(diff);
+        } else {
+            diagnostics.push(format!(
+                "A change was dropped because it did not name a valid file inside the workspace: {:?}",
+                diff.file
+            ));
+        }
+    }
+
+    ParsedDiffs {
+        diffs: named,
+        diagnostics,
+    }
 }
 
 /// 截断诊断里固定出现的这段话。
@@ -2414,6 +2436,27 @@ const value = 2;
         assert!(
             parsed.diagnostics.is_empty(),
             "块已经闭合，不该再报截断：{:?}",
+            parsed.diagnostics
+        );
+    }
+
+    /// 没指名文件的改动不能变成 diff。
+    ///
+    /// 真实事故：Review 阶段产出过这样一条，空路径解析成工作区根目录，apply 时
+    /// 报 "File not found: D:\work\test" —— 把"改动没写文件名"说成了"文件不存在"。
+    #[test]
+    fn a_change_without_a_file_name_is_dropped_with_a_reason() {
+        let response = "```diff\n<<<<<<< ORIGINAL\nold\n=======\nnew\n>>>>>>> UPDATED\n```";
+
+        let parsed = parse_diffs_with_diagnostics(response);
+
+        assert!(parsed.diffs.is_empty(), "{:?}", parsed.diffs);
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|item| item.contains("did not name a valid file")),
+            "{:?}",
             parsed.diagnostics
         );
     }

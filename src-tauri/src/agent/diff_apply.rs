@@ -230,6 +230,21 @@ pub fn apply_pending_diffs_with_snapshots(
             continue;
         }
 
+        // 没指名文件的改动必须在解析路径**之前**拦掉。空路径解析出来就是工作区根目录，
+        // 于是后面拿一个目录当文件读，报出来的是 "File not found: D:\work\test" ——
+        // 方向完全反了，用户看不出问题是"这条改动没写文件名"。真实运行里 Review 阶段
+        // 产出过这种 diff，恢复之后点 Apply 才暴露出来（9 应用成功、1 失败）。
+        if diff.file.trim().is_empty() {
+            failed.push(ApplyDiffError {
+                diff_id: diff.id.clone(),
+                file: diff.file.clone(),
+                message: "This change does not name a file, so there is nothing to write. \
+                          Ask the Agent to regenerate it with the target path."
+                    .to_string(),
+            });
+            continue;
+        }
+
         // Agent 产出的写入要额外过一遍路径拒绝清单（.git/、凭据文件等）
         let file_path = match workspace::resolve_for_agent_write(&diff.file) {
             Ok(path) => path,
