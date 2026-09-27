@@ -3126,6 +3126,22 @@ pub async fn get_agent_diffs(
     Ok(orch.diffs.clone())
 }
 
+/// 把前端从 localStorage 恢复出来的待审改动交回后端，让它们重新可以应用。
+///
+/// 为什么需要它：后端的 diff 只在内存里，重启后 `get_agent_diffs` 必然是空的，而前端
+/// 手里有整份内容。没有这条通道时，一次跑完的运行在重启后只剩一排点不动的记录（10 个
+/// 文件、9 万多 token 的产出就这样没了）。收回来之后它们仍然要过 apply 的每一道检查 ——
+/// 工作区路径、`baseHash`、多处匹配、新建覆盖 —— 所以这不是一条绕过校验的近路。
+#[tauri::command]
+pub async fn adopt_restored_diffs(
+    diffs: Vec<FileDiff>,
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentGlobalState>,
+) -> Result<usize, String> {
+    let mut orch = agent_state.orchestrator.lock().await;
+    Ok(orch.adopt_restored_diffs(diffs, &app_handle))
+}
+
 /// 读回撤不回的外部动作。
 ///
 /// 和 `get_agent_diffs` 同一个位置：前端刷新后还能把"这次运行动了外面什么"拿回来，

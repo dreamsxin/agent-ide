@@ -699,7 +699,44 @@ describe("restoreDiffs", () => {
     expect(useAgentStore.getState().diffs).toEqual([backendDiff]);
   });
 
-  it("retires restored changes the backend no longer knows about", async () => {
+  /**
+   * 真实事故：一次跑完的运行留下 10 个待审改动，重启后后端一条不剩，界面上只剩一排
+   * 点不动的记录，9 万多 token 的产出就这样没了。内容其实一直在 localStorage 里，
+   * 所以要做的是交回后端、重新变成可应用，而不是标成终态。
+   */
+  it("hands the persisted changes back to the backend so they can be applied again", async () => {
+    localStorage.setItem(
+      "agent-ide-agent-diffs",
+      JSON.stringify({
+        workspacePath: "/tmp/ws",
+        diffs: [
+          { id: "diff-1", file: "tunnel/server.py", status: "stale", hunks: [] },
+          { id: "diff-2", file: "tunnel/client.py", status: "pending", hunks: [] },
+          { id: "diff-3", file: "done.ts", status: "applied", hunks: [] },
+        ],
+      })
+    );
+    invokeMock
+      .mockResolvedValueOnce([]) // get_agent_diffs：重启后后端是空的
+      .mockResolvedValueOnce(2) // adopt_restored_diffs：收下两条
+      .mockResolvedValueOnce([
+        { id: "diff-1", file: "tunnel/server.py", status: "pending", hunks: [] },
+        { id: "diff-2", file: "tunnel/client.py", status: "pending", hunks: [] },
+      ]);
+
+    await useAgentStore.getState().restoreDiffs("/tmp/ws");
+
+    const adoptCall = invokeMock.mock.calls.find((call) => call[0] === "adopt_restored_diffs");
+    expect(adoptCall).toBeDefined();
+    // 已经有结果的那条是历史，不能交回去请用户"重新应用"
+    expect(adoptCall?.[1]?.diffs.map((diff: { id: string }) => diff.id)).toEqual([
+      "diff-1",
+      "diff-2",
+    ]);
+    expect(useAgentStore.getState().diffs.every((diff) => diff.status === "pending")).toBe(true);
+  });
+
+  it("retires restored changes only when the backend will not take them", async () => {
     localStorage.setItem(
       "agent-ide-agent-diffs",
       JSON.stringify({
@@ -707,7 +744,9 @@ describe("restoreDiffs", () => {
         diffs: [{ id: "diff-1", file: "smoke.txt", status: "pending", hunks: [] }],
       })
     );
-    invokeMock.mockResolvedValueOnce([]);
+    invokeMock
+      .mockResolvedValueOnce([]) // 后端没有
+      .mockResolvedValueOnce(0); // 一条也没收下
 
     await useAgentStore.getState().restoreDiffs("/tmp/ws");
 

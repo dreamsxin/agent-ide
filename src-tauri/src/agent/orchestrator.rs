@@ -2561,6 +2561,72 @@ impl AgentOrchestrator {
     ///
     /// 失败也不被改写：一次报错的运行处理完剩下的 diff 之后不该显示成"已完成"，
     /// 那和状态机里「Error 压过一切」是同一条规则。
+    /// 把前端恢复出来的待审改动收回后端，返回真正收下的条数。
+    ///
+    /// 后端的 diff 只活在内存里，重启后一条不剩；而前端把整份内容（hunks、`baseHash`、
+    /// provenance）都写进了 localStorage。一次跑完的运行因此在重启后变成一排点不动的记录 ——
+    /// 内容明明还在，只是后端不认识它们了。这个方法就是那条交回来的通道。
+    ///
+    /// 三条不变量：
+    /// - **只收还没有结果的**：`pending` / `partial` / `failed`，外加上一版被降级成
+    ///   `stale` 的那些。`applied` / `rejected` / `reverted` 是历史，收回来等于请用户
+    ///   重新应用已经发生过的事。
+    /// - **不重新盖 `baseHash`**。盖一遍等于记下"文件现在的样子"，关窗期间被改过这件事
+    ///   就再也查不出来了 —— 那道检查会变成永远通过。保留原指纹，配上"没有指纹就拒绝"，
+    ///   期间被改过的文件在 apply 时会带原因拒掉，没动过的正常落盘。这是收回来仍然安全的全部理由。
+    /// - **同 id 不重复收**，否则刷新一次界面就多出一份。
+    ///
+    /// `stale` 本来是前端独有的状态（见 `src/types/agent.ts`）。这里破例认它，是因为
+    /// 2026-09-25 那版已经把它写进了磁盘：不认的话，恰恰是踩过这个坑的人永远救不回来。
+    pub fn adopt_restored_diffs(
+        &mut self,
+        diffs: Vec<crate::agent::state_machine::FileDiff>,
+        events: &dyn RunEvents,
+    ) -> usize {
+        let mut adopted = 0usize;
+        for mut diff in diffs {
+            if !matches!(
+                diff.status.as_str(),
+                "pending" | "partial" | "failed" | "stale"
+            ) {
+                continue;
+            }
+            if self.diffs.iter().any(|existing| existing.id == diff.id) {
+                continue;
+            }
+            if diff.status == "stale" {
+                diff.status = "pending".to_string();
+            }
+            self.diffs.push(diff);
+            adopted += 1;
+        }
+        if adopted == 0 {
+            return 0;
+        }
+        self.refresh_review_state();
+        events.emit_json(
+            "agent-diff-ready",
+            serde_json::to_value(&self.diffs).unwrap_or_default(),
+        );
+        self.emit_action_log(
+            events,
+            "info",
+            "diffs_restored",
+            None,
+            None,
+            &format!(
+                "{} change{} restored from the previous session and ready to review",
+                adopted,
+                if adopted == 1 { "" } else { "s" }
+            ),
+            "Base hashes were kept as recorded, so anything edited while the app was closed \
+             will be refused at apply time instead of overwritten.",
+            None,
+            Some(self.summarize_pending_diffs()),
+        );
+        adopted
+    }
+
     pub fn refresh_review_state(&mut self) {
         if self.active_claim.is_some() {
             return;
@@ -4279,6 +4345,46 @@ mod tests {
 
         assert_eq!(level, "success");
         assert!(summary.contains("0 new diffs"));
+    }
+
+    /// 交回来的改动要能重新应用，而且不能把"关窗期间文件变过"这个信号擦掉。
+    ///
+    /// 真实事故：一次跑完的运行留下 10 个待审改动，重启后后端一条不剩，界面上只剩一排
+    /// 点不动的记录。内容一直在前端的持久化里，缺的只是这条交回来的通道。
+    #[test]
+    fn restored_changes_come_back_as_applicable_without_a_fresh_stamp() {
+        let events = crate::agent::events::RecordingEvents::default();
+        let mut orchestrator = AgentOrchestrator::new();
+        let mut stale = make_diff("tunnel/server.py", "old", "new");
+        stale.status = "stale".to_string();
+        stale.base_hash = Some("recorded-when-generated".to_string());
+        let mut history = make_diff("done.ts", "old", "new");
+        history.status = "applied".to_string();
+
+        let adopted = orchestrator.adopt_restored_diffs(vec![stale, history], &events);
+
+        assert_eq!(adopted, 1, "只收还没有结果的那条");
+        assert_eq!(orchestrator.diffs.len(), 1);
+        assert_eq!(orchestrator.diffs[0].status, "pending", "收回来就要能按");
+        assert_eq!(
+            orchestrator.diffs[0].base_hash.as_deref(),
+            Some("recorded-when-generated"),
+            "重新盖章会让过期检查永远通过，等于把信号擦掉"
+        );
+    }
+
+    #[test]
+    fn adopting_the_same_change_twice_does_not_duplicate_it() {
+        let events = crate::agent::events::RecordingEvents::default();
+        let mut orchestrator = AgentOrchestrator::new();
+        let diff = make_diff("tunnel/client.py", "old", "new");
+
+        assert_eq!(
+            orchestrator.adopt_restored_diffs(vec![diff.clone()], &events),
+            1
+        );
+        assert_eq!(orchestrator.adopt_restored_diffs(vec![diff], &events), 0);
+        assert_eq!(orchestrator.diffs.len(), 1);
     }
 
     #[test]

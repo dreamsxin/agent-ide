@@ -626,9 +626,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         persistDiffs(backend);
         return;
       }
+      // 内容其实一直都在这份持久化里（hunks、baseHash、provenance 全在），缺的只是
+      // 后端不认识它们。所以先交回去让它们重新可应用 —— 只标 stale 等于把能救的东西
+      // 当成救不回来的，那是 2026-09-25 的判断，只对了一半。
+      const adoptable = persisted.filter(isAdoptableDiff);
+      if (adoptable.length > 0) {
+        const adopted = await invoke<number>("adopt_restored_diffs", { diffs: adoptable });
+        if (adopted > 0) {
+          const refreshed = await invoke<DiffEntry[]>("get_agent_diffs");
+          set({ diffs: refreshed });
+          persistDiffs(refreshed);
+          return;
+        }
+      }
+      // 后端一条都没收下（工作区不对、或者全是历史记录）：这才是真的过期了
       set({ diffs: markOrphanedDiffsStale(persisted) });
     } catch (err: unknown) {
-      console.warn("[AgentStore] get_agent_diffs failed:", err);
+      console.warn("[AgentStore] restoreDiffs failed:", err);
+      // 交回失败时也不能留着一排点不动的按钮
+      set({ diffs: markOrphanedDiffsStale(persisted) });
     }
   },
   refreshExternalActions: async () => {
@@ -1919,6 +1935,16 @@ function persistDiffs(diffs: DiffEntry[]) {
     diffs: diffs.slice(-200),
   };
   localStorage.setItem(AGENT_DIFFS_STORAGE_KEY, JSON.stringify(payload));
+}
+
+/**
+ * 能交回后端的待审改动：还没有结果的，加上上一版被降级成 `stale` 的。
+ *
+ * `stale` 必须算在内。2026-09-25 那版已经把这个状态写进了磁盘，不认它的话，
+ * 恰恰是踩过这个坑的人永远救不回自己那批改动。
+ */
+function isAdoptableDiff(diff: DiffEntry): boolean {
+  return isReviewableDiff(diff) || diff.status === "stale";
 }
 
 /**
