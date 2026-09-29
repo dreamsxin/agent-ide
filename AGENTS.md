@@ -62,9 +62,8 @@ npm test
 
 - **`agent/orchestrator.rs` imports no Tauri types.** Emission goes through the
   `RunEvents` trait; `AppHandle` implements it, tests pass `RecordingEvents`. The rule
-  covers anything that both decides and emits — `McpToolInvoker`, and the command
-  layer's run-finish helpers (`finish_agent_run`, `publish_tool_writes`,
-  `publish_external_actions`, both `emit_*_degradation_log`) take `&dyn RunEvents`.
+  covers anything that both decides and emits — `McpToolInvoker` and the command
+  layer's run-finish helpers take `&dyn RunEvents`.
   Every defect found in those for four cycles was a wording or counting defect, and a
   signature taking `AppHandle` cannot be tested for either.
 - **A run is driven by `drive_run` / `drive_pipeline` / `drive_repair`**, free functions
@@ -108,7 +107,7 @@ npm test
 - **Documentation claims must be verified against the code.** Drift here has included
   a fabricated CLI help block, an inert flag described as working, and stale test
   counts. When a write-up asserts a *consequence*, that consequence needs its own
-  evidence: one fix was published with two symptoms the code could not produce.
+  evidence.
 - **Assertions sit on the property that matters**, not on incidental shape. Prefer
   "counted as a failure, earlier results survive" over an exact error string.
 - Delete unused code rather than renaming it to `_unused` or leaving a `// removed`
@@ -118,4 +117,6 @@ npm test
 
 `ROADMAP.md` Known Issues is the design log: audited problems with the reasoning,
 including rejected options and why. `SECURITY.md` documents what the backend actually
-enforces. Record decisions there, not in new files.
+enforces. `.wiki/_index.md` (a hidden dir) is the code map: backend, frontend, and
+the IPC command/event tables, every claim cited to path:line. Record decisions in
+the first two, not in new files.
