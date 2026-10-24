@@ -38,10 +38,12 @@ npm test
 | `agent/multi_agent.rs` | Pipeline role execution, role prompt construction, stage status management |
 | `services/workspace.rs` | Workspace path resolution (`resolve_existing`, `resolve_for_write`), boundary enforcement (`ensure_within_workspace`), Windows verbatim path normalization (`shell_compatible_path`), relative traversal rejection |
 | `services/llm_profiles.rs` | Legacy config migration, profile serialization, API key masking, credential reference handling |
+| `services/permissions.rs` | Desktop permission model (Phase 9.0.4) — ask/suggest/auto presets, `edit` CLI alias parsing, granular create/edit/delete/command/git flags, deny-path matching (exact/directory/wildcard), per-run and per-batch caps, policy persistence round-trip with invalid-cap repair, command pattern matching shared with the CLI, workspace-boundary-aware create-vs-edit classification |
 | `services/problem_parser.rs` | Backend command-output problem parsing for structured error extraction |
 | `commands/git.rs` | Git status classification (added vs untracked), staged/worktree diff, branch checkout, remote branch tracking, conflict detection, conflict resolution, workspace boundary checks |
 | `commands/lsp.rs` | LSP file URI encoding/decoding, Windows verbatim path normalization, indexing-state detection |
-| `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all), repair permission requirements, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, `smoke ide-backend` |
+| `agent/orchestrator.rs` (permissions) | Auto-mode auto-apply policy gate — suggest/ask presets block unattended apply, deny paths and caps produce violations, default auto preset proceeds, per-run counter resets on `begin_run` |
+| `cli/mod.rs` | CLI argument parsing, `--allow-run` pattern matching (exact, prefix wildcard, trusted all; now delegated to `services::permissions`), repair permission requirements, workspace resolution, `doctor --output json`, preview artifacts, apply artifacts, `repair-chain.json`, `smoke ide-backend` |
 
 Run command:
 

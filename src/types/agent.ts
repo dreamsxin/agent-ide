@@ -21,6 +21,7 @@ export type AgentPermissionPreset = "ask" | "suggest" | "auto";
 /** 细粒度 Agent 权限 */
 export interface AgentPermission {
   allowFileCreate: boolean;
+  allowFileEdit: boolean;
   allowFileDelete: boolean;
   allowCommandRun: boolean;
   allowGitActions: boolean;
@@ -29,6 +30,7 @@ export interface AgentPermission {
 /** 默认权限（ask 模式下的全手动确认） */
 export const DEFAULT_PERMISSIONS: AgentPermission = {
   allowFileCreate: false,
+  allowFileEdit: false,
   allowFileDelete: false,
   allowCommandRun: false,
   allowGitActions: false,
@@ -37,6 +39,7 @@ export const DEFAULT_PERMISSIONS: AgentPermission = {
 /** suggest 预设：审查但不自动执行 */
 export const SUGGEST_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
+  allowFileEdit: true,
   allowFileDelete: false,
   allowCommandRun: false,
   allowGitActions: false,
@@ -45,6 +48,7 @@ export const SUGGEST_PERMISSIONS: AgentPermission = {
 /** auto 预设：全部放行 */
 export const AUTO_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
+  allowFileEdit: true,
   allowFileDelete: true,
   allowCommandRun: true,
   allowGitActions: true,
@@ -57,6 +61,74 @@ export function permissionsForPreset(preset: AgentPermissionPreset): AgentPermis
     case "suggest": return { ...SUGGEST_PERMISSIONS };
     case "auto": return { ...AUTO_PERMISSIONS };
   }
+}
+
+/**
+ * 后端权限策略（Phase 9.0.4，services/permissions.rs 的 serde 契约）。
+ * Agent 的自动应用受 preset + 细粒度开关 + denyPaths + 单次运行上限约束。
+ */
+export interface PermissionPolicy {
+  /** "edit" 是后端/CLI 兼容别名，前端归一到 suggest */
+  preset: AgentPermissionPreset | "edit";
+  allowCreate: boolean;
+  allowEdit: boolean;
+  allowDelete: boolean;
+  allowCommands: boolean;
+  allowGit: boolean;
+  allowedCommandPatterns: string[];
+  denyPaths: string[];
+  maxAutoAppliesPerRun: number;
+  maxFilesPerAutoApply: number;
+}
+
+/** 前端权限状态 -> 后端策略 */
+export function toPermissionPolicy(
+  preset: AgentPermissionPreset,
+  permissions: AgentPermission,
+  extras: PermissionPolicyExtras
+): PermissionPolicy {
+  return {
+    preset,
+    allowCreate: permissions.allowFileCreate,
+    allowEdit: permissions.allowFileEdit,
+    allowDelete: permissions.allowFileDelete,
+    allowCommands: permissions.allowCommandRun,
+    allowGit: permissions.allowGitActions,
+    ...extras,
+  };
+}
+
+/** 后端策略 -> 前端权限状态 */
+export function fromPermissionPolicy(policy: PermissionPolicy): {
+  preset: AgentPermissionPreset;
+  permissions: AgentPermission;
+  extras: PermissionPolicyExtras;
+} {
+  return {
+    // "edit" 预设是 CLI 兼容别名，前端归一到 suggest。
+    preset: policy.preset === "edit" ? "suggest" : policy.preset,
+    permissions: {
+      allowFileCreate: policy.allowCreate,
+      allowFileEdit: policy.allowEdit,
+      allowFileDelete: policy.allowDelete,
+      allowCommandRun: policy.allowCommands,
+      allowGitActions: policy.allowGit,
+    },
+    extras: {
+      allowedCommandPatterns: policy.allowedCommandPatterns,
+      denyPaths: policy.denyPaths,
+      maxAutoAppliesPerRun: policy.maxAutoAppliesPerRun,
+      maxFilesPerAutoApply: policy.maxFilesPerAutoApply,
+    },
+  };
+}
+
+/** 策略中与预设开关无关的部分 */
+export interface PermissionPolicyExtras {
+  allowedCommandPatterns: string[];
+  denyPaths: string[];
+  maxAutoAppliesPerRun: number;
+  maxFilesPerAutoApply: number;
 }
 
 /** 破坏性操作类型 */

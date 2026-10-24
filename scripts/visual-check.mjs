@@ -179,7 +179,31 @@ async function main() {
       check("Chat context preview shows AGENTS.md toggle", false, "context preview button not found");
     }
 
-    // 6. No uncaught page errors during the run.
+    // 6. Agent settings exposes the permission model (Phase 9.0.4).
+    const agentSettingsTab = page.locator('[data-testid="agent-tab-settings"]');
+    if (await agentSettingsTab.isVisible().catch(() => false)) {
+      await agentSettingsTab.click();
+      await sleep(500);
+      const permissionsHeader = page.locator("text=Agent Permissions").first();
+      const headerVisible = await permissionsHeader.isVisible().catch(() => false);
+      if (headerVisible) {
+        await permissionsHeader.scrollIntoViewIfNeeded();
+        await sleep(200);
+      }
+      const presetButtons = await page
+        .locator('button:has-text("Ask"), button:has-text("Suggest"), button:has-text("Auto")')
+        .count();
+      check(
+        "Agent settings shows permission presets",
+        headerVisible && presetButtons >= 3,
+        `header=${headerVisible}, presetButtons=${presetButtons}`
+      );
+      await page.screenshot({ path: resolve(SHOT_DIR, "05-agent-permissions.png") });
+    } else {
+      check("Agent settings shows permission presets", false, "agent settings tab not found");
+    }
+
+    // 7. No uncaught page errors during the run.
     check(
       "No uncaught page errors",
       pageErrors.length === 0,

@@ -54,6 +54,8 @@ pub fn run() {
             commands::agent::run_agent_step,
             commands::agent::continue_agent_pipeline,
             commands::agent::set_agent_mode,
+            commands::agent::get_permission_policy,
+            commands::agent::set_permission_policy,
             commands::agent::apply_diffs,
             commands::agent::apply_diff,
             commands::agent::apply_diff_hunk,

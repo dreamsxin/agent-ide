@@ -684,6 +684,21 @@ pub async fn set_agent_mode(
     Ok(())
 }
 
+/// Load the desktop permission policy (Phase 9.0.4).
+#[tauri::command]
+pub async fn get_permission_policy() -> Result<crate::services::permissions::PermissionPolicy, String>
+{
+    Ok(crate::services::permissions::PermissionPolicy::load())
+}
+
+/// Persist the desktop permission policy.
+#[tauri::command]
+pub async fn set_permission_policy(
+    policy: crate::services::permissions::PermissionPolicy,
+) -> Result<(), String> {
+    policy.save()
+}
+
 /// Apply all pending diffs to the filesystem.
 #[tauri::command]
 pub async fn apply_diffs(

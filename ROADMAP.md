@@ -173,6 +173,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fixed the broken frontend build (2026-10-24): six TypeScript errors in the half-landed Phase 9.2 intelligent-completion hook (`useIntelligentCompletion.ts`) and Phase 9.1 editor integration (`EditorContainer.tsx`); `maxSuggestions`/`onSuggestionGenerated` options are now actually wired through the Monaco completion provider, and suggestion statistics update from generated suggestions.
 - Added Vitest coverage for the Phase 9.1/9.2 editor utilities (`incrementalRenderer`, `intelligentCompletion`), the task run lifecycle/terminal queueing store (`useTaskStore`), and log persistence behavior (`useLogStore`), raising the frontend suite from 14 to 53 tests.
 - Added automated visual smoke verification (`npm run visual:test`, `scripts/visual-check.mjs`): Playwright-core drives the Vite web preview in headless Edge/Chrome, asserts required layout elements and tab/palette interactions, captures per-state screenshots plus `summary.json` under `test-results/visual/`, and fails on uncaught page errors; screenshots are reviewed manually as the 视觉校对 step.
+- Landed Phase 9.0.4 desktop permission model first pass (2026-10-24): persisted permission policy in `services/permissions.rs` (ask/suggest/auto presets, granular flags, deny paths, per-run caps, shared `--allow-run` matcher), policy-gated Auto-mode auto-apply with `auto_apply_blocked` action logs and per-run counters, and an Agent Permissions settings section wired to `get/set_permission_policy` commands.
 - Released **v0.2.0** (2026-10-24): version bumped across `package.json`/`tauri.conf.json`/`Cargo.toml`, `CHANGELOG.md` added, README/README.zh-CN refreshed, Tauri bundle config fixed (removed missing `icons/icon.icns`), and the Windows NSIS installer packaged with the new `-NoDefaultFeatures` flag and SHA256 manifest.
 
 Important distinction:
@@ -189,9 +190,9 @@ Last verified locally:
 ```powershell
 npm run build     # passes; Vite still warns about a large Monaco/Markdown chunk
 npm test          # passes; 53 tests across 10 files (14 -> 53 on 2026-10-24)
-npm run visual:test # passes; 13/13 automated visual smoke checks with screenshots
+npm run visual:test # passes; 14/14 automated visual smoke checks with screenshots
 cargo check       # passes (no-default-features)
-cargo test        # passes; 127 tests (no-default-features)
+cargo test        # passes; 137 tests (no-default-features; 127 -> 137 with the Phase 9.0.4 permission model suite on 2026-10-24)
 ```
 
 2026-10-24 verification note: the previously broken `npm run build` was fixed (six TypeScript errors in the half-landed Phase 9.1/9.2 files `useIntelligentCompletion.ts` and `EditorContainer.tsx`). The Phase 9.1/9.2 utility modules are now covered by Vitest. `npm run visual:test` was added and its screenshots were visually reviewed: default layout, bottom tabs, and command palette render correctly in web preview mode with accurate degraded-state messaging.
@@ -617,7 +618,7 @@ Goal: close the gap to the 2026 agentic-coding standard feature surface (Codex /
 | 9.0.1 Provider-Native Tool Calling | Native function-call request and streaming tool-call parsing in `services/llm_client.rs` + `agent/executor.rs`; `agent-changes` text protocol remains the fallback for local/small models | Critical | **Done (2026-09-05)** |
 | 9.0.2 AGENTS.md Project Memory | Load workspace-root `AGENTS.md` into `AgentContext`; bounded size; participates in all compression modes and budget packing; CLI `--include project-memory` | Critical | **Done (2026-09-04)** |
 | 9.0.3 MCP Client | RMCP-based stdio transport with tool discovery/invocation, wired into native tool calling and the action log | High | Planned |
-| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | Planned |
+| 9.0.4 Desktop Permission Model V2 | Ask/Suggest/Auto presets plus granular file/command/git toggles, path deny rules, and per-run cost caps; reuse CLI `--allow-run` patterns in `commands/agent.rs` | High | **First pass (2026-10-24)**: `services/permissions.rs` policy persisted per config dir, orchestrator auto-apply enforcement with `auto_apply_blocked` logs, settings UI wired to load/save via `get/set_permission_policy`; command/git flags stored and the matcher shared with the CLI, full enforcement lands with agent-initiated commands (CLI Phase CLI-4) |
 
 Exit criteria: an Agent run uses native tool calls with at least one OpenAI-compatible provider; AGENTS.md content is visible in context estimate sections; MCP tools appear in the agent tool surface; desktop runs enforce permission presets.
 
@@ -867,7 +868,7 @@ target\release\agent_cli --help
 
 1. ~~Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback~~ **Done (2026-09-05)**: `stream_chat_with_tools` parses OpenAI-compatible `delta.tool_calls` streams and non-streaming `tool_calls`, and `merge_tool_call_output` synthesizes `agent-changes` blocks so the parse pipeline is transport-agnostic. Live provider round-trip still pending a real API key.
 2. Implement Phase 9.0.3 MCP client (RMCP stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface.
-3. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, and a per-run cost cap.
+3. ~~Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, and a per-run cost cap.~~ **First pass done (2026-10-24)**: `services/permissions.rs` (ask/suggest/auto presets aligned with the frontend tables, `edit` kept as a CLI alias, granular create/edit/delete/command/git flags, deny-path matching, per-run caps, `is_command_allowed` now shared with the CLI); Auto-mode auto-apply is policy-gated and falls back to the review flow with an `auto_apply_blocked` action log; the Agent Permissions settings section loads/saves the policy through the new commands.
 4. ~~Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.~~ **Done (2026-10-24)**: Chat context preview has an "AGENTS.md" toggle; `includeProjectMemory` flows through estimates and runs.
 5. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
 6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
@@ -880,4 +881,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-10-24 - Fixed broken build in half-landed Phase 9.1/9.2 files; frontend suite grew 14 -> 53 tests (Phase 9.1/9.2 utilities, task/log stores); added automated visual smoke verification `npm run visual:test`. Phase 9.0: AGENTS.md project memory (9.0.2) and provider-native tool calling (9.0.1) done. Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*
+*Last updated: 2026-10-24 - Phase 9.0.4 desktop permission model first pass landed (policy service, auto-apply enforcement, settings UI, CLI matcher sharing; Rust suite 127 -> 137, visual checks 13 -> 14). Released v0.2.0 (Windows NSIS, `-NoDefaultFeatures`); fixed broken build in half-landed Phase 9.1/9.2 files; frontend suite grew 14 -> 53 tests. Phase 9.0: AGENTS.md project memory (9.0.2) and provider-native tool calling (9.0.1) done. 9.1 incremental rendering deferred.*

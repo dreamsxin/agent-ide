@@ -24,10 +24,14 @@ import type {
   AgentPermission,
   AgentPermissionPreset,
   DestructiveOpConfirm,
+  PermissionPolicy,
+  PermissionPolicyExtras,
 } from "../types/agent";
 import {
-  DEFAULT_PERMISSIONS,
+  AUTO_PERMISSIONS,
   permissionsForPreset,
+  toPermissionPolicy,
+  fromPermissionPolicy,
 } from "../types/agent";
 
 interface AgentStore {
@@ -70,6 +74,7 @@ interface AgentStore {
   // ====== 权限控制 ======
   permissionPreset: AgentPermissionPreset;
   permissions: AgentPermission;
+  permissionExtras: PermissionPolicyExtras;
   pendingConfirm: DestructiveOpConfirm | null;
 
   // ====== 同步 Actions ======
@@ -156,8 +161,10 @@ interface AgentStore {
   resetPipeline: () => Promise<void>;
 
   // ====== 权限管理 ======
+  loadPermissionPolicy: () => Promise<void>;
   setPermissionPreset: (preset: AgentPermissionPreset) => void;
   togglePermission: (key: keyof AgentPermission) => void;
+  setPermissionExtras: (extras: PermissionPolicyExtras) => void;
   requestConfirm: (confirm: DestructiveOpConfirm) => void;
   clearConfirm: () => void;
 
@@ -256,8 +263,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   chatContextCompression: null,
 
   // ====== 权限初始值 ======
-  permissionPreset: "suggest",
-  permissions: DEFAULT_PERMISSIONS,
+  permissionPreset: "auto",
+  permissions: AUTO_PERMISSIONS,
+  permissionExtras: {
+    allowedCommandPatterns: [],
+    denyPaths: [],
+    maxAutoAppliesPerRun: 25,
+    maxFilesPerAutoApply: 50,
+  },
   pendingConfirm: null,
 
   // ========== 同步 Actions ==========
@@ -470,14 +483,39 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   // ====== 权限管理实现 ======
+  loadPermissionPolicy: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const policy = fromPermissionPolicy(
+        await invoke<PermissionPolicy>("get_permission_policy")
+      );
+      set({
+        permissionPreset: policy.preset,
+        permissions: policy.permissions,
+        permissionExtras: policy.extras,
+      });
+    } catch (error) {
+      console.error("Failed to load permission policy:", error);
+    }
+  },
   setPermissionPreset: (preset) => {
     const permissions = permissionsForPreset(preset);
     set({ permissionPreset: preset, permissions });
+    persistPermissionPolicy(get());
   },
   togglePermission: (key) =>
-    set((s) => ({
-      permissions: { ...s.permissions, [key]: !s.permissions[key] },
-    })),
+    set((s) => {
+      const next = {
+        ...s,
+        permissions: { ...s.permissions, [key]: !s.permissions[key] },
+      };
+      persistPermissionPolicy(next);
+      return { permissions: next.permissions };
+    }),
+  setPermissionExtras: (extras) => {
+    set({ permissionExtras: extras });
+    persistPermissionPolicy(get());
+  },
   requestConfirm: (confirm) => set({ pendingConfirm: confirm }),
   clearConfirm: () => set({ pendingConfirm: null }),
 
@@ -1231,4 +1269,21 @@ function currentWorkspacePath() {
   } catch {
     return "";
   }
+}
+
+/** 把当前权限状态推送到后端持久化（Phase 9.0.4 强制点据此放行/拦截）。 */
+function persistPermissionPolicy(state: {
+  permissionPreset: AgentPermissionPreset;
+  permissions: AgentPermission;
+  permissionExtras: PermissionPolicyExtras;
+}) {
+  if (!isTauriRuntime()) return;
+  const policy = toPermissionPolicy(
+    state.permissionPreset,
+    state.permissions,
+    state.permissionExtras
+  );
+  invoke("set_permission_policy", { policy }).catch((error) => {
+    console.error("Failed to persist permission policy:", error);
+  });
 }

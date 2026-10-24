@@ -7,6 +7,7 @@ use crate::services::context::{
 };
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::llm_profiles;
+use crate::services::permissions;
 use crate::services::problem_parser::ProblemEntry;
 use crate::services::project_tasks::{self, RunProjectTaskResult};
 use crate::services::{context::AgentContext, workspace};
@@ -1003,7 +1004,7 @@ async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (
     }
 
     for command in args.run.run_commands.clone() {
-        if !is_command_allowed(&command, &args.run.allow_run) {
+        if !permissions::is_command_allowed(&command, &args.run.allow_run) {
             args.run.allow_run.push(command);
         }
     }
@@ -1816,7 +1817,7 @@ fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)>
     let unauthorized = args
         .run_commands
         .iter()
-        .filter(|command| !is_command_allowed(command, &args.allow_run))
+        .filter(|command| !permissions::is_command_allowed(command, &args.allow_run))
         .cloned()
         .collect::<Vec<_>>();
     if !unauthorized.is_empty() {
@@ -1829,24 +1830,6 @@ fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)>
         ));
     }
     Ok(())
-}
-
-fn is_command_allowed(command: &str, allow_run: &[String]) -> bool {
-    let command = normalize_command_pattern(command);
-    allow_run.iter().any(|pattern| {
-        let pattern = normalize_command_pattern(pattern);
-        if pattern == "*" {
-            return true;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return command.starts_with(prefix.trim_end());
-        }
-        command == pattern
-    })
-}
-
-fn normalize_command_pattern(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn resolve_workspace(path: Option<&Path>) -> Result<PathBuf, (ExitCode, String)> {
@@ -2112,12 +2095,12 @@ mod tests {
 
     #[test]
     fn repair_permissions_support_prefix_wildcard() {
-        assert!(is_command_allowed(
+        assert!(permissions::is_command_allowed(
             "cargo test --all",
             &["cargo *".to_string()]
         ));
-        assert!(!is_command_allowed("npm test", &["cargo *".to_string()]));
-        assert!(is_command_allowed("npm run test", &["*".to_string()]));
+        assert!(!permissions::is_command_allowed("npm test", &["cargo *".to_string()]));
+        assert!(permissions::is_command_allowed("npm run test", &["*".to_string()]));
     }
 
     #[test]

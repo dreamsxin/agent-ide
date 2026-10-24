@@ -50,6 +50,9 @@ pub struct AgentOrchestrator {
     pub current_run_id: Option<String>,
     pub last_run_id: Option<String>,
     pub paused_run: Option<PausedPipelineRun>,
+    /// Files auto-applied during the current run; feeds the permission
+    /// policy's per-run cap.
+    pub auto_applied_files: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -75,12 +78,14 @@ impl AgentOrchestrator {
             current_run_id: None,
             last_run_id: None,
             paused_run: None,
+            auto_applied_files: 0,
         }
     }
 
     pub fn begin_run(&mut self, run_id: Option<String>) {
         self.current_run_id = run_id.clone();
         self.last_run_id = run_id;
+        self.auto_applied_files = 0;
     }
 
     pub fn finish_run(&mut self) {
@@ -470,21 +475,60 @@ impl AgentOrchestrator {
             .transition(&AgentEvent::DiffReady(self.diffs.clone()));
 
         if self.mode == AgentMode::Auto {
-            // Auto mode applies diffs immediately.
-            self.apply_diffs_to_fs()?;
-            self.emit_action_log(
-                &app,
-                "success",
-                "auto_apply",
-                None,
-                None,
-                "Auto mode applied pending diffs",
-                "Agent auto mode completed filesystem apply.",
-                Some(context_summary.clone()),
-                Some(self.summarize_pending_diffs()),
-            );
-            self.state_mgr
-                .set(crate::agent::state_machine::AgentState::Done);
+            // Auto mode applies diffs immediately, but only within the
+            // permission policy (Phase 9.0.4). Violations fall back to the
+            // manual review flow so nothing unattended touches the files.
+            let policy = crate::services::permissions::PermissionPolicy::load();
+            match self.check_auto_apply(&policy) {
+                Err(violations) => {
+                    let reasons = violations
+                        .iter()
+                        .map(|v| {
+                            if v.file.is_empty() {
+                                v.reason.clone()
+                            } else {
+                                format!("{}: {}", v.file, v.reason)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    self.emit_action_log(
+                        &app,
+                        "warn",
+                        "auto_apply_blocked",
+                        None,
+                        None,
+                        "Auto mode apply blocked by permission policy",
+                        &reasons,
+                        Some(context_summary.clone()),
+                        Some(self.summarize_pending_diffs()),
+                    );
+                    self.state_mgr
+                        .set(crate::agent::state_machine::AgentState::WaitingUser);
+                }
+                Ok(()) => {
+                    let batch_files = self
+                        .diffs
+                        .iter()
+                        .filter(|diff| diff.status == "pending")
+                        .count() as u32;
+                    self.apply_diffs_to_fs()?;
+                    self.auto_applied_files = self.auto_applied_files.saturating_add(batch_files);
+                    self.emit_action_log(
+                        &app,
+                        "success",
+                        "auto_apply",
+                        None,
+                        None,
+                        "Auto mode applied pending diffs",
+                        "Agent auto mode completed filesystem apply.",
+                        Some(context_summary.clone()),
+                        Some(self.summarize_pending_diffs()),
+                    );
+                    self.state_mgr
+                        .set(crate::agent::state_machine::AgentState::Done);
+                }
+            }
         } else {
             self.state_mgr
                 .set(crate::agent::state_machine::AgentState::WaitingUser);
@@ -492,6 +536,26 @@ impl AgentOrchestrator {
         self.emit_state(&app);
 
         Ok(())
+    }
+
+    /// Check the pending diffs against the permission policy before an
+    /// unattended apply. Ok means the apply may proceed.
+    pub fn check_auto_apply(
+        &self,
+        policy: &crate::services::permissions::PermissionPolicy,
+    ) -> Result<(), Vec<crate::services::permissions::PermissionViolation>> {
+        let batch: Vec<(String, String)> = self
+            .diffs
+            .iter()
+            .filter(|diff| diff.status == "pending")
+            .map(|diff| (diff.id.clone(), diff.file.clone()))
+            .collect();
+        crate::services::permissions::evaluate_auto_apply(
+            policy,
+            &batch,
+            self.auto_applied_files,
+            None,
+        )
     }
 
     /// Apply pending diffs to the workspace filesystem.
@@ -900,6 +964,40 @@ mod tests {
             }],
             status: "pending".to_string(),
         }
+    }
+
+    #[test]
+    fn auto_mode_respects_permission_policy() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("main.rs", "fn main() {}");
+
+        let mut orchestrator = AgentOrchestrator::new();
+        orchestrator.mode = AgentMode::Auto;
+        orchestrator
+            .diffs
+            .push(make_diff("main.rs", "fn main() {}", "fn main() -> i32 { 0 }"));
+
+        // Suggest preset blocks unattended apply.
+        let suggest = crate::services::permissions::PermissionPolicy::default()
+            .with_preset(crate::services::permissions::PermissionPreset::Suggest);
+        let violations = orchestrator.check_auto_apply(&suggest).unwrap_err();
+        assert!(violations[0].reason.contains("does not allow unattended apply"));
+
+        // Deny paths block matching files even in auto preset.
+        let mut denying = crate::services::permissions::PermissionPolicy::default();
+        denying.deny_paths = vec!["main.rs".to_string()];
+        let violations = orchestrator.check_auto_apply(&denying).unwrap_err();
+        assert_eq!(violations[0].file, "main.rs");
+
+        // Default auto preset within the granular rules proceeds.
+        assert!(orchestrator
+            .check_auto_apply(&crate::services::permissions::PermissionPolicy::default())
+            .is_ok());
+
+        // The per-run counter starts at zero on begin_run.
+        orchestrator.begin_run(Some("run-1".to_string()));
+        assert_eq!(orchestrator.auto_applied_files, 0);
     }
 
     #[test]

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Phase 9.0.4 desktop permission model, first pass: `services/permissions.rs` defines the persisted permission policy (ask/suggest/auto presets aligned with the frontend preset tables, `edit` kept as a CLI alias, granular create/edit/delete/commands/git flags, deny-path rules, per-run and per-batch caps) and a `--allow-run` style command matcher now shared with the CLI.
+- Orchestrator enforcement: Auto-mode auto-apply consults the policy, falls back to the manual review flow with an `auto_apply_blocked` action log on violations, and tracks per-run auto-apply counts (reset on `begin_run`).
+- Agent Permissions settings section (Agent panel → Settings): preset chips, five granular toggles (file creation/editing/deletion, command execution, git actions), denied-path and command-pattern editors, per-run cap inputs; loads and saves the backend policy via the new `get_permission_policy` / `set_permission_policy` commands.
+- Visual smoke check for the permissions UI (`visual:test`, now 14 checks).
+
+### Changed
+
+- Frontend permission default preset moved from `suggest` to `auto` to preserve the desktop's historical Auto-mode behavior; users can switch to Ask/Suggest for stricter guardrails.
+- CLI `--allow-run` matching now delegates to `services::permissions::is_command_allowed` (same exact/prefix/trust-all semantics).
+
 ## 0.2.0 — 2026-10-24
 
 First packaged, usable IDE release (Windows NSIS installer, `--no-default-features` build without the pending local-inference engine).

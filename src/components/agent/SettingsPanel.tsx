@@ -97,8 +97,11 @@ export default function SettingsPanel() {
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
   const permissionPreset = useAgentStore((s) => s.permissionPreset);
   const permissions = useAgentStore((s) => s.permissions);
+  const permissionExtras = useAgentStore((s) => s.permissionExtras);
   const setPermissionPreset = useAgentStore((s) => s.setPermissionPreset);
   const togglePermission = useAgentStore((s) => s.togglePermission);
+  const setPermissionExtras = useAgentStore((s) => s.setPermissionExtras);
+  const loadPermissionPolicy = useAgentStore((s) => s.loadPermissionPolicy);
 
   const [profileId, setProfileId] = useState("");
   const [profileName, setProfileName] = useState("Default");
@@ -121,11 +124,45 @@ export default function SettingsPanel() {
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [localStatus, setLocalStatus] = useState<{ exists: boolean; loaded: boolean; modelPath: string } | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
+  const [denyPathsText, setDenyPathsText] = useState(() => permissionExtras.denyPaths.join("\n"));
+  const [commandPatternsText, setCommandPatternsText] = useState(() =>
+    permissionExtras.allowedCommandPatterns.join("\n")
+  );
+  const [maxAutoAppliesText, setMaxAutoAppliesText] = useState(() =>
+    String(permissionExtras.maxAutoAppliesPerRun)
+  );
+  const [maxFilesText, setMaxFilesText] = useState(() =>
+    String(permissionExtras.maxFilesPerAutoApply)
+  );
 
   // 初始化：从后端加载配置
   useEffect(() => {
     fetchLlmConfig();
-  }, [fetchLlmConfig]);
+    void loadPermissionPolicy();
+  }, [fetchLlmConfig, loadPermissionPolicy]);
+
+  // 后端权限策略加载后同步本地文本框
+  useEffect(() => {
+    setDenyPathsText(permissionExtras.denyPaths.join("\n"));
+    setCommandPatternsText(permissionExtras.allowedCommandPatterns.join("\n"));
+    setMaxAutoAppliesText(String(permissionExtras.maxAutoAppliesPerRun));
+    setMaxFilesText(String(permissionExtras.maxFilesPerAutoApply));
+  }, [permissionExtras]);
+
+  const commitPermissionExtras = useCallback(() => {
+    setPermissionExtras({
+      allowedCommandPatterns: commandPatternsText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+      denyPaths: denyPathsText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+      maxAutoAppliesPerRun: Math.max(1, parseInt(maxAutoAppliesText, 10) || 25),
+      maxFilesPerAutoApply: Math.max(1, parseInt(maxFilesText, 10) || 50),
+    });
+  }, [commandPatternsText, denyPathsText, maxAutoAppliesText, maxFilesText, setPermissionExtras]);
 
   // 后端配置回来之后填充表单
   useEffect(() => {
@@ -608,10 +645,10 @@ export default function SettingsPanel() {
         </div>
         <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
           {permissionPreset === "ask"
-            ? "Always confirm before any file or command operation."
+            ? "Always confirm before any file or command operation; Auto mode never applies diffs unattended."
             : permissionPreset === "suggest"
-            ? "Allow file creation; confirm destructive operations."
-            : "Allow all operations without confirmation."}
+            ? "Diffs wait for review; Auto mode never applies diffs unattended."
+            : "Auto mode may apply diffs unattended within the toggles, denied paths, and caps below."}
         </p>
 
         {/* Granular Toggles */}
@@ -621,6 +658,12 @@ export default function SettingsPanel() {
             desc="Allow Agent to create new files"
             checked={permissions.allowFileCreate}
             onChange={() => togglePermission("allowFileCreate")}
+          />
+          <PermissionToggle
+            label="File Editing"
+            desc="Allow Agent to modify existing files"
+            checked={permissions.allowFileEdit}
+            onChange={() => togglePermission("allowFileEdit")}
           />
           <PermissionToggle
             label="File Deletion"
@@ -640,6 +683,56 @@ export default function SettingsPanel() {
             checked={permissions.allowGitActions}
             onChange={() => togglePermission("allowGitActions")}
           />
+        </div>
+
+        {/* Deny paths / command patterns / per-run caps */}
+        <label className="block text-surface-muted mb-1 text-[11px]">Denied paths (one per line)</label>
+        <textarea
+          value={denyPathsText}
+          onChange={(event) => setDenyPathsText(event.target.value)}
+          onBlur={commitPermissionExtras}
+          rows={2}
+          placeholder={".env\nsecrets/"}
+          className="mb-2 w-full resize-y rounded border border-surface-border bg-surface-panel p-1.5 font-mono text-[10px] text-surface-text outline-none focus:border-accent-blue"
+        />
+        {permissions.allowCommandRun && (
+          <>
+            <label className="block text-surface-muted mb-1 text-[11px]">
+              Allowed command patterns (one per line, `*` wildcard)
+            </label>
+            <textarea
+              value={commandPatternsText}
+              onChange={(event) => setCommandPatternsText(event.target.value)}
+              onBlur={commitPermissionExtras}
+              rows={2}
+              placeholder={"npm test\ncargo *"}
+              className="mb-2 w-full resize-y rounded border border-surface-border bg-surface-panel p-1.5 font-mono text-[10px] text-surface-text outline-none focus:border-accent-blue"
+            />
+          </>
+        )}
+        <div className="mb-1 grid grid-cols-2 gap-2">
+          <label className="block text-[11px] text-surface-muted">
+            Max auto-applies / run
+            <input
+              type="number"
+              min={1}
+              value={maxAutoAppliesText}
+              onChange={(event) => setMaxAutoAppliesText(event.target.value)}
+              onBlur={commitPermissionExtras}
+              className="mt-0.5 w-full rounded border border-surface-border bg-surface-panel px-1.5 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+            />
+          </label>
+          <label className="block text-[11px] text-surface-muted">
+            Max files / auto-apply
+            <input
+              type="number"
+              min={1}
+              value={maxFilesText}
+              onChange={(event) => setMaxFilesText(event.target.value)}
+              onBlur={commitPermissionExtras}
+              className="mt-0.5 w-full rounded border border-surface-border bg-surface-panel px-1.5 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+            />
+          </label>
         </div>
       </div>
 
