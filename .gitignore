@@ -8,3 +8,4 @@ artifacts/
 .zcode/
 rustup-init.exe
 
+test-results/

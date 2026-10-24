@@ -170,6 +170,9 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Added Pipeline stage source/output visualization from Agent action logs and clearer Diff hunk review/regeneration status in the desktop UI.
 - Added a reusable Phase 8 real-runtime smoke run template and baseline notes to `docs/smoke_test.md`.
 - Added Phase 9.0 AGENTS.md project memory: workspace-root `AGENTS.md` is loaded into `AgentContext` as a bounded section, included by default in every IDE and CLI run, respects the per-run `includeProjectMemory` source toggle, and is exposed to CLI automation via `--include project-memory`.
+- Fixed the broken frontend build (2026-10-24): six TypeScript errors in the half-landed Phase 9.2 intelligent-completion hook (`useIntelligentCompletion.ts`) and Phase 9.1 editor integration (`EditorContainer.tsx`); `maxSuggestions`/`onSuggestionGenerated` options are now actually wired through the Monaco completion provider, and suggestion statistics update from generated suggestions.
+- Added Vitest coverage for the Phase 9.1/9.2 editor utilities (`incrementalRenderer`, `intelligentCompletion`), the task run lifecycle/terminal queueing store (`useTaskStore`), and log persistence behavior (`useLogStore`), raising the frontend suite from 14 to 53 tests.
+- Added automated visual smoke verification (`npm run visual:test`, `scripts/visual-check.mjs`): Playwright-core drives the Vite web preview in headless Edge/Chrome, asserts required layout elements and tab/palette interactions, captures per-state screenshots plus `summary.json` under `test-results/visual/`, and fails on uncaught page errors; screenshots are reviewed manually as the 视觉校对 step.
 
 Important distinction:
 
@@ -184,10 +187,13 @@ Last verified locally:
 
 ```powershell
 npm run build     # passes; Vite still warns about a large Monaco/Markdown chunk
-npm test          # passes; covers path normalization and terminal problem parsing
-cargo check       # passes
-cargo test        # passes; includes context, workspace, diff apply, orchestrator, pipeline, action-log support, and Git tests
+npm test          # passes; 53 tests across 10 files (14 -> 53 on 2026-10-24)
+npm run visual:test # passes; 12/12 automated visual smoke checks with screenshots
+cargo check       # passes (no-default-features)
+cargo test        # passes; 127 tests (no-default-features)
 ```
+
+2026-10-24 verification note: the previously broken `npm run build` was fixed (six TypeScript errors in the half-landed Phase 9.1/9.2 files `useIntelligentCompletion.ts` and `EditorContainer.tsx`). The Phase 9.1/9.2 utility modules are now covered by Vitest. `npm run visual:test` was added and its screenshots were visually reviewed: default layout, bottom tabs, and command palette render correctly in web preview mode with accurate degraded-state messaging.
 
 2026-09-05 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (127 tests, 0 failed), including the AGENTS.md project-memory tests and the new tool-call accumulator / synthesis tests. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
@@ -862,7 +868,7 @@ target\release\agent_cli --help
 4. Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.
 5. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
 6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
-7. Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.
+7. ~~Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.~~ **First pass landed (2026-10-24)**: `npm run visual:test` automates the web-preview shell smoke (layout, bottom tabs, command palette, page-error capture, screenshots). Tauri-runtime interactions (edit/save, LSP, Agent fix, Git) still need the desktop E2E layer from `npm run e2e:workflow` extended to those flows.
 8. Add richer merge editor UI for conflict blocks, including conflict-region navigation, accept current/incoming/both per block, and post-resolution status refresh.
 9. Expand Agent workflow UI with stage input/output source panels and explicit per-stage approve/skip controls.
 10. Expand Command Palette with recent commands, file/symbol search, command keybinding hints, and Agent prompt templates.
@@ -871,4 +877,4 @@ target\release\agent_cli --help
 
 ---
 
-*Last updated: 2026-09-05 - Phase 9.0: AGENTS.md project memory (9.0.2) and provider-native tool calling (9.0.1) done. Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*
+*Last updated: 2026-10-24 - Fixed broken build in half-landed Phase 9.1/9.2 files; frontend suite grew 14 -> 53 tests (Phase 9.1/9.2 utilities, task/log stores); added automated visual smoke verification `npm run visual:test`. Phase 9.0: AGENTS.md project memory (9.0.2) and provider-native tool calling (9.0.1) done. Roadmap restructured around the 2026-09 competitive review with Phase 9.0/9.5; 9.1 incremental rendering deferred.*

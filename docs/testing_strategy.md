@@ -16,6 +16,11 @@ Agent IDE uses a multi-layer testing approach covering unit tests, integration t
 | `src/utils/terminalProblemParser.test.ts` | Terminal output parsing into Problems entries for TypeScript/lint/test-style `file:line:column` formats, Vitest/Jest-style `FAIL` summaries, and stack traces |
 | `src/hooks/useLspDiagnostics.test.ts` | LSP diagnostics hook behavior — bridging LSP diagnostics into the Problems store |
 | `src/stores/useProblemStore.test.ts` | Problem store behavior — adding, replacing, clearing, and deduplicating problems across diagnostic/lsp/test/agent/system sources |
+| `src/stores/useTaskStore.test.ts` | Task run lifecycle (start/finish/fallback entry), run history capping, terminal command queueing/consumption per terminal, terminal session requests, bounded terminal output buffer |
+| `src/stores/useLogStore.test.ts` | Log store behavior — monotonic ids, 500-entry cap, localStorage persistence, per-workspace restore, id continuation after reload, malformed payload tolerance |
+| `src/utils/intelligentCompletion.test.ts` | Intelligent completion engine (Phase 9.2) — context analyzer language detection/variable/function extraction, bounded edit history, suggestion ranking and clamping, suggestion cache, Chinese prompt optimizer, Monaco completion provider mapping and failure fallback |
+| `src/utils/incrementalRenderer.test.ts` | Incremental rendering engine (Phase 9.1) — dirty-line marking and eviction, viewport tracking, change history cap, frame-budget rendering ordering, metrics/profiling |
+| `src/stores/useLayoutStore.test.ts` | Layout navigation state — the selected Agent view survives right-panel toggle cycles |
 
 Run command:
 
@@ -83,6 +88,21 @@ See `docs/smoke_test.md` sections 2–10 for the full manual checklist that thes
 
 `npm run verify:workflow` runs the baseline build/tests/checks and then this E2E workflow.
 
+### Visual Smoke Checks (Automated — 2026-10-24)
+
+`npm run visual:test` runs the automated visual verification pass (视觉校对) for the IDE shell. It is a Playwright-driven browser check that:
+
+1. Starts the Vite dev server (web preview mode; the Tauri backend is intentionally unavailable) or connects to an already-running one via `VISUAL_BASE_URL`.
+2. Drives the real UI in headless Microsoft Edge (or Chrome) through `playwright-core` — no browser download is required.
+3. Verifies required layout elements (`app-root`, `topbar`, `left-panel`, `bottom-panel`, bottom tabs), switches all four bottom-panel tabs, opens the command palette with `Ctrl+Shift+P`, and fails on any uncaught page error.
+4. Saves per-state screenshots and a `summary.json` to `test-results/visual/` (gitignored) for human visual review, and exits non-zero when any check fails.
+
+The manual visual review step is to open the generated screenshots and confirm layout, degraded-state messaging (for example `TS unavailable`, `Terminal is available in the Tauri app runtime.`), and theme rendering look correct. Recorded 2026-10-24: 12/12 checks passed, screenshots reviewed — default layout, bottom tabs, and command palette all render as designed.
+
+```bash
+npm run visual:test
+```
+
 ## CLI Smoke Coverage
 
 The Agent CLI has automated smoke coverage independent of the desktop UI:
@@ -136,7 +156,9 @@ Current CI status: GitHub Actions workflow (`windows-package.yml`) handles Windo
 | LLM profile handling | Good | Rust unit tests for migration, masking, serialization |
 | CLI smoke coverage | Good | Automated `doctor`, preview, apply, repair-chain, `ide-backend` tests |
 | Agent state transitions | Thin | Needs more coverage for edge cases (error recovery, cancelled states, interrupted sessions) |
-| Frontend store behavior | Thin | Needs more coverage for Agent event bridging, diff status updates, Problem deduplication |
+| Frontend store behavior | Medium | Task run lifecycle/queueing, log persistence/capping, layout navigation, and Problem deduplication now covered by Vitest; Agent event bridging and diff status updates still uncovered |
+| Phase 9.1/9.2 editor utilities | Good | Incremental renderer and intelligent completion engine covered by Vitest (2026-10-24), including cache, budget, and failure-fallback behavior |
+| Visual shell verification | Automated | `npm run visual:test` browser smoke with screenshots; web-preview scope only (no Tauri backend) |
 | Monaco diagnostics bridge | None | Requires real Monaco/Tauri runtime; currently manual smoke only |
 | LSP server integration | None | LSP URI/indexing helpers are tested; actual server spawn requires runtime validation |
 | Tauri runtime (E2E) | Manual only | Smoke checklist in `docs/smoke_test.md` |
@@ -189,6 +211,9 @@ npm run e2e:workflow
 
 # Baseline + Windows desktop golden-path E2E
 npm run verify:workflow
+
+# Automated visual smoke check (web preview, headless Edge/Chrome)
+npm run visual:test
 
 # CLI binary tests
 cd src-tauri

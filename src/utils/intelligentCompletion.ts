@@ -739,7 +739,11 @@ export function createIntelligentCompletionEngine(): IntelligentCompletionEngine
  */
 export function createMonacoCompletionProvider(
   engine: IntelligentCompletionEngine,
-  monaco: typeof import("monaco-editor")
+  monaco: typeof import("monaco-editor"),
+  options: {
+    maxSuggestions?: number;
+    onSuggestions?: (suggestions: CompletionSuggestion[]) => void;
+  } = {}
 ): import("monaco-editor").languages.CompletionItemProvider {
   return {
     triggerCharacters: ['.', '/', '\\', '"', "'", '@', '<', ' ', '(', '[', '{'],
@@ -754,8 +758,10 @@ export function createMonacoCompletionProvider(
           column: position.column,
         }, surroundingCode, {
           language: model.getLanguageId(),
-          maxSuggestions: 20,
+          maxSuggestions: options.maxSuggestions ?? 20,
         });
+
+        options.onSuggestions?.(suggestions);
 
         return {
           suggestions: suggestions.map(suggestion => ({

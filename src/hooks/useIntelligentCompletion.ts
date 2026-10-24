@@ -31,7 +31,12 @@ export interface UseIntelligentCompletionReturn {
   engine: IntelligentCompletionEngine | null;
   currentSuggestions: CompletionSuggestion[];
   lastContext: CodeContext | null;
-  getContext: (file: string, position: { lineNumber: number; column: number }, surroundingCode: string) => Promise<CodeContext>;
+  getContext: (
+    file: string,
+    position: { lineNumber: number; column: number },
+    surroundingCode: string,
+    language?: string
+  ) => Promise<CodeContext>;
   forceRefresh: () => void;
   clearCache: () => void;
   setCacheEnabled: (enabled: boolean) => void;
@@ -92,6 +97,19 @@ export function useIntelligentCompletion(
       return;
     }
 
+    const recordSuggestions = (suggestions: CompletionSuggestion[]) => {
+      if (suggestions.length > 0) {
+        statisticsRef.current.totalSuggestions += suggestions.length;
+        statisticsRef.current.totalConfidence += suggestions.reduce(
+          (sum, s) => sum + s.confidence,
+          0
+        );
+      }
+      currentSuggestionsRef.current = suggestions;
+      setCurrentSuggestions(suggestions);
+      onSuggestionGenerated?.(suggestions);
+    };
+
     // 为支持的语言注册智能补全提供者
     const supportedLanguages = [
       'typescript', 'javascript', 'python', 'rust', 'go',
@@ -99,7 +117,10 @@ export function useIntelligentCompletion(
     ];
 
     for (const language of supportedLanguages) {
-      const provider = createMonacoCompletionProvider(engineRef.current, monaco);
+      const provider = createMonacoCompletionProvider(engineRef.current, monaco, {
+        maxSuggestions,
+        onSuggestions: recordSuggestions,
+      });
       const disposable = monaco.languages.registerCompletionItemProvider(language, provider);
       disposablesRef.current.add(disposable);
     }
@@ -108,24 +129,7 @@ export function useIntelligentCompletion(
       disposablesRef.current.forEach(d => d.dispose());
       disposablesRef.current.clear();
     };
-  }, [editor, monaco, enabled]);
-
-  // 监听编辑器变化以更新统计信息
-  useEffect(() => {
-    if (!editor || !engineRef.current) {
-      return;
-    }
-
-    const disposable = editor.onDidChangeModelContent(() => {
-      updateStatistics();
-    });
-
-    disposablesRef.current.add(disposable);
-
-    return () => {
-      disposable.dispose();
-    };
-  }, [editor]);
+  }, [editor, monaco, enabled, maxSuggestions, onSuggestionGenerated]);
 
   // 获取代码上下文
   const getContext = useCallback(async (
@@ -199,17 +203,6 @@ export function useIntelligentCompletion(
     engineRef.current?.setCacheEnabled(enabled);
   }, []);
 
-  // 更新统计信息
-  const updateStatistics = useCallback(() => {
-    const stats = statisticsRef.current;
-    const suggestions = currentSuggestionsRef.current;
-
-    if (suggestions.length > 0) {
-      const avgConfidence = suggestions.reduce((sum, s) => sum + s.confidence, 0) / suggestions.length;
-      stats.averageConfidence = avgConfidence;
-    }
-  }, []);
-
   // 清理函数
   const cleanup = useCallback(() => {
     disposablesRef.current.forEach(d => d.dispose());
@@ -264,7 +257,7 @@ export function useCompletionQualityMonitor(
     }
 
     // 计算平均置信度
-    const avgConfidence = suggestions.reduce((sum, s) => sum + s.confidence, 0) / suggestions.length;
+    const averageConfidence = suggestions.reduce((sum, s) => sum + s.confidence, 0) / suggestions.length;
 
     // 计算高低置信度数量
     const highConfidenceCount = suggestions.filter(s => s.confidence >= 0.8).length;
