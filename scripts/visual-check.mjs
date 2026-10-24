@@ -80,8 +80,16 @@ function startDevServer() {
 }
 
 async function launchBrowser() {
-  // Prefer the locally installed Edge/Chrome — playwright-core ships no browsers.
-  for (const options of [{ channel: "msedge" }, { channel: "chrome" }, {}]) {
+  // Prefer the locally installed Edge/Chrome — playwright-core ships no
+  // browsers. The sandboxless fallback covers CI runners where kernel user
+  // namespaces are restricted; locally it is simply never reached.
+  const attempts = [
+    { channel: "msedge" },
+    { channel: "chrome" },
+    { channel: "chrome", args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+    { args: ["--no-sandbox", "--disable-setuid-sandbox"] },
+  ];
+  for (const options of attempts) {
     try {
       return await chromium.launch({ headless: true, ...options });
     } catch (error) {

@@ -7,6 +7,7 @@ Reconciled with the rewritten `main` line (the remote had been force-pushed with
 ### Added
 
 - `npm run visual:test` (`scripts/visual-check.mjs`) now runs against the localized UI: selectors accept both English and Chinese labels (palette placeholder, permissions section, context-preview button); 14/14 checks pass on the merged tree.
+- `visual:test` wired into the CI frontend job: the visual smoke runs on every push/PR in headless Chrome on ubuntu runners (sandboxless fallback added to the launcher for restricted runners), and `test-results/visual/` screenshots upload as a 7-day artifact on both green and red runs. The merge commit `ba6be6e` itself was verified green by the pre-existing three-platform CI before this change.
 - CHANGELOG.md (this file), carried over from the v0.2.0 release work.
 
 ### Changed

@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend (typecheck + build + tests)
+    name: Frontend (typecheck + build + tests + visual)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,26 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      # Automated visual smoke check (视觉校对). The script launches its own
+      # Vite dev server, drives the real UI in headless Chrome (preinstalled
+      # on ubuntu runners; the script falls back Edge -> Chrome -> bundled
+      # resolution), asserts the IDE shell layout plus bottom-tab/palette/
+      # context-preview/permissions interactions, and fails on any uncaught
+      # page error. Screenshots are uploaded either way: a red run without
+      # pictures cannot be reviewed, and a green one without pictures cannot
+      # be trusted.
+      - name: Visual smoke check
+        run: npm run visual:test
+
+      - name: Upload visual check screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-check-screenshots
+          path: test-results/visual/
+          retention-days: 7
+          if-no-files-found: warn
 
   rust:
     name: Rust (fmt + clippy + tests)

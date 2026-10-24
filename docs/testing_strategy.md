@@ -128,6 +128,8 @@ jobs:
     - npm ci
     - npm run build
     - npm test
+    - npm run visual:test              # headless Chrome against the dev server
+    - upload test-results/visual/      # screenshots, kept 7 days either way
   rust:                # windows
     - cargo fmt --check
     - cargo clippy --all-targets -- -D warnings
