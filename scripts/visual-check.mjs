@@ -14,7 +14,7 @@
  * Exit codes: 0 = all checks passed, 1 = one or more checks failed.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { chromium } from "playwright-core";
@@ -59,6 +59,12 @@ function startDevServer() {
     cwd: resolve(),
     stdio: ["ignore", "pipe", "pipe"],
     shell: process.platform === "win32",
+    // POSIX: give the child its own process group so the kill below can
+    // take down the whole tree (npm -> sh -> vite). Without this, a
+    // surviving vite holds the inherited stdio pipes open and this Node
+    // process never exits — which is exactly how the first CI run of this
+    // script hung for 20+ minutes after all checks had already passed.
+    detached: process.platform !== "win32",
   });
   let output = "";
   child.stdout.on("data", (d) => (output += d.toString()));
@@ -67,10 +73,27 @@ function startDevServer() {
     child,
     getOutput: () => output,
     kill: () => {
+      // Both branches are synchronous on purpose: main() force-exits right
+      // after cleanup, so an async killer could be killed with the parent
+      // before it does its job.
       try {
-        child.kill();
         if (process.platform === "win32") {
-          spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"]);
+          // Kill the tree FIRST. `child.kill()` here would terminate the
+          // cmd.exe shell wrapper (shell: true makes pid the cmd.exe pid)
+          // and leave taskkill pointing at a dead pid while npm/vite live
+          // on as orphans holding the stdio pipes — the exact leak this
+          // script shipped with on Windows.
+          if (child.pid) {
+            execSync(`taskkill /pid ${child.pid} /f /t`, { stdio: "ignore" });
+          }
+        } else if (child.pid) {
+          // The child was spawned detached, so it leads its own process
+          // group: negative pid = npm, sh, and vite all at once. SIGKILL
+          // because nothing here needs a graceful shutdown and a process
+          // that stalls on SIGTERM must not hang CI.
+          process.kill(-child.pid, "SIGKILL");
+        } else {
+          child.kill("SIGKILL");
         }
       } catch {
         // already gone
@@ -250,7 +273,23 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error("Visual check crashed:", error);
-  process.exitCode = 1;
-});
+// CI watchdog: whatever keeps the event loop alive (a surviving dev-server
+// process holding inherited pipes, a wedged browser), this run must end.
+// Fires only if the loop is still alive 8 minutes in; unref'd so a clean,
+// fast run is never slowed by it.
+setTimeout(() => {
+  console.error("Visual check watchdog: force-exiting after 8 minutes");
+  process.exit(1);
+}, 8 * 60 * 1000).unref();
+
+main()
+  .catch((error) => {
+    console.error("Visual check crashed:", error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // The dev-server kill above is best-effort; force the exit so a leaked
+    // grandchild holding stdio pipes cannot turn a finished run into an
+    // endless CI step (observed on the first Linux CI run).
+    process.exit(process.exitCode ?? 0);
+  });
