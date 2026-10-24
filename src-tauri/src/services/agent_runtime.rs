@@ -41,6 +41,7 @@ where
             &step_context,
             cancel_flag.clone(),
             token_sender(step),
+            None,
         )
         .await?;
         let diffs = executor::parse_diffs_with_diagnostics(&response).diffs;

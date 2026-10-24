@@ -1,7 +1,10 @@
 use crate::agent::multi_agent::AgentRole;
 use crate::agent::state_machine::{DiffHunkProvenance, DiffProvenance, FileDiff, SddArtifact};
 use crate::services::llm_client::{
-    synthesize_agent_changes_block, ChatMessage, LlmClient, LlmStreamOutput,
+    synthesize_agent_changes_block, ChatMessage, LlmClient, LlmStreamOutput, NATIVE_CHANGES_TOOL,
+};
+use crate::services::mcp::{
+    format_mcp_tool_result_block, parse_mcp_tool_surface_name, McpState,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -9,13 +12,52 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tokio::sync::mpsc;
 
 /// 将原生工具调用合并进响应文本：追加合成的 agent-changes 围栏块，
-/// 使下游 parse_diffs 管线无需感知传输方式。
-fn merge_tool_call_output(output: LlmStreamOutput) -> String {
+/// 使下游 parse_diffs 管线无需感知传输方式。`mcp__<server>__<tool>` 形状
+/// 的调用会路由到已连接的 MCP 服务器执行（Phase 9.0.3），结果以
+/// ```mcp-tool-result 围栏块并入响应，供后续阶段与聊天视图观察。
+async fn merge_tool_call_output(output: LlmStreamOutput, mcp: Option<&McpState>) -> String {
     let mut content = output.content;
-    if !output.tool_calls.is_empty() {
-        if let Some(block) = synthesize_agent_changes_block(&output.tool_calls) {
-            content.push_str(&block);
+    if output.tool_calls.is_empty() {
+        return content;
+    }
+
+    if let Some(block) = synthesize_agent_changes_block(&output.tool_calls) {
+        content.push_str(&block);
+    }
+
+    for call in &output.tool_calls {
+        if call.name == NATIVE_CHANGES_TOOL {
+            continue;
         }
+        let Some((server, tool)) = parse_mcp_tool_surface_name(&call.name) else {
+            continue;
+        };
+        let arguments = serde_json::from_str::<rmcp::model::JsonObject>(&call.arguments).ok();
+        let block = match mcp {
+            Some(state) => match state.call_tool(&server, &tool, arguments).await {
+                Ok(outcome) => format_mcp_tool_result_block(&outcome),
+                Err(error) => format_mcp_tool_result_block(
+                    &crate::services::mcp::McpToolCallOutcome {
+                        server,
+                        tool,
+                        is_error: true,
+                        text: error,
+                        structured_content: None,
+                    },
+                ),
+            },
+            None => format_mcp_tool_result_block(
+                &crate::services::mcp::McpToolCallOutcome {
+                    server,
+                    tool,
+                    is_error: true,
+                    text: "MCP is not available in this context (no MCP state attached)"
+                        .to_string(),
+                    structured_content: None,
+                },
+            ),
+        };
+        content.push_str(&block);
     }
     content
 }
@@ -55,6 +97,7 @@ pub async fn execute_step(
     context: &str,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
+    mcp: Option<&McpState>,
 ) -> Result<String, String> {
     let messages = vec![
         ChatMessage {
@@ -73,7 +116,7 @@ pub async fn execute_step(
     let output = llm
         .stream_chat_with_tools(messages, cancel_flag, tx)
         .await?;
-    Ok(merge_tool_call_output(output))
+    Ok(merge_tool_call_output(output, mcp).await)
 }
 
 pub async fn execute_stage(
@@ -86,6 +129,7 @@ pub async fn execute_stage(
     pending_diffs: &str,
     cancel_flag: Arc<AtomicBool>,
     tx: mpsc::Sender<String>,
+    mcp: Option<&McpState>,
 ) -> Result<String, String> {
     let output_rules = match role {
         AgentRole::Architect => "Output a concise implementation plan. Do not output code diffs.",
@@ -216,7 +260,7 @@ If a blocking fix is required, include an Agent IDE diff/new-file block after th
     let output = llm
         .stream_chat_with_tools(messages, cancel_flag, tx)
         .await?;
-    Ok(merge_tool_call_output(output))
+    Ok(merge_tool_call_output(output, mcp).await)
 }
 
 /// 从 LLM 响应中解析 diff 块
@@ -934,8 +978,8 @@ fn make_new_file_diff(file: &str, content: &str) -> FileDiff {
 mod tests {
     use super::*;
 
-    #[test]
-    fn merge_tool_call_output_appends_agent_changes_block() {
+    #[tokio::test]
+    async fn merge_tool_call_output_appends_agent_changes_block() {
         let merged = merge_tool_call_output(LlmStreamOutput {
             content: "Applying the rename.".to_string(),
             tool_calls: vec![crate::services::llm_client::LlmToolCall {
@@ -943,7 +987,8 @@ mod tests {
                 name: "emit_agent_changes".to_string(),
                 arguments: r#"{"version":1,"changes":[{"type":"edit","file":"src/app.ts","hunks":[{"original":"const a = 1;","updated":"const a = 2;"}]}]}"#.to_string(),
             }],
-        });
+        }, None)
+        .await;
 
         assert!(merged.starts_with("Applying the rename."));
         assert!(merged.contains("```agent-changes"));
@@ -954,8 +999,8 @@ mod tests {
         assert_eq!(diffs[0].file, "src/app.ts");
     }
 
-    #[test]
-    fn merge_tool_call_output_keeps_plain_content_when_no_usable_calls() {
+    #[tokio::test]
+    async fn merge_tool_call_output_keeps_plain_content_when_no_usable_calls() {
         let base = LlmStreamOutput {
             content: "Just prose.".to_string(),
             tool_calls: vec![crate::services::llm_client::LlmToolCall {
@@ -964,13 +1009,13 @@ mod tests {
                 arguments: r#"{"version":1,"changes":[]}"#.to_string(),
             }],
         };
-        assert_eq!(merge_tool_call_output(base), "Just prose.");
+        assert_eq!(merge_tool_call_output(base, None).await, "Just prose.");
 
         let plain = LlmStreamOutput {
             content: "Just prose.".to_string(),
             tool_calls: Vec::new(),
         };
-        assert_eq!(merge_tool_call_output(plain), "Just prose.");
+        assert_eq!(merge_tool_call_output(plain, None).await, "Just prose.");
     }
 
     #[test]

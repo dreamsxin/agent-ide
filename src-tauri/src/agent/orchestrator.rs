@@ -21,6 +21,7 @@ use std::sync::{
 };
 use tauri::AppHandle;
 use tauri::Emitter;
+use tauri::Manager;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,6 +302,7 @@ impl AgentOrchestrator {
             let prior_outputs = stage_outputs.join("\n\n---\n\n");
             let pending_diff_summary = self.summarize_pending_diffs();
 
+            let mcp_state = app.state::<crate::services::mcp::McpState>();
             match executor::execute_stage(
                 llm,
                 stage.role,
@@ -311,6 +313,7 @@ impl AgentOrchestrator {
                 &pending_diff_summary,
                 cancel_flag.clone(),
                 tx2,
+                Some(mcp_state.inner()),
             )
             .await
             {

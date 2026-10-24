@@ -13,6 +13,7 @@ use crate::services::context::{
 use crate::services::llm_client::{
     EnhancedLlmClientFactory, LlmClient, LlmConfig, LocalModelConfig, ModelType,
 };
+use crate::services::mcp::McpState;
 use crate::services::llm_profiles::{
     self, LlmProfileResponse, LlmProfilesConfig, LlmProfilesResponse, SaveLlmProfileRequest,
 };
@@ -180,6 +181,15 @@ pub struct RunAgentStepRequest {
     pub run_id: Option<String>,
 }
 
+/// 附加 MCP (Phase 9.0.3) 发现的工具到 LLM 客户端的原生工具面
+fn attach_mcp_tools(llm: LlmClient, mcp_schemas: Vec<serde_json::Value>) -> LlmClient {
+    if mcp_schemas.is_empty() {
+        llm
+    } else {
+        llm.with_extra_tools(mcp_schemas)
+    }
+}
+
 /// Get the current Agent state.
 #[tauri::command]
 pub async fn get_agent_state(
@@ -224,8 +234,12 @@ pub async fn send_agent_prompt(
     request: SendPromptRequest,
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp: State<'_, McpState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let llm = attach_mcp_tools(
+        agent_state.get_llm_client(request.profile_id.as_deref())?,
+        mcp.tool_function_schemas().await,
+    );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
 
     let mut context = build_agent_context(
@@ -401,8 +415,12 @@ pub async fn run_agent_step(
     request: RunAgentStepRequest,
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp: State<'_, McpState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client(request.profile_id.as_deref())?;
+    let llm = attach_mcp_tools(
+        agent_state.get_llm_client(request.profile_id.as_deref())?,
+        mcp.tool_function_schemas().await,
+    );
     let context_budget = agent_state.get_context_budget(request.profile_id.as_deref());
     let mut context = build_agent_context(
         request.active_file,
@@ -469,7 +487,7 @@ pub async fn run_agent_step(
     }
 
     let response =
-        crate::agent::executor::execute_step(&llm, &step_prompt, &ctx_str, cancel_flag, tx).await;
+        crate::agent::executor::execute_step(&llm, &step_prompt, &ctx_str, cancel_flag, tx, Some(mcp.inner())).await;
     let mut orch = agent_state.orchestrator.lock().await;
     match response {
         Ok(response) => {
@@ -608,8 +626,9 @@ pub async fn run_agent_step(
 pub async fn continue_agent_pipeline(
     app_handle: AppHandle,
     agent_state: State<'_, AgentGlobalState>,
+    mcp: State<'_, McpState>,
 ) -> Result<String, String> {
-    let llm = agent_state.get_llm_client(None)?;
+    let llm = attach_mcp_tools(agent_state.get_llm_client(None)?, mcp.tool_function_schemas().await);
     agent_state.cancel_flag.store(false, Ordering::SeqCst);
     let cancel_flag = agent_state.cancel_flag.clone();
     let mut orch = agent_state.orchestrator.lock().await;

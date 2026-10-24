@@ -431,6 +431,8 @@ pub struct LlmClient {
     client: Client,
     /// 本地模型引擎（如果是本地模型）
     local_engine: Option<Arc<dyn ModelEngine>>,
+    /// MCP (Phase 9.0.3) 发现的工具 schema，随原生工具面一起下发
+    extra_tools: Vec<serde_json::Value>,
 }
 
 impl LlmClient {
@@ -447,12 +449,19 @@ impl LlmClient {
             config,
             client,
             local_engine: None, // 将在初始化时设置
+            extra_tools: Vec::new(),
         }
     }
 
     /// 设置本地模型引擎
     pub fn with_local_engine(mut self, engine: Arc<dyn ModelEngine>) -> Self {
         self.local_engine = Some(engine);
+        self
+    }
+
+    /// 附加 MCP (Phase 9.0.3) 工具 schema，与内置工具一起下发给模型
+    pub fn with_extra_tools(mut self, tools: Vec<serde_json::Value>) -> Self {
+        self.extra_tools = tools;
         self
     }
 
@@ -586,7 +595,7 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
-        let body = build_chat_request(&self.config, messages, true);
+        let body = build_chat_request_with_extra_tools(&self.config, messages, true, &self.extra_tools);
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -694,7 +703,7 @@ impl LlmClient {
             "{}/chat/completions",
             self.config.endpoint.trim_end_matches('/')
         );
-        let body = build_chat_request(&self.config, messages, false);
+        let body = build_chat_request_with_extra_tools(&self.config, messages, false, &self.extra_tools);
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Agent task cancelled".to_string());
@@ -947,6 +956,15 @@ fn build_chat_request(
     messages: Vec<ChatMessage>,
     stream: bool,
 ) -> serde_json::Value {
+    build_chat_request_with_extra_tools(config, messages, stream, &[])
+}
+
+fn build_chat_request_with_extra_tools(
+    config: &LlmConfig,
+    messages: Vec<ChatMessage>,
+    stream: bool,
+    extra_tools: &[serde_json::Value],
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": messages,
@@ -959,7 +977,12 @@ fn build_chat_request(
             object.insert(key.to_string(), serde_json::json!(max_output_tokens));
         }
         if config.tool_call_mode == "native_tools" {
-            object.insert("tools".to_string(), native_tools_schema());
+            let mut tools = native_tools_schema();
+            if let Some(array) = tools.as_array_mut() {
+                // MCP (Phase 9.0.3) 工具已在客户端层封装为 OpenAI function 形状
+                array.extend(extra_tools.iter().cloned());
+            }
+            object.insert("tools".to_string(), tools);
             object.insert("tool_choice".to_string(), serde_json::json!("auto"));
         }
     }
@@ -1258,6 +1281,38 @@ impl EnhancedLlmClientFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_chat_request_includes_extra_mcp_tools() {
+        let mut cfg = config("openai", "gpt-4o", None);
+        cfg.tool_call_mode = "native_tools".to_string();
+        let mcp_tool = serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "mcp__filesystem__read_file",
+                "description": "Read a file from the workspace",
+                "parameters": {"type": "object"}
+            }
+        });
+        let body = build_chat_request_with_extra_tools(
+            &cfg,
+            Vec::new(),
+            true,
+            &[mcp_tool.clone()],
+        );
+        let tools = body.get("tools").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(tools.len(), 3); // 2 built-in + 1 MCP tool
+        assert_eq!(tools[2], mcp_tool);
+        assert_eq!(body.get("tool_choice").and_then(|v| v.as_str()), Some("auto"));
+    }
+
+    #[test]
+    fn build_chat_request_text_protocol_omits_tools() {
+        let mut cfg = config("openai", "gpt-4o", None);
+        cfg.tool_call_mode = "text_protocol".to_string();
+        let body = build_chat_request_with_extra_tools(&cfg, Vec::new(), true, &[]);
+        assert!(body.get("tools").is_none());
+    }
 
     fn config(provider: &str, model: &str, max_output_tokens: Option<u32>) -> LlmConfig {
         LlmConfig {

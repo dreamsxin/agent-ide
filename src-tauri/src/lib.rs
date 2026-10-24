@@ -17,6 +17,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .manage(AgentGlobalState::new())
+        .manage(crate::services::mcp::McpState::new())
         .manage(TerminalManager::new())
         .manage(FileWatcherState::new())
         .manage(LspManager::new())
@@ -25,6 +26,24 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Agent IDE");
             }
+
+            // MCP (Phase 9.0.3): auto-connect enabled servers so their tools
+            // join the agent's native tool surface on every run.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let config = crate::services::mcp::McpServersConfig::load();
+                if let Err(err) = config.validate() {
+                    eprintln!("MCP config invalid, skipping auto-connect: {}", err);
+                    return;
+                }
+                let state = handle.state::<crate::services::mcp::McpState>();
+                for server in config.servers.into_iter().filter(|s| s.enabled) {
+                    if let Err(err) = state.connect(&server).await {
+                        eprintln!("MCP auto-connect '{}' failed: {}", server.name, err);
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -55,6 +74,13 @@ pub fn run() {
             commands::agent::continue_agent_pipeline,
             commands::agent::set_agent_mode,
             commands::agent::get_permission_policy,
+            commands::mcp::mcp_get_servers,
+            commands::mcp::mcp_set_servers,
+            commands::mcp::mcp_connect,
+            commands::mcp::mcp_disconnect,
+            commands::mcp::mcp_status,
+            commands::mcp::mcp_list_tools,
+            commands::mcp::mcp_call_tool,
             commands::agent::set_permission_policy,
             commands::agent::apply_diffs,
             commands::agent::apply_diff,
