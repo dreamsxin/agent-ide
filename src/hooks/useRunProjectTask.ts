@@ -6,6 +6,7 @@ import { useProblemStore } from "../stores/useProblemStore";
 import { useTaskStore, type ProjectTaskDefinition } from "../stores/useTaskStore";
 import { parseTerminalProblems } from "../utils/terminalProblemParser";
 import { isTauriRuntime } from "../utils/tauri";
+import { useT } from "../i18n";
 
 interface RunProjectTaskResult {
   command: string;
@@ -16,6 +17,7 @@ interface RunProjectTaskResult {
 }
 
 export function useRunProjectTask() {
+  const t = useT();
   const workspacePath = useLayoutStore((s) => s.workspacePath);
   const bottomVisible = useLayoutStore((s) => s.bottomVisible);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
@@ -38,7 +40,7 @@ export function useRunProjectTask() {
           time: new Date().toLocaleTimeString(),
           level: "info",
           source: "system",
-          message: `Running project task: ${task.label}`,
+          message: t("tasks.log.running", { label: task.label }),
           details: task.command,
         });
 
@@ -58,7 +60,11 @@ export function useRunProjectTask() {
             time: new Date().toLocaleTimeString(),
             level: status === "success" ? "success" : "error",
             source: "system",
-            message: `${task.label} ${status} (${result.durationMs} ms)`,
+            message: t("tasks.log.finished", {
+              label: task.label,
+              status: t(`tasks.status.${status}`),
+              ms: result.durationMs,
+            }),
             details: output.slice(0, 4000),
           });
         } catch (err) {
@@ -71,7 +77,7 @@ export function useRunProjectTask() {
             time: new Date().toLocaleTimeString(),
             level: "error",
             source: "system",
-            message: `Failed to run project task: ${task.label}`,
+            message: t("tasks.log.failed", { label: task.label }),
             details: String(err),
           });
         }
@@ -87,7 +93,7 @@ export function useRunProjectTask() {
         time: new Date().toLocaleTimeString(),
         level: "info",
         source: "system",
-        message: `Opened terminal session for project task: ${task.label}`,
+        message: t("tasks.log.terminal", { label: task.label }),
         details: task.command,
       });
     },
@@ -100,6 +106,7 @@ export function useRunProjectTask() {
       replaceProblems,
       setBottomTab,
       startTaskRun,
+      t,
       toggleBottomPanel,
       workspacePath,
     ]

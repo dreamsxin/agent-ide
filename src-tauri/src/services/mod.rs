@@ -1,11 +1,23 @@
 pub mod agent_runtime;
+pub mod browser;
+pub mod capture;
+/// 命令和它的输出在 Windows / POSIX 之间的对齐：翻译能翻的，按代码页解码回来的。
+pub mod command_text;
+pub mod computer;
 pub mod context;
 pub mod credentials;
+pub mod images;
+/// 往批准过的窗口里注入一次点击。这个产品里最狠的能力，形状见模块文档。
+pub mod input;
 pub mod llm_client;
 pub mod llm_profiles;
 pub mod mcp;
-pub mod permissions;
 pub mod problem_parser;
 pub mod project_memory;
 pub mod project_tasks;
+/// 把运行记录落到磁盘。界面那个日志面板关窗即失，排查问题要的就是它。形状见模块文档。
+pub mod run_log;
+pub mod verification;
+/// 取一个网址的正文给模型看：URL 校验、跳转策略、正文提取。形状见模块文档。
+pub mod web_fetch;
 pub mod workspace;

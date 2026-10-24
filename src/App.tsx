@@ -1,24 +1,22 @@
 import { lazy, Suspense, useCallback, useRef, useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import TopBar from "./components/layout/TopBar";
 import LeftPanel from "./components/layout/LeftPanel";
 import AgentPanel from "./components/layout/AgentPanel";
 import BottomPanel from "./components/layout/BottomPanel";
+import StatusBar from "./components/layout/StatusBar";
 import ResizeHandle from "./components/layout/ResizeHandle";
 import ShortcutsHelp from "./components/shared/ShortcutsHelp";
 import CommandPalette, { usePaletteCommands } from "./components/shared/CommandPalette";
 import ConfirmDialog from "./components/agent/ConfirmDialog";
+import QuestionDialog from "./components/agent/QuestionDialog";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import PanelLoading from "./components/shared/PanelLoading";
-import { useLayoutStore } from "./stores/useLayoutStore";
-import { useEditorStore } from "./stores/useEditorStore";
-import { useLogStore } from "./stores/useLogStore";
-import { useAgentStore } from "./stores/useAgentStore";
+import { useLayoutStore, maxBottomHeight } from "./stores/useLayoutStore";
 import { useAgentBridge } from "./hooks/useAgentBridge";
-import useShortcuts from "./hooks/useShortcuts";
+import { useAppBootstrap } from "./hooks/useAppBootstrap";
+import useShortcuts, { type Shortcut } from "./hooks/useShortcuts";
 import { useProjectTasks } from "./hooks/useProjectTasks";
 import { useRunProjectTask } from "./hooks/useRunProjectTask";
-import { isTauriRuntime } from "./utils/tauri";
 
 const EditorContainer = lazy(() => import("./components/editor/EditorContainer"));
 
@@ -71,6 +69,22 @@ export default function App() {
   const setBottomHeight = useLayoutStore((s) => s.setBottomHeight);
   const resizeStartRef = useRef({ left: leftWidth, right: rightWidth, bottom: bottomHeight });
 
+  // 视口高度只放在**组件**里，不写进 store：底部面板高度的上限跟着窗口走，但那是
+  // 一个渲染约束，不是用户的意图。把 clamp 的结果写回 store 会把用户在大屏上拖出来
+  // 的 500 永久改写成小窗口的上限，缩回去也回不来 —— 一次看不见、也无法撤销的偏好
+  // 丢失。存档里存意图，渲染时取 min。
+  const [viewportHeight, setViewportHeight] = useState(() =>
+    typeof window === "undefined" ? 900 : window.innerHeight
+  );
+  useEffect(() => {
+    const onResize = () => setViewportHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const bottomMax = maxBottomHeight(viewportHeight);
+  const effectiveBottomHeight = Math.min(bottomHeight, bottomMax);
+
+
   useAgentBridge();
 
   const { shortcuts } = useShortcuts();
@@ -103,31 +117,14 @@ export default function App() {
     return () => window.removeEventListener("toggle-command-palette", handler);
   }, []);
 
-  // 启动时恢复上次的工作目录
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-    invoke<string | null>("get_workspace_path").then((saved) => {
-      if (saved && typeof saved === "string" && saved.length > 0) {
-        console.log("[App] Restoring workspace:", saved);
-        useLayoutStore.getState().setWorkspacePath(saved);
-        useEditorStore.getState().setWorkspacePath(saved);
-        useLogStore.getState().restoreLogs(saved);
-        useAgentStore.getState().restoreAgentSession(saved);
-        useAgentStore.getState().restoreDiffs(saved);
-        void useAgentStore.getState().reconcileBackendRun();
-        void useEditorStore.getState().restoreEditorSession(saved);
-      } else {
-        console.log("[App] No saved workspace found, starting empty");
-      }
-    }).catch((err) => {
-      console.warn("[App] Failed to load workspace:", err);
-    });
-  }, []);
+  useAppBootstrap();
 
-  const allShortcuts = [
+  const allShortcuts: Shortcut[] = [
     ...shortcuts,
-    { id: "help", keys: "F1", label: "Shortcuts Help",
-      group: "General", scope: "global" as const,
+    // F1 这条不在 `useShortcuts` 里：它开的是那个帮助弹窗自己，而弹窗的开关是 App 的状态。
+    // 类型写出来是为了别再漏字段 —— 这里以前写的是 `label`，而接口已经换成了 `labelKey`。
+    { id: "help", keys: "F1", labelKey: "shortcut.help",
+      group: "general", scope: "global" as const,
       handler: () => setHelpVisible((v) => !v) },
   ];
 
@@ -154,13 +151,20 @@ export default function App() {
   const onBottomResize = useCallback(
     (delta: number, phase?: "start" | "move" | "end") => {
       if (phase === "start") {
-        resizeStartRef.current.bottom = useLayoutStore.getState().bottomHeight;
+        // 从屏幕上看到的高度起算，而不是存档里的意图值：窗口小的时候两者不同，
+        // 用意图值起算会让指针一按下去面板就跳一下。
+        resizeStartRef.current.bottom = effectiveBottomHeight;
         return;
       }
-      if (phase === "move") setBottomHeight(resizeStartRef.current.bottom - delta);
+      // 拖拽是显式操作，把上限写进意图是对的 —— 用户明确要求了这个尺寸。
+      if (phase === "move") {
+        setBottomHeight(Math.min(resizeStartRef.current.bottom - delta, bottomMax));
+      }
     },
-    [setBottomHeight]
+    [bottomMax, effectiveBottomHeight, setBottomHeight]
   );
+
+
 
   return (
     <div data-testid="app-root" className="h-screen flex flex-col bg-surface-base text-surface-text overflow-hidden">
@@ -174,7 +178,17 @@ export default function App() {
         commands={paletteCommands}
         onClose={() => setCommandPaletteVisible(false)}
       />
+      {/*
+        它现在真的会出现：后端一次撤不回的动作（先是 `workspace_browser_open`）会挂起
+        并等一个决定，`agent-approval-requested` 把请求放进 `pendingConfirm`，两个按钮
+        各送一个决定回去。没人点就在超时后按拒绝处理。
+      */}
       <ConfirmDialog />
+      {/*
+        模型也会反过来问用户：`ask_user_question` 挂起一次工具调用，等一个选项或一句
+        自己写的答案。和批准分开渲染，因为它不是授权 —— 不答只会让模型自己判断。
+      */}
+      <QuestionDialog />
 
       {/* 自定义标题栏 */}
       <TopBar />
@@ -210,11 +224,14 @@ export default function App() {
       <AnimatedPanel visible={bottomVisible} keepMounted className="flex-shrink-0">
         <div>
           <ResizeHandle direction="vertical" onResize={onBottomResize} />
-          <div style={{ height: `${bottomHeight}px` }} className="flex-shrink-0">
+              <div style={{ height: `${effectiveBottomHeight}px` }} className="flex-shrink-0">
             <BottomPanel />
           </div>
         </div>
       </AnimatedPanel>
+
+      {/* 状态栏在底部面板**外面**：它不是面板，focus mode 收起的是面板 */}
+      <StatusBar />
     </div>
   );
 }

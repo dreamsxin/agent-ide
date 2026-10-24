@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useLogStore } from "../../stores/useLogStore";
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "../../utils/tauri";
+import { useT } from "../../i18n";
+import type { MessageKey } from "../../i18n/messages";
 
 const LEVEL_COLORS: Record<string, string> = {
   info: "text-accent-blue",
@@ -16,10 +20,23 @@ const SOURCE_ICONS: Record<string, string> = {
 };
 
 export default function LogView() {
+  const t = useT();
   const logs = useLogStore((s) => s.logs);
   const clearLogs = useLogStore((s) => s.clearLogs);
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // 面板这份只在内存 + localStorage 里，磁盘那份才是关掉窗口还在、能发给别人看的。
+  // 路径必须在界面上给出来：知道有这个文件却找不到它，等于没有。
+  const [logPath, setLogPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void invoke<string>("run_log_path")
+      .then(setLogPath)
+      .catch(() => {
+        // 拿不到就不显示：这一行是帮忙的，不该自己变成一条错误
+      });
+  }, []);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -33,8 +50,14 @@ export default function LogView() {
       <div className="h-full flex items-center justify-center bg-black text-surface-muted font-mono text-xs">
         <div className="text-center">
           <div className="text-2xl mb-2">📋</div>
-          <div>No logs yet</div>
-          <div className="text-[10px] mt-1">Agent activity will appear here</div>
+          <div>{t("logs.empty")}</div>
+          <div className="text-[10px] mt-1">{t("logs.empty.hint")}</div>
+          {/* 空面板正是最需要这条路径的时候：这一次没记录，不等于磁盘上那份也空 */}
+          {logPath && (
+            <div className="mt-2 break-all text-[10px] text-surface-muted/70" title={t("logs.file.title")}>
+              {logPath}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -45,13 +68,21 @@ export default function LogView() {
       {/* Toolbar */}
       <div className="flex items-center justify-between px-2 py-1 border-b border-surface-border/20">
         <span className="text-surface-muted text-[10px] font-mono">
-          {logs.length} entries
+          {t("logs.entries", { count: logs.length })}
         </span>
+        {logPath && (
+          <span
+            className="min-w-0 flex-1 truncate px-2 text-left text-[10px] font-mono text-surface-muted/60"
+            title={t("logs.file.title")}
+          >
+            {logPath}
+          </span>
+        )}
         <button
           onClick={clearLogs}
           className="text-surface-muted hover:text-surface-text text-[10px] px-1"
         >
-          Clear
+          {t("logs.clear")}
         </button>
       </div>
 
@@ -97,23 +128,23 @@ export default function LogView() {
                 )}
 
                 <span className="ml-auto text-surface-muted text-[9px] opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                  {hasDetails ? (isExpanded ? "hide" : "details") : log.source}
+                  {hasDetails ? (isExpanded ? t("logs.hide") : t("logs.details")) : log.source}
                 </span>
               </button>
 
               {isExpanded && (
                 <div className="ml-[5.75rem] mr-2 mb-1 rounded border border-surface-border/30 bg-surface-base/80 p-2 text-[10px] text-surface-muted whitespace-pre-wrap break-words">
-                  <MetaLine label="phase" value={log.phase} />
-                  <MetaLine label="role" value={log.role ?? undefined} />
-                  <MetaLine label="stage" value={log.stage ?? undefined} />
+                  <MetaLine labelKey="logs.meta.phase" value={log.phase} />
+                  <MetaLine labelKey="logs.meta.role" value={log.role ?? undefined} />
+                  <MetaLine labelKey="logs.meta.stage" value={log.stage ?? undefined} />
                   {log.details && (
-                    <Section title="details" content={log.details} />
+                    <Section titleKey="logs.section.details" content={log.details} />
                   )}
                   {log.contextSummary && (
-                    <Section title="context" content={log.contextSummary} />
+                    <Section titleKey="logs.section.context" content={log.contextSummary} />
                   )}
                   {log.diffSummary && (
-                    <Section title="diffs" content={log.diffSummary} />
+                    <Section titleKey="logs.section.diffs" content={log.diffSummary} />
                   )}
                 </div>
               )}
@@ -125,19 +156,21 @@ export default function LogView() {
   );
 }
 
-function MetaLine({ label, value }: { label: string; value?: string | null }) {
+function MetaLine({ labelKey, value }: { labelKey: MessageKey; value?: string | null }) {
+  const t = useT();
   if (!value) return null;
   return (
     <div className="mb-1">
-      <span className="text-surface-text">{label}:</span> {value}
+      <span className="text-surface-text">{t(labelKey)}:</span> {value}
     </div>
   );
 }
 
-function Section({ title, content }: { title: string; content: string }) {
+function Section({ titleKey, content }: { titleKey: MessageKey; content: string }) {
+  const t = useT();
   return (
     <div className="mt-2">
-      <div className="text-surface-text mb-1">{title}</div>
+      <div className="text-surface-text mb-1">{t(titleKey)}</div>
       <div>{content}</div>
     </div>
   );

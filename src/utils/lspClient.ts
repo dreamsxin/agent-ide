@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { IRange } from "monaco-editor";
 import { isTauriRuntime } from "./tauri";
+import { translate, useLocaleStore } from "../i18n";
 
 export interface LspPosition {
   line: number;
@@ -96,7 +97,12 @@ export function toLspLanguageId(languageId: string) {
 }
 
 export async function initializeLsp(workspacePath: string | null, languageId = "typescript"): Promise<{ ready: boolean; message?: string }> {
-  if (!isTauriRuntime()) return { ready: false, message: "Language server support is available in the Tauri app runtime." };
+  if (!isTauriRuntime())
+    return {
+      ready: false,
+      // 不在组件里，现问 store 的语言：这句会进 `useLspStore.message`，直接上屏
+      message: translate(useLocaleStore.getState().locale, "lsp.needsTauri"),
+    };
   try {
     await invoke("lsp_initialize", { workspacePath, languageId });
     return { ready: true };

@@ -1,15 +1,19 @@
 import { useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "../utils/tauri";
 import { useAgentStore } from "../stores/useAgentStore";
 import { useEditorStore } from "../stores/useEditorStore";
 import { useLayoutStore } from "../stores/useLayoutStore";
 import type { ProblemEntry } from "../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../stores/useTaskStore";
 import {
+  buildIdeRuntimeContext,
   buildProblemExplainPrompt,
   buildProblemFixPrompt,
   buildTaskFailureFixPrompt,
-  withIdeRuntimeContext,
 } from "../utils/agentRuntimeContext";
+import { ideRuntimeOptionsFor, loadContextOptions } from "../utils/chatContextOptions";
+import { isAgentBusy as agentIsBusy } from "../utils/agentExperience";
 
 export function useFixWithAgent() {
   const sendPrompt = useAgentStore((s) => s.sendPrompt);
@@ -22,11 +26,7 @@ export function useFixWithAgent() {
   const toggleRightPanel = useLayoutStore((s) => s.toggleRightPanel);
   const setAgentView = useLayoutStore((s) => s.setAgentView);
 
-  const isAgentBusy =
-    agentState !== "idle" &&
-    agentState !== "done" &&
-    agentState !== "error" &&
-    agentState !== "waiting_user";
+  const isAgentBusy = agentIsBusy(agentState);
 
   const sendFixPrompt = useCallback(
     async (prompt: string) => {
@@ -36,21 +36,24 @@ export function useFixWithAgent() {
         toggleRightPanel();
       }
 
-      const fullPrompt = withIdeRuntimeContext(prompt);
+      // 用户在 Chat 里存下来的那份开关，而不是硬编码的默认值：他关掉了终端和日志，
+      // 从问题面板点进来就不该照样把两者发出去
+      const ideRuntime = buildIdeRuntimeContext(ideRuntimeOptionsFor(loadContextOptions()));
       addMessage({
         id: `fix-${Date.now()}`,
         role: "user",
-        content: fullPrompt,
+        content: prompt,
         timestamp: Date.now(),
       });
 
       await sendPrompt({
-        prompt: fullPrompt,
+        prompt,
         contextFiles: activeFile ? [activeFile] : [],
         activeFile: activeFile ?? undefined,
         activeFileContent: activeFile ? fileContents[activeFile] : undefined,
         selection: selectedText ?? undefined,
         ideMode: "code",
+        ideRuntime,
       });
     },
     [
@@ -82,13 +85,31 @@ export function useFixWithAgent() {
 
   const fixTaskFailure = useCallback(
     async (task: ProjectTaskRunState) => {
-      await sendFixPrompt(buildTaskFailureFixPrompt(task));
+      // 提示词以后端那份为准。同一段提示曾在 Rust 和 TypeScript 各存一份，
+      // 两边对"输出太长时保哪一半"给出过相反答案（CLI 用的那半是错的）。
+      // TS 版本现在只在非 Tauri 环境或 IPC 失败时兜底。
+      let prompt: string | null = null;
+      if (isTauriRuntime()) {
+        try {
+          prompt = await invoke<string>("agent_repair_prompt", {
+            request: {
+              command: task.command,
+              exitCode: task.exitCode ?? null,
+              output: task.output ?? "",
+            },
+          });
+        } catch {
+          prompt = null;
+        }
+      }
+      await sendFixPrompt(prompt ?? buildTaskFailureFixPrompt(task));
     },
     [sendFixPrompt]
   );
 
   return {
     isAgentBusy,
+    sendFixPrompt,
     explainProblem,
     fixProblem,
     fixTaskFailure,

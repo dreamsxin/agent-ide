@@ -7,9 +7,12 @@ use crate::services::context::{
 };
 use crate::services::llm_client::{LlmClient, LlmConfig};
 use crate::services::llm_profiles;
-use crate::services::permissions;
 use crate::services::problem_parser::ProblemEntry;
 use crate::services::project_tasks::{self, RunProjectTaskResult};
+// 修复循环的措辞和截断规则和桌面端共用，避免两套实现慢慢漂移
+use crate::services::verification::{
+    build_repair_prompt, collect_command_problems, failed_command_results, is_command_allowed,
+};
 use crate::services::{context::AgentContext, workspace};
 use chrono::Utc;
 use clap::error::ErrorKind;
@@ -184,6 +187,13 @@ struct RunArgs {
     #[arg(long = "allow-delete")]
     allow_delete: bool,
 
+    /// Expose `workspace_write_file` to the model. Requires `--apply`.
+    ///
+    /// 单独一个开关，不复用 `--allow-edit`：那个管的是"产出的 diff 能否落盘"，
+    /// 而这个是"模型可以在运行途中直接写文件"，两件事。
+    #[arg(long = "allow-agent-write")]
+    allow_agent_write: bool,
+
     #[arg(long = "allow-git")]
     allow_git: Vec<String>,
 }
@@ -203,9 +213,38 @@ struct SmokeArgs {
 }
 
 #[derive(Subcommand, Debug)]
+// `IdeBackend` 带着完整的 run 参数，`IdeSurface` 只有几个字段，体积差被 clippy
+// 盯上了。这里无所谓：整个进程只从 argv 构造一次这个枚举，既不放进集合也不
+// 高频传递。装箱要么 clap 的 derive 不接受，要么只是为了让 lint 闭嘴。
+#[allow(clippy::large_enum_variant)]
 enum SmokeCommand {
     /// Exercise workspace resolution, project scripts, command checks, Problems, diff apply, and repair-chain artifacts.
     IdeBackend(AgentCommandArgs),
+    /// Probe the IDE panel backends read-only: workspace, project tasks, Git, context packing.
+    IdeSurface(IdeSurfaceArgs),
+}
+
+/// `smoke ide-surface` 的参数。
+///
+/// 刻意只读、也不需要 LLM：它回答的是"桌面端那些面板背后的后端此刻能不能工作"，
+/// 而这些以前只能靠打开应用一个个点。没有 provider 依赖意味着它能进 CI。
+#[derive(Args, Debug, Clone)]
+struct IdeSurfaceArgs {
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = OutputMode::Text)]
+    output: OutputMode,
+
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    run_id: Option<String>,
+
+    /// Context compression mode used for the context-packing probe.
+    #[arg(long, value_enum, default_value_t = ContextModeArg::Budgeted)]
+    context_mode: ContextModeArg,
 }
 
 impl Default for RunArgs {
@@ -234,6 +273,7 @@ impl Default for RunArgs {
             allow_create: false,
             allow_edit: false,
             allow_delete: false,
+            allow_agent_write: false,
             allow_git: Vec::new(),
         }
     }
@@ -415,6 +455,64 @@ enum CliEvent {
         status: CliStatus,
         exit_code: u8,
     },
+    SurfaceProbed {
+        name: String,
+        status: String,
+        detail: String,
+    },
+}
+
+/// 一次 IDE 后端面探测的结果。
+///
+/// `unavailable` 和 `failed` 必须分开：工作区不是 git 仓库时 Git 面板本来就
+/// 没东西可显示，那不是缺陷；而 `git_status` 真的报错是缺陷。混成一个状态会
+/// 让这个命令在非 git 目录里永远是红的，很快就没人看了。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SurfaceProbe {
+    name: String,
+    status: String,
+    detail: String,
+}
+
+impl SurfaceProbe {
+    fn ok(name: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "ok".to_string(),
+            detail,
+        }
+    }
+
+    fn unavailable(name: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "unavailable".to_string(),
+            detail,
+        }
+    }
+
+    fn failed(name: &str, detail: String) -> Self {
+        Self {
+            name: name.to_string(),
+            status: "failed".to_string(),
+            detail,
+        }
+    }
+
+    fn is_failure(&self) -> bool {
+        self.status == "failed"
+    }
+}
+
+/// Git 探测里哪些错误属于"这个仓库现在没东西可看"而不是缺陷。
+///
+/// 只剩一种：根本不是 git 仓库。这个探测命令当初还发现了第二种——刚 `git init`
+/// 还没有提交时 `git_status` 直接返回 Err（git2 的 `UnbornBranch`），桌面端 Git
+/// 面板在新建仓库里会因此报错。那个缺陷已经在 `commands::git` 里修掉了，所以这里
+/// 不再容忍它：继续容忍等于把回归静音成"不可用"。
+fn git_probe_unavailable(error: &str) -> bool {
+    error.contains("Not a git repo")
 }
 
 struct CliOutput {
@@ -679,9 +777,47 @@ async fn run_agent_command(
         .unwrap_or_else(|| default_artifact_dir(&workspace_path, &run_id));
     let prompt = read_prompt(&args, positional_prompt)?;
     validate_repair_permissions(&args)?;
+    validate_agent_write_permission(&args)?;
     let llm = build_llm_client(&args)?;
+    // CLI 的工具面。在此之前 CLI 传的是 `None` invoker，所以 headless 运行里模型是
+    // "盲"的 —— 这也是 CLI 需要 `--max-iterations` 修复循环兜底的原因。
+    //
+    // 两个开关是分开的，故意的：
+    // - `--allow-run` 给验证工具，限定在同一批 pattern 内
+    // - `--allow-agent-write` 给写入工具，且要求 `--apply`（见
+    //   `validate_agent_write_permission`）
+    //
+    // 不复用 `--allow-edit` / `--allow-create`：那两个管的是"产出的 diff 能否落盘"，
+    // 把它们重新解释成"模型可以直接写文件"是偷偷提权。
+    //
+    // 只读工具则**无条件**挂上。读工作区里的文件不是特权：工作区本来就是这次任务的
+    // 对象，而模型看不到文件内容就只能靠猜写 ORIGINAL 段。真实 provider 评测证实了
+    // 这一点：一次不带任何工具权限的运行，打包出的 context 只有 228 个字符的文件树，
+    // 模型于是"引用"了一段它从未见过的代码（把 `Hello, ${name}` 写成
+    // `Hello, ${name}!`、单引号写成双引号），四个 hunk 全部以
+    // "Could not find original content" 失败。提示词里早就写着"逐字复制原文"，
+    // 但没有读的手段时那条要求无从遵守。
+    let tool_permissions = crate::agent::workspace_tools::WorkspaceToolPermissions::new(
+        args.allow_run.clone(),
+        args.allow_agent_write,
+        args.allow_agent_write && args.allow_create,
+    );
+    let (llm, tool_invoker) = crate::agent::workspace_tools::attach_workspace_tools(
+        llm,
+        None,
+        None,
+        tool_permissions.clone(),
+    );
+
     let mut context = build_workspace_context(&workspace_path, &args.include);
     context.enrich_from_workspace_with_sources(&source_options(&args.include));
+    // 项目记忆被切掉尾部时说一句。CLI 没有 action log，而这件事影响的正是这一次运行 ——
+    // 用户会看到 Agent 不照最后写下的那几条规矩做，却查不到原因。stdout 留给要被解析的
+    // JSON/NDJSON，所以走 stderr（同图片降级、历史修剪）
+    if let Some(bytes) = context.project_memory_truncated {
+        let (summary, details) = crate::services::project_memory::truncation_report(bytes);
+        eprintln!("warning: {}\n{}", summary, details);
+    }
     let context_options = ContextBuildOptions::new(args.context_mode.into(), None);
     let context_text = context.to_prompt_context_with_options(&context_options);
     let context_estimate = context.estimate_prompt_context(&context_options);
@@ -794,6 +930,7 @@ async fn run_agent_command(
         &mut output,
         cancel_flag,
         args.timeout_seconds,
+        tool_invoker.clone(),
     )
     .await?;
     validate_diff_limit(&diffs, args.max_diff_files)?;
@@ -824,74 +961,94 @@ async fn run_agent_command(
         .any(|result| result.exit_code.unwrap_or(-1) != 0);
     let mut repair_chain = Vec::new();
 
-    if args.apply && checks_failed && args.max_iterations > 0 {
-        for iteration in 1..=args.max_iterations {
-            let command_problems = collect_command_problems(&command_results);
-            let failed_commands_before = failed_command_results(&command_results);
-            output.event(CliEvent::RepairIterationStarted {
-                iteration,
-                max_iterations: args.max_iterations,
-                problem_count: command_problems.len(),
-            });
-            output.text(format!(
-                "--- Repair iteration {}/{} ---",
-                iteration, args.max_iterations
-            ));
-            let repair_prompt =
-                build_repair_prompt(&prompt, iteration, &command_results, &command_problems);
-            let repair_steps = vec![TaskStep {
-                id: format!("repair-{}-{}", iteration, Uuid::new_v4()),
-                title: format!("Repair failed checks iteration {}", iteration),
-                step_type: "edit".to_string(),
-                status: "todo".to_string(),
-                logs: Vec::new(),
-                scope: Some("workspace".to_string()),
-                execution_mode: Some("fix".to_string()),
-            }];
-            let repair_diffs = execute_steps(
-                &llm,
-                &repair_prompt,
-                &context_text,
-                &workspace_path,
-                &repair_steps,
-                &mut output,
-                Arc::new(AtomicBool::new(false)),
-                args.timeout_seconds,
-            )
-            .await?;
-            validate_diff_limit(&repair_diffs, args.max_diff_files)?;
-            let _ = validate_cli_policy(&args, &repair_diffs)?;
-            let repair_apply = apply_pending_diffs(&repair_diffs);
-            output.event(CliEvent::ApplyFinished {
-                applied_count: repair_apply.applied.len(),
-                failed_count: repair_apply.failed.len(),
-            });
-            diffs.extend(repair_diffs.clone());
-            apply_results.push(repair_apply.clone());
-            command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
-            trim_command_outputs(&mut command_results, args.max_output_bytes);
-            checks_failed = command_results
-                .iter()
-                .any(|result| result.exit_code.unwrap_or(-1) != 0);
-            repair_chain.push(RepairIterationRecord {
-                iteration,
-                prompt: repair_prompt,
-                failed_commands_before,
-                problems_before: command_problems,
-                diffs: repair_diffs,
-                apply_result: repair_apply.clone(),
-                commands_after: command_results.clone(),
-                checks_failed_after: checks_failed,
-            });
-            output.event(CliEvent::RepairIterationFinished {
-                iteration,
-                diff_count: diffs.len(),
-                checks_failed,
-            });
-            if !repair_apply.failed.is_empty() || !checks_failed {
+    // 循环的准入和退出规则现在归 `verification::RepairPolicy`，桌面端要走同一套
+    // （9.0.10）。这里只剩调用序列。
+    let repair_policy =
+        crate::services::verification::RepairPolicy::new(args.max_iterations, args.apply);
+    let mut completed_iterations = 0u8;
+    let mut repair_apply_failed = false;
+    loop {
+        let decision = repair_policy.next(completed_iterations, checks_failed, repair_apply_failed);
+        let iteration = match decision {
+            crate::services::verification::RepairDecision::Repair { iteration } => iteration,
+            crate::services::verification::RepairDecision::Stop(stop) => {
+                // 只在真的修过的时候说明为什么停：一次没修过的运行里，
+                // "repair not enabled" 是噪音
+                if completed_iterations > 0 {
+                    output.text(format!(
+                        "--- Repair stopped after {} iteration(s): {} ---",
+                        completed_iterations,
+                        stop.reason()
+                    ));
+                }
                 break;
             }
-        }
+        };
+        let command_problems = collect_command_problems(&command_results);
+        let failed_commands_before = failed_command_results(&command_results);
+        output.event(CliEvent::RepairIterationStarted {
+            iteration,
+            max_iterations: args.max_iterations,
+            problem_count: command_problems.len(),
+        });
+        output.text(format!(
+            "--- Repair iteration {}/{} ---",
+            iteration, args.max_iterations
+        ));
+        let repair_prompt =
+            build_repair_prompt(&prompt, iteration, &command_results, &command_problems);
+        let repair_steps = vec![TaskStep {
+            id: format!("repair-{}-{}", iteration, Uuid::new_v4()),
+            title: format!("Repair failed checks iteration {}", iteration),
+            step_type: "edit".to_string(),
+            status: "todo".to_string(),
+            logs: Vec::new(),
+            scope: Some("workspace".to_string()),
+            execution_mode: Some("fix".to_string()),
+        }];
+        let repair_diffs = execute_steps(
+            &llm,
+            &repair_prompt,
+            &context_text,
+            &workspace_path,
+            &repair_steps,
+            &mut output,
+            Arc::new(AtomicBool::new(false)),
+            args.timeout_seconds,
+            tool_invoker.clone(),
+        )
+        .await?;
+        validate_diff_limit(&repair_diffs, args.max_diff_files)?;
+        let _ = validate_cli_policy(&args, &repair_diffs)?;
+        let repair_apply = apply_pending_diffs(&repair_diffs);
+        output.event(CliEvent::ApplyFinished {
+            applied_count: repair_apply.applied.len(),
+            failed_count: repair_apply.failed.len(),
+        });
+        diffs.extend(repair_diffs.clone());
+        apply_results.push(repair_apply.clone());
+        command_results = run_cli_checks(&args, &workspace_path, &mut output).await?;
+        trim_command_outputs(&mut command_results, args.max_output_bytes);
+        checks_failed = command_results
+            .iter()
+            .any(|result| result.exit_code.unwrap_or(-1) != 0);
+        repair_chain.push(RepairIterationRecord {
+            iteration,
+            prompt: repair_prompt,
+            failed_commands_before,
+            problems_before: command_problems,
+            diffs: repair_diffs,
+            apply_result: repair_apply.clone(),
+            commands_after: command_results.clone(),
+            checks_failed_after: checks_failed,
+        });
+        output.event(CliEvent::RepairIterationFinished {
+            iteration,
+            diff_count: diffs.len(),
+            checks_failed,
+        });
+        repair_apply_failed = !repair_apply.failed.is_empty();
+        completed_iterations = iteration;
     }
 
     let command_problems = collect_all_observed_problems(&command_results, &repair_chain);
@@ -978,13 +1135,224 @@ async fn run_agent_command(
         Some(&context_text),
         Some(&diffs),
     )?;
+    // 工具写入要留痕。桌面端把它们登记成可撤销的 applied diff 卡片，CLI 没有审查区，
+    // 所以对应物是 run artifact：不写这一份，磁盘变了而运行记录里查不到是谁改的。
+    //
+    // 只要开了写权限就落这份文件，哪怕是空数组：文件缺失和"一次都没写"是两件事，
+    // 混在一起的话读运行记录的人分不出"没授权"和"授权了但没用"。
+    if args.allow_agent_write {
+        let records: Vec<serde_json::Value> = tool_permissions
+            .take_writes()
+            .iter()
+            .map(|write| {
+                serde_json::json!({
+                    "file": write.file,
+                    "created": write.previous.is_none(),
+                    "previousChars": write.previous.as_ref().map(|value| value.len()),
+                    "updatedChars": write.updated.len(),
+                })
+            })
+            .collect();
+        write_json(artifact_dir.join("tool-writes.json"), &records)?;
+    }
     Ok(exit)
 }
 
 async fn run_smoke(args: SmokeArgs) -> Result<ExitCode, (ExitCode, String)> {
     match args.command {
         SmokeCommand::IdeBackend(args) => run_ide_backend_smoke(args).await,
+        SmokeCommand::IdeSurface(args) => run_ide_surface_smoke(args).await,
     }
+}
+
+/// 只读地探一遍桌面端各面板背后的后端。
+///
+/// 存在的理由：`agent_cli` 一行 `commands::` 都没 import，走的全是 `services::`
+/// 和 `agent::`，所以 Agent 流程之外的东西（Git 面板、命令面板、上下文装配）
+/// 在自动化里完全没有入口 —— 只能打开应用一个个点。这个子命令用**桌面端调用的
+/// 同一批函数**把它们跑一遍并给出机器可读结果。
+///
+/// 刻意不碰的东西：终端 PTY 和 LSP 需要真的起子进程，写操作和 fetch/pull/push
+/// 会碰网络和磁盘。这个命令必须能在 CI 里对任意仓库无副作用地跑。
+async fn run_ide_surface_smoke(args: IdeSurfaceArgs) -> Result<ExitCode, (ExitCode, String)> {
+    let mut output = CliOutput::new(args.output);
+    let run_id = args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| make_run_id(args.workspace.as_deref()));
+    let workspace_path = resolve_workspace(args.workspace.as_deref())?;
+    configure_workspace(&workspace_path)?;
+    let workspace_display = workspace_path.to_string_lossy().to_string();
+    let artifact_dir = args
+        .artifact_dir
+        .clone()
+        .unwrap_or_else(|| default_artifact_dir(&workspace_path, &run_id));
+
+    output.event(CliEvent::RunStarted {
+        run_id: run_id.clone(),
+        command: "smoke ide-surface".to_string(),
+        workspace: workspace_display.clone(),
+    });
+
+    let mut probes = Vec::new();
+
+    // 1. 工作区边界解析：所有面板都建立在它之上，它错了后面全错
+    probes.push(match workspace::resolve_existing(".") {
+        Ok(path) => SurfaceProbe::ok("workspace_resolve", path.to_string_lossy().to_string()),
+        Err(error) => SurfaceProbe::failed("workspace_resolve", error),
+    });
+
+    // 2. 命令面板 / TopBar 的命令来源
+    let tasks = project_tasks::discover_project_tasks_in_root(&workspace_path);
+    probes.push(match &tasks {
+        Ok(tasks) if tasks.is_empty() => SurfaceProbe::unavailable(
+            "project_tasks",
+            "No package.json scripts or Cargo tasks were discovered".to_string(),
+        ),
+        Ok(tasks) => SurfaceProbe::ok(
+            "project_tasks",
+            format!(
+                "{} task(s): {}",
+                tasks.len(),
+                tasks
+                    .iter()
+                    .map(|task| task.command.as_str())
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Err(error) => SurfaceProbe::failed("project_tasks", error.clone()),
+    });
+
+    // 3. Agent 验证工具和 Verify All 实际会覆盖哪些命令。
+    //    长驻命令被排除，所以这里显示的是"真的会跑的那些"，不是全部任务。
+    if let Ok(tasks) = &tasks {
+        let verifiable: Vec<&str> = tasks
+            .iter()
+            .map(|task| task.command.as_str())
+            .filter(|command| !crate::services::verification::is_long_running_command(command))
+            .collect();
+        probes.push(if verifiable.is_empty() {
+            SurfaceProbe::unavailable(
+                "verification_candidates",
+                "Every discovered task looks long-running, so a verification pass would cover nothing"
+                    .to_string(),
+            )
+        } else {
+            SurfaceProbe::ok(
+                "verification_candidates",
+                format!("{}: {}", verifiable.len(), verifiable.join(", ")),
+            )
+        });
+    }
+
+    // 4. Git 面板后端，调的就是桌面端那两个函数
+    probes.push(
+        match crate::commands::git::git_status(workspace_display.clone()) {
+            Ok(status) => SurfaceProbe::ok(
+                "git_status",
+                format!(
+                    "branch {}, {} changed entr(ies), {} staged, ahead {} behind {}, {} conflict(s)",
+                    status.branch,
+                    status.entries.len(),
+                    status.entries.iter().filter(|entry| entry.staged).count(),
+                    status.ahead,
+                    status.behind,
+                    status.conflicts.len()
+                ),
+            ),
+            Err(error) if git_probe_unavailable(&error) => {
+                SurfaceProbe::unavailable("git_status", error)
+            }
+            Err(error) => SurfaceProbe::failed("git_status", error),
+        },
+    );
+    probes.push(
+        match crate::commands::git::git_diff(
+            workspace_display.clone(),
+            None,
+            Some("all".to_string()),
+        ) {
+            Ok(diff) => SurfaceProbe::ok("git_diff", format!("{} chars", diff.len())),
+            Err(error) if git_probe_unavailable(&error) => {
+                SurfaceProbe::unavailable("git_diff", error)
+            }
+            Err(error) => SurfaceProbe::failed("git_diff", error),
+        },
+    );
+
+    // 5. 上下文装配：段落配额、预算裁剪，Agent 每次运行都依赖它
+    let context = build_workspace_context(&workspace_path, &[]);
+    let estimate = estimate_context(&context, args.context_mode);
+    probes.push(SurfaceProbe::ok(
+        "context_estimate",
+        format!(
+            "{} section(s), {} estimated tokens, budget {}",
+            estimate.sections.len(),
+            estimate.estimated_tokens,
+            estimate
+                .input_budget_tokens
+                .map(|tokens| tokens.to_string())
+                .unwrap_or_else(|| "unset".to_string())
+        ),
+    ));
+
+    for probe in &probes {
+        output.event(CliEvent::SurfaceProbed {
+            name: probe.name.clone(),
+            status: probe.status.clone(),
+            detail: probe.detail.clone(),
+        });
+        output.text(format!(
+            "[{}] {}: {}",
+            probe.status, probe.name, probe.detail
+        ));
+    }
+
+    let errors: Vec<String> = probes
+        .iter()
+        .filter(|probe| probe.is_failure())
+        .map(|probe| format!("{}: {}", probe.name, probe.detail))
+        .collect();
+    let (status, exit) = if errors.is_empty() {
+        (CliStatus::Ok, ExitCode::Success)
+    } else {
+        (CliStatus::PreconditionFailed, ExitCode::PreconditionFailed)
+    };
+
+    let summary = CliSummary {
+        schema_version: 1,
+        run_id,
+        status: status.clone(),
+        exit_code: exit.as_u8(),
+        workspace: workspace_display,
+        command: "smoke ide-surface".to_string(),
+        prompt: None,
+        output: args.output,
+        artifact_dir: artifact_dir.to_string_lossy().to_string(),
+        context: Some(estimate),
+        plan: Vec::new(),
+        diffs: Vec::new(),
+        apply_result: None,
+        commands: Vec::new(),
+        problems: Vec::new(),
+        repair_chain: Vec::new(),
+        repair_summary: Vec::new(),
+        project_tasks: tasks.unwrap_or_default(),
+        capabilities: None,
+        policy: default_policy_summary(),
+        errors,
+    };
+
+    emit_summary(&mut output, &summary)?;
+    write_artifacts(&artifact_dir, &summary, &output.events, None, None)?;
+    // 探测结果单独落一份，方便外部工具直接读而不用从事件流里筛
+    let probes_path = artifact_dir.join("surface-probes.json");
+    if let Ok(serialized) = serde_json::to_string_pretty(&probes) {
+        let _ = std::fs::write(probes_path, serialized);
+    }
+    Ok(exit)
 }
 
 async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (ExitCode, String)> {
@@ -1004,7 +1372,7 @@ async fn run_ide_backend_smoke(mut args: AgentCommandArgs) -> Result<ExitCode, (
     }
 
     for command in args.run.run_commands.clone() {
-        if !permissions::is_command_allowed(&command, &args.run.allow_run) {
+        if !is_command_allowed(&command, &args.run.allow_run) {
             args.run.allow_run.push(command);
         }
     }
@@ -1041,6 +1409,7 @@ async fn execute_steps(
     output: &mut CliOutput,
     cancel_flag: Arc<AtomicBool>,
     timeout_seconds: Option<u64>,
+    tool_invoker: Option<Arc<dyn crate::agent::executor::ToolInvoker>>,
 ) -> Result<Vec<FileDiff>, (ExitCode, String)> {
     let output_mode = output.mode;
     let deferred_events = RefCell::new(Vec::<CliEvent>::new());
@@ -1050,6 +1419,7 @@ async fn execute_steps(
         context_text,
         workspace_path,
         steps,
+        tool_invoker.as_deref(),
         cancel_flag,
         |index, total, step| {
             if output_mode == OutputMode::Text {
@@ -1094,6 +1464,34 @@ async fn execute_steps(
     }
     .map_err(|err| (ExitCode::ProviderFailed, err))?;
     output.events.extend(deferred_events.into_inner());
+    // CLI 没有 action log 可以写，降级只好走 stderr（stdout 留给 JSON / NDJSON 的消费者）。
+    // 和桌面端一样只打**一条**：一次运行被削减的每件事凑成一段。四行分开的 warning 读起来
+    // 就是噪音，而它们讲的是同一件事 —— "这次运行比你以为的少做了什么"。
+    let degradations: Vec<(String, String)> = [
+        crate::services::llm_client::image_degradation_report(&llm.image_drops()),
+        crate::services::llm_client::history_trim_report(&llm.history_trims()),
+        crate::services::llm_client::output_clamp_report(&llm.output_clamps()),
+        crate::services::llm_client::output_raise_report(&llm.output_raises()),
+        crate::services::llm_client::reasoning_degradation_report(
+            llm.reasoning_was_rejected(),
+            llm.requested_reasoning_effort(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !degradations.is_empty() {
+        let body = degradations
+            .iter()
+            .map(|(summary, details)| format!("{}\n{}", summary, details))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        eprintln!(
+            "warning: this run was degraded in {} way(s)\n{}",
+            degradations.len(),
+            body
+        );
+    }
 
     Ok(results
         .into_iter()
@@ -1455,11 +1853,18 @@ fn validate_cli_policy(
                 ),
             ));
         }
-        let operation = diff
-            .provenance
-            .as_ref()
-            .map(|provenance| provenance.operation.as_str())
-            .unwrap_or("edit");
+        // 用 hunk 形态判定是否新建文件，而不是信 provenance.operation：
+        // `attach_step_provenance` 给后端生成的 diff 填的是 "unknown"，缺省又
+        // 回落成 "edit"，于是一个真的会创建文件的 diff 会通过 --allow-edit
+        // 检查、绕过 --allow-create。hunk 形态是 apply 真正分支的依据。
+        let operation = if crate::agent::diff_apply::is_new_file_diff(diff) {
+            "create"
+        } else {
+            diff.provenance
+                .as_ref()
+                .map(|provenance| provenance.operation.as_str())
+                .unwrap_or("edit")
+        };
         if !args.apply {
             decisions.push(format!("preview {} {}", operation, diff.file));
             continue;
@@ -1573,13 +1978,6 @@ fn trim_text_bytes(value: &str, max_bytes: usize) -> String {
     format!("{}\n... output truncated ...", &value[..end])
 }
 
-fn collect_command_problems(command_results: &[RunProjectTaskResult]) -> Vec<ProblemEntry> {
-    command_results
-        .iter()
-        .flat_map(|result| result.problems.clone())
-        .collect()
-}
-
 fn collect_all_observed_problems(
     command_results: &[RunProjectTaskResult],
     repair_chain: &[RepairIterationRecord],
@@ -1598,14 +1996,6 @@ fn collect_all_observed_problems(
     problems
 }
 
-fn failed_command_results(command_results: &[RunProjectTaskResult]) -> Vec<RunProjectTaskResult> {
-    command_results
-        .iter()
-        .filter(|result| result.exit_code.unwrap_or(-1) != 0)
-        .cloned()
-        .collect()
-}
-
 fn merge_apply_results(results: Vec<ApplyDiffsResult>) -> Option<ApplyDiffsResult> {
     if results.is_empty() {
         return None;
@@ -1619,83 +2009,6 @@ fn merge_apply_results(results: Vec<ApplyDiffsResult>) -> Option<ApplyDiffsResul
         merged.failed.extend(result.failed);
     }
     Some(merged)
-}
-
-fn build_repair_prompt(
-    original_prompt: &str,
-    iteration: u8,
-    command_results: &[RunProjectTaskResult],
-    problems: &[ProblemEntry],
-) -> String {
-    let mut lines = vec![
-        format!(
-            "Repair iteration {} for the original Agent IDE CLI task.",
-            iteration
-        ),
-        "Original task:".to_string(),
-        original_prompt.to_string(),
-        String::new(),
-        "Checks failed after applying the generated changes. Fix only the failures below."
-            .to_string(),
-        "Return reviewable Agent IDE diffs only.".to_string(),
-        String::new(),
-        "Parsed Problems:".to_string(),
-    ];
-
-    if problems.is_empty() {
-        lines.push("(none parsed)".to_string());
-    } else {
-        for problem in problems.iter().take(40) {
-            lines.push(format!(
-                "- {}:{}:{} [{}] {}: {}",
-                problem.file,
-                problem.line,
-                problem.column,
-                problem.severity,
-                problem.source,
-                problem.message
-            ));
-        }
-        if problems.len() > 40 {
-            lines.push(format!(
-                "... {} more problem(s) omitted",
-                problems.len() - 40
-            ));
-        }
-    }
-
-    lines.push(String::new());
-    lines.push("Failed command output:".to_string());
-    for result in command_results
-        .iter()
-        .filter(|result| result.exit_code.unwrap_or(-1) != 0)
-    {
-        let output = [result.stdout.as_str(), result.stderr.as_str()]
-            .into_iter()
-            .filter(|value| !value.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        lines.push(format!(
-            "\n$ {} (exit {})\n```text\n{}\n```",
-            result.command,
-            result
-                .exit_code
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            truncate_for_prompt(&output, 16_000)
-        ));
-    }
-
-    lines.join("\n")
-}
-
-fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
-    if value.len() <= max_chars {
-        return value.to_string();
-    }
-    let mut truncated = value.chars().take(max_chars).collect::<String>();
-    truncated.push_str("\n... truncated ...");
-    truncated
 }
 
 fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
@@ -1744,8 +2057,20 @@ fn build_llm_client(args: &RunArgs) -> Result<LlmClient, (ExitCode, String)> {
         api_key,
         model: model.clone(),
         provider: "custom".to_string(),
-        max_output_tokens: None,
-        tool_call_mode: "text_protocol".to_string(),
+        // 空响应那条错误会建议"设一个输出上限"，所以 CLI 这边必须真的有地方设 —— 否则那句
+        // 建议指向一个只有桌面端才有的设置，命令行用户照着做不了。没给就仍然由供应商决定。
+        max_context_tokens: None,
+        reasoning_effort: None,
+        max_output_tokens: std::env::var("LLM_MAX_OUTPUT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|limit| *limit > 0),
+        // 只读工作区工具现在无条件挂上，所以一律走原生工具调用。任意 OpenAI 兼容
+        // 端点因此都会收到 `tools` 参数 —— 明确拒绝的那些由 `tools_rejected` 记下
+        // 并自动降级重试，代价是一次 400；换来的是模型能读到真实文件内容，而不是
+        // 靠猜写 ORIGINAL 段。
+        tool_call_mode: "native_tools".to_string(),
+
         model_type: crate::services::llm_client::ModelType::from_string(&model),
         local_model_config: None,
     }))
@@ -1817,7 +2142,7 @@ fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)>
     let unauthorized = args
         .run_commands
         .iter()
-        .filter(|command| !permissions::is_command_allowed(command, &args.allow_run))
+        .filter(|command| !is_command_allowed(command, &args.allow_run))
         .cloned()
         .collect::<Vec<_>>();
     if !unauthorized.is_empty() {
@@ -1827,6 +2152,22 @@ fn validate_repair_permissions(args: &RunArgs) -> Result<(), (ExitCode, String)>
                 "--max-iterations requires explicit --allow-run for command(s): {}",
                 unauthorized.join(", ")
             ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_write_permission(args: &RunArgs) -> Result<(), (ExitCode, String)> {
+    if !args.allow_agent_write {
+        return Ok(());
+    }
+    // 没有 `--apply` 的运行是预览：用户的预期是"磁盘一点都不动"。写入工具会在
+    // 运行途中落盘，直接违背这个预期，所以必须显式配上 `--apply`。
+    // 这和桌面端把写入工具锁在 Auto 模式是同一条理由 —— Auto 本来就会自动落盘。
+    if !args.apply {
+        return Err((
+            ExitCode::InvalidInput,
+            "--allow-agent-write requires --apply: without it a run is a preview and must leave the workspace untouched, but the write tool changes files mid-run.".to_string(),
         ));
     }
     Ok(())
@@ -1900,7 +2241,7 @@ fn make_run_id(workspace: Option<&Path>) -> String {
         "run-{}-{}-{}",
         Utc::now().format("%Y%m%d%H%M%S"),
         sanitize_run_part(name),
-        Uuid::new_v4().simple().to_string()[..8].to_string()
+        &Uuid::new_v4().simple().to_string()[..8]
     )
 }
 
@@ -1924,6 +2265,9 @@ fn default_artifact_dir(workspace_path: &Path, run_id: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+// 这些测试用同步互斥量串行化对进程级环境变量的修改，锁必须跨 await 持有；
+// 生产代码里的跨 await 持锁仍然会被 clippy 拦下。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
@@ -2095,12 +2439,12 @@ mod tests {
 
     #[test]
     fn repair_permissions_support_prefix_wildcard() {
-        assert!(permissions::is_command_allowed(
+        assert!(is_command_allowed(
             "cargo test --all",
             &["cargo *".to_string()]
         ));
-        assert!(!permissions::is_command_allowed("npm test", &["cargo *".to_string()]));
-        assert!(permissions::is_command_allowed("npm run test", &["*".to_string()]));
+        assert!(!is_command_allowed("npm test", &["cargo *".to_string()]));
+        assert!(is_command_allowed("npm run test", &["*".to_string()]));
     }
 
     #[test]
@@ -2203,6 +2547,7 @@ mod tests {
                 source_stage: None,
                 regenerated_from_diff_id: None,
                 regenerated_from_hunk_index: None,
+                moved_from: None,
             }),
             hunks: Vec::new(),
             status: "pending".to_string(),
@@ -2215,6 +2560,53 @@ mod tests {
             ..RunArgs::default()
         };
         assert!(validate_cli_policy(&allowed, &diffs).is_ok());
+    }
+
+    /// 回归测试：新建文件的 diff 不能因为 provenance 是 "unknown" 就被记成编辑。
+    /// `attach_step_provenance` 给后端生成的 diff 填的正是 "unknown"，所以这条
+    /// 路径在真实 CLI 运行中会被走到，而 policy.json 的决策记录是审计依据。
+    #[test]
+    fn cli_policy_labels_create_shaped_diff_as_create() {
+        let preview = RunArgs {
+            allow_edit: true,
+            ..RunArgs::default()
+        };
+        let create_shaped = vec![FileDiff {
+            id: "d1".to_string(),
+            file: "src/brand-new.ts".to_string(),
+            base_hash: None,
+            provenance: Some(crate::agent::state_machine::DiffProvenance {
+                protocol: "unknown".to_string(),
+                operation: "unknown".to_string(),
+                rationale: None,
+                schema_version: None,
+                change_index: None,
+                source_role: None,
+                source_stage: None,
+                regenerated_from_diff_id: None,
+                regenerated_from_hunk_index: None,
+                moved_from: None,
+            }),
+            hunks: vec![crate::agent::state_machine::DiffHunk {
+                old_start: 0,
+                old_lines: 0,
+                new_start: 1,
+                new_lines: 1,
+                content: String::new(),
+                original: String::new(),
+                updated: "export const created = true;\n".to_string(),
+                provenance: None,
+                status: None,
+            }],
+            status: "pending".to_string(),
+        }];
+
+        let decisions = validate_cli_policy(&preview, &create_shaped).unwrap();
+
+        assert_eq!(
+            decisions,
+            vec!["preview create src/brand-new.ts".to_string()]
+        );
     }
 
     #[test]
@@ -2481,7 +2873,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(chain_path).unwrap()).unwrap();
         assert_eq!(chain.as_array().unwrap().len(), 1);
         assert_eq!(chain[0]["checksFailedAfter"], false);
-        assert!(chain[0]["failedCommandsBefore"].as_array().unwrap().len() >= 1);
+        assert!(!chain[0]["failedCommandsBefore"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let summary_path = workspace.artifacts.join("repair-summary.json");
         assert!(summary_path.exists());
         let repair_summary: serde_json::Value =
@@ -2493,6 +2888,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary["repairSummary"][0]["checksFailedAfter"], false);
+    }
+
+    /// 修复循环放弃的那条路径。上面那个测试只覆盖"修一轮就好了"，
+    /// 而"修不好"才是退出码和记录必须说实话的场合：这里的检查命令永远不会通过，
+    /// 所以循环会一直修到预算用完 —— 这同时钉住了迭代计数（预算 2 就是修 2 轮，
+    /// 不是 1 轮也不是 3 轮）。
+    #[tokio::test]
+    async fn smoke_repair_chain_reports_giving_up_when_checks_never_pass() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("repair-giveup", "initial");
+        // mock 产出的修复把文件写成 "fixed"，所以找一个它永远不会写进去的词
+        let check_command = if cfg!(windows) {
+            "findstr never-appears smoke.txt"
+        } else {
+            "grep never-appears smoke.txt"
+        };
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--endpoint".to_string(),
+            "mock://cli-smoke".to_string(),
+            "--api-key".to_string(),
+            "sk-smoke".to_string(),
+            "--model".to_string(),
+            "mock-model".to_string(),
+            "--apply".to_string(),
+            "--run-command".to_string(),
+            check_command.to_string(),
+            "--allow-run".to_string(),
+            check_command.to_string(),
+            "--max-iterations".to_string(),
+            "2".to_string(),
+            "Update smoke file and repair checks".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        // 检查没过就必须是 ChecksFailed：修复循环跑过并不代表运行成功
+        assert_eq!(exit, ExitCode::ChecksFailed);
+        let chain: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("repair-chain.json")).unwrap(),
+        )
+        .unwrap();
+        let chain = chain.as_array().unwrap();
+        assert_eq!(chain.len(), 2, "预算是 2 轮");
+        // 每一轮都要记下"修完还是失败"，否则从记录里看不出这个链为什么停
+        for record in chain {
+            assert_eq!(record["checksFailedAfter"], true);
+        }
     }
 
     #[tokio::test]
@@ -2507,19 +2960,26 @@ mod tests {
             "package.json",
             r#"{"scripts":{"build":"node test.js","test":"node test.js"}}"#,
         );
+        // `file:///` + 绝对路径只在 Windows 上正确（根以盘符开头）。Unix 的根本身
+        // 就是一个斜杠，硬拼会得到 `file:////tmp/...`。按平台拼出合法 URI。
+        let workspace_uri = {
+            let root = workspace.root.to_string_lossy().replace('\\', "/");
+            if cfg!(windows) {
+                format!("file:///{}", root)
+            } else {
+                format!("file://{}", root)
+            }
+        };
         let test_js = r#"import { readFileSync } from "node:fs";
 const value = readFileSync("smoke.txt", "utf8").trim();
 if (value !== "fixed") {
   console.error("ReferenceError: smoke is not fixed");
-  console.error("    at file:///WORKSPACE/test.js:3:1");
+  console.error("    at WORKSPACE_URI/test.js:3:1");
   process.exit(1);
 }
 console.log("ok");
 "#
-        .replace(
-            "WORKSPACE",
-            &workspace.root.to_string_lossy().replace('\\', "/"),
-        );
+        .replace("WORKSPACE_URI", &workspace_uri);
         workspace.write("test.js", &test_js);
 
         let exit = run_from_args([
@@ -2620,5 +3080,265 @@ console.log("ok");
             1
         );
         assert_eq!(chain[0]["commandsAfter"][0]["exitCode"], 0);
+    }
+
+    /// `smoke ide-surface` 是 Agent 流程之外那些面板后端的唯一自动化入口，
+    /// 所以它必须在**没有** LLM 配置、也不管工作区是不是 git 仓库的情况下成功：
+    /// 一旦它需要前置条件才能跑，就进不了 CI，也就等于不存在。
+    #[tokio::test]
+    async fn smoke_ide_surface_probes_panel_backends_without_a_provider() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        let workspace = SmokeWorkspace::new("surface", "initial");
+
+        let exit = run_from_args([
+            "agent-cli".to_string(),
+            "smoke".to_string(),
+            "ide-surface".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ])
+        .await
+        .unwrap();
+
+        let probes_raw =
+            fs::read_to_string(workspace.artifacts.join("surface-probes.json")).unwrap();
+        assert_eq!(exit, ExitCode::Success, "probes: {}", probes_raw);
+
+        let probes: serde_json::Value = serde_json::from_str(&probes_raw).unwrap();
+        let probes = probes.as_array().expect("probe array").clone();
+        let by_name = |name: &str| {
+            probes
+                .iter()
+                .find(|probe| probe["name"] == name)
+                .unwrap_or_else(|| panic!("missing probe {}", name))
+                .clone()
+        };
+
+        assert_eq!(by_name("workspace_resolve")["status"], "ok");
+        assert_eq!(by_name("context_estimate")["status"], "ok");
+        // git 探测在非仓库目录里必须是 unavailable 而不是 failed —— 否则这个命令
+        // 在任何非 git 目录里都是红的，很快就没人看它的结果了
+        let git_status = by_name("git_status")["status"].clone();
+        assert!(
+            git_status == "ok" || git_status == "unavailable",
+            "{}",
+            git_status
+        );
+
+        let summary: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("summary.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["status"], "ok");
+        assert_eq!(summary["command"], "smoke ide-surface");
+    }
+
+    /// 工具循环此前在**任何**自动化路径里都跑不到：mock provider 只能回文本
+    /// （`stream_mock_chat` 返回 `String`），CLI 又给执行器传 `None` invoker。
+    /// 这是那条链路的第一份端到端证据：模型发出工具调用 → 执行器真的跑了命令 →
+    /// 结果作为 `tool` 消息回填 → 下一轮产出 diff。
+    ///
+    /// 断言选的是"命令的副作用"而不是"这一轮完成了"：工具报错时同样会进入下一轮
+    /// 并产出 diff，所以只看 diff 分不出真假。命令用 shell 重定向写文件，
+    /// `run_project_command` 在两个平台上都过 shell，因此不依赖 node。
+    #[tokio::test]
+    async fn smoke_tool_loop_runs_an_allow_listed_command() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("toolloop", "broken");
+        let command = "echo yes > tool-ran.txt";
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_run_command");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({ "command": command }).to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--allow-run".to_string(),
+            command.to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        let exit = result.unwrap();
+
+        assert!(
+            workspace.path("tool-ran.txt").exists(),
+            "the allow-listed command never ran, so the tool loop did not complete"
+        );
+        assert_eq!(exit, ExitCode::ChangesProposed);
+    }
+
+    /// 未授权时命令工具不通告，所以模型即使"想"调也调不到 —— 这条约束必须在
+    /// CLI 这条路径上也成立，不能只在桌面端成立。
+    #[tokio::test]
+    async fn smoke_tool_loop_is_absent_without_allow_run() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("notools", "broken");
+        let command = "echo yes > tool-ran.txt";
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_run_command");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({ "command": command }).to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        let exit = result.unwrap();
+
+        assert!(
+            !workspace.path("tool-ran.txt").exists(),
+            "a command ran without --allow-run: the tool was reachable when it should not exist"
+        );
+        assert_eq!(exit, ExitCode::ChangesProposed);
+    }
+
+    /// 写入工具的端到端证据：模型调用 → 文件真的落盘 → 运行记录里查得到。
+    ///
+    /// 最后一条是重点。桌面端把工具写入登记成可撤销的 applied diff 卡片，CLI 没有
+    /// 审查区，对应物就是 `tool-writes.json`；不写它，磁盘变了而运行记录查不到
+    /// 是谁改的。
+    #[tokio::test]
+    async fn smoke_write_tool_lands_a_file_and_records_it() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("writetool", "initial");
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_write_file");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({
+                "path": "written-by-agent.txt",
+                "content": "tool wrote this\n",
+            })
+            .to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--apply".to_string(),
+            "--allow-create".to_string(),
+            "--allow-edit".to_string(),
+            "--allow-agent-write".to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        result.unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path("written-by-agent.txt")).unwrap(),
+            "tool wrote this\n"
+        );
+        let records: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.artifacts.join("tool-writes.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(records[0]["file"], "written-by-agent.txt");
+        assert_eq!(records[0]["created"], true);
+    }
+
+    /// 对照组：同一次调用，只是没给 `--allow-agent-write`。工具不通告也不认领，
+    /// 所以文件不该出现 —— 证明它是真的不可达，而不是恰好没被调到。
+    #[tokio::test]
+    async fn smoke_write_tool_is_absent_without_permission() {
+        let _guard = cli_smoke_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _workspace_guard = workspace::env_test_guard();
+        set_mock_llm_env();
+        let workspace = SmokeWorkspace::new("nowrite", "initial");
+        std::env::set_var("AGENT_IDE_MOCK_TOOL", "workspace_write_file");
+        std::env::set_var(
+            "AGENT_IDE_MOCK_TOOL_ARGS",
+            serde_json::json!({
+                "path": "written-by-agent.txt",
+                "content": "tool wrote this\n",
+            })
+            .to_string(),
+        );
+
+        let result = run_from_args([
+            "agent-cli".to_string(),
+            "run".to_string(),
+            "--workspace".to_string(),
+            workspace.root.to_string_lossy().to_string(),
+            "--artifact-dir".to_string(),
+            workspace.artifacts.to_string_lossy().to_string(),
+            "--apply".to_string(),
+            "--allow-create".to_string(),
+            "--allow-edit".to_string(),
+            "Update smoke file".to_string(),
+        ])
+        .await;
+
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL");
+        std::env::remove_var("AGENT_IDE_MOCK_TOOL_ARGS");
+        result.unwrap();
+
+        assert!(
+            !workspace.path("written-by-agent.txt").exists(),
+            "the write tool was reachable without --allow-agent-write"
+        );
+        assert!(!workspace.artifacts.join("tool-writes.json").exists());
+    }
+
+    /// 预览运行（没有 `--apply`）的承诺是"磁盘一点都不动"，而写入工具会在运行
+    /// 途中落盘。所以这个组合必须在跑之前就被拒绝，而不是跑完才发现文件变了。
+    #[test]
+    fn agent_write_requires_apply() {
+        let mut args = RunArgs {
+            allow_agent_write: true,
+            ..RunArgs::default()
+        };
+
+        let error = validate_agent_write_permission(&args).unwrap_err();
+        assert_eq!(error.0, ExitCode::InvalidInput);
+        assert!(error.1.contains("--apply"), "{}", error.1);
+
+        args.apply = true;
+        assert!(validate_agent_write_permission(&args).is_ok());
     }
 }

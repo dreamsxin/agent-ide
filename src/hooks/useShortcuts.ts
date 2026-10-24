@@ -4,12 +4,16 @@ import { useEditorStore } from "../stores/useEditorStore";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isTauriRuntime } from "../utils/tauri";
+import { useT } from "../i18n";
+import type { MessageKey } from "../i18n/messages";
 
 export interface Shortcut {
   id: string;
   keys: string;          // e.g. "Ctrl+S"
-  label: string;
-  group: string;         // "Editor" | "Panels" | "Navigation" | "Git" | "General"
+  /** 界面上显示的名字走文案键：这一串以前是英文写死的，帮助弹窗是唯一的消费者 */
+  labelKey: MessageKey;
+  /** 分组用 id，不用显示名 —— 显示名由 `shortcut.group.*` 给，帮助弹窗以前另存了一份映射表 */
+  group: "panels" | "git" | "navigation" | "editor" | "general";
   scope: "global" | "editor";
   handler: () => void;
 }
@@ -57,43 +61,45 @@ export default function useShortcuts() {
   const toggleFocusMode = useLayoutStore((s) => s.toggleFocusMode);
   const setLeftTab = useLayoutStore((s) => s.setLeftTab);
   const setBottomTab = useLayoutStore((s) => s.setBottomTab);
+  // 只有"打开文件夹"那个系统对话框的标题需要现译：其它名字是给帮助弹窗看的键
+  const t = useT();
 
   /** 定义所有全局快捷键 */
   const shortcuts: Shortcut[] = [
     // Panels
-    { id: "command-palette", keys: "Ctrl+Shift+P", label: "Command Palette", group: "General", scope: "global",
+    { id: "command-palette", keys: "Ctrl+Shift+P", labelKey: "shortcut.commandPalette", group: "general", scope: "global",
       handler: () => window.dispatchEvent(new CustomEvent("toggle-command-palette")) },
-    { id: "toggle-explorer", keys: "Ctrl+Shift+E", label: "Toggle Explorer", group: "Panels", scope: "global",
+    { id: "toggle-explorer", keys: "Ctrl+Shift+E", labelKey: "shortcut.toggleExplorer", group: "panels", scope: "global",
       handler: () => toggleLeftPanel() },
-    { id: "toggle-agent", keys: "Ctrl+Shift+X", label: "Toggle Agent Panel", group: "Panels", scope: "global",
+    { id: "toggle-agent", keys: "Ctrl+Shift+X", labelKey: "shortcut.toggleAgent", group: "panels", scope: "global",
       handler: () => toggleRightPanel() },
-    { id: "toggle-terminal", keys: "Ctrl+`", label: "Toggle Terminal", group: "Panels", scope: "global",
+    { id: "toggle-terminal", keys: "Ctrl+`", labelKey: "shortcut.toggleTerminal", group: "panels", scope: "global",
       handler: () => toggleBottomPanel() },
-    { id: "toggle-focus", keys: "Ctrl+Shift+F", label: "Toggle Focus Mode", group: "Panels", scope: "global",
+    { id: "toggle-focus", keys: "Ctrl+Shift+F", labelKey: "shortcut.toggleFocus", group: "panels", scope: "global",
       handler: () => toggleFocusMode() },
 
     // Git
-    { id: "git-panel", keys: "Ctrl+Shift+G", label: "Git Panel", group: "Git", scope: "global",
+    { id: "git-panel", keys: "Ctrl+Shift+G", labelKey: "shortcut.gitPanel", group: "git", scope: "global",
       handler: () => { setLeftTab("git"); useLayoutStore.getState().leftVisible || toggleLeftPanel(); } },
 
     // Navigation
-    { id: "explorer-panel", keys: "Ctrl+Shift+D", label: "Explorer Panel", group: "Navigation", scope: "global",
+    { id: "explorer-panel", keys: "Ctrl+Shift+D", labelKey: "shortcut.explorerPanel", group: "navigation", scope: "global",
       handler: () => { setLeftTab("explorer"); useLayoutStore.getState().leftVisible || toggleLeftPanel(); } },
-    { id: "terminal-bottom", keys: "Ctrl+Shift+T", label: "Switch to Terminal", group: "Navigation", scope: "global",
+    { id: "terminal-bottom", keys: "Ctrl+Shift+T", labelKey: "shortcut.terminalBottom", group: "navigation", scope: "global",
       handler: () => { setBottomTab("terminal"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
-    { id: "commands-bottom", keys: "Ctrl+Shift+B", label: "Switch to Commands", group: "Navigation", scope: "global",
+    { id: "commands-bottom", keys: "Ctrl+Shift+B", labelKey: "shortcut.commandsBottom", group: "navigation", scope: "global",
       handler: () => { setBottomTab("commands"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
-    { id: "logs-bottom", keys: "Ctrl+Shift+L", label: "Switch to Logs", group: "Navigation", scope: "global",
+    { id: "logs-bottom", keys: "Ctrl+Shift+L", labelKey: "shortcut.logsBottom", group: "navigation", scope: "global",
       handler: () => { setBottomTab("logs"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
-    { id: "problems-bottom", keys: "Ctrl+Shift+M", label: "Switch to Problems", group: "Navigation", scope: "global",
+    { id: "problems-bottom", keys: "Ctrl+Shift+M", labelKey: "shortcut.problemsBottom", group: "navigation", scope: "global",
       handler: () => { setBottomTab("problems"); useLayoutStore.getState().bottomVisible || toggleBottomPanel(); } },
 
     // File
-    { id: "open-folder", keys: "Ctrl+O", label: "Open Folder", group: "General", scope: "global",
+    { id: "open-folder", keys: "Ctrl+O", labelKey: "shortcut.openFolder", group: "general", scope: "global",
       handler: async () => {
         try {
           if (!isTauriRuntime()) return;
-          const selected = await open({ directory: true, multiple: false, title: "Open Workspace Folder" });
+          const selected = await open({ directory: true, multiple: false, title: t("shortcut.openFolder.dialog") });
           if (selected && typeof selected === "string") {
             await invoke("save_workspace_path", { path: selected });
             useLayoutStore.getState().setWorkspacePath(selected);

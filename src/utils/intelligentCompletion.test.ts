@@ -5,7 +5,6 @@ import {
   IntelligentCompletionEngine,
   createIntelligentCompletionEngine,
   createMonacoCompletionProvider,
-  type CompletionSuggestion,
 } from "./intelligentCompletion";
 
 describe("ContextAnalyzer", () => {
@@ -228,13 +227,9 @@ describe("createMonacoCompletionProvider", () => {
     } as unknown as import("monaco-editor").editor.ITextModel;
   }
 
-  it("maps engine suggestions to Monaco items and reports them via onSuggestions", async () => {
+  it("maps engine suggestions to Monaco completion items", async () => {
     const engine = createIntelligentCompletionEngine();
-    const reported: CompletionSuggestion[][] = [];
-    const provider = createMonacoCompletionProvider(engine, fakeMonaco, {
-      maxSuggestions: 3,
-      onSuggestions: (suggestions) => reported.push(suggestions),
-    });
+    const provider = createMonacoCompletionProvider(engine, fakeMonaco);
 
     const suggestions =
       (
@@ -247,7 +242,6 @@ describe("createMonacoCompletionProvider", () => {
       )?.suggestions ?? [];
 
     expect(suggestions.length).toBeGreaterThan(0);
-    expect(suggestions.length).toBeLessThanOrEqual(3);
     for (const item of suggestions) {
       expect(item.range).toEqual({
         startLineNumber: 2,
@@ -257,8 +251,6 @@ describe("createMonacoCompletionProvider", () => {
       });
       expect(typeof item.insertText).toBe("string");
     }
-    expect(reported).toHaveLength(1);
-    expect(reported[0].map((s) => s.label)).toEqual(suggestions.map((item) => item.label as string));
   });
 
   it("returns no suggestions when the engine rejects", async () => {

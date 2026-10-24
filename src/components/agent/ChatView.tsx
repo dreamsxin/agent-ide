@@ -1,10 +1,20 @@
-import { lazy, Suspense, useState, useRef, useEffect, useCallback } from "react";
-import { useAgentStore } from "../../stores/useAgentStore";
+import { lazy, Suspense, useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useAgentStore, pipelineMatchesDefault } from "../../stores/useAgentStore";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useProblemStore } from "../../stores/useProblemStore";
 import { useTaskStore } from "../../stores/useTaskStore";
 import { useLogStore } from "../../stores/useLogStore";
-import { withIdeRuntimeContext, type IdeRuntimeContextOptions } from "../../utils/agentRuntimeContext";
+import PendingChangesCard from "./PendingChangesCard";
+import { buildIdeRuntimeContext } from "../../utils/agentRuntimeContext";
+import { agentStateMessageKey, isAgentBusy } from "../../utils/agentExperience";
+import { runFailureHint } from "../../utils/runFailure";
+import { useT } from "../../i18n";
+import {
+  ideRuntimeOptionsFor,
+  loadContextOptions,
+  persistContextOptions,
+  type ChatContextOptions,
+} from "../../utils/chatContextOptions";
 import type { AgentState, ContextCompressionMode, ContextEstimateResponse } from "../../types/agent";
 import type { ProblemEntry } from "../../stores/useProblemStore";
 import type { ProjectTaskRunState } from "../../stores/useTaskStore";
@@ -13,44 +23,19 @@ import { ArrowUp, Check, Copy, CornerDownLeft, RotateCcw, Square } from "lucide-
 
 const MarkdownMessage = lazy(() => import("./MarkdownMessage"));
 
-type ChatContextOptions = {
-  activeFile: boolean;
-  selection: boolean;
-  openFiles: boolean;
-  problems: boolean;
-  failedTask: boolean;
-  terminalOutput: boolean;
-  logs: boolean;
-  gitDiff: boolean;
-  projectTree: boolean;
-  projectMemory: boolean;
-};
-
-const DEFAULT_CONTEXT_OPTIONS: ChatContextOptions = {
-  activeFile: true,
-  selection: true,
-  openFiles: true,
-  problems: true,
-  failedTask: true,
-  terminalOutput: true,
-  logs: true,
-  gitDiff: true,
-  projectTree: true,
-  projectMemory: true,
-};
-
-const CONTEXT_OPTIONS_KEY = "agent-ide-chat-context-options";
-
-/** 各状态对应的 UI 信息 */
-const STATE_INFO: Record<AgentState, { label: string; spinner: boolean }> = {
-  idle:         { label: "Ready",         spinner: false },
-  thinking:     { label: "Thinking…",     spinner: true },
-  planning:     { label: "Planning…",     spinner: true },
-  acting:       { label: "Executing…",    spinner: true },
-  reviewing:    { label: "Reviewing…",    spinner: true },
-  waiting_user: { label: "Awaiting input", spinner: false },
-  done:         { label: "Done",           spinner: false },
-  error:        { label: "Error",          spinner: false },
+/**
+ * 每个状态转不转圈。**标签不在这里** —— 状态名的映射只有 `agentStateMessageKey` 一份，
+ * 这里曾经另写一套（"Ready" / "Executing…"），于是同一个状态在聊天区和运行摘要上是两个词。
+ */
+const STATE_SPINNER: Record<AgentState, boolean> = {
+  idle: false,
+  thinking: true,
+  planning: true,
+  acting: true,
+  reviewing: true,
+  waiting_user: false,
+  done: false,
+  error: false,
 };
 
 /** 单条消息组件 */
@@ -62,6 +47,7 @@ function MessageBubble({
   isStreamingBubble: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  const t = useT();
 
   const handleCopy = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -113,8 +99,8 @@ function MessageBubble({
         {isAgent && msg.content && (
           <button
             onClick={handleCopy}
-            title="Copy raw content"
-            aria-label={copied ? "Message copied" : "Copy message"}
+            title={t("chat.copyTitle")}
+            aria-label={copied ? t("chat.copied") : t("chat.copy")}
             className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-surface-border/50 text-surface-muted hover:text-surface-text text-[10px]"
           >
             {copied ? (
@@ -154,7 +140,123 @@ function ContextToggle({
   );
 }
 
+/**
+ * 后端真正会喂给模型的那几轮，以及"从这一轮起切掉"。
+ *
+ * 单独一块、默认收起，而**不是**把按钮挂在消息气泡上。气泡和这里的"轮"不是一一
+ * 对应的：气泡由各个调用点自己 push、不设上限、刷新即失；这个列表只在一次 prompt
+ * **成功**之后才多一轮、只留末尾若干轮，取消和报错都不记。把"切上下文"做成气泡上的
+ * 按钮，用户点的是第 3 条、切掉的会是另一条。
+ *
+ * 顺带解决一个更基本的问题：在此之前用户完全看不到模型实际收到的历史是什么。
+ */
+function ContextTurns() {
+  const t = useT();
+  const turns = useAgentStore((s) => s.conversationTurns);
+  const loadConversationTurns = useAgentStore((s) => s.loadConversationTurns);
+  const truncateConversationFrom = useAgentStore((s) => s.truncateConversationFrom);
+  const isStreaming = useAgentStore((s) => s.isStreaming);
+  const revertTurnChanges = useAgentStore((s) => s.revertTurnChanges);
+  const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 一次运行成功结束才会多一轮，所以在 streaming 落下沿刷新；挂载时也会跑一次。
+  useEffect(() => {
+    if (!isStreaming) void loadConversationTurns();
+  }, [isStreaming, loadConversationTurns]);
+
+  const handleCut = async (turnId: string) => {
+    setError(null);
+    try {
+      await truncateConversationFrom(turnId);
+    } catch (err) {
+      // 那一轮可能已经被头部淘汰掉了。说出来，而不是让按钮看起来没反应。
+      setError(String(err));
+    }
+  };
+
+  const handleRevert = async (turnId: string) => {
+    setError(null);
+    try {
+      const result = await revertTurnChanges(turnId);
+      if (result) {
+        // 成功也要留一行：恢复了哪几个文件是用户唯一能核对的东西
+        setError(
+          result.failed.length === 0
+            ? `Restored ${result.restored.length} file(s): ${result.restored.join(", ")}`
+            : `Restored ${result.restored.length} file(s); could not restore ${result.failed.join(", ")}`
+        );
+      }
+    } catch (err) {
+      // 后端挡住时给的是一条指引（"先撤销更晚的改动"），原样显示
+      setError(String(err));
+    }
+  };
+
+
+  if (turns.length === 0) return null;
+
+  return (
+    <div className="flex-shrink-0 border-b border-surface-border text-[10px]">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        className="flex w-full items-center justify-between px-3 py-1.5 text-surface-muted hover:text-surface-text"
+      >
+        <span>{t("chat.turns.header", { count: turns.length })}</span>
+        <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && (
+        <div className="space-y-1 px-3 pb-2">
+          {turns.map((turn, index) => (
+            <div
+              key={turn.id}
+              className="group flex items-start gap-2 rounded border border-surface-border/60 px-2 py-1"
+            >
+              <span className="mt-[1px] text-surface-muted">{index + 1}.</span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-surface-text" title={turn.prompt}>
+                  {turn.prompt}
+                </span>
+                <span className="block truncate text-surface-muted" title={turn.outcome}>
+                  {turn.outcome}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleCut(turn.id)}
+                title={t("chat.turn.cut.title")}
+                className="opacity-0 transition-opacity group-hover:opacity-100 rounded border border-surface-border px-1.5 py-0.5 text-surface-muted hover:text-surface-text"
+              >
+                {t("chat.turn.cut")}
+              </button>
+              {/*
+                切上下文只改"发给模型的历史"，磁盘上的改动一个字都不动。这个按钮补的是另一半：
+                把这一轮写出去的文件恢复回去。只有后端能判断能不能做（撤销栈严格后进先出），
+                所以这里不预判、不禁用 —— 被挡住时把后端那句话原样显示出来，它本身就是指引。
+              */}
+              {turn.runId && (
+                <button
+                  type="button"
+                  onClick={() => void handleRevert(turn.id)}
+                  title={t("chat.turn.revert.title")}
+                  className="opacity-0 transition-opacity group-hover:opacity-100 rounded border border-surface-border px-1.5 py-0.5 text-surface-muted hover:text-diff-remove"
+                >
+                  {t("chat.turn.revert")}
+                </button>
+              )}
+            </div>
+          ))}
+          {error && <div className="text-accent-red">{error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ChatView() {
+  const t = useT();
   const messages = useAgentStore((s) => s.messages);
   const addMessage = useAgentStore((s) => s.addMessage);
   const updateMessage = useAgentStore((s) => s.updateMessage);
@@ -162,10 +264,21 @@ export default function ChatView() {
   const ghostSuggestions = useAgentStore((s) => s.ghostSuggestions);
   const setGhostSuggestions = useAgentStore((s) => s.setGhostSuggestions);
   const dismissGhostSuggestion = useAgentStore((s) => s.dismissGhostSuggestion);
+  // 配置里的那条，不是运行中那条（`runPipeline`）：这个标记要说的正是"下一次会怎么跑"
+  const pipeline = useAgentStore((s) => s.pipeline);
   const updateActiveSddMarkdown = useAgentStore((s) => s.updateActiveSddMarkdown);
   const saveActiveSdd = useAgentStore((s) => s.saveActiveSdd);
   const promoteSddToCodePrompt = useAgentStore((s) => s.promoteSddToCodePrompt);
+  // 只为了重新估算而订阅：对话历史是后端上下文里的一节，改了它数字就该跟着变
+  const conversationTurns = useAgentStore((s) => s.conversationTurns);
+  // 上下文占用的测量值，来自最后一次真实请求
+  const contextUsage = useAgentStore((s) => s.contextUsage);
   const [input, setInput] = useState("");
+  // 失败后重试要重发的是失败的那条 prompt，不是输入框里当时碰巧有什么。
+  // 原来 Retry 的 onClick 就是 handleSend、disabled 是 !input.trim()，而
+  // handleSend 发出后会清空输入框 —— 所以那个红色按钮在失败后永远是禁用的，
+  // 点不动。把失败的 prompt 放回输入框，重试才有对象，用户也能看到要重发什么。
+  const [lastPrompt, setLastPrompt] = useState("");
   const [sddSaveMessage, setSddSaveMessage] = useState("");
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextOptions, setContextOptions] = useState<ChatContextOptions>(() => loadContextOptions());
@@ -173,6 +286,9 @@ export default function ChatView() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const agentState = useAgentStore((s) => s.state);
+  const agentError = useAgentStore((s) => s.error);
+  // 认得出来的失败给一句可操作提示；认不出来就只有原话（编一句通用建议比不说更糟）
+  const failureHint = runFailureHint(agentError);
   const agentMode = useAgentStore((s) => s.mode);
   const ideMode = useAgentStore((s) => s.ideMode);
   const streamContent = useAgentStore((s) => s.streamContent);
@@ -186,6 +302,8 @@ export default function ChatView() {
   const chatContextCompression = useAgentStore((s) => s.chatContextCompression);
   const contextCompression = useAgentStore((s) => s.contextCompression);
   const setChatProfileId = useAgentStore((s) => s.setChatProfileId);
+  const chatModelOverride = useAgentStore((s) => s.chatModelOverride);
+  const setChatModelOverride = useAgentStore((s) => s.setChatModelOverride);
   const setChatContextCompression = useAgentStore((s) => s.setChatContextCompression);
 
   const activeFile = useEditorStore((s) => s.activeFile);
@@ -206,30 +324,39 @@ export default function ChatView() {
     persistContextOptions(contextOptions);
   }, [contextOptions]);
 
-  const isActing =
-    agentState !== "idle" &&
-    agentState !== "done" &&
-    agentState !== "error" &&
-    agentState !== "waiting_user";
+  const isActing = isAgentBusy(agentState);
 
-  const info = STATE_INFO[agentState] ?? STATE_INFO.idle;
+  const spinning = STATE_SPINNER[agentState] ?? false;
   const isSending = isActing;
   const selectedProfileId = chatProfileId ?? activeProfileId;
+  // 占位符显示"不覆盖时会用哪个模型"：用户要能看出默认值是什么，才知道自己在改什么
+  const activeProfileModel =
+    llmProfiles.find((profile) => profile.id === selectedProfileId)?.model ?? "";
   const selectedContextMode = chatContextCompression ?? contextCompression;
   const selectedProfile = llmProfiles.find((profile) => profile.id === selectedProfileId);
   const failedTaskCount = Object.values(taskRuns).filter((task) => task.status === "failed").length;
   const terminalSessionCount = Object.values(terminalOutput).filter((output) => output.trim()).length;
   const warningLogCount = logs.filter((log) => log.level === "error" || log.level === "warn").length;
   const selectedContextItems = [
-    contextOptions.activeFile && activeFile ? "active file" : null,
-    contextOptions.selection && selectedText ? "selection" : null,
-    contextOptions.openFiles && openFiles.length > 0 ? `${openFiles.length} open file${openFiles.length === 1 ? "" : "s"}` : null,
-    contextOptions.problems && problems.length > 0 ? `${problems.length} problem${problems.length === 1 ? "" : "s"}` : null,
-    contextOptions.failedTask && failedTaskCount > 0 ? `${failedTaskCount} failed run${failedTaskCount === 1 ? "" : "s"}` : null,
-    contextOptions.terminalOutput && terminalSessionCount > 0 ? `${terminalSessionCount} terminal${terminalSessionCount === 1 ? "" : "s"}` : null,
-    contextOptions.logs && warningLogCount > 0 ? `${warningLogCount} warning/error log${warningLogCount === 1 ? "" : "s"}` : null,
-    contextOptions.gitDiff ? "git diff" : null,
-    contextOptions.projectTree ? "project tree" : null,
+    contextOptions.activeFile && activeFile ? t("chat.context.sum.activeFile") : null,
+    contextOptions.selection && selectedText ? t("chat.context.sum.selection") : null,
+    contextOptions.openFiles && openFiles.length > 0
+      ? t("chat.context.sum.openFiles", { count: openFiles.length })
+      : null,
+    contextOptions.problems && problems.length > 0
+      ? t("chat.context.sum.problems", { count: problems.length })
+      : null,
+    contextOptions.failedTask && failedTaskCount > 0
+      ? t("chat.context.sum.failedRun", { count: failedTaskCount })
+      : null,
+    contextOptions.terminalOutput && terminalSessionCount > 0
+      ? t("chat.context.sum.terminal", { count: terminalSessionCount })
+      : null,
+    contextOptions.logs && warningLogCount > 0
+      ? t("chat.context.sum.logs", { count: warningLogCount })
+      : null,
+    contextOptions.gitDiff ? t("chat.context.sum.gitDiff") : null,
+    contextOptions.projectTree ? t("chat.context.sum.projectTree") : null,
     contextOptions.projectMemory ? "AGENTS.md" : null,
   ].filter(Boolean);
   const estimatedSelectedTokens = contextEstimate?.estimatedTokens ?? 0;
@@ -278,6 +405,17 @@ export default function ChatView() {
     };
   }, [activeFile, fileContents, selectedText, openFiles, contextOptions]);
 
+  // 估算和发送必须用同一份文本。依赖里带上 problems / logs / taskRuns / terminalOutput
+  // 本身，而不只是那四个开关：`npm test` 跑出 20 条问题时，开关没变但内容变了，只依赖
+  // 开关的话面板上的数字会停在旧值 —— 而那正是用户要点"让 Agent 修"的时刻。
+  const ideRuntimeText = useMemo(
+    () => buildIdeRuntimeContext(ideRuntimeOptionsFor(contextOptions)),
+    [contextOptions, problems, logs, taskRuns, terminalOutput]
+  );
+
+  // 依赖里也带上 `turns`：对话历史是后端上下文里的一节，而 Clear / Cut from here 这两个
+  // 控件的全部作用就是改它。不依赖它的话，用户切掉三轮之后面板上的数字一动不动 ——
+  // 一个按了之后没有任何反应的控件，比没有这个控件更糟。
   useEffect(() => {
     let cancelled = false;
     const ctx = buildContext();
@@ -291,6 +429,8 @@ export default function ChatView() {
           includeProjectTree: contextOptions.projectTree,
           includeProjectMemory: contextOptions.projectMemory,
         },
+        // 估算必须和发送用同一份内容，否则面板上的数字比真实提示词小上万字符
+        ideRuntime: ideRuntimeText,
       }).then((estimate) => {
         if (!cancelled) setContextEstimate(estimate);
       });
@@ -299,12 +439,20 @@ export default function ChatView() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory]);
+  }, [buildContext, estimateContext, selectedProfileId, selectedContextMode, contextOptions.gitDiff, contextOptions.projectTree, contextOptions.projectMemory, ideRuntimeText, conversationTurns]);
+
+  // 运行失败时把 prompt 放回输入框，Retry 才有可发的东西
+  useEffect(() => {
+    if (agentState === "error" && lastPrompt && !input.trim()) {
+      setInput(lastPrompt);
+    }
+  }, [agentState, input, lastPrompt]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || isActing) return;
 
     const content = input.trim();
+    setLastPrompt(content);
     addMessage({
       id: Date.now().toString(),
       role: "user",
@@ -314,14 +462,11 @@ export default function ChatView() {
     setInput("");
 
     const ctx = buildContext();
-    const runtimeContextOptions: IdeRuntimeContextOptions = {
-      includeFailedTask: contextOptions.failedTask,
-      includeProblems: contextOptions.problems,
-      includeTerminalOutput: contextOptions.terminalOutput,
-      includeLogs: contextOptions.logs,
-    };
     await sendPrompt({
-      prompt: withIdeRuntimeContext(content, runtimeContextOptions),
+      prompt: content,
+      // 单独给后端，让它作为上下文段落参与估算和裁剪；拼进 prompt 的话这上万字符
+      // 对预算是隐形的
+      ideRuntime: ideRuntimeText,
       profileId: selectedProfileId || undefined,
       contextCompression: selectedContextMode,
       contextSources: {
@@ -331,7 +476,7 @@ export default function ChatView() {
       },
       ...ctx,
     });
-  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions]);
+  }, [input, isActing, sendPrompt, selectedProfileId, selectedContextMode, buildContext, addMessage, contextOptions, ideRuntimeText]);
 
   const handleSaveSdd = useCallback(async () => {
     setSddSaveMessage("");
@@ -358,6 +503,7 @@ export default function ChatView() {
 
   return (
     <div data-testid="agent-chat" className="flex flex-col h-full">
+      <ContextTurns />
       {/* 消息列表 */}
       <div className="flex-1 overflow-auto p-3 space-y-3">
         {messages.map((msg) => (
@@ -369,6 +515,9 @@ export default function ChatView() {
             }
           />
         ))}
+        {/* 待审查改动紧跟在最后一条回复之后：这一层负责通知和快速决策，
+            逐 hunk 深审仍在 Changes 面板 */}
+        <PendingChangesCard />
         {activeSddArtifact && (
           <div className="rounded border border-surface-border bg-surface-base/70 p-2 text-xs text-surface-text">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -400,7 +549,7 @@ export default function ChatView() {
             </div>
             {activeSddArtifact.reviewFindings.length > 0 && (
               <div className="mb-2 rounded border border-diff-modify/30 bg-diff-modify/10 p-2 text-[11px]">
-                <div className="mb-1 font-medium text-diff-modify">Review Findings</div>
+                <div className="mb-1 font-medium text-diff-modify">{t("chat.reviewFindings")}</div>
                 {activeSddArtifact.reviewFindings.map((finding, index) => (
                   <div key={`${finding}-${index}`} className="truncate text-surface-muted" title={finding}>
                     - {finding}
@@ -424,7 +573,7 @@ export default function ChatView() {
         {ghostSuggestions.length > 0 && (
           <div className="space-y-1.5 rounded border border-surface-border bg-surface-base/50 p-2 text-xs">
             <div className="text-[10px] font-semibold uppercase tracking-wide text-surface-muted">
-              Suggested next steps
+              {t("chat.suggestions.title")}
             </div>
             {ghostSuggestions.map((suggestion) => (
               <div
@@ -467,11 +616,11 @@ export default function ChatView() {
       <div className="p-2 border-t border-surface-border">
         {/* 状态指示条 */}
         <div className="flex items-center gap-2 mb-1.5 px-0.5">
-          {info.spinner && (
+          {spinning && (
             <span className="inline-block w-2.5 h-2.5 border-2 border-surface-muted border-t-accent-blue rounded-full animate-spin flex-shrink-0" />
           )}
-          <span className={`text-[11px] font-medium ${info.spinner ? "text-accent-blue" : "text-surface-muted"}`}>
-            {info.label}
+          <span className={`text-[11px] font-medium ${spinning ? "text-accent-blue" : "text-surface-muted"}`}>
+            {t(agentStateMessageKey(agentState))}
           </span>
           {agentState !== "idle" && agentState !== "error" && (
             <span className="text-[10px] text-surface-muted ml-auto">
@@ -486,10 +635,10 @@ export default function ChatView() {
             onChange={(event) => setChatProfileId(event.target.value || null)}
             disabled={isSending || llmProfiles.length === 0}
             className="min-w-0 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
-            title="LLM profile for this chat run"
+            title={t("chat.profile.title")}
           >
             {llmProfiles.length === 0 ? (
-              <option value="">No provider configured</option>
+              <option value="">{t("chat.profile.none")}</option>
             ) : (
               llmProfiles.map((profile) => (
                 <option key={profile.id} value={profile.id}>
@@ -503,101 +652,204 @@ export default function ChatView() {
             onChange={(event) => setChatContextCompression(event.target.value as ContextCompressionMode)}
             disabled={isSending}
             className="rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
-            title="Context compression mode for this chat run"
+            title={t("chat.compression.title")}
           >
-            <option value="focused">Mode: Focused</option>
-            <option value="compact">Mode: Compact</option>
-            <option value="budgeted">Mode: Budgeted</option>
-            <option value="full">Mode: Full</option>
+            <option value="focused">{t("chat.compression.focused")}</option>
+            <option value="compact">{t("chat.compression.compact")}</option>
+            <option value="budgeted">{t("chat.compression.budgeted")}</option>
+            <option value="full">{t("chat.compression.full")}</option>
           </select>
+          {/*
+            改过流水线之后，聊天面板以前完全看不出来 —— 第一个证据要等运行开始、Plan 视图
+            填出来才有。只在和默认不同时出现：默认路径上常驻一个"4 步"是噪音，而噪音正是
+            让有信息的那一次被忽略的原因。
+            窄到挤不下时它先放弃文字（`truncate` + `min-w-0`），而不是把模型选择挤出这一行。
+          */}
+          {!pipelineMatchesDefault(pipeline) && (
+            <span
+              className="min-w-0 truncate rounded border border-accent-purple/40 px-1.5 py-1 text-[10px] text-accent-purple"
+              title={t("chat.pipeline.customTitle", { count: pipeline.length })}
+            >
+              {t("chat.pipeline.custom", { count: pipeline.length })}
+            </span>
+          )}
+        </div>
+        {/*
+          临时换模型：不用为"试一下另一个模型"存一个 profile（存了还会顺带把它设成全局活跃的）。
+          只换模型名 —— key、endpoint、预算、价格、上限都还是所选 profile 的，所以下面那句话
+          必须在，而后端也会为此写一条 action log。
+        */}
+        <div className="mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <input
+              value={chatModelOverride ?? ""}
+              onChange={(event) => setChatModelOverride(event.target.value)}
+              // 一个 provider 都没配时和 profile 选择框一起禁用：那时换模型名毫无意义，
+              // 请求连发都发不出去
+              disabled={isSending || llmProfiles.length === 0}
+              placeholder={t("chat.model.placeholder", {
+                model: activeProfileModel || t("chat.model.unset"),
+              })}
+              aria-label={t("chat.model.label")}
+              className="min-w-0 flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            {chatModelOverride && (
+              <button
+                type="button"
+                onClick={() => setChatModelOverride(null)}
+                disabled={isSending}
+                className="rounded border border-surface-border px-2 py-1 text-[10px] text-surface-muted hover:bg-surface-border/30"
+                title={t("chat.model.resetTitle")}
+              >
+                {t("chat.model.reset")}
+              </button>
+            )}
+          </div>
+          {chatModelOverride && (
+            <p className="mt-1 text-[10px] leading-relaxed text-surface-muted">
+              {t("chat.model.note")}
+            </p>
+          )}
         </div>
         {(selectedProfile?.effectiveInputTokens !== undefined || contextEstimate) && (
-          <div className="mb-1.5 px-0.5 text-[10px] text-surface-muted">
-            Estimated input budget:{" "}
+          // 这个数字只覆盖**打包进去的那几节上下文**：系统提示词、工具 schema、逐阶段累积的
+          // 消息都不在里面，所以真实请求一定比它大。悬浮里说清漏了什么 —— 一个看起来"离
+          // 预算还很远"的数字，配上一次因为超长而被截断的运行，就是这个产品最该避免的那种
+          // 虚假信心。真正把它们算进来要另一条路（见 ROADMAP 119），不是改这一行文案。
+          <div
+            className="mb-1.5 px-0.5 text-[10px] text-surface-muted"
+            title={t("chat.budget.title")}
+          >
+            {t("chat.budget.estimated")}{" "}
             <span className="font-mono text-surface-text">
-              {(contextEstimate?.inputBudgetTokens ?? selectedProfile?.effectiveInputTokens ?? 0).toLocaleString()}
+              {/* 两个都没有就是"不知道窗口"，不能显示 0 —— 那是一个看着精确的假数字，
+                  而设置面板对同一份配置显示的是 unknown（见 utils/contextBudget.ts） */}
+              {contextEstimate?.inputBudgetTokens?.toLocaleString() ??
+                selectedProfile?.effectiveInputTokens?.toLocaleString() ??
+                t("chat.budget.unknown")}
             </span>{" "}
-            tokens · selected context{" "}
+
+            · {t("chat.budget.selectedContext")}{" "}
             <span className="font-mono text-surface-text">
               {estimatedSelectedTokens.toLocaleString()}
             </span>
             {contextEstimate?.trimmed ? (
-              <span className="text-diff-remove"> · trimmed</span>
+              <span className="text-diff-remove"> · {t("chat.budget.trimmed")}</span>
+            ) : null}
+            {/*
+              漏了什么要**显示出来**，不能只放在上面那个 title 悬浮里：不悬浮的人看不到，
+              而这个数字恰恰是他拿去调 Max context 的那个。名单由后端给（`notCounted`），
+              因为只有装配请求的那一侧知道漏了什么 —— 前端写死的那份迟早和代码说的不是一件事。
+            */}
+            {contextEstimate?.notCounted?.length ? (
+              <div className="mt-0.5 text-[10px] text-surface-muted">
+                {t("chat.budget.notCounted", { items: contextEstimate.notCounted.join("、") })}
+              </div>
             ) : null}
           </div>
         )}
+        {/*
+          测量值单独一块，和上面那行估算刻意区分开：上面是发送前按字符推的、只覆盖打包
+          进去的那几节；这一行是供应商回报的真实 token，覆盖整个请求（系统提示词、工具
+          schema、逐阶段累积的消息都算在里面）。分母用的是模型窗口 `maxContextTokens`，
+          不是上面那行的输入预算 —— 分子含输出，拿输入预算当分母会算出超过 100% 的数。
+          窗口未知或这次运行没有测到用量时整块不出现：不显示比显示一个假的百分比好。
+        */}
+        {contextUsage && selectedProfile?.maxContextTokens ? (
+          <div className="mb-1.5 border-t border-surface-border/60 px-0.5 pt-1 text-[10px] text-surface-muted">
+            {t("chat.usage.peak")}{" "}
+            <span className="font-mono text-surface-text">
+              {contextUsage.peakTotalTokens.toLocaleString()}
+            </span>
+            {" / "}
+            <span className="font-mono text-surface-text">
+              {selectedProfile.maxContextTokens.toLocaleString()}
+            </span>{" "}
+            {t("chat.usage.contextTokens")} ·{" "}
+            <span className="font-mono text-surface-text">
+              {Math.round((contextUsage.peakTotalTokens / selectedProfile.maxContextTokens) * 100)}%
+            </span>
+          </div>
+        ) : null}
         <div className="mb-1.5 rounded border border-surface-border bg-surface-base/60">
           <button
             type="button"
             onClick={() => setContextPreviewOpen((open) => !open)}
             className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2 py-1 text-left text-[11px] text-surface-muted hover:bg-surface-border/20"
-            title="Preview and choose what the Agent receives as context"
+            title={t("chat.context.title")}
           >
             <span className="truncate">
-              Context: {selectedContextItems.length > 0 ? selectedContextItems.join(", ") : "none selected"}
+              {t("chat.context.prefix")}:{" "}
+              {selectedContextItems.length > 0
+                ? selectedContextItems.join("、")
+                : t("chat.context.none")}
             </span>
-            <span>{contextPreviewOpen ? "Hide" : "Edit"}</span>
+            <span>{contextPreviewOpen ? t("chat.context.hide") : t("chat.context.edit")}</span>
           </button>
           {contextPreviewOpen && (
             <div className="space-y-2 border-t border-surface-border p-2 text-[11px]">
               <div className="grid grid-cols-2 gap-1">
                 <ContextToggle
-                  label="Active file"
-                  detail={activeFile ? activeFile.split(/[/\\]/).pop() ?? activeFile : "none"}
+                  label={t("chat.context.activeFile")}
+                  detail={activeFile ? activeFile.split(/[/\\]/).pop() ?? activeFile : t("chat.context.detail.none")}
                   checked={contextOptions.activeFile}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, activeFile: checked }))}
                 />
                 <ContextToggle
-                  label="Selection"
-                  detail={selectedText ? `${selectedText.length} chars` : "none"}
+                  label={t("chat.context.selection")}
+                  detail={
+                    selectedText
+                      ? t("chat.context.detail.chars", { count: selectedText.length })
+                      : t("chat.context.detail.none")
+                  }
                   checked={contextOptions.selection}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, selection: checked }))}
                 />
                 <ContextToggle
-                  label="Open files"
+                  label={t("chat.context.openFiles")}
                   detail={`${openFiles.length}`}
                   checked={contextOptions.openFiles}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, openFiles: checked }))}
                 />
                 <ContextToggle
-                  label="Problems"
+                  label={t("chat.context.problems")}
                   detail={`${problems.length}`}
                   checked={contextOptions.problems}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, problems: checked }))}
                 />
                 <ContextToggle
-                  label="Failed run"
+                  label={t("chat.context.failedRun")}
                   detail={`${failedTaskCount}`}
                   checked={contextOptions.failedTask}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, failedTask: checked }))}
                 />
                 <ContextToggle
-                  label="Terminal"
+                  label={t("chat.context.terminal")}
                   detail={`${terminalSessionCount}`}
                   checked={contextOptions.terminalOutput}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, terminalOutput: checked }))}
                 />
                 <ContextToggle
-                  label="Logs"
+                  label={t("chat.context.logs")}
                   detail={`${warningLogCount}`}
                   checked={contextOptions.logs}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, logs: checked }))}
                 />
                 <ContextToggle
-                  label="Git diff"
+                  label={t("chat.context.gitDiff")}
                   detail={formatEstimateDetail(contextEstimate, "git_diff", "workspace")}
                   checked={contextOptions.gitDiff}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, gitDiff: checked }))}
                 />
                 <ContextToggle
-                  label="Project tree"
+                  label={t("chat.context.projectTree")}
                   detail={formatEstimateDetail(contextEstimate, "project_tree", "summary")}
                   checked={contextOptions.projectTree}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectTree: checked }))}
                 />
                 <ContextToggle
-                  label="AGENTS.md"
-                  detail={formatEstimateDetail(contextEstimate, "project_memory", "workspace")}
+                  label={t("chat.context.agentsMd")}
+                  detail={formatEstimateDetail(contextEstimate, "project_memory", "project memory")}
                   checked={contextOptions.projectMemory}
                   onChange={(checked) => setContextOptions((prev) => ({ ...prev, projectMemory: checked }))}
                 />
@@ -622,6 +874,30 @@ export default function ChatView() {
           )}
         </div>
 
+        {/* 运行失败原因 — 没有这块的话，用户只能看到一个 Retry 按钮，
+            完全不知道失败在哪。错误文本一直存在 store 里，之前没有任何地方渲染。
+            原话下面不动，上面加一句"你可以做什么"：提供方的报错只说发生了什么
+            （`maximum context length is 128000 tokens...`），不说怎么办。 */}
+        {agentError && (
+          <div
+            data-testid="agent-error-banner"
+            className="mb-2 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1.5"
+          >
+            <div className="mb-0.5 text-[10px] font-medium text-diff-remove">{t("chat.runFailed")}</div>
+            {failureHint && (
+              <div
+                data-testid="agent-error-hint"
+                className="mb-1 text-[11px] leading-relaxed text-surface-text"
+              >
+                {t(failureHint)}
+              </div>
+            )}
+            <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-surface-text">
+              {agentError}
+            </pre>
+          </div>
+        )}
+
         {/* 输入 + 按钮 */}
         <div className="flex gap-2">
           <textarea
@@ -631,14 +907,14 @@ export default function ChatView() {
             data-testid="agent-chat-input"
             placeholder={
               isSending
-                ? "Agent is working…"
+                ? t("chat.input.busy")
                 : agentState === "waiting_user"
-                ? "Review diffs or continue… (Shift+Enter for newline)"
+                ? t("chat.input.waiting")
                 : agentState === "error"
-                ? "An error occurred. Try again…"
+                ? t("chat.input.error")
                 : ideMode === "plan"
-                ? "Draft an SDD… (Plan mode, Shift+Enter for newline)"
-                : `Ask Agent… (Mode: ${agentMode}, Shift+Enter for newline)`
+                ? t("chat.input.plan")
+                : t("chat.input.default", { mode: t(`mode.${agentMode}`) })
             }
             disabled={isSending}
             rows={2}
@@ -746,37 +1022,6 @@ function buildGhostSuggestions(
     });
   }
   return suggestions.slice(0, 3);
-}
-
-function loadContextOptions(): ChatContextOptions {
-  if (typeof window === "undefined") return DEFAULT_CONTEXT_OPTIONS;
-  try {
-    const workspacePath = localStorage.getItem("agent-ide-workspace-path") ?? "";
-    const raw = localStorage.getItem(CONTEXT_OPTIONS_KEY);
-    if (!raw) return DEFAULT_CONTEXT_OPTIONS;
-    const parsed = JSON.parse(raw) as { workspacePath?: string; options?: Partial<ChatContextOptions> };
-    if (parsed.workspacePath && workspacePath && parsed.workspacePath !== workspacePath) {
-      return DEFAULT_CONTEXT_OPTIONS;
-    }
-    return { ...DEFAULT_CONTEXT_OPTIONS, ...(parsed.options ?? {}) };
-  } catch {
-    return DEFAULT_CONTEXT_OPTIONS;
-  }
-}
-
-function persistContextOptions(options: ChatContextOptions) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(
-      CONTEXT_OPTIONS_KEY,
-      JSON.stringify({
-        workspacePath: localStorage.getItem("agent-ide-workspace-path") ?? "",
-        options,
-      })
-    );
-  } catch {
-    // Ignore persistence failures.
-  }
 }
 
 function formatEstimateDetail(

@@ -1,14 +1,25 @@
 use crate::agent::state_machine::{ApplyDiffError, ApplyDiffsResult, FileDiff};
 use crate::services::workspace;
-use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
-pub(crate) fn apply_diff_to_path(
+/// 单文件应用的便捷入口，仅测试使用。
+/// 生产路径一律走 `apply_pending_diffs`，因为它还要负责同批次内的写入追踪。
+#[cfg(test)]
+fn apply_diff_to_path(file_path: &std::path::Path, diff: &FileDiff) -> Result<bool, String> {
+    apply_diff_to_path_inner(file_path, diff, false)
+}
+
+/// `skip_base_hash` 只在同一批 apply 中该文件已被我们自己写过时为 true：
+/// 此时内容变化来自上一个 hunk/diff，而不是外部改动，baseHash 必然不匹配。
+fn apply_diff_to_path_inner(
     file_path: &std::path::Path,
     diff: &FileDiff,
+    skip_base_hash: bool,
 ) -> Result<bool, String> {
     use std::fs;
 
-    let Some(updated_content) = build_updated_content(file_path, diff)? else {
+    let Some(updated_content) = build_updated_content(file_path, diff, skip_base_hash)? else {
         return Ok(false);
     };
 
@@ -21,9 +32,24 @@ pub(crate) fn apply_diff_to_path(
     Ok(true)
 }
 
+/// 该 diff 是否会创建一个新文件。
+///
+/// 判定依据是 hunk 形态（全部 hunk 的 original 为空、updated 非空），
+/// 与 `build_updated_content` 实际走的分支完全一致。刻意不看
+/// `provenance.operation`：那个字段可能是 `"unknown"`（后端生成的 diff 就是），
+/// 用它做权限判断会留下绕过口子。
+pub fn is_new_file_diff(diff: &FileDiff) -> bool {
+    !diff.hunks.is_empty()
+        && diff
+            .hunks
+            .iter()
+            .all(|hunk| hunk.original.is_empty() && !hunk.updated.is_empty())
+}
+
 fn build_updated_content(
     file_path: &std::path::Path,
     diff: &FileDiff,
+    skip_base_hash: bool,
 ) -> Result<Option<String>, String> {
     use std::fs;
 
@@ -31,12 +57,7 @@ fn build_updated_content(
         return Ok(None);
     }
 
-    let is_new_file = diff
-        .hunks
-        .iter()
-        .all(|hunk| hunk.original.is_empty() && !hunk.updated.is_empty());
-
-    if is_new_file {
+    if is_new_file_diff(diff) {
         if file_path.exists() {
             return Err(format!(
                 "Refusing to overwrite existing file: {}",
@@ -54,7 +75,9 @@ fn build_updated_content(
 
     let mut content = fs::read_to_string(file_path)
         .map_err(|_| format!("File not found: {}", file_path.display()))?;
-    validate_base_hash(&content, diff, file_path)?;
+    if !skip_base_hash {
+        validate_base_hash(&content, diff, file_path)?;
+    }
 
     for hunk in &diff.hunks {
         if hunk.original.is_empty() {
@@ -68,7 +91,15 @@ fn build_updated_content(
                 "{} in {}: {}",
                 message,
                 file_path.display(),
-                hunk.original[..hunk.original.len().min(200)].replace('\n', "\\n")
+                // 按字符截断。以前是 `hunk.original[..min(200)]` —— 对模型生成的文本做
+                // 字节切片，第 200 字节落在多字节 UTF-8 中间就 panic，而这里正是
+                // "某个 hunk 没应用上"的错误构造路径：同批次更早的 diff 已经落盘，
+                // 命令任务却直接崩掉，前端的 invoke 永远等不到结果。
+                hunk.original
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+                    .replace('\n', "\\n")
             )
         })?;
     }
@@ -82,7 +113,18 @@ fn validate_base_hash(
     file_path: &std::path::Path,
 ) -> Result<(), String> {
     let Some(expected) = diff.base_hash.as_deref() else {
-        return Ok(());
+        // 走到这里说明：这是一次编辑（新建在上面就返回了）、文件确实在磁盘上，
+        // 却没有生成时的指纹 —— 没有任何依据判断这期间文件变过没有。
+        //
+        // 每条产出 diff 的路径都会 `stamp_base_hashes`，所以正常不会出现；真会出现的是
+        // "生成时目标不存在或读不出来、apply 时却存在了"，而那恰恰是最该拦的一种：
+        // 锚点匹配挡不住它，2026-09-26 加的按缩进容错还让匹配比以前更松。
+        return Err(format!(
+            "No baseHash recorded for {}: the file could not be read when this diff was \
+             generated, so there is no way to tell whether it changed since. Ask the Agent to \
+             regenerate the change against the current file.",
+            file_path.display()
+        ));
     };
     let actual = content_hash(content);
     if actual == expected {
@@ -97,22 +139,114 @@ fn validate_base_hash(
     }
 }
 
+/// 内容指纹，用于检测 diff 生成之后文件是否被改动。
+///
+/// 这里刻意手写 FNV-1a 而不是用 `DefaultHasher`：标准库明确不保证
+/// `DefaultHasher` 的结果在 Rust 版本之间稳定，而这个哈希会随待审查的 diff
+/// 一起按 workspace 持久化、重启后再校验。用不稳定的哈希意味着升级工具链
+/// 之后所有已保存的 diff 都会被误判为 stale。
 pub fn content_hash(content: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:016x}", hash)
+}
+
+/// 读取目标文件当前内容的哈希；文件不存在或不可读时返回 None。
+fn current_content_hash(file: &str) -> Option<String> {
+    let path = workspace::resolve_for_write(file).ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(content_hash(&content))
+}
+
+/// 在生成 diff 时记录目标文件的当前内容哈希，供 apply 时检测外部改动。
+///
+/// 模型在 `agent-changes` 里给出的 `baseHash` 一律被覆盖：模型无从知道
+/// Agent IDE 的哈希函数，它填的值只能是猜的。只有后端算出的哈希可信。
+/// 新建文件（目标不存在）保持 None——没有可比较的基准内容。
+pub fn stamp_base_hashes(diffs: &mut [FileDiff]) {
+    for diff in diffs.iter_mut() {
+        diff.base_hash = current_content_hash(&diff.file);
+    }
+}
+
+/// apply 之后刷新仍待审查的 diff 的 baseHash。
+///
+/// 逐 hunk 审查会让文件内容前进，后续 hunk 必须以新内容为基准，否则第二个
+/// hunk 会被误判为 stale。只刷新我们刚成功写过的文件：写入失败的情况下
+/// 原有的 stale 判定必须保留。
+///
+/// 只处理 `pending` / `partial`：`failed` 的 diff 应当走"基于当前文件重新生成"
+/// 的流程，而不是被悄悄改基准。
+pub fn restamp_applied_files(diffs: &mut [FileDiff], applied: &[FileDiff]) {
+    let written: HashSet<&str> = applied.iter().map(|diff| diff.file.as_str()).collect();
+    for diff in diffs.iter_mut() {
+        let has_remaining_work = diff.status == "pending" || diff.status == "partial";
+        if has_remaining_work && written.contains(diff.file.as_str()) {
+            diff.base_hash = current_content_hash(&diff.file);
+        }
+    }
+}
+
+/// 一个文件在被写入之前的内容。
+///
+/// `previous` 为 None 表示这个文件当时并不存在，撤销就意味着把它删掉。
+#[derive(Clone, Debug)]
+pub struct FileSnapshot {
+    pub file: String,
+    pub path: PathBuf,
+    pub previous: Option<String>,
+    /// 撤销这一笔要把 `path` 移回到这里。
+    ///
+    /// 移动的逆操作是移回去，不是"用内容重写源文件"：后者会丢掉文件本身的身份
+    /// （元数据、时间戳），二进制文件更是连内容都读不出来。
+    pub move_back_to: Option<PathBuf>,
 }
 
 pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
+    apply_pending_diffs_with_snapshots(diffs).0
+}
+
+/// 应用 diff，并返回写入前的文件内容快照供撤销使用。
+///
+/// 快照不进 `ApplyDiffsResult`：那个结构要跨 IPC 回前端，把整份文件内容塞进去
+/// 等于每次应用都往 webview 传一遍源码。撤销栈留在后端。
+pub fn apply_pending_diffs_with_snapshots(
+    diffs: &[FileDiff],
+) -> (ApplyDiffsResult, Vec<FileSnapshot>) {
     let mut applied: Vec<FileDiff> = Vec::new();
     let mut failed: Vec<ApplyDiffError> = Vec::new();
+    let mut snapshots: Vec<FileSnapshot> = Vec::new();
+    // 本批次内已写过的文件：它们的内容变化来自我们自己，不该再按 baseHash 判 stale
+    let mut written: HashSet<PathBuf> = HashSet::new();
 
     for diff in diffs {
         if diff.status != "pending" {
             continue;
         }
 
-        let file_path = match workspace::resolve_for_write(&diff.file) {
+        // 没指名文件的改动必须在解析路径**之前**拦掉。空路径解析出来就是工作区根目录，
+        // 于是后面拿一个目录当文件读，报出来的是 "File not found: D:\work\test" ——
+        // 方向完全反了，用户看不出问题是"这条改动没写文件名"。真实运行里 Review 阶段
+        // 产出过这种 diff，恢复之后点 Apply 才暴露出来（9 应用成功、1 失败）。
+        if diff.file.trim().is_empty() {
+            failed.push(ApplyDiffError {
+                diff_id: diff.id.clone(),
+                file: diff.file.clone(),
+                message: "This change does not name a file, so there is nothing to write. \
+                          Ask the Agent to regenerate it with the target path."
+                    .to_string(),
+            });
+            continue;
+        }
+
+        // Agent 产出的写入要额外过一遍路径拒绝清单（.git/、凭据文件等）
+        let file_path = match workspace::resolve_for_agent_write(&diff.file) {
             Ok(path) => path,
             Err(err) => {
                 failed.push(ApplyDiffError {
@@ -124,8 +258,25 @@ pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
             }
         };
 
-        match apply_diff_to_path(&file_path, diff) {
-            Ok(true) => applied.push(diff.clone()),
+        // 写之前先取一份原文。同一批次里同一个文件可能被写多次，只留第一次的
+        // 快照 —— 撤销要回到"这一批开始之前"，不是回到上一个 hunk 之前。
+        let previous = std::fs::read_to_string(&file_path).ok();
+        let already_snapshotted = written.contains(&file_path);
+
+        let skip_base_hash = already_snapshotted;
+        match apply_diff_to_path_inner(&file_path, diff, skip_base_hash) {
+            Ok(true) => {
+                if !already_snapshotted {
+                    snapshots.push(FileSnapshot {
+                        file: diff.file.clone(),
+                        path: file_path.clone(),
+                        previous,
+                        move_back_to: None,
+                    });
+                }
+                written.insert(file_path);
+                applied.push(diff.clone());
+            }
             Ok(false) => {}
             Err(message) => failed.push(ApplyDiffError {
                 diff_id: diff.id.clone(),
@@ -135,12 +286,93 @@ pub fn apply_pending_diffs(diffs: &[FileDiff]) -> ApplyDiffsResult {
         }
     }
 
-    ApplyDiffsResult { applied, failed }
+    (ApplyDiffsResult { applied, failed }, snapshots)
+}
+
+/// 把快照写回磁盘，返回实际恢复的文件名。
+///
+/// 原本不存在的文件会被删除。单个文件恢复失败不影响其它文件：撤销一半也比
+/// 完全不撤销好，失败的部分照实回报。
+pub fn restore_snapshots(snapshots: &[FileSnapshot]) -> (Vec<String>, Vec<String>) {
+    let mut restored = Vec::new();
+    let mut failed = Vec::new();
+    // **倒序**。一批快照是按操作发生的顺序记的，而一串操作的逆操作必须反过来做。
+    // 顺序重放会真的丢数据：`move A→B` 之后又 `write A`，正序先把 B 移回 A（覆盖刚建的
+    // A，这步是对的），再按第二条记录把 A 删掉 —— A 的原始内容哪儿都不剩了，界面还报告
+    // "已恢复"。`move A→B; move B→C`、`move A→B; move C→A` 同理。
+    // 单文件的内容快照彼此独立，倒序对它们没有任何影响。
+    for snapshot in snapshots.iter().rev() {
+        let outcome = match snapshot.move_back_to {
+            // 撤销一次移动：先把文件移回去。目标已经不在了（移完之后又被删掉）也不算
+            // 失败 —— 那种情况下 `previous` 里存着内容，下面一步把源文件重建出来。
+            Some(ref target) => restore_move(snapshot, target),
+            None => match snapshot.previous {
+                Some(ref content) => std::fs::write(&snapshot.path, content)
+                    .map_err(|error| format!("{}: {}", snapshot.file, error)),
+                None => match std::fs::remove_file(&snapshot.path) {
+                    Ok(()) => Ok(()),
+                    // 已经不在了就算撤销成功，不必报错
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(format!("{}: {}", snapshot.file, error)),
+                },
+            },
+        };
+        match outcome {
+            Ok(()) => restored.push(snapshot.file.clone()),
+            Err(message) => failed.push(message),
+        }
+    }
+    (restored, failed)
+}
+
+/// 把 `snapshot.path` 移回 `target`，必要时用 `previous` 补回内容。
+///
+/// 父目录要重建：移动很可能把文件从一个此后被清空的目录里搬走了，而 `fs::rename`
+/// 不会为你创建目标目录。
+fn restore_move(snapshot: &FileSnapshot, target: &PathBuf) -> Result<(), String> {
+    // `fs::rename` 会**静默覆盖**已存在的目标。倒序重放之后源路径本该是空的，所以
+    // 这里有东西就说明世界和快照不一致（比如运行结束后用户自己建了个同名文件）——
+    // 那时候宁可让撤销这一条失败并如实报告，也不能把它悄悄冲掉。
+    if target.exists() && snapshot.path != *target {
+        return Err(format!(
+            "{}: {} already exists, refusing to overwrite it while undoing a move",
+            snapshot.file,
+            target.display()
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("{}: {}", snapshot.file, error))?;
+    }
+    match std::fs::rename(&snapshot.path, target) {
+        Ok(()) => {}
+        // 移动之后目标又被删了：内容还在快照里，直接重建源文件
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && snapshot.previous.is_some() => {}
+        Err(error) => return Err(format!("{}: {}", snapshot.file, error)),
+    }
+    // 移动之后又被改过：`previous` 是移动那一刻的内容，写回去才算真的撤销
+    if let Some(ref content) = snapshot.previous {
+        std::fs::write(target, content).map_err(|error| format!("{}: {}", snapshot.file, error))?;
+    }
+    Ok(())
 }
 
 fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, String> {
     if original.is_empty() {
         return Err("Original content is empty".to_string());
+    }
+
+    let orig_trim = original.trim();
+    let updated_trim = updated.trim();
+
+    // 改名类替换里 original 常常是 updated 的前缀（`greet` → `greeting`）。如果
+    // 另一份提议已经把文件改成目标状态，天真的子串匹配会在新文本里再次命中
+    // original，把 `greeting` 写成 `greetinging` —— 不是报错，是把文件改坏。
+    //
+    // 这种交叠是真实模型的常态：planner 拆出的一步整文件重写，另一步给出片段
+    // 替换，两者做的是同一件事。所以在替换之前先确认目标状态是否已经在场。
+    if !updated_trim.is_empty() && updated_trim.contains(orig_trim) && text.contains(updated_trim) {
+        return Ok(text.to_string());
     }
 
     let exact_count = text.matches(original).count();
@@ -151,26 +383,497 @@ fn replace_unique(text: &str, original: &str, updated: &str) -> Result<String, S
         return Err("Original content matched more than once".to_string());
     }
 
-    let orig_trim = original.trim();
     if orig_trim != original && !orig_trim.is_empty() {
         let trim_count = text.matches(orig_trim).count();
         if trim_count == 1 {
-            return Ok(text.replacen(orig_trim, updated.trim(), 1));
+            return Ok(text.replacen(orig_trim, updated_trim, 1));
         }
         if trim_count > 1 {
             return Err("Original content matched more than once".to_string());
         }
     }
 
+    // 原文不在场，但目标内容已经在了：这一处的改动已经由别的提议完成，不是失败。
+    // 以前一律报 "Could not find original content"，于是一次其实完全成功的应用
+    // 被报成"2 成功 3 失败"，用户无从判断到底落地没有。
+    //
+    // 原文和目标都不在场仍然是错误 —— 那才是模型引用了不存在的代码。
+    if !updated_trim.is_empty() && text.contains(updated_trim) {
+        return Ok(text.to_string());
+    }
+
+    // 行尾不一致时再试一次。Windows 上工作区文件普遍是 CRLF，而模型（哪怕是逐字
+    // 读过文件之后）输出的 ORIGINAL 段一律是 LF，于是逐字节匹配必然失败。
+    // 真实 provider 评测里就是这样：模型读了文件、引用得一字不差，四个 hunk 仍然
+    // 全部报 "Could not find original content"，因为文件里是 `\r\n`。
+    //
+    // 折叠 `\r\n` 只用于**定位**；替换文本按文件原本的行尾写回，所以不会顺手把
+    // 整个文件的行尾改掉 —— 那会让 diff 看起来动了每一行。
+    if let Some(result) = replace_unique_ignoring_line_endings(text, orig_trim, updated) {
+        return Ok(result);
+    }
+
+    // 最后一招：逐行忽略缩进定位。模型经常把引用的那段重新缩进（或文件本身的缩进变了），
+    // 这时逐字节、整体 trim、CRLF 折叠全都对不上 —— 和 CRLF 那次一样，模型引用得没错、
+    // 锚点也没错，卡住的是用户根本看不见的空白。
+    //
+    // 只在**唯一命中**时替换；命中多处仍然按"匹配到多处"拒绝，否则一个孤零零的 `}`
+    // 就能被挪到任意位置。替换文本按缩进差平移，块内相对缩进保持不变 —— Python 这类
+    // 空白敏感的语言靠的就是这一点。
+    match replace_unique_ignoring_indentation(text, original, updated) {
+        IndentMatch::Replaced(result) => return Ok(result),
+        IndentMatch::Ambiguous => return Err("Original content matched more than once".to_string()),
+        IndentMatch::NotFound => {}
+    }
+
     Err("Could not find original content".to_string())
+}
+
+/// 忽略缩进的定位结果。"没找到"和"找到多处"必须分开：前者继续往下走，
+/// 后者要立刻拒绝，不能退化成"没找到"再被别的分支瞎猜。
+enum IndentMatch {
+    Replaced(String),
+    Ambiguous,
+    NotFound,
+}
+
+/// 逐行按 `trim()` 定位原文，按缩进差平移替换内容写回。
+fn replace_unique_ignoring_indentation(text: &str, original: &str, updated: &str) -> IndentMatch {
+    let original_lines: Vec<&str> = original
+        .lines()
+        .skip_while(|line| line.trim().is_empty())
+        .collect();
+    let original_lines: Vec<&str> = match original_lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+    {
+        Some(last) => original_lines[..=last].to_vec(),
+        None => return IndentMatch::NotFound,
+    };
+    let text_lines: Vec<&str> = text.lines().collect();
+    if original_lines.is_empty() || text_lines.len() < original_lines.len() {
+        return IndentMatch::NotFound;
+    }
+
+    let matches: Vec<usize> = (0..=text_lines.len() - original_lines.len())
+        .filter(|start| {
+            text_lines[*start..*start + original_lines.len()]
+                .iter()
+                .zip(original_lines.iter())
+                .all(|(line, expected)| line.trim() == expected.trim())
+        })
+        .collect();
+    let start = match matches.as_slice() {
+        [only] => *only,
+        [] => return IndentMatch::NotFound,
+        _ => return IndentMatch::Ambiguous,
+    };
+
+    // 缩进按位置从**文件**那一段逐行取，不做"缩进差平移"。平移只在两边缩进步长一致时
+    // 才成立，而"模型用 2 空格、文件用 4 空格"是常见组合，平移会写出 6 空格这种两边都
+    // 没有的缩进。沿用文件的缩进，等于"只改内容、不动这一段的排版"。
+    let window = &text_lines[start..start + original_lines.len()];
+    let file_indents: Vec<&str> = window.iter().map(|line| leading_whitespace(line)).collect();
+    let original_indents: Vec<&str> = original_lines
+        .iter()
+        .map(|line| leading_whitespace(line))
+        .collect();
+    let mut rebuilt: Vec<String> = text_lines[..start]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect();
+    for (index, line) in updated.lines().enumerate() {
+        if line.trim().is_empty() {
+            rebuilt.push(line.to_string());
+            continue;
+        }
+        let indent = match file_indents.get(index) {
+            Some(file_indent) => (*file_indent).to_string(),
+            // updated 比 original 长：多出来的行没有对应的文件行，就把模型相对最后一行
+            // 多出来的那截缩进接在文件最后一行的缩进后面
+            None => {
+                let base_model = original_indents.last().copied().unwrap_or("");
+                let base_file = file_indents.last().copied().unwrap_or("");
+                let extra = leading_whitespace(line)
+                    .strip_prefix(base_model)
+                    .unwrap_or("");
+                format!("{}{}", base_file, extra)
+            }
+        };
+        rebuilt.push(format!("{}{}", indent, line.trim_start()));
+    }
+    rebuilt.extend(
+        text_lines[start + original_lines.len()..]
+            .iter()
+            .map(|line| (*line).to_string()),
+    );
+
+    // 按文件原本的行尾写回，别顺手把整个文件的行尾改掉
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut result = rebuilt.join(newline);
+    if text.ends_with('\n') {
+        result.push_str(newline);
+    }
+    IndentMatch::Replaced(result)
+}
+
+fn leading_whitespace(line: &str) -> &str {
+    let end = line
+        .find(|ch: char| !ch.is_whitespace())
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
+/// 忽略 CRLF/LF 差异定位原文，并保持文件原有行尾写回替换内容
+fn replace_unique_ignoring_line_endings(
+    text: &str,
+    original: &str,
+    updated: &str,
+) -> Option<String> {
+    if !text.contains('\r') || original.is_empty() {
+        return None;
+    }
+    let normalized_text = text.replace("\r\n", "\n");
+    let normalized_original = original.replace("\r\n", "\n");
+    if normalized_original.is_empty() || normalized_text.matches(&normalized_original).count() != 1
+    {
+        return None;
+    }
+    let normalized_start = normalized_text.find(&normalized_original)?;
+    let normalized_end = normalized_start + normalized_original.len();
+
+    // 把折叠后的下标映射回原文本的下标：`\r\n` 折叠成一个字符，所以要一边走一边数
+    let mut raw_start = None;
+    let mut raw_end = None;
+    let mut normalized_pos = 0usize;
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index <= bytes.len() {
+        if normalized_pos == normalized_start && raw_start.is_none() {
+            raw_start = Some(index);
+        }
+        if normalized_pos == normalized_end && raw_end.is_none() {
+            raw_end = Some(index);
+            break;
+        }
+        if index == bytes.len() {
+            break;
+        }
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 2;
+        } else {
+            index += 1;
+        }
+        normalized_pos += 1;
+    }
+    let (raw_start, raw_end) = (raw_start?, raw_end?);
+
+    // 按文件原本的行尾写回：这里能走到说明文件用的是 CRLF
+    let updated_crlf = updated.replace("\r\n", "\n").replace('\n', "\r\n");
+    Some(format!(
+        "{}{}{}",
+        &text[..raw_start],
+        updated_crlf,
+        &text[raw_end..]
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::state_machine::DiffHunk;
-    use std::path::PathBuf;
     use uuid::Uuid;
+
+    /// 目标内容已经在场时，这一处算已完成，而不是失败 —— 更不能再替换一次。
+    ///
+    /// `greet` → `greeting` 这种改名里 original 是 updated 的前缀：另一份提议已经
+    /// 改完之后，天真的子串匹配会在新文本里再次命中，把 `greeting` 写成
+    /// `greetinging`。这不是误报，是把文件改坏。
+    #[test]
+    fn hunk_already_satisfied_by_another_proposal_is_not_reapplied() {
+        let text = "export function greeting(name: string) {}\n";
+
+        let result = replace_unique(text, "export function greet", "export function greeting");
+
+        assert_eq!(result.as_deref(), Ok(text), "内容必须保持原样");
+        assert!(!result.unwrap().contains("greetinging"));
+    }
+
+    /// 原文和目标都不在场：这才是真正的失败 —— 模型引用了不存在的代码。
+    #[test]
+    fn hunk_matching_nothing_at_all_still_fails() {
+        let text = "export function greet(name: string) {}\n";
+
+        let result = replace_unique(text, "class Greeter", "class Greeting");
+
+        assert!(result.is_err(), "{:?}", result);
+    }
+
+    /// 撤销一次移动就是移回去，而不是"在源路径重写内容"。
+    ///
+    /// 用重写实现的话，文件的身份（时间戳、权限）会丢，而二进制文件根本读不出内容来
+    /// 重写；目标路径那个新文件也会留在磁盘上。
+    #[test]
+    fn undoing_a_move_puts_the_file_back_and_leaves_nothing_behind() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-undo-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("nested")).unwrap();
+        let source = base.join("old.ts");
+        let destination = base.join("nested/new.ts");
+        std::fs::write(&destination, "export const a = 1;\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[FileSnapshot {
+            file: "nested/new.ts".to_string(),
+            path: destination.clone(),
+            previous: None,
+            move_back_to: Some(source.clone()),
+        }]);
+
+        assert_eq!(restored, vec!["nested/new.ts".to_string()]);
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert!(!destination.exists(), "移动的落点不该留下文件");
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "export const a = 1;\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 移动之后又在原路径新建了一个文件：撤销必须倒着来。
+    ///
+    /// 正序重放会先把 B 移回 A（覆盖新建的那个 A，这步是对的），再按第二条记录把 A
+    /// 删掉 —— A 的原始内容哪儿都不剩了，而界面报告的是"已恢复"。这正是本项目拒绝
+    /// 把移动拆成删+建时列出的那个失败，从另一扇门回来了。
+    #[test]
+    fn undoing_a_move_then_a_write_at_the_old_path_replays_in_reverse() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-order-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        // 运行结束时的磁盘状态：A 是运行中新建的，B 是从原来的 A 移过去的
+        std::fs::write(&b, "the original a\n").unwrap();
+        std::fs::write(&a, "written after the move\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[
+            FileSnapshot {
+                file: "b.ts".to_string(),
+                path: b.clone(),
+                previous: None,
+                move_back_to: Some(a.clone()),
+            },
+            FileSnapshot {
+                file: "a.ts".to_string(),
+                path: a.clone(),
+                previous: None,
+                move_back_to: None,
+            },
+        ]);
+
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "the original a\n");
+        assert!(!b.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 连续两次移动：A→B→C。倒序重放才能把文件送回 A。
+    #[test]
+    fn undoing_two_chained_moves_returns_the_file_to_the_first_path() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-chain-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        let c = base.join("c.ts");
+        std::fs::write(&c, "content\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[
+            FileSnapshot {
+                file: "b.ts".to_string(),
+                path: b.clone(),
+                previous: None,
+                move_back_to: Some(a.clone()),
+            },
+            FileSnapshot {
+                file: "c.ts".to_string(),
+                path: c.clone(),
+                previous: None,
+                move_back_to: Some(b.clone()),
+            },
+        ]);
+
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "content\n");
+        assert!(!b.exists());
+        assert!(!c.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新建之后再移动：撤销之后两个路径都不该有文件 —— 运行之前它们都不存在。
+    #[test]
+    fn undoing_a_create_then_move_leaves_neither_path_behind() {
+        let base = std::env::temp_dir().join(format!("agent-ide-create-move-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        std::fs::write(&b, "agent authored\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[
+            FileSnapshot {
+                file: "a.ts".to_string(),
+                path: a.clone(),
+                previous: None,
+                move_back_to: None,
+            },
+            FileSnapshot {
+                file: "b.ts".to_string(),
+                path: b.clone(),
+                previous: None,
+                move_back_to: Some(a.clone()),
+            },
+        ]);
+
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(restored.len(), 2);
+        assert!(!a.exists(), "运行前 a.ts 并不存在，撤销后也不该有");
+        assert!(!b.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 源路径上已经有别的东西时，移回去要如实失败，而不是 `fs::rename` 静默覆盖。
+    #[test]
+    fn undoing_a_move_refuses_to_overwrite_something_at_the_source() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-clash-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.ts");
+        let b = base.join("b.ts");
+        std::fs::write(&b, "moved content\n").unwrap();
+        // 运行结束之后用户自己在原路径建了个同名文件
+        std::fs::write(&a, "user's own file\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[FileSnapshot {
+            file: "b.ts".to_string(),
+            path: b.clone(),
+            previous: None,
+            move_back_to: Some(a.clone()),
+        }]);
+
+        assert!(restored.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].contains("already exists"), "{:?}", failed);
+        // 两边都保持原样：撤销失败也不能毁掉任何一份内容
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "user's own file\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "moved content\n");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 移动之后又被改过：`previous` 是移动那一刻的内容，移回去还得把它写回来。
+    #[test]
+    fn undoing_a_move_that_was_edited_afterwards_restores_the_older_content() {
+        let base = std::env::temp_dir().join(format!("agent-ide-move-edit-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("old.ts");
+        let destination = base.join("new.ts");
+        std::fs::write(&destination, "edited after the move\n").unwrap();
+
+        let (restored, failed) = restore_snapshots(&[FileSnapshot {
+            file: "new.ts".to_string(),
+            path: destination.clone(),
+            previous: Some("as it was when moved\n".to_string()),
+            move_back_to: Some(source.clone()),
+        }]);
+
+        assert_eq!(restored.len(), 1);
+        assert!(failed.is_empty(), "{:?}", failed);
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "as it was when moved\n"
+        );
+        assert!(!destination.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 一个应用不上的 hunk，其错误信息里要摘录 original 的开头。摘录必须按字符切，
+    /// 不能按字节。
+    ///
+    /// 以前是 `hunk.original[..min(200)]`：第 200 字节落在多字节 UTF-8 中间就 panic。
+    /// 而这条路径本身就是"某个 hunk 没应用上"的错误构造路径 —— 同一批次里更早的 diff
+    /// 已经写进磁盘，命令任务却直接崩掉，前端的 invoke 永远等不到结果。中文注释在
+    /// 这个仓库里到处都是，触发它不需要什么特殊输入。
+    #[test]
+    fn a_failing_hunk_with_multibyte_text_reports_an_error_instead_of_panicking() {
+        let dir = std::env::temp_dir().join(format!("agent-ide-diff-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file_path = dir.join("multibyte.ts");
+        std::fs::write(&file_path, "export function greet() {}\n").expect("write file");
+
+        // 每个汉字 3 字节，第 200 字节必然落在某个字符中间
+        let original = "「".repeat(300);
+        let diff = FileDiff {
+            id: Uuid::new_v4().to_string(),
+            file: "multibyte.ts".to_string(),
+            base_hash: None,
+            provenance: None,
+            status: "pending".to_string(),
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                content: String::new(),
+                original,
+                updated: "whatever".to_string(),
+                provenance: None,
+                status: None,
+            }],
+        };
+
+        let result = build_updated_content(&file_path, &diff, true);
+
+        assert!(result.is_err(), "{:?}", result);
+        let message = result.unwrap_err();
+        assert!(message.contains("multibyte.ts"), "{}", message);
+        assert!(message.contains('「'), "摘录应当保留可读字符: {}", message);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Windows 工作区文件是 CRLF，而模型输出的 ORIGINAL 段是 LF。
+    ///
+    /// 这条是真实 provider 评测里最贵的一个发现：模型逐字读过文件、引用一字不差，
+    /// 每个 hunk 仍然报 "Could not find original content"，因为文件里是 `\r\n`。
+    /// 也就是说在 Windows 上编辑类 diff 基本没有一次能应用成功。
+    #[test]
+    fn crlf_file_matches_an_lf_original_and_keeps_its_line_endings() {
+        let text = "export function greet(name: string) {\r\n  return name;\r\n}\r\n";
+
+        let result = replace_unique(
+            text,
+            "export function greet(name: string) {\n  return name;\n}",
+            "export function greeting(name: string) {\n  return name;\n}",
+        )
+        .expect("应当能定位到原文");
+
+        assert!(result.contains("greeting"), "{:?}", result);
+        // 行尾必须保持 CRLF：顺手换掉会让 diff 看起来动了每一行
+        assert!(!result.contains("\n\n"), "{:?}", result);
+        assert_eq!(result.matches("\r\n").count(), 3, "{:?}", result);
+    }
+
+    /// 折叠行尾之后出现多处匹配时仍然拒绝：宁可报错，也不能猜改哪一处。
+    #[test]
+    fn crlf_tolerance_still_refuses_ambiguous_matches() {
+        let text = "let a = 1;\r\nlet a = 1;\r\n";
+
+        let result = replace_unique(text, "let a = 1;", "let a = 2;");
+
+        assert!(result.is_err(), "{:?}", result);
+    }
 
     fn temp_dir() -> PathBuf {
         let dir =
@@ -219,6 +922,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_reindented_quote_still_applies_and_keeps_the_files_indentation() {
+        // 模型把引用的那段重新缩进（4 空格 → 2 空格）。以前逐字节、整体 trim、CRLF
+        // 三条路都对不上，一次本该成功的应用报成 "Could not find original content"。
+        let text = "class A:\n    def run(self):\n        return 1\n";
+        let original = "  def run(self):\n    return 1";
+        let updated = "  def run(self):\n    return 2";
+
+        let result = replace_unique(text, original, updated).expect("按缩进差平移后应当命中");
+
+        assert_eq!(result, "class A:\n    def run(self):\n        return 2\n");
+    }
+
+    #[test]
+    fn a_reindented_quote_matching_twice_is_refused() {
+        // 两处 trim 后一模一样：这时候挪哪一处都是猜，必须拒绝
+        let text = "if a:\n    return None\nif b:\n        return None\n";
+        let original = "return None";
+
+        let err = replace_unique(text, original, "return 0").unwrap_err();
+
+        assert!(err.contains("matched more than once"));
+    }
+
+    #[test]
+    fn indentation_tolerance_does_not_invent_a_match() {
+        // 原文和目标都不在场仍然是错误：那才是模型引用了不存在的代码
+        let text = "fn main() {\n    println!(\"hi\");\n}\n";
+
+        let err = replace_unique(text, "    let missing = 1;", "    let missing = 2;").unwrap_err();
+
+        assert!(err.contains("Could not find original content"));
+    }
+
+    #[test]
+    fn indentation_tolerance_keeps_crlf_endings() {
+        let text = "class A:\r\n    def run(self):\r\n        return 1\r\n";
+        let original = "  def run(self):\n    return 1";
+
+        let result =
+            replace_unique(text, original, "  def run(self):\n    return 2").expect("应当命中");
+
+        assert!(result.contains("\r\n"), "文件本来是 CRLF，写回不能改成 LF");
+        assert!(result.contains("        return 2"));
+    }
+
     fn make_diff(file: &str, original: &str, updated: &str) -> FileDiff {
         FileDiff {
             id: Uuid::new_v4().to_string(),
@@ -254,12 +1003,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 给测试里的 diff 补上生成时的指纹。
+    ///
+    /// 生产里每条产出 diff 的路径都会 `stamp_base_hashes`，所以"没有指纹"在生产中
+    /// 只会出现在异常情况（生成时读不到文件），apply 现在直接拒绝。测试的夹具得和
+    /// 生产形状一致，否则测的是一条真实运行里不存在的路径。
+    fn stamped(mut diff: FileDiff, on_disk: &str) -> FileDiff {
+        diff.base_hash = Some(content_hash(on_disk));
+        diff
+    }
+
     #[test]
     fn apply_diff_to_path_updates_existing_file() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const value = 1;\nconsole.log(value);\n").unwrap();
-        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        let before = "const value = 1;\nconsole.log(value);\n";
+        std::fs::write(&path, before).unwrap();
+        let diff = stamped(
+            make_diff("edit.ts", "const value = 1;", "const value = 2;"),
+            before,
+        );
 
         let written = apply_diff_to_path(&path, &diff).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -270,12 +1033,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 没有生成时指纹的编辑必须被拒绝，而不是只靠锚点匹配硬写。
+    ///
+    /// 会走到这里的是"生成时目标读不出来、apply 时却在磁盘上"：那期间文件被谁建出来了，
+    /// 而 diff 是照着不存在的文件想出来的。按缩进容错之后锚点匹配更松，更需要这道拦。
+    #[test]
+    fn apply_diff_to_path_refuses_an_edit_without_a_base_hash() {
+        let dir = temp_dir();
+        let path = dir.join("edit.ts");
+        std::fs::write(&path, "const value = 1;\n").unwrap();
+        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        assert!(diff.base_hash.is_none());
+
+        let err = apply_diff_to_path(&path, &diff).unwrap_err();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(err.contains("No baseHash recorded"), "{}", err);
+        assert_eq!(content, "const value = 1;\n", "拒绝的时候不能动文件");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn apply_diff_to_path_reports_missing_original() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const value = 1;\n").unwrap();
-        let diff = make_diff("edit.ts", "const value = 9;", "const value = 2;");
+        let before = "const value = 1;\n";
+        std::fs::write(&path, before).unwrap();
+        let diff = stamped(
+            make_diff("edit.ts", "const value = 9;", "const value = 2;"),
+            before,
+        );
 
         let err = apply_diff_to_path(&path, &diff).unwrap_err();
 
@@ -290,8 +1077,14 @@ mod tests {
         env.write_file("src/ok.ts", "const value = 1;\n");
         env.write_file("src/fail.ts", "const other = 1;\n");
 
-        let ok_diff = make_diff("src/ok.ts", "const value = 1;", "const value = 2;");
-        let fail_diff = make_diff("src/fail.ts", "const missing = 1;", "const value = 2;");
+        let ok_diff = stamped(
+            make_diff("src/ok.ts", "const value = 1;", "const value = 2;"),
+            "const value = 1;\n",
+        );
+        let fail_diff = stamped(
+            make_diff("src/fail.ts", "const missing = 1;", "const value = 2;"),
+            "const other = 1;\n",
+        );
 
         let result = apply_pending_diffs(&[ok_diff.clone(), fail_diff.clone()]);
 
@@ -316,8 +1109,12 @@ mod tests {
     fn apply_diff_to_path_rejects_ambiguous_original_without_writing() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const value = 1;\nconst value = 1;\n").unwrap();
-        let diff = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        let before = "const value = 1;\nconst value = 1;\n";
+        std::fs::write(&path, before).unwrap();
+        let diff = stamped(
+            make_diff("edit.ts", "const value = 1;", "const value = 2;"),
+            before,
+        );
 
         let err = apply_diff_to_path(&path, &diff).unwrap_err();
         let content = std::fs::read_to_string(&path).unwrap();
@@ -346,8 +1143,12 @@ mod tests {
     fn apply_diff_to_path_keeps_file_unchanged_when_later_hunk_fails() {
         let dir = temp_dir();
         let path = dir.join("edit.ts");
-        std::fs::write(&path, "const first = 1;\nconst second = 1;\n").unwrap();
-        let mut diff = make_diff("edit.ts", "const first = 1;", "const first = 2;");
+        let before = "const first = 1;\nconst second = 1;\n";
+        std::fs::write(&path, before).unwrap();
+        let mut diff = stamped(
+            make_diff("edit.ts", "const first = 1;", "const first = 2;"),
+            before,
+        );
         diff.hunks.push(DiffHunk {
             old_start: 2,
             old_lines: 1,
@@ -398,5 +1199,150 @@ mod tests {
         assert!(written);
         assert_eq!(content, "const value = 2;\n");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn is_new_file_diff_classifies_by_hunk_shape() {
+        assert!(is_new_file_diff(&make_diff(
+            "new.ts",
+            "",
+            "export const created = true;\n"
+        )));
+        assert!(!is_new_file_diff(&make_diff(
+            "edit.ts",
+            "const value = 1;",
+            "const value = 2;"
+        )));
+
+        // provenance 说的是 create，但 hunk 形态是编辑：按实际写盘行为判定，
+        // 否则权限检查会和真实行为脱节
+        let mut mislabeled = make_diff("edit.ts", "const value = 1;", "const value = 2;");
+        mislabeled.provenance = Some(crate::agent::state_machine::DiffProvenance {
+            protocol: "agent-changes".to_string(),
+            operation: "create".to_string(),
+            rationale: None,
+            schema_version: None,
+            change_index: None,
+            source_role: None,
+            source_stage: None,
+            regenerated_from_diff_id: None,
+            regenerated_from_hunk_index: None,
+            moved_from: None,
+        });
+        assert!(!is_new_file_diff(&mislabeled));
+
+        let mut empty = make_diff("edit.ts", "", "");
+        empty.hunks.clear();
+        assert!(!is_new_file_diff(&empty));
+    }
+
+    /// 这些是 FNV-1a 64 的标准测试向量。它们被钉死是为了保证 baseHash 在
+    /// Rust 版本升级后仍然一致——已持久化的待审查 diff 依赖这一点。
+    #[test]
+    fn content_hash_matches_pinned_fnv1a_vectors() {
+        assert_eq!(content_hash(""), "cbf29ce484222325");
+        assert_eq!(content_hash("a"), "af63dc4c8601ec8c");
+        assert_eq!(content_hash("foobar"), "85944171f73967e8");
+        assert_eq!(content_hash("abc").len(), 16);
+        assert_ne!(content_hash("abc"), content_hash("abd"));
+    }
+
+    #[test]
+    fn stamp_base_hashes_replaces_model_supplied_values() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/edit.ts", "const value = 1;\n");
+
+        let mut edit = make_diff("src/edit.ts", "const value = 1;", "const value = 2;");
+        // 模型只能猜 baseHash，这个值必须被后端算出的值覆盖
+        edit.base_hash = Some("model-invented-hash".to_string());
+        let mut create = make_diff("src/brand-new.ts", "", "export const created = true;\n");
+        create.base_hash = Some("also-invented".to_string());
+        let mut diffs = vec![edit, create];
+
+        stamp_base_hashes(&mut diffs);
+
+        assert_eq!(
+            diffs[0].base_hash.as_deref(),
+            Some(content_hash("const value = 1;\n").as_str())
+        );
+        // 目标文件还不存在，没有可比较的基准内容
+        assert!(diffs[1].base_hash.is_none());
+    }
+
+    #[test]
+    fn apply_pending_diffs_allows_two_diffs_on_the_same_file() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/seq.ts", "const first = 1;\nconst second = 1;\n");
+
+        let mut diffs = vec![
+            make_diff("src/seq.ts", "const first = 1;", "const first = 2;"),
+            make_diff("src/seq.ts", "const second = 1;", "const second = 2;"),
+        ];
+        stamp_base_hashes(&mut diffs);
+
+        let result = apply_pending_diffs(&diffs);
+        let content = std::fs::read_to_string(env.root.join("src/seq.ts")).unwrap();
+
+        // 第二个 diff 的 baseHash 记录的是第一个写入之前的内容；
+        // 同批次内的改动来自我们自己，不应被判为 stale
+        assert_eq!(result.applied.len(), 2, "failed: {:?}", result.failed);
+        assert!(result.failed.is_empty());
+        assert_eq!(content, "const first = 2;\nconst second = 2;\n");
+    }
+
+    #[test]
+    fn apply_pending_diffs_still_rejects_externally_changed_file() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/edit.ts", "const value = 1;\n");
+
+        let mut diffs = vec![make_diff(
+            "src/edit.ts",
+            "const value = 1;",
+            "const value = 2;",
+        )];
+        stamp_base_hashes(&mut diffs);
+        // 生成之后、应用之前，文件被外部改动
+        env.write_file("src/edit.ts", "const value = 1;\n// touched\n");
+
+        let result = apply_pending_diffs(&diffs);
+
+        assert!(result.applied.is_empty());
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0]
+            .message
+            .contains("File changed since diff was generated"));
+    }
+
+    #[test]
+    fn restamp_applied_files_only_refreshes_written_files() {
+        let _guard = workspace::env_test_guard();
+        let env = TestEnv::new();
+        env.write_file("src/written.ts", "const written = 1;\n");
+        env.write_file("src/untouched.ts", "const untouched = 1;\n");
+
+        let mut diffs = vec![
+            make_diff("src/written.ts", "const written = 1;", "const written = 2;"),
+            make_diff(
+                "src/untouched.ts",
+                "const untouched = 1;",
+                "const untouched = 2;",
+            ),
+        ];
+        stamp_base_hashes(&mut diffs);
+        let stale_stamp = diffs[1].base_hash.clone();
+
+        // 模拟 written.ts 刚被应用过一个 hunk，文件内容已前进
+        env.write_file("src/written.ts", "const written = 2;\n");
+        let applied = vec![diffs[0].clone()];
+        restamp_applied_files(&mut diffs, &applied);
+
+        assert_eq!(
+            diffs[0].base_hash.as_deref(),
+            Some(content_hash("const written = 2;\n").as_str())
+        );
+        assert_eq!(diffs[1].base_hash, stale_stamp);
     }
 }

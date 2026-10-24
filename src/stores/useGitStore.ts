@@ -2,6 +2,18 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import type { GitCredentials, GitDiffKind, GitStatus } from "../types/project";
 import { isTauriRuntime } from "../utils/tauri";
+import { translate, useLocaleStore } from "../i18n";
+
+/**
+ * 浏览器里没有 git —— 十一个动作共用这一句。
+ *
+ * 之前每个动作各写一句："Git is available in…"、"Git commit is available in…"、
+ * "Git stage is available in…"，十一种拼法说的是同一件事。区分哪个动作对用户没有用
+ * （他知道自己点了什么），但十一份拷贝意味着翻译时能漏掉十份。
+ */
+function needsTauriError(): string {
+  return translate(useLocaleStore.getState().locale, "git.needsTauri");
+}
 
 interface GitStore {
   status: GitStatus | null;
@@ -34,7 +46,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ status: null, loading: false, error: "Git is available in the Tauri app runtime." });
+        set({ status: null, loading: false, error: needsTauriError() });
         return;
       }
       const status = await invoke<GitStatus>("git_status", { path });
@@ -48,7 +60,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ diff: null, loading: false, error: "Git diff is available in the Tauri app runtime." });
+        set({ diff: null, loading: false, error: needsTauriError() });
         return;
       }
       const diff = await invoke<string>("git_diff", { path, file: file ?? null, kind });
@@ -62,7 +74,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git commit is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return null;
       }
       const oid = await invoke<string>("git_commit", {
@@ -82,7 +94,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git stage is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_stage_files", { path, files });
@@ -98,7 +110,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git unstage is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_unstage_files", { path, files });
@@ -114,7 +126,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git discard is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_discard_files", { path, files });
@@ -130,7 +142,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git branch operations are available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_checkout_branch", { path, branch, create });
@@ -146,7 +158,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git remote checkout is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_checkout_remote_branch", {
@@ -166,7 +178,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git fetch is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_fetch", { path, remote: remote ?? null, credentials: credentials ?? null });
@@ -182,7 +194,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git pull is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_pull", { path, remote: remote ?? null, credentials: credentials ?? null });
@@ -198,7 +210,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git push is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_push", { path, remote: remote ?? null, credentials: credentials ?? null });
@@ -214,7 +226,7 @@ export const useGitStore = create<GitStore>((set) => ({
     set({ loading: true, error: null });
     try {
       if (!isTauriRuntime()) {
-        set({ loading: false, error: "Git conflict resolution is available in the Tauri app runtime." });
+        set({ loading: false, error: needsTauriError() });
         return false;
       }
       await invoke("git_resolve_conflict", { path, file, resolution });

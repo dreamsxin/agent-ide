@@ -94,6 +94,7 @@ agent-ide/
 │   │   │   ├── LeftPanel.tsx
 │   │   │   ├── AgentPanel.tsx
 │   │   │   ├── BottomPanel.tsx
+│   │   │   ├── StatusBar.tsx
 │   │   │   └── ResizeHandle.tsx
 │   │   ├── editor/
 │   │   │   ├── EditorContainer.tsx
@@ -182,9 +183,9 @@ agent-ide/
 ├── <TopBar>                                   # grid-row:1 / col-span:3
 │   ├── Logo + ProjectName
 │   ├── Project Run/Build/Test/Debug buttons
-│   ├── <ModeSwitch />                         # Suggest | Edit | Auto
+│   ├── <ModeSwitch />                         # Suggest | Auto
 │   ├── LSP Status
-│   └── <StatusDot /> + Run/Stop/Settings
+│   └── Run/Stop + panel toggles + window controls
 │
 ├── <LeftPanel>                                # grid-row:2 / col-start:1
 │   ├── <Explorer />                           # File tree (react-arborist)
@@ -216,6 +217,15 @@ agent-ide/
 │   ├── <TasksPanel />                         # Project commands & run history
 │   ├── <ProblemsPanel />                      # Unified diagnostics/problems
 │   └── <LogView />                            # Agent & system action logs
+│
+├── <StatusBar>                                # last row, outside the bottom panel
+│   ├── Git branch + dirty/ahead/behind        # click -> Source Control
+│   ├── Problem counts by severity             # click -> Problems panel
+│   ├── Cursor Ln/Col
+│   ├── Active file language
+│   ├── Run tokens + estimated spend           # rides agent-state-changed
+│   ├── LLM configured / not configured
+│   └── <StatusDot />                          # Agent state
 │
 ├── <CommandPalette />                         # Ctrl+Shift+P overlay
 ├── <ShortcutsHelp />
@@ -314,7 +324,7 @@ struct MultiAgentPipeline {
 // stores/useAgentStore.ts
 interface AgentStore {
   state: AgentState;
-  mode: 'suggest' | 'edit' | 'auto';
+  mode: 'suggest' | 'auto';
   currentTask: Task | null;
   steps: Step[];
   diffs: Diff[];

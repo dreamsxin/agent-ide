@@ -148,11 +148,14 @@ async function main() {
       await page.screenshot({ path: resolve(SHOT_DIR, `02-bottom-${tab}.png`) });
     }
 
-    // 4. Command palette opens and closes (Ctrl+Shift+P).
+    // 4. Command palette opens and closes (Ctrl+Shift+P). The UI is
+    // localized, so accept either the English or the Chinese placeholder.
     await page.keyboard.press("Control+Shift+KeyP");
     await sleep(400);
     const paletteShown = await page
-      .locator('input[placeholder="Search commands..."]')
+      .locator('input[placeholder*="Search commands"]')
+      .or(page.locator('input[placeholder*="搜命令"]'))
+      .first()
       .isVisible()
       .catch(() => false);
     check("Command palette opens with Ctrl+Shift+P", paletteShown);
@@ -161,10 +164,11 @@ async function main() {
     await sleep(200);
 
     // 5. Chat context preview exposes the per-run context toggles, including
-    // the AGENTS.md project-memory toggle added in v0.2.0.
-    const contextEdit = page.locator(
-      'button[title="Preview and choose what the Agent receives as context"]'
-    );
+    // the AGENTS.md project-memory toggle.
+    const contextEdit = page
+      .locator('button[title="See and choose what the Agent is given as context"]')
+      .or(page.locator('button[title="看一眼并挑选发给 Agent 的上下文"]'))
+      .first();
     if (await contextEdit.isVisible().catch(() => false)) {
       await contextEdit.click();
       await sleep(300);
@@ -180,18 +184,24 @@ async function main() {
     }
 
     // 6. Agent settings exposes the permission model (Phase 9.0.4).
+    // Presets are localized: read-only / create-files / run-commands.
     const agentSettingsTab = page.locator('[data-testid="agent-tab-settings"]');
     if (await agentSettingsTab.isVisible().catch(() => false)) {
       await agentSettingsTab.click();
       await sleep(500);
-      const permissionsHeader = page.locator("text=Agent Permissions").first();
+      const permissionsHeader = page
+        .locator("text=What the Agent may do")
+        .or(page.locator("text=Agent 能做什么"))
+        .first();
       const headerVisible = await permissionsHeader.isVisible().catch(() => false);
       if (headerVisible) {
         await permissionsHeader.scrollIntoViewIfNeeded();
         await sleep(200);
       }
       const presetButtons = await page
-        .locator('button:has-text("Ask"), button:has-text("Suggest"), button:has-text("Auto")')
+        .locator(
+          'button:has-text("Read only"), button:has-text("只读"), button:has-text("Create files"), button:has-text("可新建文件"), button:has-text("Run commands"), button:has-text("可跑命令")'
+        )
         .count();
       check(
         "Agent settings shows permission presets",

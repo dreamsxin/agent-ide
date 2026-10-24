@@ -2,18 +2,21 @@
 
 ## Unreleased
 
+Reconciled with the rewritten `main` line (the remote had been force-pushed with its own, more advanced implementations of the same phases — MCP client, permission model, provider-native tool calling — plus CI, a localized UI, the tool loop, browser/computer-use tools, and a much larger test suite). Where both lines implemented the same feature, the `main` implementation won; the unique contributions from this line were kept.
+
 ### Added
 
-- Phase 9.0.3 MCP client, first pass: `services/mcp.rs` implements the RMCP stdio transport (spawn → initialize → tool discovery → invocation) with a persisted `mcp.json` config (validated, unique names, required commands), a connection registry managed by Tauri, and startup auto-connect of enabled servers. Discovered tools join the Phase 9.0.1 native tool surface as `mcp__<server>__<tool>`; agent pipeline stages execute MCP tool calls and append fenced `mcp-tool-result` blocks; seven `mcp_*` Tauri commands expose the surface. Validated by live integration tests (`tests/mcp_integration.rs`) driving a real child-process MCP server.
-- Phase 9.0.4 desktop permission model, first pass: `services/permissions.rs` defines the persisted permission policy (ask/suggest/auto presets aligned with the frontend preset tables, `edit` kept as a CLI alias, granular create/edit/delete/commands/git flags, deny-path rules, per-run and per-batch caps) and a `--allow-run` style command matcher now shared with the CLI.
-- Orchestrator enforcement: Auto-mode auto-apply consults the policy, falls back to the manual review flow with an `auto_apply_blocked` action log on violations, and tracks per-run auto-apply counts (reset on `begin_run`).
-- Agent Permissions settings section (Agent panel → Settings): preset chips, five granular toggles (file creation/editing/deletion, command execution, git actions), denied-path and command-pattern editors, per-run cap inputs; loads and saves the backend policy via the new `get_permission_policy` / `set_permission_policy` commands.
-- Visual smoke check for the permissions UI (`visual:test`, now 14 checks).
+- `npm run visual:test` (`scripts/visual-check.mjs`) now runs against the localized UI: selectors accept both English and Chinese labels (palette placeholder, permissions section, context-preview button); 14/14 checks pass on the merged tree.
+- CHANGELOG.md (this file), carried over from the v0.2.0 release work.
 
 ### Changed
 
-- Frontend permission default preset moved from `suggest` to `auto` to preserve the desktop's historical Auto-mode behavior; users can switch to Ask/Suggest for stricter guardrails.
-- CLI `--allow-run` matching now delegates to `services::permissions::is_command_allowed` (same exact/prefix/trust-all semantics).
+- `charge_image_bytes` migrated from the deprecated `AtomicUsize::fetch_update` to `try_update` (pure rename) — current stable rustc deprecates the old name and CI runs clippy with `-D warnings` on floating stable.
+- Merge hygiene: dropped the superseded registrations the textual merge had left in `lib.rs` (duplicate `McpState` manage, `mcp_*`/`permission_policy`/local-inference commands whose implementations were replaced), removed the orphaned RMCP-based `services/permissions.rs` and `tests/mcp_integration.rs`, and restored `playwright-core` after taking the remote `package.json`.
+
+### Superseded by `main`
+
+These were implemented on this line and then replaced by the `main` implementations during the merge (our versions remain on branch `evolution/local-2026-10` for reference): the RMCP-SDK MCP client with startup auto-connect, the `services/permissions.rs` ask/suggest/auto policy service, and the `get/set_permission_policy` commands. The `main` line ships its own hand-written stdio MCP client (with argument redaction and tool-name hijack guards), a preset permission model named after what it grants (read-only / create-files / run-commands), and a full agent tool loop.
 
 ## 0.2.0 — 2026-10-24
 

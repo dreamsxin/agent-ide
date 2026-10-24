@@ -13,6 +13,14 @@ interface EditorStore {
   // 文件内容缓存 (path → content)
   fileContents: Record<string, string>;
 
+  /**
+   * 最近一次保存失败的原因，`null` 表示没有。
+   *
+   * 保存失败以前只走 `console.error`，界面上毫无反应 —— 用户以为存下去了。
+   */
+  saveError: string | null;
+  clearSaveError: () => void;
+
   // Explorer 刷新触发器
   explorerKey: number;
   workspacePath: string;
@@ -25,6 +33,13 @@ interface EditorStore {
   // 选区
   selectedText: string | null;
   selectedRange: { startLine: number; endLine: number } | null;
+  /**
+   * 当前光标位置（1-based，跟 Monaco 一致）。
+   *
+   * 和 `selectedRange` 分开存：后者只在选区**非空**时有值，一取消选择就被清成
+   * null，所以它回答不了"我现在在第几行"这个一直成立的问题。
+   */
+  cursorPosition: { line: number; column: number } | null;
   pendingRevealLocation: { file: string; line: number; column: number } | null;
 
   // ====== 文件打开/关闭 ======
@@ -66,6 +81,7 @@ interface EditorStore {
 
   setSelectedText: (text: string | null) => void;
   setSelectedRange: (range: { startLine: number; endLine: number } | null) => void;
+  setCursorPosition: (position: { line: number; column: number } | null) => void;
   revealLocation: (file: string, line: number, column: number) => void;
   clearPendingRevealLocation: () => void;
 }
@@ -74,6 +90,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   openFiles: [],
   activeFile: null,
   fileContents: {},
+  saveError: null,
   explorerKey: 0,
   workspacePath: "",
   inlineSuggestion: null,
@@ -81,6 +98,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   intentHints: [],
   selectedText: null,
   selectedRange: null,
+  cursorPosition: null,
   pendingRevealLocation: null,
 
   openFile: async (tab) => {
@@ -89,26 +107,51 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       path: normalizeFilePath(tab.path),
       name: tab.name || fileNameFromPath(tab.path),
     };
-    const s = get();
-    const exists = s.openFiles.find((f) => pathsEqual(f.path, normalizedTab.path));
-    if (exists) {
-      set({ activeFile: exists.path });
+    // 先同步占位，再去读盘。
+    //
+    // 以前是"查一遍 openFiles → await 读文件 → 追加"，而这中间的 await 让检查和插入
+    // 不再是一步：在文件树上双击（或鼠标点一下又按一次回车）会连发两次 openFile，两次
+    // 都在对方插入之前查到"还没打开"，于是同一个文件出现两个页签。页签的 React key 就是
+    // 路径，两个同 key 的兄弟节点会让高亮和点击落到另一个上 —— 这就是"tab 不对"。
+    let alreadyOpen = false;
+    set((prev) => {
+      const exists = prev.openFiles.find((f) => pathsEqual(f.path, normalizedTab.path));
+      if (exists) {
+        alreadyOpen = true;
+        return { activeFile: exists.path };
+      }
+      return {
+        openFiles: [...prev.openFiles, normalizedTab],
+        activeFile: normalizedTab.path,
+        // 占位内容是空串而不是伪造的一行注释：缓冲区是保存的事实来源
+        fileContents: {
+          ...prev.fileContents,
+          [normalizedTab.path]: prev.fileContents[normalizedTab.path] ?? "",
+        },
+      };
+    });
+    if (alreadyOpen) {
       persistEditorSession();
       return;
     }
 
     let content = "";
+    let loadError: string | undefined;
     try {
       content = isTauriRuntime()
         ? await invoke<string>("read_file_content", { path: normalizedTab.path })
         : `// File loading is available in the Tauri app runtime.\n// ${normalizedTab.path}`;
-    } catch {
-      content = `// Failed to load: ${normalizedTab.path}`;
+    } catch (err: unknown) {
+      // 读取失败时缓冲区留空并记下原因，不再伪造一行注释当文件内容。
+      // 缓冲区是保存的事实来源，伪造内容会在下一次保存时覆盖真文件。
+      content = "";
+      loadError = err instanceof Error ? err.message : String(err);
     }
 
     set((prev) => ({
-      openFiles: [...prev.openFiles, normalizedTab],
-      activeFile: normalizedTab.path,
+      openFiles: prev.openFiles.map((f) =>
+        pathsEqual(f.path, normalizedTab.path) ? { ...f, loadError } : f
+      ),
       fileContents: { ...prev.fileContents, [normalizedTab.path]: content },
     }));
     persistEditorSession();
@@ -132,6 +175,8 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         openFiles: remaining,
         activeFile: newActive,
         fileContents: restContents,
+        // 关掉的正是当前文件时，光标位置跟着作废
+        cursorPosition: newActive === s.activeFile ? s.cursorPosition : null,
       };
     });
     persistEditorSession();
@@ -139,14 +184,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setActiveFile: (path) => {
     const existing = get().openFiles.find((file) => pathsEqual(file.path, path));
-    set({ activeFile: existing?.path ?? normalizeFilePath(path) });
+    // 换 tab 时旧位置立刻失效：Monaco 会在切模型后重新报一次，宁可空一帧
+    // 也不要显示上一个文件的行号
+    set({ activeFile: existing?.path ?? normalizeFilePath(path), cursorPosition: null });
     persistEditorSession();
   },
 
   markDirty: (path, dirty) =>
     set((s) => ({
       openFiles: s.openFiles.map((f) =>
-        f.path === path ? { ...f, isDirty: dirty } : f
+        pathsEqual(f.path, path) ? { ...f, isDirty: dirty } : f
       ),
     })),
 
@@ -163,37 +210,67 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       };
     }),
 
+  clearSaveError: () => set({ saveError: null }),
+
   saveCurrentFile: async () => {
-    const { activeFile, fileContents } = get();
+    const { activeFile, fileContents, openFiles } = get();
     if (!activeFile) return;
     const content = fileContents[activeFile];
     if (content === undefined) return;
     if (!isTauriRuntime()) return;
 
+    // 打开时读取失败过就不能保存：缓冲区里的内容不代表磁盘上的文件，
+    // 写回去等于用一个空/残缺的缓冲区覆盖真文件。
+    const tab = openFiles.find((file) => pathsEqual(file.path, activeFile));
+    if (tab?.loadError) {
+      set({
+        saveError: `Not saved: ${tab.name} failed to load (${tab.loadError}), so the editor does not hold its real content. Close the tab and reopen it.`,
+      });
+      return;
+    }
+
     try {
       await invoke("write_file_content", { path: activeFile, content });
       set((s) => ({
+        saveError: null,
         openFiles: s.openFiles.map((f) =>
-          f.path === activeFile ? { ...f, isDirty: false } : f
+          pathsEqual(f.path, activeFile) ? { ...f, isDirty: false } : f
         ),
       }));
     } catch (e) {
+      // 以前这里只有 console.error：保存失败在界面上毫无反应，
+      // 而 dirty 标记也不会清除，看起来像"存了但还是脏的"。
       console.error("Failed to save file:", e);
+      set({
+        saveError: `Failed to save ${activeFile}: ${e instanceof Error ? e.message : String(e)}`,
+      });
     }
   },
 
   reloadFile: async (path) => {
     if (!isTauriRuntime()) return;
+    // 缓冲区的键必须是**已打开那条页签**的路径：调用方给的可能是 `\` 分隔或盘符大小写
+    // 不同的同一个文件，直接拿它当键会多出一份缓冲区，而页签仍指着旧的那份。
+    const filePath =
+      get().openFiles.find((file) => pathsEqual(file.path, path))?.path ?? normalizeFilePath(path);
     try {
       const content = await invoke<string>("read_file_content", { path });
       set((s) => ({
-        fileContents: { ...s.fileContents, [path]: content },
+        fileContents: { ...s.fileContents, [filePath]: content },
         openFiles: s.openFiles.map((f) =>
-          f.path === path ? { ...f, isDirty: false } : f
+          // 重新读成功就清掉 loadError，否则这个标签会永久停在"不可保存"
+          pathsEqual(f.path, filePath) ? { ...f, isDirty: false, loadError: undefined } : f
         ),
       }));
     } catch (e) {
       console.error(`Failed to reload ${path}:`, e);
+      set((s) => ({
+        openFiles: s.openFiles.map((f) =>
+          pathsEqual(f.path, filePath)
+            ? { ...f, loadError: e instanceof Error ? e.message : String(e) }
+            : f
+        ),
+      }));
     }
   },
 
@@ -224,7 +301,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     await invoke("delete_path", { path });
     // 关闭该文件（如果是打开的文件）
     const s = get();
-    if (s.openFiles.some((f) => f.path === path)) {
+    if (s.openFiles.some((f) => pathsEqual(f.path, path))) {
       s.closeFile(path);
     }
     // 刷新 Explorer
@@ -246,24 +323,32 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   renamePath: async (oldPath, newPath) => {
     if (!isTauriRuntime()) return;
     await invoke("rename_path", { oldPath, newPath });
-    // 更新已打开的文件引用
-    set((s) => ({
-      openFiles: s.openFiles.map((f) =>
-        f.path === oldPath
-          ? { ...f, path: newPath, name: newPath.split(/[/\\]/).pop() || newPath }
-          : f
-      ),
-      activeFile: s.activeFile === oldPath ? newPath : s.activeFile,
-      fileContents: (() => {
-        const contents = { ...s.fileContents };
-        if (contents[oldPath] !== undefined) {
-          contents[newPath] = contents[oldPath];
-          delete contents[oldPath];
-        }
-        return contents;
-      })(),
-      explorerKey: s.explorerKey + 1,
-    }));
+    // 改名前后都按归一化后的路径认：调用方给的可能是 `\` 分隔或盘符大小写不同的同一个
+    // 文件，裸比较会让页签还指着旧名字，而缓冲区里多出一份对不上的内容。
+    const nextPath = normalizeFilePath(newPath);
+    set((s) => {
+      const previousPath =
+        s.openFiles.find((file) => pathsEqual(file.path, oldPath))?.path ??
+        normalizeFilePath(oldPath);
+      return {
+        openFiles: s.openFiles.map((f) =>
+          pathsEqual(f.path, previousPath)
+            ? { ...f, path: nextPath, name: fileNameFromPath(nextPath) }
+            : f
+        ),
+        activeFile:
+          s.activeFile && pathsEqual(s.activeFile, previousPath) ? nextPath : s.activeFile,
+        fileContents: (() => {
+          const contents = { ...s.fileContents };
+          if (contents[previousPath] !== undefined) {
+            contents[nextPath] = contents[previousPath];
+            delete contents[previousPath];
+          }
+          return contents;
+        })(),
+        explorerKey: s.explorerKey + 1,
+      };
+    });
     persistEditorSession();
   },
 
@@ -310,7 +395,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         const content = isTauriRuntime()
           ? await invoke<string>("read_file_content", { path: tab.path })
           : `// File loading is available in the Tauri app runtime.\n// ${tab.path}`;
-        restoredFiles.push({ ...tab, isDirty: false });
+        // 这一分支意味着读取成功了，所以要清掉存档里可能带着的旧 loadError，
+        // 否则一个曾经读失败的标签恢复之后会永久停在"不可保存"
+        restoredFiles.push({ ...tab, isDirty: false, loadError: undefined });
         restoredContents[tab.path] = content;
       } catch {
         // Skip files that no longer exist or cannot be read.
@@ -318,10 +405,14 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     }
 
     if (restoredFiles.length === 0) return;
-    const activeFile =
-      saved.activeFile && restoredFiles.some((file) => file.path === saved.activeFile)
-        ? saved.activeFile
-        : restoredFiles[0].path;
+    // 取**恢复出来那条页签自己的**路径，而不是存档里那句写法：存档可能是 `\` 分隔的同一个
+    // 文件，照抄回去会让 activeFile 指着一个 openFiles 里不存在的字符串。
+    // （顺带去掉一个 `!` 非空断言 —— 用断言让类型检查闭嘴是这个项目踩过的坑。）
+    const savedActive = saved.activeFile;
+    const matchedActive = savedActive
+      ? restoredFiles.find((file) => pathsEqual(file.path, savedActive))
+      : undefined;
+    const activeFile = matchedActive?.path ?? restoredFiles[0].path;
 
     set({
       openFiles: restoredFiles,
@@ -359,6 +450,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   setSelectedText: (selectedText) => set({ selectedText }),
   setSelectedRange: (selectedRange) => set({ selectedRange }),
+  setCursorPosition: (cursorPosition) => set({ cursorPosition }),
   revealLocation: (file, line, column) =>
     set({ pendingRevealLocation: { file, line, column } }),
   clearPendingRevealLocation: () => set({ pendingRevealLocation: null }),
@@ -377,7 +469,9 @@ function persistEditorSession() {
   const { workspacePath, openFiles, activeFile } = useEditorStore.getState();
   const session: PersistedEditorSession = {
     workspacePath,
-    openFiles: openFiles.map((file) => ({ ...file, isDirty: false })),
+    // loadError 是"这一次打开失败了"，不是文件的属性：下次启动会重新读，
+    // 存进去只会让一个恢复成功的标签带着过期的不可保存标记
+    openFiles: openFiles.map((file) => ({ ...file, isDirty: false, loadError: undefined })),
     activeFile,
   };
   localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(session));

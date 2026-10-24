@@ -1,0 +1,317 @@
+import { describe, expect, it } from "vitest";
+import {
+  CREATE_FILES_PERMISSIONS,
+  READ_ONLY_PERMISSIONS,
+  RUN_COMMANDS_PERMISSIONS,
+  describeRunUsage,
+  mcpApprovalForPermissions,
+  normalizeApprovalRequest,
+  normalizeContextUsage,
+  normalizeDestructiveOpType,
+  normalizeRunUsage,
+  permissionsForPreset,
+  type AgentPermissionPreset,
+  type RunUsage,
+} from "./agent";
+import { formatMicrosUsd } from "../utils/money";
+
+describe("permissionsForPreset", () => {
+  it("maps each preset to its permission table", () => {
+    expect(permissionsForPreset("read-only")).toEqual(READ_ONLY_PERMISSIONS);
+    expect(permissionsForPreset("create-files")).toEqual(CREATE_FILES_PERMISSIONS);
+    expect(permissionsForPreset("run-commands")).toEqual(RUN_COMMANDS_PERMISSIONS);
+  });
+
+  it("is a ladder: each preset adds exactly one grant", () => {
+    expect(permissionsForPreset("read-only")).toEqual({
+      allowFileCreate: false,
+      allowCommandRun: false,
+      allowBrowserUse: false,
+      browserOrigins: [],
+      allowPageRead: false,
+      pageReadOrigins: [],
+      allowComputerUse: false,
+      computerApps: [],
+      allowComputerCapture: false,
+      captureApps: [],
+      allowComputerInput: false,
+      inputApps: [],
+    });
+    // create-files 放开新建文件，但不放开命令执行 —— MCP 工具策略依赖这一点
+    expect(permissionsForPreset("create-files").allowFileCreate).toBe(true);
+    expect(permissionsForPreset("create-files").allowCommandRun).toBe(false);
+    expect(permissionsForPreset("run-commands").allowCommandRun).toBe(true);
+    // 浏览器不在这条阶梯上：为了跑测试而选 run-commands，不该顺带批准出网
+    expect(permissionsForPreset("run-commands").allowBrowserUse).toBe(false);
+    expect(permissionsForPreset("run-commands").browserOrigins).toEqual([]);
+    // 桌面观察同理：它披露的是窗口标题，和"能跑项目命令"没有关系
+    expect(permissionsForPreset("run-commands").allowComputerUse).toBe(false);
+    expect(permissionsForPreset("run-commands").computerApps).toEqual([]);
+    // 截图更不在阶梯上：它交出去的是窗口**内容**，是这几档里最重的一次披露
+    expect(permissionsForPreset("run-commands").allowComputerCapture).toBe(false);
+    expect(permissionsForPreset("run-commands").captureApps).toEqual([]);
+    expect(permissionsForPreset("create-files").allowComputerCapture).toBe(false);
+    // 读页面正文同样不在阶梯上：它交出去的是站点上的内容，包括登录后才可见的部分
+    expect(permissionsForPreset("run-commands").allowPageRead).toBe(false);
+    expect(permissionsForPreset("run-commands").pageReadOrigins).toEqual([]);
+    // 点击更不在：它撤不回，而且能点掉任何一个确认框
+    expect(permissionsForPreset("run-commands").allowComputerInput).toBe(false);
+    expect(permissionsForPreset("run-commands").inputApps).toEqual([]);
+  });
+
+  it("returns a fresh object so callers cannot mutate the shared presets", () => {
+    const permissions = permissionsForPreset("read-only");
+    permissions.allowFileCreate = true;
+
+    expect(READ_ONLY_PERMISSIONS.allowFileCreate).toBe(false);
+    expect(permissionsForPreset("read-only").allowFileCreate).toBe(false);
+  });
+});
+
+describe("mcpApprovalForPermissions", () => {
+  it("only grants allow_all when command execution is permitted", () => {
+    const presets: AgentPermissionPreset[] = ["read-only", "create-files", "run-commands"];
+    const approvals = presets.map((preset) =>
+      mcpApprovalForPermissions(permissionsForPreset(preset))
+    );
+
+    expect(approvals).toEqual(["auto_approved_only", "auto_approved_only", "allow_all"]);
+  });
+
+  it("ignores the file-creation toggle", () => {
+    // MCP 工具是外部进程执行，只应跟随 allowCommandRun；
+    // 放开新建文件不应顺带放开任意外部工具。
+    expect(
+      mcpApprovalForPermissions({
+        allowFileCreate: true,
+        allowCommandRun: false,
+        allowBrowserUse: false,
+        browserOrigins: [],
+        allowPageRead: false,
+        pageReadOrigins: [],
+        allowComputerUse: false,
+        computerApps: [],
+        allowComputerCapture: false,
+        captureApps: [],
+        allowComputerInput: false,
+        inputApps: [],
+      })
+    ).toBe("auto_approved_only");
+
+    expect(
+      mcpApprovalForPermissions({
+        allowFileCreate: false,
+        allowCommandRun: true,
+        allowBrowserUse: false,
+        browserOrigins: [],
+        allowPageRead: false,
+        pageReadOrigins: [],
+        allowComputerUse: false,
+        computerApps: [],
+        allowComputerCapture: false,
+        captureApps: [],
+        allowComputerInput: false,
+        inputApps: [],
+      })
+    ).toBe("allow_all");
+  });
+});
+
+describe("run usage", () => {
+  function usage(overrides: Partial<RunUsage> = {}): RunUsage {
+    return {
+      totalTokens: 1_500,
+      reasoningTokens: 0,
+      maxTotalTokens: null,
+      spendMicros: 2_000,
+      maxSpendMicros: null,
+      calls: 3,
+      reportedCalls: 3,
+      ...overrides,
+    };
+  }
+
+
+  /**
+   * 状态栏和 action log 里的同一笔花费必须是同一个字符串，所以这里的格式化
+   * 逐位复制后端 `format_micros_usd`（截断到 4 位小数，不四舍五入）。
+   */
+  it("formats spend the same way the backend does", () => {
+    expect(formatMicrosUsd(2_000)).toBe("$0.0020");
+    expect(formatMicrosUsd(1_234_567)).toBe("$1.2345");
+    expect(formatMicrosUsd(0)).toBe("$0.0000");
+  });
+
+  it("says nothing before the first provider call", () => {
+    expect(describeRunUsage(usage({ calls: 0, reportedCalls: 0 }), formatMicrosUsd)).toBeNull();
+  });
+
+  it("reports unknown rather than zero when the provider never says", () => {
+    const described = describeRunUsage(
+      usage({ totalTokens: 0, reportedCalls: 0, spendMicros: 0 }),
+      formatMicrosUsd
+    );
+
+    // 打印 0 会让人以为这次运行免费
+    expect(described?.label).toBe("usage unknown");
+    expect(described?.detail).toContain("cannot be estimated");
+  });
+
+  it("calls out a partial report, because the cap undercounts there", () => {
+    const described = describeRunUsage(usage({ reportedCalls: 1 }), formatMicrosUsd);
+
+    // `≥` 必须出现在可见标签上，不能只写在 tooltip 里
+    expect(described?.label).toBe("\u22651500 tok · \u2265$0.0020");
+    expect(described?.detail).toContain("lower bound");
+    expect(described?.detail).toContain("undercounts");
+  });
+
+  it("does not mark a complete report as a lower bound", () => {
+    expect(describeRunUsage(usage(), formatMicrosUsd)?.label).toBe("1500 tok · $0.0020");
+  });
+
+  it("distinguishes an uncomputable cost from a free run", () => {
+    const described = describeRunUsage(usage({ spendMicros: null }), formatMicrosUsd);
+
+    expect(described?.label).toBe("1500 tok");
+    expect(described?.detail).toContain("not computable");
+  });
+
+  /**
+   * 推理模型上"花了钱、正文是空的"没有别的解释入口。思考 token 只进悬浮详情（24px 的
+   * 状态栏放不下第三个数字），而且必须点明它已经含在总数里 —— 否则读起来像又多花了一笔。
+   */
+  it("names reasoning tokens in the detail without adding them to the total", () => {
+    const described = describeRunUsage(
+      usage({ totalTokens: 5_096, reasoningTokens: 3_900 }),
+      formatMicrosUsd
+    );
+
+    expect(described?.label).toBe("5096 tok · $0.0020");
+    expect(described?.detail).toContain("3900 of those tokens were reasoning");
+    expect(described?.detail).toContain("already inside the total");
+  });
+
+  /** 非推理模型上恒为 0 的一句是噪音 */
+  it("says nothing about reasoning when there was none", () => {
+    expect(describeRunUsage(usage(), formatMicrosUsd)?.detail).not.toContain("reasoning");
+  });
+});
+
+
+describe("normalizeRunUsage", () => {
+  it("returns null for anything that is not a usage object", () => {
+    expect(normalizeRunUsage(null)).toBeNull();
+    expect(normalizeRunUsage(undefined)).toBeNull();
+    expect(normalizeRunUsage("1500")).toBeNull();
+  });
+
+  /**
+   * 事件里少字段就当 0 / null，而不是让 undefined 一路漏到 `toFixed` 变成 NaN。
+   * 旧版本后端不带 `usage` 字段时也走这条路。
+   */
+  it("fills missing counters instead of letting undefined through", () => {
+    const normalized = normalizeRunUsage({ totalTokens: 10 });
+
+    expect(normalized).toEqual({
+      totalTokens: 10,
+      reasoningTokens: 0,
+      maxTotalTokens: null,
+      spendMicros: null,
+      maxSpendMicros: null,
+      calls: 0,
+      reportedCalls: 0,
+
+    });
+  });
+
+  /**
+   * `typeof NaN === "number"`，所以只看 typeof 挡不住它。放过去的话状态栏会
+   * 渲染出 `$NaN.0NaN`；负数则会显示成负花费。
+   */
+  it("rejects NaN and Infinity, and clamps negatives", () => {
+    const normalized = normalizeRunUsage({
+      totalTokens: Number.NaN,
+      spendMicros: Number.POSITIVE_INFINITY,
+      maxSpendMicros: -5,
+      calls: 2,
+      reportedCalls: 2,
+    });
+
+    expect(normalized?.totalTokens).toBe(0);
+    expect(normalized?.spendMicros).toBeNull();
+    expect(normalized?.maxSpendMicros).toBe(0);
+  });
+});
+
+/**
+ * 这个载荷决定用户看到什么并为什么签字，所以它的失败方向必须是"不显示"，
+ * 而不是"显示一个补过默认值的版本"。
+ */
+describe("normalizeApprovalRequest", () => {
+  const valid = {
+    id: "req-1",
+    opType: "browser_open",
+    title: "Open a page in Chrome",
+    description: "The agent wants to open http://127.0.0.1:1420/",
+    detail: "Origin http://127.0.0.1:1420 is allowed for this run.",
+  };
+
+  it("keeps a complete request", () => {
+    expect(normalizeApprovalRequest(valid)).toEqual(valid);
+  });
+
+  /** detail 可以为空：不是每个动作都有第二行要说的 */
+  it("tolerates a missing detail", () => {
+    expect(normalizeApprovalRequest({ ...valid, detail: undefined })?.detail).toBe("");
+  });
+
+  /**
+   * 缺 id 的请求最危险：它能显示出来，但点了之后没有任何后端请求会被 resolve ——
+   * 用户以为自己批准了，而那次动作其实在超时后被拒。
+   */
+  it("drops a request that cannot be answered or read", () => {
+    expect(normalizeApprovalRequest({ ...valid, id: "" })).toBeNull();
+    expect(normalizeApprovalRequest({ ...valid, title: undefined })).toBeNull();
+    expect(normalizeApprovalRequest({ ...valid, description: 42 })).toBeNull();
+    expect(normalizeApprovalRequest(null)).toBeNull();
+  });
+
+  /**
+   * 后端加了一种新动作、前端还不认识它时，宁可不显示 —— 显示成已知的某一档会让
+   * 对话框说错将要发生什么，而它的全部意义就是说对。
+   */
+  it("drops an operation type it does not know", () => {
+    expect(normalizeApprovalRequest({ ...valid, opType: "computer_input" })).toBeNull();
+    expect(normalizeDestructiveOpType("computer_input")).toBe("unknown");
+    // 以前这里还有 file_delete / command_run / git_push / git_force 四种，后端从来不发
+    expect(normalizeDestructiveOpType("git_force")).toBe("unknown");
+    expect(normalizeDestructiveOpType("browser_open")).toBe("browser_open");
+    expect(normalizeDestructiveOpType("browser_read_page")).toBe("browser_read_page");
+    expect(normalizeDestructiveOpType("computer_capture")).toBe("computer_capture");
+    expect(normalizeDestructiveOpType("computer_click")).toBe("computer_click");
+    expect(normalizeDestructiveOpType("computer_scroll")).toBe("computer_scroll");
+  });
+
+});
+
+describe("normalizeContextUsage", () => {
+  it("keeps a measured request", () => {
+    expect(normalizeContextUsage({ peakTotalTokens: 12500 })).toEqual({ peakTotalTokens: 12500 });
+  });
+
+  /**
+   * 0 在这里不是"上下文是空的"，而是"这次运行没有一个请求回报过用量"（本地 runtime、
+   * mock 端点都是这样）。返回 null 才能让界面整行不显示，而不是显示一个 0%。
+   */
+  it("treats a zero total as no measurement at all", () => {
+    expect(normalizeContextUsage({ peakTotalTokens: 0 })).toBeNull();
+    expect(normalizeContextUsage({ peakTotalTokens: -5 })).toBeNull();
+    expect(normalizeContextUsage({ peakTotalTokens: Number.NaN })).toBeNull();
+    expect(normalizeContextUsage(null)).toBeNull();
+    expect(normalizeContextUsage("12000")).toBeNull();
+    // 后端换了键名（比如掉了 camelCase 重命名）时必须判无效，而不是渲染 0
+    expect(normalizeContextUsage({ peak_total_tokens: 12500 })).toBeNull();
+  });
+});
+

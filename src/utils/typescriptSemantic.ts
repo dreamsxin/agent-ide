@@ -1,11 +1,14 @@
 import type * as Monaco from "monaco-editor";
 import type { FileTab } from "../types/editor";
 
-let configured = false;
+// 按 monaco 模块去重，而不是一个裸的模块布尔量：编译选项是设在这个模块的
+// `languages.typescript` 上的，用全局布尔量的话第二个 monaco 模块会被跳过，
+// 拿不到任何编译选项。
+const configuredModules = new WeakSet<typeof Monaco>();
 
 export function configureTypeScriptSemantic(monaco: typeof Monaco) {
-  if (configured) return;
-  configured = true;
+  if (configuredModules.has(monaco)) return;
+  configuredModules.add(monaco);
 
   const compilerOptions: Monaco.languages.typescript.CompilerOptions = {
     allowJs: true,

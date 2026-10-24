@@ -30,12 +30,57 @@
 
 ### Area 1: Top Control Bar (Global Control) `[Implemented]`
 
+The top bar carries **actions**. Passive status moved to the status bar (Area 1b)
+so that one 40px row is not doing both jobs.
+
 **Functions:**
-- Agent mode switch: Suggest / Edit / Auto
-- Current task status (Idle / Thinking / Acting)
-- One-click Run (Run Task / Stop)
-- Scope control (Current File / Project / Multi-file)
-- Git status
+- Agent mode switch: Suggest / Auto
+- IDE mode switch: Code / Plan
+- Run / Debug / Build / Test, from the project's own declared commands
+- Stop, while a run is in flight
+- Panel toggles (Explorer / Agent / Terminal), focus mode, theme, command
+  palette, shortcuts help
+- LSP status entry point — a badge that opens a details popover. It is the one
+  status-shaped thing that stays, because it is also the way in to that popover.
+- Window controls (minimize / maximize / close)
+
+Not present despite earlier drafts claiming otherwise: scope control
+(Current File / Project / Multi-file) and a Git status segment. Scope is chosen
+per prompt in the Agent panel; Git state lives in the Source Control panel.
+
+### Area 1b: Status Bar (Passive Status) `[Implemented]`
+
+A 24px row at the bottom edge, outside the bottom panel — it is not a panel, and
+focus mode collapses panels.
+
+- Problem counts by severity, each prefixed with `E`/`W`/`I` so the distinction
+  does not rest on colour alone, clickable to open the Problems panel. Previously
+  these were only visible once that panel was already open.
+- Cursor line and column. Tracked separately from the selection, because the
+  selection is cleared the moment you deselect and "which line am I on" is a
+  fact that always holds.
+- Active file's language.
+- Whether an LLM profile is configured, **with text**. This used to be an
+  unlabelled coloured dot in the top bar: the single most consequential piece of
+  state in the app — whether the Agent can run at all — required hovering to read.
+- Agent state (Idle / Thinking / Planning / Acting / Reviewing / Waiting / Done /
+  Error).
+- Git branch, with a `*` when the worktree is dirty and ↑/↓ counts when the
+  branch has diverged from its upstream. Clickable to open Source Control. The
+  whole segment is absent when the folder is not a repository — an opened
+  directory that is not under version control is normal, and should not leave a
+  question mark in the status bar.
+
+- The current run's token count and estimated spend, hover for the full
+  breakdown. Three states, kept distinct on purpose: a number, `usage unknown`
+  when the provider reported nothing (printing 0 would read as "free"), and a
+  lower-bound warning when only some calls reported usage — that case also means
+  the per-run cap undercounts. Refresh granularity is state changes, so a long
+  stage's tool rounds land when the stage ends.
+
+Deliberately absent until the data exists: encoding and line-ending. An empty
+segment is worse than no segment.
+
 
 **Design points:**
 - Always visible
@@ -174,9 +219,17 @@ Explain | Fix | Refactor | Optimize
 
 ### 3.4 AI Control Level Toggle `[Implemented]`
 
-- Suggest (suggestions only)
-- Edit (can modify code)
-- Auto (automatic execution)
+- Suggest (changes wait in the review area)
+- Auto (changes are applied when the run finishes)
+
+Two positions, not three. A middle `Edit` position existed and was byte-identical
+to Suggest — every backend gate tests for Auto only — so it was removed rather
+than given a meaning it would have duplicated from the permission toggles.
+
+This is `AgentMode`, and it is separate from the permission preset in
+Settings → Agent Permissions (`read-only` / `create-files` / `run-commands`),
+which sets the fine-grained toggles instead. The preset decides what the Agent may
+do during a run; the mode decides what happens to its changes afterwards.
 
 ### 3.5 Ghost Mode (Background AI) `[Future - Phase 10]`
 
@@ -257,7 +310,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 - **Icon Button** (Run / Stop / Diff / Apply)
 - **Tag / Chip** (Scope / Mode / Agent)
 - **Input**: Chat Input (multiline + attachments), Command Input (single line)
-- **Toggle / Segment** (Suggest | Edit | Auto)
+- **Toggle / Segment** (Suggest | Auto)
 - **Status Dot** (Idle / Thinking / Acting)
 
 ### 7.3 Composite Components
@@ -274,7 +327,7 @@ Idle -> Thinking -> Planning -> Acting -> Reviewing
 ### 7.4 Container Components
 
 - **Editor Container**: Tabs / Split / Minimap / Overlay layers
-- **Agent Panel**: Tabs: Chat | Tasks | Diff
+- **Agent Panel**: Primary views Chat | Plan | Changes, plus utility entries New task, Task history (the `sessions` view id), Pipeline and Settings. The user-facing word for a conversation-plus-its-plan is **task**; the code and the IPC commands say `session`. Each row in Task history offers four actions: open it (resume its context), rename it in place, fork it (a new task with the same context, leaving this one untouched), and delete it. Renaming does not reorder the list — the order is activity time, which is how a user recognises "the one from this morning".
 - **Bottom Panel**: Terminal / Logs / Tests / Actions
 - **Explorer Panel**
 
@@ -338,8 +391,9 @@ Apply Patch -> Editor
 
 **Task:**
 ```typescript
-{ id, title, status, steps: [], affectedFiles: [] }
+{ id, title }
 ```
+Steps live in `steps`, not on the task; see ROADMAP 118.
 
 **Step:**
 ```typescript

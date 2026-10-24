@@ -9,141 +9,496 @@ export type AgentState =
   | "done"
   | "error";
 
-/** Agent 控制模式 */
-export type AgentMode = "suggest" | "edit" | "auto";
+/**
+ * Agent 控制模式：改动是等人审查，还是跑完直接落盘。
+ *
+ * 只有两档。后端所有权限门都只问"是不是 auto"，所以曾经的第三档 `edit` 和
+ * `suggest` 逐位相同 —— 一个拨了不会有任何区别的位置。更细的授权在
+ * SettingsPanel 的权限开关里（能不能新建文件、能不能跑命令）。
+ */
+export type AgentMode = "suggest" | "auto";
+
+/**
+ * 把外部来源的模式字符串收敛成合法值。
+ *
+ * 需要它的地方有两处，都是不受本进程控制的输入：localStorage 里上个版本存下的
+ * 会话（可能是已删掉的 `"edit"`），以及后端事件里的模式字段。两处原本都是
+ * `as AgentMode` 硬转，那不是校验，只是让类型检查闭嘴 —— 真值仍然会漏进 store，
+ * 让分段控件渲染出一个哪一段都没选中的状态。
+ */
+export function normalizeAgentMode(value: unknown): AgentMode {
+  return value === "auto" ? "auto" : "suggest";
+}
+
 
 /** IDE 工作模式，独立于 Agent 权限模式 */
 export type IdeMode = "code" | "plan";
 
-/** Agent 权限预设 */
-export type AgentPermissionPreset = "ask" | "suggest" | "auto";
-
-/** 细粒度 Agent 权限 */
-export interface AgentPermission {
-  allowFileCreate: boolean;
-  allowFileEdit: boolean;
-  allowFileDelete: boolean;
-  allowCommandRun: boolean;
-  allowGitActions: boolean;
+/**
+ * 一次运行至今的用量，随 `agent-state-changed` 一起送来。
+ *
+ * `spendMicros` 为 null 是"没配价格，算不出来"，**不是**"没花钱"。
+ * `calls` / `reportedCalls` 分开是因为供应商可能不回报用量：那时 token 数是 0，
+ * 但那代表"不知道"。
+ */
+export interface RunUsage {
+  totalTokens: number;
+  /**
+   * `totalTokens` 里花在思考上的那部分（推理模型的 reasoning tokens）。
+   *
+   * **不要和 totalTokens 相加**：它已经含在里面。单独有它是因为"一次 finish_reason=length
+   * 的空回答同样按 completion 计费" —— 没有这个数字，账单上那一笔看起来像记错了。
+   */
+  reasoningTokens: number;
+  maxTotalTokens: number | null;
+  spendMicros: number | null;
+  maxSpendMicros: number | null;
+  calls: number;
+  reportedCalls: number;
 }
 
-/** 默认权限（ask 模式下的全手动确认） */
-export const DEFAULT_PERMISSIONS: AgentPermission = {
+
+/** 事件里的 usage 字段收敛成 `RunUsage`，非法或缺失时返回 null */
+/**
+ * 上下文占用测量值的归一化。
+ *
+ * 和 `normalizeRunUsage` 同一个理由：事件载荷不可信。多一条规则 —— 总数为 0 时返回
+ * null，因为 0 在这里不是"空的上下文"，而是"这次运行没有一个请求回报过用量"，
+ * 界面必须什么都不显示而不是显示 0%。
+ */
+export function normalizeContextUsage(value: unknown): ContextUsageMeasurement | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = (value as Record<string, unknown>).peakTotalTokens;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) {
+    return null;
+  }
+  return { peakTotalTokens: Math.floor(candidate) };
+}
+
+export function normalizeRunUsage(value: unknown): RunUsage | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  // `typeof NaN === "number"`，所以光看 typeof 不够：NaN 或负数漏进去，
+  // 状态栏就会渲染出 `$NaN.0NaN` 这种东西。计数不可能为负，钳到 0。
+  const finite = (key: string): number | null => {
+    const candidate = raw[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+  };
+  const count = (key: string) => Math.max(0, finite(key) ?? 0);
+  const optional = (key: string) => {
+    const candidate = finite(key);
+    return candidate === null ? null : Math.max(0, candidate);
+  };
+  return {
+    totalTokens: count("totalTokens"),
+    reasoningTokens: count("reasoningTokens"),
+    maxTotalTokens: optional("maxTotalTokens"),
+
+    spendMicros: optional("spendMicros"),
+    maxSpendMicros: optional("maxSpendMicros"),
+    calls: count("calls"),
+    reportedCalls: count("reportedCalls"),
+  };
+}
+
+/**
+ * 把用量说成状态栏那一格能放下的一句话，以及悬停时的完整明细。
+ *
+ * 返回 null 表示这次会话还没发出过任何请求 —— 那时整格不渲染，而不是显示 0。
+ *
+ * 三档必须分开，理由和后端 `action_log_summary` 一样：完全没回报时说 "unknown"
+ * 而不是打印 0（后者让人以为免费）；部分回报比完全不回报更危险，总数看起来正常
+ * 但漏掉的调用不进账、per-run 上限因此偏松，所以明说。
+ */
+export function describeRunUsage(
+  usage: RunUsage,
+  formatSpend: (micros: number) => string
+): { label: string; detail: string } | null {
+  if (usage.calls === 0) return null;
+
+  const parts = [`${usage.calls} call${usage.calls === 1 ? "" : "s"}`];
+  if (usage.maxTotalTokens !== null) {
+    parts.push(`token cap ${usage.maxTotalTokens}`);
+  }
+  if (usage.maxSpendMicros !== null) {
+    parts.push(`spend cap ${formatSpend(usage.maxSpendMicros)}`);
+  }
+
+  if (usage.reportedCalls === 0) {
+    return {
+      label: "usage unknown",
+      detail: `The provider reported no token usage, so this run's cost cannot be estimated (${parts.join(", ")}).`,
+    };
+  }
+
+  const spend = usage.spendMicros === null ? null : formatSpend(usage.spendMicros);
+  // 部分回报时用 `≥` 把"这是下界"摆在**可见**的标签上，而不是只写进 tooltip：
+  // 只有 hover 才看得到的限定词，键盘和读屏用户永远看不到，而那正是这条信息
+  // 最要紧的部分 —— 数字看起来正常，实际偏低，per-run 上限也因此偏松。
+  const bound = usage.reportedCalls < usage.calls ? "\u2265" : "";
+  const label = spend
+    ? `${bound}${usage.totalTokens} tok · ${bound}${spend}`
+    : `${bound}${usage.totalTokens} tok`;
+  const partial =
+    usage.reportedCalls < usage.calls
+      ? ` Only ${usage.reportedCalls} of ${usage.calls} calls reported usage, so this is a lower bound and the per-run cap undercounts.`
+      : "";
+  const cost = spend ? `, estimated ${spend}` : ", cost not computable (no pricing configured)";
+  // 思考 token 只进悬浮详情：状态栏那一格放不下第三个数字，而这条信息要回答的是
+  // "为什么花了这么多却没拿到东西"，那是事后复盘的问题，不是实时监看的问题。
+  // 明说它已经含在总数里，否则读起来像是又多花了一笔。
+  const reasoning =
+    usage.reasoningTokens > 0
+      ? ` ${usage.reasoningTokens} of those tokens were reasoning (already inside the total).`
+      : "";
+  return {
+    label,
+    detail: `${usage.totalTokens} tokens${cost} (${parts.join(", ")}).${reasoning}${partial}`,
+  };
+}
+
+
+
+/**
+ * 权限预设：一个梯子，每一档在前一档之上多放开一件事。
+ *
+ * 值名刻意不叫 `ask` / `suggest` / `auto` —— 后两个和 `AgentMode` 的取值撞名却
+ * 含义不同，选 `suggest` 预设并不会让运行进入 `suggest` 模式。既然两个轴必须
+ * 并存，那就让名字自己说清它授予什么，而不是靠文档去解释一个陷阱。
+ */
+export type AgentPermissionPreset = "read-only" | "create-files" | "run-commands";
+
+
+/**
+ * 一次运行授予 Agent 的细粒度权限。
+ *
+ * 只有两项，因为只有两项真的过 IPC 并在后端被检查。曾经还有
+ * `allowFileDelete` 和 `allowGitActions`：两个界面上拨得动、后端没有任何读者的
+ * 开关。它们比没有更糟 —— 关掉"文件删除"会让人以为堵上了一条路，而那条路
+ * 从来不存在；打开"Git 操作"会让人以为开了一条路，而 Agent 根本不跑 Git。
+ * 等真的出现对应的后端路径时再把开关加回来，那时它才有东西可守。
+ */
+export interface AgentPermission {
+  allowFileCreate: boolean;
+  allowCommandRun: boolean;
+  /**
+   * 是否允许 Agent 驱动浏览器。
+   *
+   * 和写盘分开：打开一个页面不改工作区，但它会把工作区里的内容送到某个站点去，而且
+   * 导航**撤不回**。后端两道闸门都要过（这个开关 + 下面的 origin 清单），所以单独打开
+   * 它不会让 Agent 能去任何地方。
+   */
+  allowBrowserUse: boolean;
+  /**
+   * 允许访问的 origin（`scheme://host[:port]`，`*` 表示不限）。
+   *
+   * 空清单等于不许，即使开关是开的 —— 默认放开的清单在出事那天读起来像是用户批准过。
+   */
+  browserOrigins: string[];
+  /**
+   * 是否允许 Agent 读取一个已经打开的页面的正文。
+   *
+   * 和 `allowBrowserUse` 分开，因为披露的东西不是一个量级：标签页列表说的是"你开着
+   * 这个站点"，正文说的是站点上的**内容** —— 包括只有登录之后才看得到的那部分。
+   * 后端也是两道闸门：这个开关 + 下面的 origin 清单。它不点击、不输入、不导航。
+   */
+  allowPageRead: boolean;
+  /**
+   * 允许被读取正文的 origin（`scheme://host[:port]`，`*` 表示不限）。
+   *
+   * 独立于 `browserOrigins`：允许把一份文档**打开**，不等于允许把它的正文抄给模型。
+   */
+  pageReadOrigins: string[];
+  /**
+   * 是否允许 Agent 观察桌面（枚举可见窗口，只读）。
+   *
+   * 和浏览器分开：那边的范围是"哪些站点"，这里是"哪些应用"，互不蕴含。窗口标题里有
+   * 文档名、网页标题、聊天对象，所以后端同样要两道闸门：这个开关 + 下面的应用清单。
+   * 目前只有 Windows 有实现，其他平台上工具不会通告。
+   */
+  allowComputerUse: boolean;
+  /**
+   * 允许被观察的应用（可执行文件名，`*` 表示不限）。
+   *
+   * 空清单等于不许。它过滤的是**结果**：不在清单里的窗口不会出现在返回值里，只回报
+   * 被挡掉的数量。
+   */
+  computerApps: string[];
+  /**
+   * 是否允许 Agent 截取窗口内容。
+   *
+   * 和 `allowComputerUse` 分开，因为披露的东西不是一个量级：窗口标题说"Signal 开着"，
+   * 一张截图把里面的消息都交出去了。共用一个开关等于替用户把他给过的"能看列表"
+   * 悄悄升级成"能看内容"。同样只有 Windows 有实现。
+   */
+  allowComputerCapture: boolean;
+  /** 允许被截图的应用（进程名，`*` 表示不限）。 */
+  captureApps: string[];
+  /**
+   * 是否允许 Agent 往一个窗口里注入点击。
+   *
+   * 这个产品里最狠的一档：一次点击撤不回，而且它能点掉任何一个确认框 —— 包括本产品
+   * 自己那个。后端除了这个开关和下面的清单，还要求那一下必须对着模型**已经截过的那一
+   * 帧**给坐标，并且每次都要人工批准。
+   */
+  allowComputerInput: boolean;
+  /** 允许被点击的应用（进程名，`*` 表示不限）。独立于 `captureApps`。 */
+  inputApps: string[];
+}
+
+/**
+ * 只有布尔那几项能被"切换"。
+ *
+ * `browserOrigins` 是一个数组，落进 `togglePermission` 会被 `!value` 变成 `false`，
+ * 一个类型上不该存在的值就这样进了 store。用类型把它挡在外面，而不是靠调用方记得。
+ */
+export type BooleanPermissionKey = {
+  [K in keyof AgentPermission]: AgentPermission[K] extends boolean ? K : never;
+}[keyof AgentPermission];
+
+/** `read-only` 预设：既不新建文件，也不跑命令，也不碰浏览器。 */
+export const READ_ONLY_PERMISSIONS: AgentPermission = {
   allowFileCreate: false,
-  allowFileEdit: false,
-  allowFileDelete: false,
   allowCommandRun: false,
-  allowGitActions: false,
+  allowBrowserUse: false,
+  browserOrigins: [],
+  allowPageRead: false,
+  pageReadOrigins: [],
+  allowComputerUse: false,
+  computerApps: [],
+  allowComputerCapture: false,
+  captureApps: [],
+  allowComputerInput: false,
+  inputApps: [],
 };
 
-/** suggest 预设：审查但不自动执行 */
-export const SUGGEST_PERMISSIONS: AgentPermission = {
+/** `create-files` 预设：可以新建文件（改动仍进审查区），但不跑命令。 */
+export const CREATE_FILES_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
-  allowFileEdit: true,
-  allowFileDelete: false,
   allowCommandRun: false,
-  allowGitActions: false,
+  allowBrowserUse: false,
+  browserOrigins: [],
+  allowPageRead: false,
+  pageReadOrigins: [],
+  allowComputerUse: false,
+  computerApps: [],
+  allowComputerCapture: false,
+  captureApps: [],
+  allowComputerInput: false,
+  inputApps: [],
 };
 
-/** auto 预设：全部放行 */
-export const AUTO_PERMISSIONS: AgentPermission = {
+/**
+ * `run-commands` 预设：可以新建文件，也可以跑项目自己声明的命令。
+ *
+ * 浏览器不跟着这个预设一起开：能跑本地检查命令和能访问外部站点是两件不同性质的事，
+ * 把它们绑在一个预设里，用户为了跑测试就顺手批准了出网。
+ */
+export const RUN_COMMANDS_PERMISSIONS: AgentPermission = {
   allowFileCreate: true,
-  allowFileEdit: true,
-  allowFileDelete: true,
   allowCommandRun: true,
-  allowGitActions: true,
+  allowBrowserUse: false,
+  browserOrigins: [],
+  allowPageRead: false,
+  pageReadOrigins: [],
+  allowComputerUse: false,
+  computerApps: [],
+  allowComputerCapture: false,
+  captureApps: [],
+  allowComputerInput: false,
+  inputApps: [],
 };
 
 /** 根据预设获取权限 */
 export function permissionsForPreset(preset: AgentPermissionPreset): AgentPermission {
   switch (preset) {
-    case "ask": return { ...DEFAULT_PERMISSIONS };
-    case "suggest": return { ...SUGGEST_PERMISSIONS };
-    case "auto": return { ...AUTO_PERMISSIONS };
+    case "read-only": return { ...READ_ONLY_PERMISSIONS };
+    case "create-files": return { ...CREATE_FILES_PERMISSIONS };
+    case "run-commands": return { ...RUN_COMMANDS_PERMISSIONS };
   }
 }
 
+/** MCP 工具放行策略，与后端 `McpToolPolicy` 一一对应 */
+export type McpToolApproval = "deny" | "auto_approved_only" | "allow_all";
+
 /**
- * 后端权限策略（Phase 9.0.4，services/permissions.rs 的 serde 契约）。
- * Agent 的自动应用受 preset + 细粒度开关 + denyPaths + 单次运行上限约束。
+ * 由 Agent 权限推导 MCP 工具放行策略。
+ *
+ * MCP 工具本质上是外部进程执行（可读写文件、访问网络、跑命令），
+ * 因此跟随 `allowCommandRun`：未授予命令执行权限时，只允许用户在
+ * server 配置里显式列入 autoApprove 的工具。
  */
-export interface PermissionPolicy {
-  /** "edit" 是后端/CLI 兼容别名，前端归一到 suggest */
-  preset: AgentPermissionPreset | "edit";
-  allowCreate: boolean;
-  allowEdit: boolean;
-  allowDelete: boolean;
-  allowCommands: boolean;
-  allowGit: boolean;
-  allowedCommandPatterns: string[];
-  denyPaths: string[];
-  maxAutoAppliesPerRun: number;
-  maxFilesPerAutoApply: number;
+export function mcpApprovalForPermissions(permissions: AgentPermission): McpToolApproval {
+  return permissions.allowCommandRun ? "allow_all" : "auto_approved_only";
 }
 
-/** 前端权限状态 -> 后端策略 */
-export function toPermissionPolicy(
-  preset: AgentPermissionPreset,
-  permissions: AgentPermission,
-  extras: PermissionPolicyExtras
-): PermissionPolicy {
-  return {
-    preset,
-    allowCreate: permissions.allowFileCreate,
-    allowEdit: permissions.allowFileEdit,
-    allowDelete: permissions.allowFileDelete,
-    allowCommands: permissions.allowCommandRun,
-    allowGit: permissions.allowGitActions,
-    ...extras,
-  };
-}
-
-/** 后端策略 -> 前端权限状态 */
-export function fromPermissionPolicy(policy: PermissionPolicy): {
-  preset: AgentPermissionPreset;
-  permissions: AgentPermission;
-  extras: PermissionPolicyExtras;
-} {
-  return {
-    // "edit" 预设是 CLI 兼容别名，前端归一到 suggest。
-    preset: policy.preset === "edit" ? "suggest" : policy.preset,
-    permissions: {
-      allowFileCreate: policy.allowCreate,
-      allowFileEdit: policy.allowEdit,
-      allowFileDelete: policy.allowDelete,
-      allowCommandRun: policy.allowCommands,
-      allowGitActions: policy.allowGit,
-    },
-    extras: {
-      allowedCommandPatterns: policy.allowedCommandPatterns,
-      denyPaths: policy.denyPaths,
-      maxAutoAppliesPerRun: policy.maxAutoAppliesPerRun,
-      maxFilesPerAutoApply: policy.maxFilesPerAutoApply,
-    },
-  };
-}
-
-/** 策略中与预设开关无关的部分 */
-export interface PermissionPolicyExtras {
-  allowedCommandPatterns: string[];
-  denyPaths: string[];
-  maxAutoAppliesPerRun: number;
-  maxFilesPerAutoApply: number;
-}
-
-/** 破坏性操作类型 */
-export type DestructiveOpType = "file_delete" | "command_run" | "git_push" | "git_force";
+/**
+ * 需要人点一下才能发生的操作类型。
+ *
+ * 只列后端真的会发的那些。之前这里还有 `file_delete` / `command_run` / `git_push` /
+ * `git_force` 四种，没有任何后端路径产生它们 —— 连同对话框里对应的图标和标签，
+ * 那是四份看起来像"这些操作有确认"的假象。
+ */
+export type DestructiveOpType =
+  | "browser_open"
+  | "browser_read_page"
+  | "computer_capture"
+  | "computer_click"
+  | "computer_scroll";
 
 export interface DestructiveOpConfirm {
+
   id: string;
   opType: DestructiveOpType;
   title: string;
   description: string;
   detail: string;
-  requireExplicitConfirm: boolean;
+}
+
+/**
+ * 把后端事件里的 `opType` 收敛成已知取值。
+ *
+ * 不用 `as DestructiveOpType`：那只是让 tsc 闭嘴。后端加了一种新动作而前端还没认识
+ * 它时，硬转会让界面按一个不存在的分支渲染；落到某个具体已知值上更糟 —— 对话框会说错
+ * 将要发生什么，而这个对话框的全部意义就是说对。所以未知值单独一档。
+ */
+export function normalizeDestructiveOpType(value: unknown): DestructiveOpType | "unknown" {
+  switch (value) {
+    case "browser_open":
+    case "browser_read_page":
+    case "computer_capture":
+    case "computer_click":
+    case "computer_scroll":
+      return value;
+    default:
+
+      return "unknown";
+  }
+}
+
+/**
+ * 把后端 `agent-approval-requested` 的载荷收成一条待批准记录。
+ *
+ * 缺字段就返回 null 而不是补默认值：一条说不清"将要发生什么"的批准请求不该被显示，
+ * 显示它等于请用户为一件他看不见的事签字。
+ */
+export function normalizeApprovalRequest(value: unknown): DestructiveOpConfirm | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === "string" ? raw.id : "";
+  const title = typeof raw.title === "string" ? raw.title : "";
+  const description = typeof raw.description === "string" ? raw.description : "";
+  if (!id || !title || !description) {
+    return null;
+  }
+  const opType = normalizeDestructiveOpType(raw.opType);
+  if (opType === "unknown") {
+    return null;
+  }
+  return {
+    id,
+    opType,
+    title,
+    description,
+    detail: typeof raw.detail === "string" ? raw.detail : "",
+  };
+}
+
+/**
+ * 模型问用户的一道选择题。
+ *
+ * 和 `DestructiveOpConfirm` 是两回事：那个问"要不要让我做"，这个问"你想要哪一种"。
+ * 答案不是许可，所以没有"批准/拒绝"，只有一个字符串。
+ */
+export interface AgentQuestion {
+  id: string;
+  question: string;
+  /** 模型给的候选项。用户永远还可以自己写一句，所以这不是全集 */
+  options: string[];
+}
+
+/**
+ * 把后端 `agent-question-requested` 的载荷收成一道选择题。
+ *
+ * 缺字段、选项不足两个就返回 null：一个只有一个按钮的"选择题"点不出信息，而显示它会让
+ * 用户以为自己回答了什么。读不懂的请求由调用方回一个"没答案"，不能默默丢掉 ——
+ * 丢掉的话后端要白等满两分钟。
+ */
+export function normalizeAgentQuestion(value: unknown): AgentQuestion | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === "string" ? raw.id : "";
+  const question = typeof raw.question === "string" ? raw.question.trim() : "";
+  if (!id || !question) {
+    return null;
+  }
+  const options = Array.isArray(raw.options)
+    ? raw.options
+        .filter((option): option is string => typeof option === "string")
+        .map((option) => option.trim())
+        .filter((option) => option.length > 0)
+    : [];
+  if (options.length < 2) {
+    return null;
+  }
+  return { id, question, options };
+}
+
+/**
+ * 项目记忆（`AGENTS.md`）此刻的状态，外加让 Agent 起草它的那句提示词。
+ *
+ * `draftPrompt` 由后端给：那段文字就是这个功能的全部，而它必须和后端的注入上限、文件名
+ * 保持一致 —— 在前端再写一份迟早会和后端说的不是同一件事。
+ */
+export interface ProjectMemoryInfo {
+  workspaceOpen: boolean;
+  exists: boolean;
+  path: string;
+  bytes: number;
+  limit: number;
+  truncated: boolean;
+  draftPrompt: string;
+}
+
+/**
+ * 收一条项目记忆状态。读不懂就返回 null。
+ *
+ * 不用 `as`：这条载荷决定界面是说"没有项目记忆"还是"有一份 9 KB 的"，猜错的话用户会照着
+ * 一句假话做决定。缺 `draftPrompt` 也算读不懂 —— 没有它那个按钮就是个空壳。
+ */
+export function normalizeProjectMemoryInfo(value: unknown): ProjectMemoryInfo | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const draftPrompt = typeof raw.draftPrompt === "string" ? raw.draftPrompt : "";
+  const path = typeof raw.path === "string" ? raw.path : "";
+  if (!draftPrompt || !path) {
+    return null;
+  }
+  const bytes = typeof raw.bytes === "number" && Number.isFinite(raw.bytes) ? raw.bytes : 0;
+  const limit = typeof raw.limit === "number" && raw.limit > 0 ? raw.limit : 0;
+  if (!limit) {
+    return null;
+  }
+  return {
+    workspaceOpen: raw.workspaceOpen === true,
+    exists: raw.exists === true,
+    path,
+    bytes,
+    limit,
+    // 自己算而不是信后端那个布尔：两边算出不同结果时，屏幕上说的必须和它旁边那两个数字一致
+    truncated: bytes > limit,
+    draftPrompt,
+  };
 }
 
 export type ContextCompressionMode = "full" | "focused" | "compact" | "budgeted";
+
 export type StepScope = "selection" | "active_file" | "open_files" | "workspace";
 export type StepExecutionMode = "analyze" | "diff" | "test" | "fix";
 
@@ -179,7 +534,17 @@ export interface DiffEntry {
   baseHash?: string | null;
   provenance?: DiffProvenance | null;
   hunks: DiffHunk[];
-  status: "pending" | "partial" | "applied" | "rejected" | "failed";
+  /**
+   * `reverted` 是终态：工具写入的记录被撤销之后停在这里。
+   *
+   * 它不能退回 `pending` —— 那样 Apply 会把一条删除记录当成内容替换执行，把文件写成
+   * 0 字节而不是删掉它；移动记录更是没有内容可应用。见后端 `undo_last_apply`。
+   *
+   * `stale` 也是终态，而且**只有前端会写**：后端的 diff 只活在内存里，重启之后它一条都
+   * 没有，而前端从 localStorage 恢复出一整排。对不上的那些就是 `stale` —— 还看得见（它是
+   * 上一次会话的记录），但不再当成"等你决定"，因为按 Apply 后端根本不认识它们。
+   */
+  status: "pending" | "partial" | "applied" | "rejected" | "failed" | "reverted" | "stale";
   applyError?: string;
 }
 
@@ -193,6 +558,8 @@ export interface DiffProvenance {
   sourceStage?: string | null;
   regeneratedFromDiffId?: string | null;
   regeneratedFromHunkIndex?: number | null;
+  /** 移动过来的话，这里是移动前的工作区相对路径（`DiffEntry.file` 只有落点） */
+  movedFrom?: string | null;
 }
 
 export interface DiffHunk {
@@ -204,7 +571,7 @@ export interface DiffHunk {
   original: string;
   updated: string;
   provenance?: DiffHunkProvenance | null;
-  status?: "pending" | "applied" | "rejected" | "failed";
+  status?: "pending" | "applied" | "rejected" | "failed" | "reverted";
   applyError?: string;
 }
 
@@ -266,13 +633,196 @@ export interface GhostSuggestion {
   createdAt: number;
 }
 
-/** Task 任务 */
+/**
+ * 上下文占用的**测量值**：这次运行里最大的那次请求，来自供应商回报的用量。
+ *
+ * 和 `ContextEstimateResponse` 不是一回事，也不能相加或互相校对：估算是发送前按
+ * 字符推出来的、只覆盖打包进去的那几节上下文；这个是真实 token，覆盖整个请求
+ * （系统提示词、工具 schema、逐阶段累积的消息都在里面）。
+ *
+ * 为什么是最大值：占用问的是"窗口最满的时候有多满"。最后一次请求会被紧随其后的小
+ * 请求顶掉 —— 下一个阶段、单步执行、自动修复都可能只发几百 token。
+ */
+export interface ContextUsageMeasurement {
+  peakTotalTokens: number;
+}
+
+/**
+ * 当前这一轮任务。**只有标题和身份**，没有步骤列表。
+ *
+ * 步骤是 `steps`，那是后端 `record_plan` 的产物；任务只负责回答"现在在做哪件事"。
+ * 曾经这里还有 `steps` / `affectedFiles` / `status` 三个字段，从来没有人写过它们，
+ * 于是标题栏永远显示硬编码的 "Agent Task"。
+ */
 export interface Task {
+  /** 发起这一轮的 run id，方便和后端日志对上 */
+  id: string;
+  /** 来源见 `deriveTaskTitle`：prompt 的第一行 */
+  title: string;
+}
+
+
+/**
+ * 后端真正会喂给模型的一轮对话。
+ *
+ * 和 `ChatMessage` 不是一回事，也不该被混在一起显示：消息流不设上限、不持久化、
+ * 由各个调用点自己 push；这个列表只留末尾若干轮、每轮都截断过，而且只有一次
+ * `send_agent_prompt` **成功**才会产生一轮。要让用户管上下文，得让他看见这一份。
+ */
+export interface ConversationTurn {
+  /** 后端分配的稳定编号；切上下文时回传的就是它，不是下标 */
+  id: string;
+  prompt: string;
+  outcome: string;
+  /**
+   * 这一轮是从一次步骤执行派生出来的，不是用户自己提的那一问。
+   *
+   * 恢复历史会话时要靠它区分说话人：把 `Ran step: 加测试` 画成一条用户消息，等于告诉用户
+   * 那句话是他自己打的。
+   */
+  derived?: boolean;
+  /**
+   * 产生这一轮的那次运行。
+   *
+   * 撤销点记的也是运行 id，两边靠它对上 —— "撤销这一轮改的文件"就是这么问出来的。
+   * 加这个字段之前存下的会话没有它，那些轮次只能整栈撤销。
+   */
+  runId?: string | null;
+}
+
+
+/**
+ * 历史会话列表里的一行。
+ *
+ * 一个"会话"在这个产品里就是**模型上下文**的一段历史：那几轮对话。刻意不含 steps / diffs ——
+ * diff 描述的是磁盘某一刻的样子，隔天恢复出来多半已经对不上，而"界面显示的和实际的不一致"
+ * 正是这个产品要避免的。界面上的措辞必须照这个事实来。
+ */
+export interface AgentSessionSummary {
   id: string;
   title: string;
-  status: "todo" | "doing" | "done" | "error";
-  steps: Step[];
-  affectedFiles: string[];
+  /** 毫秒时间戳，列表按它倒序 */
+  updatedAt: number;
+  turnCount: number;
+  /** 最后一轮的结果，用来认出"是不是这次" */
+  lastOutcome: string;
+}
+
+/** `list_agent_sessions` / `start_new_agent_session` / `delete_agent_session` 的返回值 */
+export interface AgentSessionList {
+  activeId: string;
+  sessions: AgentSessionSummary[];
+  /**
+   * 会话历史此刻写不进磁盘、或者读不出来的原因。
+   *
+   * 查历史的地方正是该说这句话的地方：写失败在界面上没有任何其他症状，用户会在下一次打开时
+   * 才发现历史里什么都没有；读失败则会让"还没聊过"和"那几十条读不出来"长得一模一样。
+   */
+  warning: string | null;
+  /** 这个环境此刻会不会存会话（没打开工作区时一条都存不下来） */
+  sessionsAreSaved: boolean;
+}
+
+/** 恢复一个历史会话之后后端告诉界面的东西 */
+export interface AgentSessionDetail {
+  id: string;
+  title: string;
+  turns: ConversationTurn[];
+}
+
+export function normalizeConversationTurn(value: unknown): ConversationTurn | null {
+  if (!value || typeof value !== "object") return null;
+  const { id, prompt, outcome, derived, runId } = value as Record<string, unknown>;
+  if (typeof id !== "string" || id === "") return null;
+  return {
+    id,
+    prompt: typeof prompt === "string" ? prompt : "",
+    outcome: typeof outcome === "string" ? outcome : "",
+    derived: derived === true,
+    // 没有运行 id 的轮次（改这个字段之前存下的会话）不显示"撤销这一轮的文件"：
+    // 它的改动认不出来，而一个按下去只会报错的按钮比没有更糟
+    runId: typeof runId === "string" && runId !== "" ? runId : null,
+  };
+}
+
+/**
+ * 会话列表的归一化。
+ *
+ * 和 `normalizeContextUsage` 同一个理由：IPC 载荷不可信，`as` 只是把类型检查关掉。一条没有
+ * id 的会话比没有这条更糟 —— 点它会发一个空 id 过去，后端报"找不到"，而用户看到的是一个点
+ * 了就报错的列表项。
+ */
+export function normalizeAgentSessionList(value: unknown): AgentSessionList {
+  const empty: AgentSessionList = {
+    activeId: "",
+    sessions: [],
+    warning: null,
+    sessionsAreSaved: false,
+  };
+  if (!value || typeof value !== "object") return empty;
+  const { activeId, sessions, warning, sessionsAreSaved } = value as Record<string, unknown>;
+  const rows = Array.isArray(sessions) ? sessions : [];
+  return {
+    activeId: typeof activeId === "string" ? activeId : "",
+    sessions: rows.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const { id, title, updatedAt, turnCount, lastOutcome } = row as Record<string, unknown>;
+      if (typeof id !== "string" || id === "") return [];
+      return [
+        {
+          id,
+          title: typeof title === "string" && title.trim() !== "" ? title : "Untitled session",
+          updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0,
+          turnCount: typeof turnCount === "number" && Number.isFinite(turnCount) ? turnCount : 0,
+          lastOutcome: typeof lastOutcome === "string" ? lastOutcome : "",
+        },
+      ];
+    }),
+    warning: typeof warning === "string" && warning.trim() !== "" ? warning : null,
+    // 缺这个字段时按"存不下来"算：那一侧的话术是"这里不会保存"，比反过来谎称存好了安全
+    sessionsAreSaved: sessionsAreSaved === true,
+  };
+}
+
+
+/** 恢复结果的归一化。没有 id 就当没恢复成功 —— 那时界面不该把聊天区换掉。 */
+export function normalizeAgentSessionDetail(value: unknown): AgentSessionDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const { id, title, turns } = value as Record<string, unknown>;
+  if (typeof id !== "string" || id === "") return null;
+  return {
+    id,
+    title: typeof title === "string" && title.trim() !== "" ? title : "Untitled session",
+    turns: (Array.isArray(turns) ? turns : []).flatMap((turn) => {
+      const normalized = normalizeConversationTurn(turn);
+      return normalized ? [normalized] : [];
+    }),
+  };
+}
+
+
+/**
+ * 上一次连通性测试的结果。
+ *
+ * 和 `llmConfigured` 是两件事，不能混：后者只说明"存了一个 profile"，端点通不通、
+ * key 对不对、模型名存不存在，它一概不知道。之前状态栏只有一个绿点表示"已配置"，
+ * 而一个填错端点的 profile 也会让它变绿 —— 这正是这个项目明令禁止的那种虚假信心。
+ *
+ * `unknown` 是诚实的默认值：没测过就是不知道，不能算通。
+ */
+export interface LlmConnectionState {
+  status: "unknown" | "ok" | "failed";
+  /** 什么时候测的；`unknown` 时为 null */
+  checkedAt: number | null;
+  /** 成功时是模型回的一小段内容，失败时是错误原因 */
+  detail: string | null;
+  /**
+   * 被测的那个目标的指纹（见 `stores/llmConnection.ts`）。
+   *
+   * 结果必须带着目标一起存：否则改完端点之后，上一次的 ok 会替一个从没连过的
+   * 地址作保。
+   */
+  target: string | null;
 }
 
 /** Chat 消息 */
@@ -326,7 +876,16 @@ export interface LlmProfile {
   provider: ModelProvider;
   endpoint: string;
   api_key_masked: string;
+  /**
+   * 这个 profile 现在能不能真的跑起来（后端判定，不要在前端重算）。
+   *
+   * 不能拿 `api_key_masked !== "not configured"` 当"已配置"：一份没被开启的明文密钥
+   * 会显示成 `sk-1****7890 (plaintext in config.json)`，字符串比较判成已配置，而每次
+   * 运行都会失败。旧的可选性是为了兼容后端还没带这个字段的旧响应。
+   */
+  api_key_usable?: boolean;
   model: string;
+
   modelType?: LocalModelType;
   modelPath?: string;
   modelFile?: string;
@@ -341,6 +900,15 @@ export interface LlmProfile {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  /** 思考档位：off / low / medium / high。空表示不发这个参数，由供应商决定。 */
+  reasoningEffort?: string;
+  /** 单次运行的 token 上限；未设置或 0 表示不限制 */
+  maxRunTokens?: number;
+  /** 每百万 prompt token 的价格，单位微美元（$0.28/M = 280000） */
+  promptMicrosPerMillion?: number;
+  completionMicrosPerMillion?: number;
+  /** 单次运行的金额上限（微美元）；两个价格都配齐才会被执行 */
+  maxRunSpendMicros?: number;
   effectiveInputTokens?: number;
   toolCallMode?: "text_protocol" | "native_tools";
 }
@@ -368,6 +936,13 @@ export interface ContextEstimateResponse {
   estimatedTokens: number;
   inputBudgetTokens?: number | null;
   trimmed: boolean;
+  /**
+   * 这个估算没算进去的那几部分，由后端给。
+   *
+   * 由后端给而不是前端写死：漏了什么只有装配请求的那一侧知道，而这段话以前是手写在一个
+   * `title` 悬浮提示里的 —— 提示会和代码各自漂移，而且不悬浮的人根本看不到。
+   */
+  notCounted?: string[];
 }
 
 export interface SaveLlmProfileRequest {
@@ -391,6 +966,12 @@ export interface SaveLlmProfileRequest {
   maxContextTokens?: number;
   reservedOutputTokens?: number;
   maxOutputTokens?: number;
+  /** 思考档位：off / low / medium / high。空表示不发这个参数，由供应商决定。 */
+  reasoningEffort?: string;
+  maxRunTokens?: number;
+  promptMicrosPerMillion?: number;
+  completionMicrosPerMillion?: number;
+  maxRunSpendMicros?: number;
   toolCallMode?: "text_protocol" | "native_tools";
   setActive?: boolean;
 }

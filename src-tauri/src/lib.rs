@@ -1,6 +1,18 @@
+// CI 以 `-D warnings` 运行 clippy。以下两条是有意保留的例外，而不是被忽略的缺陷：
+//
+// - too_many_arguments: Agent 编排入口（orchestrator::run、executor::execute_stage、
+//   agent_runtime::execute_agent_steps、CLI 运行函数）确实有 8-11 个参数。
+//   收敛成参数结构体是真实的改进，但会改动全部调用点，作为独立重构项跟踪。
+// - should_implement_trait: `ContextCompressionMode::from_str` 和
+//   `AgentState::from_str` 是命名约定问题，不是缺陷；改成 FromStr 会波及
+//   所有调用点的 trait 导入。
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::should_implement_trait)]
+
 use commands::agent::AgentGlobalState;
 use commands::fs::FileWatcherState;
 use commands::lsp::LspManager;
+use commands::mcp::McpState;
 use commands::terminal::TerminalManager;
 use tauri::Manager;
 
@@ -17,32 +29,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .manage(AgentGlobalState::new())
-        .manage(crate::services::mcp::McpState::new())
         .manage(TerminalManager::new())
         .manage(FileWatcherState::new())
         .manage(LspManager::new())
+        .manage(McpState::new())
         .setup(|app| {
             // 获取主窗口并设置标题
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Agent IDE");
             }
-
-            // MCP (Phase 9.0.3): auto-connect enabled servers so their tools
-            // join the agent's native tool surface on every run.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let config = crate::services::mcp::McpServersConfig::load();
-                if let Err(err) = config.validate() {
-                    eprintln!("MCP config invalid, skipping auto-connect: {}", err);
-                    return;
-                }
-                let state = handle.state::<crate::services::mcp::McpState>();
-                for server in config.servers.into_iter().filter(|s| s.enabled) {
-                    if let Err(err) = state.connect(&server).await {
-                        eprintln!("MCP auto-connect '{}' failed: {}", server.name, err);
-                    }
-                }
-            });
 
             Ok(())
         })
@@ -51,7 +46,6 @@ pub fn run() {
             commands::fs::read_file_content,
             commands::fs::write_file_content,
             commands::fs::list_directory,
-            commands::fs::file_exists,
             commands::fs::delete_path,
             commands::fs::create_file,
             commands::fs::create_directory,
@@ -67,21 +61,14 @@ pub fn run() {
             commands::agent::estimate_agent_context,
             commands::agent::send_agent_prompt,
             commands::agent::stop_agent,
+            commands::agent::resolve_agent_approval,
+            commands::agent::answer_agent_question,
             commands::agent::update_agent_step,
             commands::agent::update_agent_steps,
             commands::agent::skip_agent_step,
             commands::agent::run_agent_step,
             commands::agent::continue_agent_pipeline,
             commands::agent::set_agent_mode,
-            commands::agent::get_permission_policy,
-            commands::mcp::mcp_get_servers,
-            commands::mcp::mcp_set_servers,
-            commands::mcp::mcp_connect,
-            commands::mcp::mcp_disconnect,
-            commands::mcp::mcp_status,
-            commands::mcp::mcp_list_tools,
-            commands::mcp::mcp_call_tool,
-            commands::agent::set_permission_policy,
             commands::agent::apply_diffs,
             commands::agent::apply_diff,
             commands::agent::apply_diff_hunk,
@@ -90,12 +77,16 @@ pub fn run() {
             commands::agent::reject_diff_hunk,
             commands::agent::get_agent_steps,
             commands::agent::get_agent_diffs,
+            commands::agent::adopt_restored_diffs,
+            commands::agent::forget_settled_diffs,
+            commands::agent::get_agent_external_actions,
+            commands::agent::forget_earlier_external_actions,
             commands::agent::get_agent_sdd_artifacts,
             commands::agent::save_sdd_artifact,
-            commands::agent::update_llm_config,
             commands::agent::get_llm_config,
             commands::agent::save_llm_profile,
             commands::agent::set_active_llm_profile,
+            commands::agent::reveal_llm_api_key,
             commands::agent::delete_llm_profile,
             commands::agent::set_context_compression,
             commands::agent::set_active_role,
@@ -103,12 +94,31 @@ pub fn run() {
             commands::agent::get_pipeline,
             commands::agent::update_pipeline,
             commands::agent::reset_pipeline,
+            commands::agent::start_new_agent_session,
+            commands::agent::list_agent_sessions,
+            commands::agent::resume_agent_session,
+            commands::agent::rename_agent_session,
+            commands::agent::fork_agent_session,
+            commands::agent::delete_agent_session,
+            commands::agent::get_agent_conversation,
+            commands::agent::get_project_memory,
+            commands::agent::append_ui_log,
+            commands::agent::run_log_path,
+            commands::agent::truncate_agent_conversation,
+            commands::agent::revert_turn_changes,
+            commands::agent::undo_last_apply,
+            commands::agent::pending_undo,
+            commands::agent::verify_workspace,
+            commands::agent::repair_workspace,
+            commands::agent::agent_repair_prompt,
             commands::agent::test_llm_connection,
-            commands::agent::get_local_model_status,
-            commands::agent::load_local_model,
-            commands::agent::unload_local_model,
             commands::agent::save_workspace_path,
             commands::agent::get_workspace_path,
+            // MCP 命令
+            commands::mcp::get_mcp_config,
+            commands::mcp::save_mcp_config,
+            commands::mcp::discover_mcp_tools,
+            commands::mcp::get_mcp_tools,
             // Git 命令
             commands::git::git_status,
             commands::git::git_diff,
@@ -142,6 +152,9 @@ pub fn run() {
             commands::terminal::write_to_terminal,
             commands::terminal::resize_terminal,
             commands::terminal::kill_terminal,
+            // 浏览器：CDP 的 HTTP 端点，只服务用户自己的操作（命令面板）
+            commands::browser::browser_list_tabs,
+            commands::browser::browser_open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent IDE");

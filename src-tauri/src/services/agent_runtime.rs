@@ -19,6 +19,7 @@ pub async fn execute_agent_steps<FStart, FFinish, FToken>(
     context_text: &str,
     workspace_path: &Path,
     steps: &[TaskStep],
+    invoker: Option<&dyn executor::ToolInvoker>,
     cancel_flag: Arc<AtomicBool>,
     mut on_step_started: FStart,
     mut on_step_finished: FFinish,
@@ -39,12 +40,15 @@ where
             llm,
             &step.title,
             &step_context,
+            invoker,
             cancel_flag.clone(),
             token_sender(step),
-            None,
         )
-        .await?;
-        let diffs = executor::parse_diffs_with_diagnostics(&response).diffs;
+        .await?
+        .text;
+        let mut diffs = executor::parse_diffs_with_diagnostics(&response).diffs;
+        // 生成时记录目标文件的内容指纹，apply 时才能识别期间发生的外部改动
+        crate::agent::diff_apply::stamp_base_hashes(&mut diffs);
         on_step_finished(step, &response, &diffs);
         results.push(AgentStepExecution {
             step: step.clone(),
@@ -163,6 +167,7 @@ pub fn attach_step_provenance(
             source_stage: None,
             regenerated_from_diff_id: None,
             regenerated_from_hunk_index: None,
+            moved_from: None,
         });
         provenance.source_role = Some("agent-step".to_string());
         provenance.source_stage = Some(step.title.clone());

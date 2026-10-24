@@ -1,18 +1,11 @@
 import { useState, useCallback } from "react";
 import { useAgentStore } from "../../stores/useAgentStore";
+import { useT } from "../../i18n";
+import { AGENT_ROLES, roleIcon, roleLabelKey } from "./agentRoles";
 import type { AgentRole, PipelineStage } from "../../types/agent";
 
-const ROLE_LABELS: Record<AgentRole, { label: string; icon: string }> = {
-  architect: { label: "Architect", icon: "🏗" },
-  designer: { label: "Designer", icon: "📐" },
-  coder: { label: "Coder", icon: "💻" },
-  tester: { label: "Tester", icon: "🧪" },
-  reviewer: { label: "Reviewer", icon: "🔍" },
-};
-
-const ALL_ROLES: AgentRole[] = ["architect", "designer", "coder", "tester", "reviewer"];
-
 export default function PipelineEditor() {
+  const t = useT();
   const pipeline = useAgentStore((s) => s.pipeline);
   const updatePipeline = useAgentStore((s) => s.updatePipeline);
   const resetPipeline = useAgentStore((s) => s.resetPipeline);
@@ -89,10 +82,15 @@ export default function PipelineEditor() {
   const addStage = useCallback(() => {
     setStages([
       ...stages,
-      { role: "coder" as AgentRole, name: "New Stage", status: "pending" as const, pauseBefore: false },
+      {
+        role: "coder" as AgentRole,
+        name: t("pipeline.newStage"),
+        status: "pending" as const,
+        pauseBefore: false,
+      },
     ]);
     setSaved(false);
-  }, [stages]);
+  }, [stages, t]);
 
   const handleSave = useCallback(async () => {
     const withPending = stages.map((s) => ({ ...s, status: "pending" as const }));
@@ -111,9 +109,11 @@ export default function PipelineEditor() {
   return (
     <div className="p-3 text-xs overflow-auto h-full">
       <div className="text-surface-muted mb-3 font-semibold tracking-wide flex items-center justify-between">
-        <span>Pipeline Editor</span>
+        <span>{t("pipeline.title")}</span>
         <span className="text-[10px] font-normal">
-          {stages.length} stage{stages.length !== 1 ? "s" : ""}
+          {stages.length === 1
+            ? t("pipeline.stages.one")
+            : t("pipeline.stages.many", { count: stages.length })}
         </span>
       </div>
 
@@ -136,9 +136,9 @@ export default function PipelineEditor() {
                 onChange={(e) => changeRole(i, e.target.value as AgentRole)}
                 className="flex-1 min-w-0 px-1.5 py-1 rounded bg-surface-panel border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
               >
-                {ALL_ROLES.map((r) => (
-                  <option key={r} value={r}>
-                    {ROLE_LABELS[r].icon} {ROLE_LABELS[r].label}
+                {AGENT_ROLES.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {roleIcon(r.id)} {t(roleLabelKey(r.id))}
                   </option>
                 ))}
               </select>
@@ -158,7 +158,7 @@ export default function PipelineEditor() {
                   onChange={() => togglePauseBefore(i)}
                   className="h-3 w-3 accent-accent-blue"
                 />
-                Pause
+                {t("pipeline.pause")}
               </label>
 
               {/* 操作 */}
@@ -167,7 +167,7 @@ export default function PipelineEditor() {
                   onClick={() => moveUp(i)}
                   disabled={i === 0}
                   className="text-surface-muted hover:text-surface-text disabled:opacity-30 p-0.5 text-[10px]"
-                  title="Move up"
+                  title={t("pipeline.moveUp")}
                 >
                   ▲
                 </button>
@@ -175,7 +175,7 @@ export default function PipelineEditor() {
                   onClick={() => moveDown(i)}
                   disabled={i === stages.length - 1}
                   className="text-surface-muted hover:text-surface-text disabled:opacity-30 p-0.5 text-[10px]"
-                  title="Move down"
+                  title={t("pipeline.moveDown")}
                 >
                   ▼
                 </button>
@@ -183,7 +183,7 @@ export default function PipelineEditor() {
                   onClick={() => removeStage(i)}
                   disabled={stages.length <= 1}
                   className="text-diff-remove hover:text-diff-remove/80 disabled:opacity-30 p-0.5 text-[10px]"
-                  title="Remove"
+                  title={t("pipeline.remove")}
                 >
                   ✕
                 </button>
@@ -198,7 +198,7 @@ export default function PipelineEditor() {
         onClick={addStage}
         className="w-full mb-3 py-1.5 rounded border border-dashed border-surface-border text-surface-muted hover:text-surface-text hover:border-surface-text/40 text-xs transition-colors"
       >
-        + Add Stage
+        {t("pipeline.add")}
       </button>
 
       {/* 操作按钮 */}
@@ -208,13 +208,13 @@ export default function PipelineEditor() {
           disabled={saved}
           className="flex-1 py-1.5 rounded bg-accent-blue hover:bg-accent-blue/80 text-white text-xs font-medium disabled:opacity-50 transition-colors"
         >
-          {saved ? "Saved ✓" : "Save Pipeline"}
+          {saved ? t("pipeline.saved") : t("pipeline.save")}
         </button>
         <button
           onClick={handleReset}
           className="flex-1 py-1.5 rounded border border-surface-border text-surface-text hover:bg-surface-border/20 text-xs transition-colors"
         >
-          Reset Default
+          {t("pipeline.reset")}
         </button>
       </div>
     </div>

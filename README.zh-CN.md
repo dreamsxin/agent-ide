@@ -8,17 +8,15 @@ Agent IDE 的目标不是做一个聊天式代码工具，而是把 Agent 放进
 
 ## 当前状态
 
-**v0.2.0 已发布** —— 第一个打包可用的 IDE 版本（Windows NSIS 安装包）。Phase 7 已完成功能收口；Phase 8 日常 IDE 打磨与 Phase 9.0 市场对齐工作推进中。
+Phase 7 已完成功能收口。Phase 8 正在推进“可稳定替代 IDE 日常使用”的运行时打磨。
 
 能力快照：
 
 - 桌面 IDE 壳：Monaco 编辑器、Explorer、Git、Terminal、Problems、Logs、Commands 和 Agent 面板。
 - Agent 闭环：角色流水线、可编辑 Plan、上下文预览/预算、结构化 action log、`agent-changes` 协议、Diff 审查/应用/重新生成。
-- 项目记忆：workspace 根目录的 `AGENTS.md` 会注入 Agent 上下文（有边界、参与 token 预算、IDE 与 CLI 通用），Chat 上下文预览里可按运行开关。
-- Provider 原生工具调用（9.0.1）：OpenAI 兼容 `delta.tool_calls` 流式解析，本地/小模型保留 `agent-changes` 文本协议回退。
+- 项目记忆：workspace 根目录的 `AGENTS.md` 会注入 Agent 上下文（有边界、参与 token 预算、IDE 与 CLI 通用）。
 - 语义与运行闭环：TypeScript/JavaScript 和 Go LSP 第一版、diagnostics 到 Problems/editor markers、项目命令 Run History、terminal failure 上下文进入 Agent repair。
-- 自动化测试：Vitest 套件（53 个测试）、Rust 套件（127 个测试）、CLI smoke 覆盖，以及自动化视觉校对（`npm run visual:test`，无头 Edge/Chrome 截图校验 IDE 外壳）。
-- 自动化与发布：headless `agent_cli` 第一版和 Windows packaging workflow（含 SHA256 manifest）。
+- 自动化与发布：headless `agent_cli` 第一版和 Windows packaging workflow。
 
 详细实现状态、缺口和下一步任务以 [ROADMAP.md](ROADMAP.md) 为准。设计和协议文档见 [docs/agent_ide_design.md](docs/agent_ide_design.md)、[docs/agent_changes_schema.md](docs/agent_changes_schema.md) 和 [docs/smoke_test.md](docs/smoke_test.md)。
 
@@ -37,6 +35,9 @@ npm run tauri -- dev
 ```
 
 运行真实桌面 IDE，包含 Rust 后端和 Tauri API。
+
+跑起来之后，[docs/getting_started.md](docs/getting_started.md) 讲的是怎么配置模型、
+跑第一个任务、审查和撤销改动，以及快捷键。本文件其余部分是构建和架构内容。
 
 ## 环境准备
 
@@ -378,7 +379,6 @@ Error: WebView2 runtime not found
 ```powershell
 npm run build
 npm test
-npm run visual:test
 cd src-tauri
 cargo check
 cargo test
@@ -386,7 +386,7 @@ cargo test
 
 已知情况：Vite 目前会提示前端 chunk 较大，因为 Monaco、Markdown、xterm 和语法高亮工具打在一起。这不是正确性失败，后续需要做 code splitting。
 
-`npm run visual:test` 会用无头 Edge/Chrome 驱动 Vite web 预览，校验 IDE 外壳布局与面板交互，并把截图和 summary 保存到 `test-results/visual/`。它只覆盖 web 预览范围；如果改动涉及 LSP、Problems、Terminal、Git 或 Agent diff application，还需要按 [docs/smoke_test.md](docs/smoke_test.md) 执行真实 Tauri runtime 回归。
+如果改动涉及 LSP、Problems、Terminal、Git 或 Agent diff application，还需要按 [docs/smoke_test.md](docs/smoke_test.md) 执行真实 Tauri runtime 回归。
 
 ## Windows 打包
 
@@ -409,12 +409,6 @@ npm run package:windows:fast
 ```powershell
 npm run package:windows:nsis
 npm run package:windows:msi
-```
-
-在没有 LLVM/libclang 的机器上（或 Phase 9.3 本地推理引擎落地前），release 构建应跳过默认的 `llama-cpp` Cargo 特性；OpenAI 兼容 provider 不受影响：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -BundleTargets nsis -NoDefaultFeatures
 ```
 
 第一次 Windows bundle 可能需要通过 Tauri 下载 NSIS、`nsis_tauri_utils.dll` 和/或 WiX 工具链。如果本地下载工具时超时，可以在工具缓存完成后重跑命令，或者运行 `Windows Package` GitHub Actions workflow；该 workflow 会在 `windows-latest` 上构建并上传 artifacts。

@@ -84,7 +84,7 @@ Current limitations:
 | `review` command / `--review` mode | Future | Phase CLI-3 — per-file/per-hunk terminal review |
 | `apply` command (standalone, from saved changes) | Future | Phase CLI-3 |
 | `fix` command (from failure artifact) | Future | Phase CLI-3 |
-| `--permission suggest\|edit\|auto` | Future | Phase CLI-4 — broader permission policy |
+| `--permission suggest\|auto` | Future | Phase CLI-4 — broader permission policy |
 | `--allow-create`, `--allow-edit`, `--allow-delete` | Future | Phase CLI-4 — file mutation permissions |
 | `--allow-git` | Future | Phase CLI-4 — Git mutation permissions |
 | `--deny-path` | Future | Phase CLI-4 — path exclusion policy |
@@ -157,7 +157,7 @@ Recommended meanings:
 ### 3.3 Permission Options
 
 ```text
---permission suggest|edit|auto
+--permission suggest|auto
 --allow-create
 --allow-edit
 --allow-delete

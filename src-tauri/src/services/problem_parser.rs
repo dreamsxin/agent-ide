@@ -248,11 +248,32 @@ fn find_failed_test_files(output: &str) -> Vec<String> {
 }
 
 fn normalize_file(file: &str) -> String {
-    percent_decode(file.trim())
-        .trim_start_matches("file:///")
-        .trim_start_matches("file://")
-        .trim_start_matches('/')
-        .replace('\\', "/")
+    let decoded = percent_decode(file.trim());
+    match decoded.strip_prefix("file://") {
+        Some(rest) => normalize_uri_path(rest).replace('\\', "/"),
+        None => decoded.replace('\\', "/"),
+    }
+}
+
+/// 处理 `file://` 之后的部分。authority 为空，所以剩下的就是路径本体。
+///
+/// - `file:///D:/repo/x.ts` → `/D:/repo/x.ts`，盘符前那个斜杠属于 URI，要去掉。
+/// - `file:///tmp/repo/x.ts` → `/tmp/repo/x.ts`，这个斜杠是 Unix 根，必须留着。
+///   之前无条件去掉，Linux/macOS 上每条问题记录都变成了跳不过去的相对路径。
+/// - `file:////tmp/repo/x.ts` 是拼 URI 的一方多给了斜杠。多余的前导斜杠一律折叠，
+///   否则会造出一个根本不存在的根（`//tmp/...`）。
+fn normalize_uri_path(rest: &str) -> String {
+    let trimmed = rest.trim_start_matches('/');
+    let mut chars = trimmed.chars();
+    let starts_with_drive = matches!(
+        (chars.next(), chars.next()),
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+    );
+    if starts_with_drive || !rest.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    }
 }
 
 fn percent_decode(value: &str) -> String {
@@ -370,6 +391,51 @@ mod tests {
         assert_eq!(problems[0].column, 1);
         assert_eq!(problems[0].severity, "error");
         assert_eq!(problems[0].source, "test");
+    }
+
+    #[test]
+    fn keeps_the_leading_slash_of_unix_absolute_paths() {
+        // 之前无条件 trim_start_matches('/')，Linux/macOS 上绝对路径会被削成相对
+        // 路径，问题面板点进去就跳不到文件。
+        let output = "/tmp/repo/src/main.rs:12:4: error: expected expression";
+
+        let problems = parse_terminal_problems(output, "task");
+
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].file, "/tmp/repo/src/main.rs");
+    }
+
+    #[test]
+    fn strips_only_the_uri_slash_that_precedes_a_drive_letter() {
+        let problems = parse_terminal_problems(
+            "ReferenceError: boom\n    at file:///D:/repo/test.js:18:1",
+            "test",
+        );
+        assert_eq!(problems[0].file, "D:/repo/test.js");
+
+        let problems = parse_terminal_problems(
+            "ReferenceError: boom\n    at file:///tmp/repo/test.js:18:1",
+            "test",
+        );
+        assert_eq!(problems[0].file, "/tmp/repo/test.js");
+    }
+
+    #[test]
+    fn collapses_extra_slashes_from_a_malformed_file_uri() {
+        // 拼 URI 的一方用 `file:///` + Unix 绝对路径就会多出一个斜杠。
+        // 保留它会造出 `//tmp/...` 这种不存在的根。
+        let problems = parse_terminal_problems(
+            "ReferenceError: boom\n    at file:////tmp/repo/test.js:3:1",
+            "test",
+        );
+        assert_eq!(problems[0].file, "/tmp/repo/test.js");
+    }
+
+    #[test]
+    fn keeps_unc_style_paths_that_are_not_uris() {
+        let problems =
+            parse_terminal_problems("\\\\server\\share\\main.rs:4:2: error: bad", "task");
+        assert_eq!(problems[0].file, "//server/share/main.rs");
     }
 
     #[test]

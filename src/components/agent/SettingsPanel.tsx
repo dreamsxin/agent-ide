@@ -1,21 +1,54 @@
-import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { useAgentStore } from "../../stores/useAgentStore";
-import { isTauriRuntime } from "../../utils/tauri";
-import type { LocalModelType, ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
+import { microsToUsdInput, spendCapStatus, usdToMicros } from "../../utils/money";
+import { formatTokenCount, parseTokenInput } from "../../utils/tokenInput";
+import { estimateInputTokens } from "../../utils/contextBudget";
+import { modelLimits } from "../../utils/modelLimits";
+import {
+  llmConnectionCheckedAt,
+  llmConnectionIndicator,
+  llmTargetFingerprint,
+} from "../../stores/llmConnection";
+import McpPanel from "./McpPanel";
+import ProjectMemoryCard from "./ProjectMemoryCard";
+import { useT } from "../../i18n";
+import type { ModelProvider, ProviderPreset, AgentPermissionPreset } from "../../types/agent";
 
 type ToolCallMode = "text_protocol" | "native_tools";
 
-// ====== 提供商预设 ======
-const providerLabels: Record<string, string> = {
-  openai: "OpenAI",
-  anthropic: "Anthropic",
-  azure: "Azure OpenAI",
-  deepseek: "DeepSeek",
-  custom: "Custom",
-  local: "Local GGUF",
-};
+/** 连通性三档的字色；判断在 `stores/llmConnection.ts`，这里只是配色 */
+const CONNECTION_TONE_TEXT = {
+  ok: "text-accent-green",
+  warn: "text-diff-modify",
+  error: "text-diff-remove",
+} as const;
 
+/**
+ * 状态卡本身也跟着连通性走。
+ *
+ * 卡片整体是绿的、标题前面还有一个绿色实心圆点，而卡里那行 Connection 写着红色的
+ * Failed —— 那个绿点正是刚从状态栏拿掉的东西，不能换个面板又长回来。
+ */
+const CONNECTION_TONE_CARD = {
+  ok: {
+    shell: "border-accent-green/30 bg-accent-green/5",
+    header: "bg-accent-green/10 border-accent-green/20 text-accent-green",
+  },
+  warn: {
+    shell: "border-diff-modify/30 bg-diff-modify/5",
+    header: "bg-diff-modify/10 border-diff-modify/20 text-diff-modify",
+  },
+  error: {
+    shell: "border-diff-remove/30 bg-diff-remove/5",
+    header: "bg-diff-remove/10 border-diff-remove/20 text-diff-remove",
+  },
+} as const;
+
+// ====== 提供商预设 ======
+// 预设只管"连到哪、有哪些模型、用哪种工具协议"。
+// 窗口和输出上限**不在这里**：它们跟着模型走（`utils/modelLimits.ts`），因为同一家自己的
+// 模型之间上限能差两个数量级 —— 按供应商给一个值，在其中一边必然是错的。
 const PROVIDERS: ProviderPreset[] = [
   {
     id: "openai",
@@ -23,9 +56,6 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://api.openai.com/v1",
     defaultModel: "gpt-4o",
     models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
-    defaultMaxContextTokens: 128000,
-    defaultReservedOutputTokens: 4096,
-    defaultMaxOutputTokens: 4096,
   },
   {
     id: "anthropic",
@@ -38,9 +68,6 @@ const PROVIDERS: ProviderPreset[] = [
       "claude-3-haiku-20240307",
       "claude-3-5-sonnet-20241022",
     ],
-    defaultMaxContextTokens: 200000,
-    defaultReservedOutputTokens: 8192,
-    defaultMaxOutputTokens: 8192,
   },
   {
     id: "azure",
@@ -48,20 +75,15 @@ const PROVIDERS: ProviderPreset[] = [
     defaultEndpoint: "https://{resource}.openai.azure.com",
     defaultModel: "gpt-4",
     models: ["gpt-4", "gpt-4o", "gpt-35-turbo"],
-    defaultMaxContextTokens: 128000,
-    defaultReservedOutputTokens: 4096,
-    defaultMaxOutputTokens: 4096,
   },
   {
     id: "deepseek",
     label: "DeepSeek",
     defaultEndpoint: "https://api.deepseek.com",
     defaultModel: "deepseek-chat",
-    models: ["deepseek-chat", "deepseek-v4-flash"],
-    defaultMaxContextTokens: 64000,
-    defaultReservedOutputTokens: 4096,
-    defaultMaxOutputTokens: 4096,
+    models: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"],
   },
+
   {
     id: "custom",
     label: "Custom Provider",
@@ -82,28 +104,49 @@ const PROVIDERS: ProviderPreset[] = [
   },
 ];
 
+/**
+ * provider 的显示名。
+ *
+ * 只有 custom 这一档是描述而不是品牌名，需要翻译；其余是各家自己的写法，翻过去反而和它们的
+ * 文档对不上。名字过去有两处来源（一张 `providerLabels` 表加 `PROVIDERS[].label`），于是同一
+ * 个 provider 在状态卡里叫 Custom、在下拉里叫 Custom Provider。
+ */
+function providerLabel(id: string, t: ReturnType<typeof useT>): string {
+  if (id === "custom") return t("settings.provider.custom");
+  return PROVIDERS.find((p) => p.id === id)?.label ?? id;
+}
+
 // ====== SettingsPanel ======
 export default function SettingsPanel() {
+  const t = useT();
   const llmEndpoint = useAgentStore((s) => s.llmEndpoint);
   const llmModel = useAgentStore((s) => s.llmModel);
   const apiKeyMasked = useAgentStore((s) => s.apiKeyMasked);
   const llmConfigured = useAgentStore((s) => s.llmConfigured);
+  const llmConnection = useAgentStore((s) => s.llmConnection);
+  // 指纹在渲染时算：上一次的结果只在目标没变时才算数，见 stores/llmConnection.ts
+  const llmTarget = useAgentStore(llmTargetFingerprint);
   const llmProfiles = useAgentStore((s) => s.llmProfiles);
   const activeProfileId = useAgentStore((s) => s.activeProfileId);
   const fetchLlmConfig = useAgentStore((s) => s.fetchLlmConfig);
   const saveLlmProfile = useAgentStore((s) => s.saveLlmProfile);
+  const revealLlmApiKey = useAgentStore((s) => s.revealLlmApiKey);
   const deleteLlmProfile = useAgentStore((s) => s.deleteLlmProfile);
   const setActiveLlmProfile = useAgentStore((s) => s.setActiveLlmProfile);
   const testLlmConnection = useAgentStore((s) => s.testLlmConnection);
   const permissionPreset = useAgentStore((s) => s.permissionPreset);
   const permissions = useAgentStore((s) => s.permissions);
-  const permissionExtras = useAgentStore((s) => s.permissionExtras);
   const setPermissionPreset = useAgentStore((s) => s.setPermissionPreset);
   const togglePermission = useAgentStore((s) => s.togglePermission);
-  const setPermissionExtras = useAgentStore((s) => s.setPermissionExtras);
-  const loadPermissionPolicy = useAgentStore((s) => s.loadPermissionPolicy);
+  const setBrowserOrigins = useAgentStore((s) => s.setBrowserOrigins);
+  const setPageReadOrigins = useAgentStore((s) => s.setPageReadOrigins);
+  const setInputApps = useAgentStore((s) => s.setInputApps);
+  const setComputerApps = useAgentStore((s) => s.setComputerApps);
+  const setCaptureApps = useAgentStore((s) => s.setCaptureApps);
 
   const [profileId, setProfileId] = useState("");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState("");
   const [profileName, setProfileName] = useState("Default");
   const [provider, setProvider] = useState<ModelProvider>("openai");
   const [endpoint, setEndpoint] = useState("");
@@ -112,57 +155,43 @@ export default function SettingsPanel() {
   const [maxContextTokens, setMaxContextTokens] = useState("");
   const [reservedOutputTokens, setReservedOutputTokens] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
-  const [modelType, setModelType] = useState<LocalModelType>("starcoder");
-  const [modelPath, setModelPath] = useState("");
-  const [modelFile, setModelFile] = useState("");
-  const [nThreads, setNThreads] = useState("4");
-  const [nCtx, setNCtx] = useState("4096");
-  const [nGpuLayers, setNGpuLayers] = useState("0");
-  const [temperature, setTemperature] = useState("0.2");
-  const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("text_protocol");
+  const [maxRunTokens, setMaxRunTokens] = useState("");
+  // 价格和金额上限在界面上用美元，存到后端是整数微美元（见 usdToMicros）
+  const [promptPrice, setPromptPrice] = useState("");
+  const [completionPrice, setCompletionPrice] = useState("");
+  const [maxRunSpend, setMaxRunSpend] = useState("");
+  const spendCapState = spendCapStatus(promptPrice, completionPrice, maxRunSpend);
+  // 空串 = 不发这个参数（由供应商决定）。存成字符串而不是枚举：档位名是各家自己的词表，
+  // 前端替它收窄只会在下一个新档位出现时变成"设不了"
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  // 默认必须和后端的 `default_tool_call_mode()` 一致（那边是 `native_tools`）。
+  // 这里写 `text_protocol` 的后果不是"默认值不同"，而是**每一个**从界面保存的 profile 都
+  // 显式把后端的默认覆盖掉：工作区只读工具、MCP 工具、派子 Agent 全部只在原生工具档位下
+  // 通告，于是桌面用户拿到的是一个看不见文件的 Agent，而设置面板上那一栏看起来一切正常。
+  const [toolCallMode, setToolCallMode] = useState<ToolCallMode>("native_tools");
   const [saving, setSaving] = useState(false);
+  // "已保存"要用后端给的结论，而不是拿掩码串和 "not configured" 比。一份没被开启的明文
+  // 密钥掩码是 `sk-1****7890 (plaintext in config.json)`，字符串比较会判成已保存，于是
+  // 面板显示绿色 (saved)、允许留空提交，而每一次运行都失败。
+  // `api_key_usable` 缺失时退回旧的字符串判断：那是后端还没带这个字段的旧响应。
+  const activeProfile = llmProfiles.find((profile) => profile.id === (profileId || activeProfileId));
+  const hasSavedKey =
+    activeProfile?.api_key_usable ??
+    (Boolean(apiKeyMasked) && apiKeyMasked !== "not configured");
+
   const [message, setMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
-  const [localStatus, setLocalStatus] = useState<{ exists: boolean; loaded: boolean; modelPath: string } | null>(null);
-  const [loadingLocal, setLoadingLocal] = useState(false);
-  const [denyPathsText, setDenyPathsText] = useState(() => permissionExtras.denyPaths.join("\n"));
-  const [commandPatternsText, setCommandPatternsText] = useState(() =>
-    permissionExtras.allowedCommandPatterns.join("\n")
-  );
-  const [maxAutoAppliesText, setMaxAutoAppliesText] = useState(() =>
-    String(permissionExtras.maxAutoAppliesPerRun)
-  );
-  const [maxFilesText, setMaxFilesText] = useState(() =>
-    String(permissionExtras.maxFilesPerAutoApply)
-  );
+  const messageRef = useRef<HTMLDivElement>(null);
+
+  // 面板很长，触发保存/测试的按钮可能已经滚出视野，反馈不滚回来就等于没有反馈
+  useEffect(() => {
+    if (message) messageRef.current?.scrollIntoView({ block: "nearest" });
+  }, [message]);
+
 
   // 初始化：从后端加载配置
   useEffect(() => {
     fetchLlmConfig();
-    void loadPermissionPolicy();
-  }, [fetchLlmConfig, loadPermissionPolicy]);
-
-  // 后端权限策略加载后同步本地文本框
-  useEffect(() => {
-    setDenyPathsText(permissionExtras.denyPaths.join("\n"));
-    setCommandPatternsText(permissionExtras.allowedCommandPatterns.join("\n"));
-    setMaxAutoAppliesText(String(permissionExtras.maxAutoAppliesPerRun));
-    setMaxFilesText(String(permissionExtras.maxFilesPerAutoApply));
-  }, [permissionExtras]);
-
-  const commitPermissionExtras = useCallback(() => {
-    setPermissionExtras({
-      allowedCommandPatterns: commandPatternsText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-      denyPaths: denyPathsText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-      maxAutoAppliesPerRun: Math.max(1, parseInt(maxAutoAppliesText, 10) || 25),
-      maxFilesPerAutoApply: Math.max(1, parseInt(maxFilesText, 10) || 50),
-    });
-  }, [commandPatternsText, denyPathsText, maxAutoAppliesText, maxFilesText, setPermissionExtras]);
+  }, [fetchLlmConfig]);
 
   // 后端配置回来之后填充表单
   useEffect(() => {
@@ -177,14 +206,11 @@ export default function SettingsPanel() {
         setMaxContextTokens(numberToInput(active.maxContextTokens));
         setReservedOutputTokens(numberToInput(active.reservedOutputTokens));
         setMaxOutputTokens(numberToInput(active.maxOutputTokens));
-        setModelType(active.modelType ?? "starcoder");
-        setModelPath(active.modelPath ?? "");
-        setModelFile(active.modelFile ?? "");
-        setNThreads(numberToInput(active.nThreads) || "4");
-        setNCtx(numberToInput(active.nCtx) || "4096");
-        setNGpuLayers(numberToInput(active.nGpuLayers) || "0");
-        setTemperature(active.temperature !== undefined ? String(active.temperature) : "0.2");
-        setToolCallMode(active.toolCallMode ?? "text_protocol");
+        setMaxRunTokens(numberToInput(active.maxRunTokens));
+        setPromptPrice(microsToUsdInput(active.promptMicrosPerMillion));
+        setCompletionPrice(microsToUsdInput(active.completionMicrosPerMillion));
+        setMaxRunSpend(microsToUsdInput(active.maxRunSpendMicros));
+        setToolCallMode(active.toolCallMode ?? "native_tools");
       } else {
         setEndpoint(llmEndpoint);
         setModel(llmModel);
@@ -196,7 +222,10 @@ export default function SettingsPanel() {
     }
   }, [activeProfileId, llmConfigured, llmEndpoint, llmModel, llmProfiles]);
 
-  // 切换 provider 时自动填默认值
+  // 切换 provider 时自动填默认值。
+  //
+  // 预算不再由预设携带，而是按**模型**查表（`modelLimits`）：同一家自己的模型之间输出上限
+  // 能差两个数量级，按供应商给一个值必然在其中一边是错的。
   const handleProviderChange = useCallback(
     (p: ModelProvider) => {
       setProvider(p);
@@ -204,58 +233,75 @@ export default function SettingsPanel() {
       if (preset) {
         setEndpoint(preset.defaultEndpoint);
         setModel(preset.defaultModel);
-        setMaxContextTokens(numberToInput(preset.defaultMaxContextTokens));
+        const limits = modelLimits(preset.defaultModel);
+        // 模型表优先；本地 GGUF 这种"上限取决于你加载时给的 n_ctx、和模型名无关"的情况
+        // 才用预设自带的值
+        setMaxContextTokens(
+          numberToInput(limits?.contextWindow ?? preset.defaultMaxContextTokens)
+        );
+        setMaxOutputTokens(numberToInput(limits?.maxOutput ?? preset.defaultMaxOutputTokens));
+        // 预留输出通常留空：它有全局默认（4096），公式还会先退回 Max output。
+        // 多填一个数字只是多一处会过期的东西。
         setReservedOutputTokens(numberToInput(preset.defaultReservedOutputTokens));
-        setMaxOutputTokens(numberToInput(preset.defaultMaxOutputTokens));
-        setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
+        setToolCallMode(preset.defaultToolCallMode ?? "native_tools");
       }
       // 不清除 apiKey
     },
     []
   );
 
-  const refreshLocalStatus = useCallback(async () => {
-    if (provider !== "local" || !isTauriRuntime()) return;
-    try {
-      const status = await invoke<{ exists: boolean; loaded: boolean; modelPath: string }>("get_local_model_status", { profileId: profileId || null });
-      setLocalStatus(status);
-    } catch {
-      setLocalStatus(null);
-    }
-  }, [profileId, provider]);
+  /**
+   * 换模型时跟着换预算。
+   *
+   * 只覆盖"还空着"或"正好等于上一个模型那一档"的框：用户手填过的值不能被一次换模型悄悄改掉，
+   * 而一个明显属于上一个模型的值留在那里更糟 —— 那会让估算和真实上限对不上，而界面看不出来。
+   */
+  const handleModelChange = useCallback(
+    (next: string) => {
+      const before = modelLimits(model);
+      const after = modelLimits(next);
+      setModel(next);
+      setMaxContextTokens((current) =>
+        shouldAdoptModelLimit(current, before?.contextWindow)
+          ? numberToInput(after?.contextWindow)
+          : current
+      );
+      setMaxOutputTokens((current) =>
+        shouldAdoptModelLimit(current, before?.maxOutput) ? numberToInput(after?.maxOutput) : current
+      );
+    },
+    [model]
+  );
 
-  useEffect(() => {
-    void refreshLocalStatus();
-  }, [refreshLocalStatus, modelFile, modelPath]);
 
-  const handleLocalLoad = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    setLoadingLocal(true);
-    try {
-      const status = await invoke<{ exists: boolean; loaded: boolean; modelPath: string }>("load_local_model", { profileId: profileId || null });
-      setLocalStatus(status);
-      setMessage({ type: "ok", text: "Local model loaded" });
-    } catch (error) {
-      setMessage({ type: "err", text: `Local model failed: ${error}` });
-    } finally {
-      setLoadingLocal(false);
-    }
-  }, [profileId]);
-
-  const handleLocalUnload = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    await invoke("unload_local_model", { profileId: profileId || null });
-    await refreshLocalStatus();
-  }, [profileId, refreshLocalStatus]);
 
   // 保存
-  const handleSave = useCallback(async () => {
-    if (!profileName.trim() || !model.trim() || (provider !== "local" && !endpoint.trim())) {
-      setMessage({ type: "err", text: provider === "local" ? "Profile name and model are required" : "Profile name, endpoint, and model are required" });
+  /** 眼睛图标：显示时向后端取一次明文，隐藏时只清本地状态 */
+  const handleToggleReveal = useCallback(async () => {
+    setRevealError("");
+    if (revealedKey !== null) {
+      setRevealedKey(null);
       return;
     }
-    if (provider !== "local" && !profileId && !apiKey.trim()) {
-      setMessage({ type: "err", text: "Secret key is required for a new profile" });
+    try {
+      setRevealedKey(await revealLlmApiKey(profileId || null));
+    } catch (e) {
+      setRevealError(t("settings.err.reveal", { error: String(e) }));
+    }
+  }, [profileId, revealLlmApiKey, revealedKey, t]);
+
+  const handleSave = useCallback(async () => {
+    if (!profileName.trim() || !model.trim() || (provider !== "local" && !endpoint.trim())) {
+      setMessage({
+        type: "err",
+        text: provider === "local" ? t("settings.err.requiredLocal") : t("settings.err.required"),
+      });
+      return;
+    }
+    // 判断依据是"是否已有可读密钥"，而不是"是否是新 profile"：
+    // 引导出来的 profile 有 id 但密钥可能从未真正存进凭据存储。
+    if (provider !== "local" && !hasSavedKey && !apiKey.trim()) {
+      setMessage({ type: "err", text: t("settings.err.keyRequired") });
       return;
     }
     setSaving(true);
@@ -268,27 +314,26 @@ export default function SettingsPanel() {
         endpoint: endpoint.trim(),
         apiKey: apiKey.trim() || undefined,
         model: model.trim(),
-        maxContextTokens: inputToNumber(maxContextTokens),
-        reservedOutputTokens: inputToNumber(reservedOutputTokens),
-        maxOutputTokens: inputToNumber(maxOutputTokens),
+        maxContextTokens: parseTokenInput(maxContextTokens),
+        reservedOutputTokens: parseTokenInput(reservedOutputTokens),
+        maxOutputTokens: parseTokenInput(maxOutputTokens),
+        reasoningEffort: reasoningEffort === "" ? undefined : reasoningEffort,
+        maxRunTokens: parseTokenInput(maxRunTokens),
+        promptMicrosPerMillion: usdToMicros(promptPrice),
+        completionMicrosPerMillion: usdToMicros(completionPrice),
+        maxRunSpendMicros: usdToMicros(maxRunSpend),
         toolCallMode,
-        modelType: provider === "local" ? modelType : undefined,
-        modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
-        modelFile: provider === "local" ? modelFile.trim() || undefined : undefined,
-        nThreads: provider === "local" ? inputToNumber(nThreads) : undefined,
-        nCtx: provider === "local" ? inputToNumber(nCtx) : undefined,
-        nGpuLayers: provider === "local" ? Number(nGpuLayers) || 0 : undefined,
-        temperature: provider === "local" ? Number(temperature) || 0.2 : undefined,
         setActive: true,
       });
-      setMessage({ type: "ok", text: "Saved successfully" });
+      setMessage({ type: "ok", text: t("settings.msg.saved") });
       setApiKey(""); // 保存后清空输入框中的 key
+      setRevealedKey(null); // 明文回显必须重新点一次才显示，避免展示过期值
     } catch (e) {
-      setMessage({ type: "err", text: `Save failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.save", { error: String(e) }) });
     } finally {
       setSaving(false);
     }
-  }, [apiKey, endpoint, maxContextTokens, maxOutputTokens, model, modelFile, modelPath, modelType, nCtx, nGpuLayers, nThreads, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, temperature, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, t, toolCallMode]);
 
   // 测试连接
   const [testing, setTesting] = useState(false);
@@ -305,34 +350,32 @@ export default function SettingsPanel() {
           endpoint: endpoint.trim(),
           apiKey: apiKey.trim(),
           model: model.trim(),
-          maxContextTokens: inputToNumber(maxContextTokens),
-          reservedOutputTokens: inputToNumber(reservedOutputTokens),
-          maxOutputTokens: inputToNumber(maxOutputTokens),
+          maxContextTokens: parseTokenInput(maxContextTokens),
+          reservedOutputTokens: parseTokenInput(reservedOutputTokens),
+          maxOutputTokens: parseTokenInput(maxOutputTokens),
+          reasoningEffort: reasoningEffort === "" ? undefined : reasoningEffort,
+          maxRunTokens: parseTokenInput(maxRunTokens),
+          promptMicrosPerMillion: usdToMicros(promptPrice),
+          completionMicrosPerMillion: usdToMicros(completionPrice),
+          maxRunSpendMicros: usdToMicros(maxRunSpend),
           toolCallMode,
-          modelType: provider === "local" ? modelType : undefined,
-          modelPath: provider === "local" ? modelPath.trim() || undefined : undefined,
-          modelFile: provider === "local" ? modelFile.trim() || undefined : undefined,
-          nThreads: provider === "local" ? inputToNumber(nThreads) : undefined,
-          nCtx: provider === "local" ? inputToNumber(nCtx) : undefined,
-          nGpuLayers: provider === "local" ? Number(nGpuLayers) || 0 : undefined,
-          temperature: provider === "local" ? Number(temperature) || 0.2 : undefined,
           setActive: true,
         });
         setApiKey(""); // 保存后清空输入框
       }
       // 后端已有配置，直接测试
       if (!llmConfigured) {
-        setMessage({ type: "err", text: "No config saved. Fill fields and click Save first." });
+        setMessage({ type: "err", text: t("settings.err.noConfig") });
         return;
       }
       const result = await testLlmConnection();
       setMessage({ type: "ok", text: result });
     } catch (e) {
-      setMessage({ type: "err", text: `Test failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.test", { error: String(e) }) });
     } finally {
       setTesting(false);
     }
-  }, [apiKey, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, model, profileId, profileName, provider, reservedOutputTokens, saveLlmProfile, testLlmConnection, toolCallMode]);
+  }, [apiKey, completionPrice, endpoint, llmConfigured, maxContextTokens, maxOutputTokens, maxRunSpend, maxRunTokens, model, profileId, profileName, promptPrice, provider, reservedOutputTokens, saveLlmProfile, t, testLlmConnection, toolCallMode]);
 
   const handleProfileSelect = useCallback((id: string) => {
     const profile = llmProfiles.find((item) => item.id === id);
@@ -345,7 +388,12 @@ export default function SettingsPanel() {
     setMaxContextTokens(numberToInput(profile.maxContextTokens));
     setReservedOutputTokens(numberToInput(profile.reservedOutputTokens));
     setMaxOutputTokens(numberToInput(profile.maxOutputTokens));
-    setToolCallMode(profile.toolCallMode ?? "text_protocol");
+    setMaxRunTokens(numberToInput(profile.maxRunTokens));
+    setPromptPrice(microsToUsdInput(profile.promptMicrosPerMillion));
+    setCompletionPrice(microsToUsdInput(profile.completionMicrosPerMillion));
+    setMaxRunSpend(microsToUsdInput(profile.maxRunSpendMicros));
+        setToolCallMode(profile.toolCallMode ?? "native_tools");
+    setReasoningEffort(profile.reasoningEffort ?? "");
     setApiKey("");
   }, [llmProfiles]);
 
@@ -359,7 +407,13 @@ export default function SettingsPanel() {
     setMaxContextTokens("");
     setReservedOutputTokens("");
     setMaxOutputTokens("");
-    setToolCallMode(preset.defaultToolCallMode ?? "text_protocol");
+    // 上限和价格也要清掉：新 profile 通常是另一个模型，沿用上一个的价格会让
+    // 金额上限按错误的单价执行，那比没有上限更糟
+    setMaxRunTokens("");
+    setPromptPrice("");
+    setCompletionPrice("");
+    setMaxRunSpend("");
+    setToolCallMode(preset.defaultToolCallMode ?? "native_tools");
     setApiKey("");
   }, []);
 
@@ -367,76 +421,101 @@ export default function SettingsPanel() {
     if (!profileId) return;
     try {
       await setActiveLlmProfile(profileId);
-      setMessage({ type: "ok", text: "Default profile updated" });
+      setMessage({ type: "ok", text: t("settings.msg.defaultUpdated") });
     } catch (e) {
-      setMessage({ type: "err", text: `Set default failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.setDefault", { error: String(e) }) });
     }
-  }, [profileId, setActiveLlmProfile]);
+  }, [profileId, setActiveLlmProfile, t]);
 
   const handleDelete = useCallback(async () => {
     if (!profileId) return;
     try {
       await deleteLlmProfile(profileId);
-      setMessage({ type: "ok", text: "Profile deleted" });
+      setMessage({ type: "ok", text: t("settings.msg.deleted") });
     } catch (e) {
-      setMessage({ type: "err", text: `Delete failed: ${e}` });
+      setMessage({ type: "err", text: t("settings.err.delete", { error: String(e) }) });
     }
-  }, [deleteLlmProfile, profileId]);
+  }, [deleteLlmProfile, profileId, t]);
 
   const preset = PROVIDERS.find((p) => p.id === provider);
+  // 窗口用填的那个；没填就按**模型**查表。表按模型 id 匹配而不是按供应商：同一家自己的模型
+  // 之间上限能差两个数量级，而同一个模型又会被好几个端点转发。
+  const knownLimits = modelLimits(model);
+  const windowForEstimate = parseTokenInput(maxContextTokens) ?? knownLimits?.contextWindow;
+  const inputBudget = estimateInputTokens(
+    windowForEstimate,
+    parseTokenInput(reservedOutputTokens),
+    parseTokenInput(maxOutputTokens)
+  );
+  const windowIsFromTable =
+    parseTokenInput(maxContextTokens) === undefined && windowForEstimate !== undefined;
+  const connectionState = llmConnectionIndicator(llmConnection, llmTarget);
+  const connectionCheckedAt = llmConnectionCheckedAt(llmConnection, llmTarget);
 
   return (
     <div className="p-3 text-xs overflow-auto h-full">
       <div className="text-surface-muted mb-3 font-semibold tracking-wide">
-        Provider Profiles
+        {t("settings.title")}
       </div>
 
       {/* 当前配置状态卡 */}
       {llmConfigured ? (
-        <div className="mb-4 rounded border border-accent-green/30 bg-accent-green/5 overflow-hidden">
-          <div className="px-3 py-1.5 bg-accent-green/10 border-b border-accent-green/20 text-accent-green text-[11px] font-medium flex items-center gap-1.5">
-            <span>●</span> LLM Service Configured
+        <div className={`mb-4 rounded border overflow-hidden ${CONNECTION_TONE_CARD[connectionState.tone].shell}`}>
+          <div className={`px-3 py-1.5 border-b text-[11px] font-medium flex items-center gap-1.5 ${CONNECTION_TONE_CARD[connectionState.tone].header}`}>
+            <span>●</span> {t("settings.configured")}
           </div>
           <div className="px-3 py-2 space-y-1 text-[11px]">
             <div className="flex justify-between">
-              <span className="text-surface-muted">Provider</span>
-              <span className="text-surface-text font-medium">{providerLabels[provider] ?? provider}</span>
+              <span className="text-surface-muted">{t("settings.field.provider")}</span>
+              <span className="text-surface-text font-medium">{providerLabel(provider, t)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Model</span>
+              <span className="text-surface-muted">{t("settings.field.model")}</span>
               <span className="text-surface-text font-mono">{llmModel}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Endpoint</span>
+              <span className="text-surface-muted">{t("settings.field.endpoint")}</span>
               <span className="text-surface-text font-mono text-[10px] truncate max-w-[160px]" title={llmEndpoint}>{new URL(llmEndpoint).hostname}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">API Key</span>
+              <span className="text-surface-muted">{t("settings.field.apiKey")}</span>
               <span className="text-surface-text font-mono">{apiKeyMasked || '****'}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-surface-muted">Tools</span>
+              <span className="text-surface-muted">{t("settings.field.tools")}</span>
               <span className="text-surface-text font-mono text-[10px]">{toolCallMode}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-muted">{t("settings.field.connection")}</span>
+              <span
+                className={`font-mono text-[10px] ${CONNECTION_TONE_TEXT[connectionState.tone]}`}
+                title={connectionState.title}
+              >
+                {connectionState.label}
+                {connectionCheckedAt
+                  ? ` · ${new Date(connectionCheckedAt).toLocaleTimeString()}`
+                  : ""}
+              </span>
             </div>
           </div>
         </div>
       ) : (
         <div className="mb-4 px-3 py-2 rounded border border-surface-border bg-surface-border/10 text-surface-muted text-[11px]">
-          No LLM service configured. Fill in the form below to connect an AI model.
+          {t("settings.notConfigured")}
         </div>
       )}
 
-      <label className="block text-surface-muted mb-1 text-[11px]">Profile</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.profile")}</label>
       <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] gap-1">
         <select
           value={profileId}
           onChange={(e) => handleProfileSelect(e.target.value)}
           className="min-w-0 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
         >
-          <option value="">New profile</option>
+          <option value="">{t("settings.profile.new")}</option>
           {llmProfiles.map((profile) => (
             <option key={profile.id} value={profile.id}>
-              {profile.name}{profile.id === activeProfileId ? " (default)" : ""}
+              {profile.name}{profile.id === activeProfileId ? t("settings.profile.defaultSuffix") : ""}
             </option>
           ))}
         </select>
@@ -445,21 +524,21 @@ export default function SettingsPanel() {
           onClick={handleNewProfile}
           className="rounded border border-surface-border px-2 py-1 text-[11px] text-surface-muted hover:text-surface-text"
         >
-          New
+          {t("settings.profile.newButton")}
         </button>
       </div>
 
-      <label className="block text-surface-muted mb-1 text-[11px]">Profile Name</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.profileName")}</label>
       <input
         type="text"
         value={profileName}
         onChange={(e) => setProfileName(e.target.value)}
-        placeholder="Work OpenAI"
+        placeholder={t("settings.profileName.placeholder")}
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
       />
 
       {/* Provider 下拉 */}
-      <label className="block text-surface-muted mb-1 text-[11px]">AI Provider</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.provider")}</label>
       <select
         value={provider}
         onChange={(e) => handleProviderChange(e.target.value as ModelProvider)}
@@ -467,13 +546,13 @@ export default function SettingsPanel() {
       >
         {PROVIDERS.map((p) => (
           <option key={p.id} value={p.id}>
-            {p.label}
+            {providerLabel(p.id, t)}
           </option>
         ))}
       </select>
 
       {/* Endpoint */}
-      <label className="block text-surface-muted mb-1 text-[11px]">API Base URL</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.endpoint")}</label>
       <input
         type="text"
         value={endpoint}
@@ -483,65 +562,67 @@ export default function SettingsPanel() {
       />
 
       {provider === "local" && (
-        <div className="mb-3 rounded border border-accent-blue/30 bg-accent-blue/5 p-2 space-y-2">
-          <div className="text-[11px] font-semibold text-surface-muted">Local model runtime</div>
-          <label className="block text-surface-muted text-[10px]">Model type
-            <select value={modelType} onChange={(e) => setModelType(e.target.value as LocalModelType)} className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text">
-              <option value="starcoder">StarCoder</option>
-              <option value="codellama">CodeLlama</option>
-              <option value="deepseek-coder">DeepSeek Coder</option>
-              <option value="codegemma">CodeGemma</option>
-            </select>
-          </label>
-          <label className="block text-surface-muted text-[10px]">Model directory
-            <input type="text" value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="~/.agent-ide/models" className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text font-mono" />
-          </label>
-          <label className="block text-surface-muted text-[10px]">GGUF file
-            <input type="text" value={modelFile} onChange={(e) => setModelFile(e.target.value)} placeholder="model.gguf" className="mt-1 w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text font-mono" />
-          </label>
-          <div className="grid grid-cols-3 gap-1">
-            <BudgetInput label="Threads" value={nThreads} onChange={setNThreads} placeholder="4" />
-            <BudgetInput label="Context" value={nCtx} onChange={setNCtx} placeholder="4096" />
-            <BudgetInput label="GPU layers" value={nGpuLayers} onChange={setNGpuLayers} placeholder="0" />
-          </div>
-          <BudgetInput label="Temperature" value={temperature} onChange={setTemperature} placeholder="0.2" />
-          <div className="text-[10px] leading-relaxed text-surface-muted">The model must be downloaded locally. Agent output is streamed through the same reviewable diff pipeline.</div>
-          <div className="flex items-center justify-between gap-2 border-t border-surface-border pt-2 text-[10px]">
-            <span className={localStatus?.loaded ? "text-accent-green" : "text-surface-muted"}>
-              {localStatus?.loaded ? "Loaded" : localStatus?.exists ? "Ready to load" : "Model file not found"}
-            </span>
-            <div className="flex gap-1">
-              <button type="button" onClick={refreshLocalStatus} className="rounded border border-surface-border px-2 py-1 text-surface-muted hover:text-surface-text">Refresh</button>
-              <button type="button" onClick={handleLocalLoad} disabled={loadingLocal || !localStatus?.exists} className="rounded border border-accent-green/40 px-2 py-1 text-accent-green disabled:opacity-40">{loadingLocal ? "Loading..." : "Load"}</button>
-              <button type="button" onClick={handleLocalUnload} disabled={!localStatus?.loaded} className="rounded border border-surface-border px-2 py-1 text-surface-muted disabled:opacity-40">Unload</button>
-            </div>
-          </div>
-          {localStatus?.modelPath && <div className="truncate font-mono text-[10px] text-surface-muted" title={localStatus.modelPath}>{localStatus.modelPath}</div>}
+        <div className="mb-3 rounded border border-accent-blue/30 bg-accent-blue/5 p-2 text-[10px] leading-relaxed text-surface-muted">
+          {t("settings.local.note", {
+            ollama: "http://localhost:11434/v1",
+            lmstudio: "http://localhost:1234/v1",
+          })}
         </div>
       )}
 
+
       {/* API Key */}
       <label className="block text-surface-muted mb-1 text-[11px]">
-        Secret Key {apiKeyMasked && <span className="text-[10px] text-accent-green">(saved)</span>}
+        {t("settings.secretKey")} {hasSavedKey && <span className="text-[10px] text-accent-green">{t("settings.secretKey.saved")}</span>}
       </label>
       <input
         type="password"
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
-        placeholder={apiKeyMasked ? "Enter to overwrite..." : "sk-..."}
-        className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
+        placeholder={hasSavedKey ? t("settings.secretKey.overwrite") : t("settings.secretKey.placeholder")}
+        className="w-full mb-1 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
 
+      {/* 已保存的密钥回显：默认掩码，点眼睛取一次明文。
+          apiKeyMasked 现在由后端实际探测凭据存储得出，所以这里显示
+          "not configured" 就意味着真的没存上，而不是界面猜的。 */}
+      <div className="mb-3 flex items-center gap-1.5 text-[10px]">
+        <span className="text-surface-muted">{t("settings.stored")}</span>
+        <code
+          data-testid="settings-stored-key"
+          className="min-w-0 flex-1 truncate rounded bg-surface-border/40 px-1 py-0.5 font-mono text-surface-text"
+        >
+          {revealedKey ?? apiKeyMasked ?? t("settings.stored.none")}
+        </code>
+        {hasSavedKey && (
+          <button
+            type="button"
+            onClick={handleToggleReveal}
+            title={revealedKey ? t("settings.key.hide") : t("settings.key.show")}
+            aria-label={revealedKey ? t("settings.key.hide") : t("settings.key.show")}
+            className="flex-shrink-0 rounded border border-surface-border px-1 py-0.5 text-surface-muted hover:text-surface-text"
+          >
+            {revealedKey ? <EyeOff size={11} /> : <Eye size={11} />}
+          </button>
+        )}
+      </div>
+      {revealError && (
+        <div className="mb-3 rounded border border-diff-remove/40 bg-diff-remove/10 px-2 py-1 text-[10px] text-diff-remove">
+          {revealError}
+        </div>
+      )}
+
+
       {/* Model */}
-      <label className="block text-surface-muted mb-1 text-[11px]">Model Name</label>
+      <label className="block text-surface-muted mb-1 text-[11px]">{t("settings.model")}</label>
       {preset && preset.models.length > 0 ? (
         <>
           <select
             value={model}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(e) => handleModelChange(e.target.value)}
             className="w-full mb-1 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue"
           >
-            <option value="">-- Select --</option>
+            <option value="">{t("settings.model.select")}</option>
             {preset.models.map((m) => (
               <option key={m} value={m}>
                 {m}
@@ -549,65 +630,161 @@ export default function SettingsPanel() {
             ))}
           </select>
           <div className="flex gap-1 mb-3">
-            <span className="text-[10px] text-surface-muted">or custom:</span>
+            <span className="text-[10px] text-surface-muted">{t("settings.model.orCustom")}</span>
           </div>
         </>
       ) : null}
       <input
         type="text"
         value={model}
-        onChange={(e) => setModel(e.target.value)}
-        placeholder="e.g. gpt-4o, claude-3-opus-20240229"
+        onChange={(e) => handleModelChange(e.target.value)}
+        placeholder={t("settings.model.placeholder")}
         className="w-full mb-3 px-2 py-1.5 rounded bg-surface-base border border-surface-border text-surface-text text-xs outline-none focus:border-accent-blue font-mono"
       />
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Context Budget Estimate
+          {t("settings.budget.title")}
         </div>
         <div className="grid grid-cols-3 gap-2">
           <BudgetInput
-            label="Max context"
+            label={t("settings.budget.maxContext")}
+            title={t("settings.budget.maxContext.title")}
             value={maxContextTokens}
             onChange={setMaxContextTokens}
-            placeholder="128000"
+            placeholder={t("settings.budget.maxContext.ph")}
+            unit="tokens"
           />
           <BudgetInput
-            label="Reserved output"
+            label={t("settings.budget.reserved")}
+            title={t("settings.budget.reserved.title")}
             value={reservedOutputTokens}
             onChange={setReservedOutputTokens}
-            placeholder="4096"
+            placeholder={t("settings.budget.reserved.ph")}
+            unit="tokens"
           />
           <BudgetInput
-            label="Max output"
+            label={t("settings.budget.maxOutput")}
+            title={t("settings.budget.maxOutput.title")}
             value={maxOutputTokens}
             onChange={setMaxOutputTokens}
-            placeholder="4096"
+            placeholder={t("settings.budget.maxOutput.ph")}
+            unit="tokens"
+          />
+
+          <BudgetInput
+            label={t("settings.budget.runCap")}
+            title={t("settings.budget.runCap.title")}
+            value={maxRunTokens}
+            onChange={setMaxRunTokens}
+            placeholder={t("settings.budget.runCap.ph")}
+            unit="tokens"
           />
         </div>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
-          Effective input estimate:{" "}
+          {t("settings.budget.estimate")}{" "}
           <span className="font-mono text-surface-text">
-            {formatTokenBudget(estimateInputTokens(maxContextTokens, reservedOutputTokens, maxOutputTokens))}
-          </span>
-          . This is model metadata for budgeting; current context modes still control compression strategy.
+            {inputBudget === undefined ? t("settings.budget.unknown") : inputBudget.toLocaleString()}
+          </span>{" "}
+          {inputBudget === undefined
+            ? t("settings.budget.explain.empty")
+            : windowIsFromTable
+            ? t("settings.budget.explain.fromTable", {
+                window: windowForEstimate?.toLocaleString() ?? "",
+                model,
+              })
+            : t("settings.budget.explain.known")}{" "}
+          {t("settings.budget.shorthand")}{" "}
+          <span className="text-surface-text">{t("settings.budget.modelFill")}</span>{" "}
+          {t("settings.budget.modelFill.detail")}{" "}
+          <span className="text-surface-text">{t("settings.budget.maxOutputNote")}</span>{" "}
+          {t("settings.budget.maxOutputNote.detail")}
+        </div>
+
+
+      </div>
+
+
+
+      <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">
+          {t("settings.spend.title")}
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <BudgetInput
+            label={t("settings.spend.input")}
+            title={t("settings.spend.input.title")}
+            value={promptPrice}
+            onChange={setPromptPrice}
+            placeholder="0.28"
+            unit="usd"
+            step="0.000001"
+          />
+          <BudgetInput
+            label={t("settings.spend.output")}
+            title={t("settings.spend.output.title")}
+            value={completionPrice}
+            onChange={setCompletionPrice}
+            placeholder="0.42"
+            unit="usd"
+            step="0.000001"
+          />
+          <BudgetInput
+            label={t("settings.spend.cap")}
+            title={t("settings.spend.cap.title")}
+            value={maxRunSpend}
+            onChange={setMaxRunSpend}
+            placeholder={t("settings.budget.runCap.ph")}
+            unit="usd"
+            step="0.01"
+          />
+        </div>
+
+        <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
+          {spendCapState === "active" ? (
+            t("settings.spend.active", { cap: maxRunSpend })
+          ) : spendCapState === "no_price" ? (
+            <span className="text-amber-300">{t("settings.spend.noPrice")}</span>
+          ) : (
+            t("settings.spend.inactive")
+          )}
         </div>
       </div>
 
       <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
         <div className="mb-2 text-[11px] font-semibold text-surface-muted">
-          Tool Call Mode
+          {t("settings.reasoning.title")}
+        </div>
+        <select
+          value={reasoningEffort}
+          onChange={(event) => setReasoningEffort(event.target.value)}
+          className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+        >
+          <option value="">{t("settings.reasoning.default")}</option>
+          <option value="off">{t("settings.reasoning.off")}</option>
+          <option value="low">{t("settings.reasoning.low")}</option>
+          <option value="medium">{t("settings.reasoning.medium")}</option>
+          <option value="high">{t("settings.reasoning.high")}</option>
+        </select>
+        <div className="mt-1.5 text-[10px] leading-relaxed text-surface-muted">
+          {t("settings.reasoning.help")}
+        </div>
+      </div>
+
+      <div className="mb-3 rounded border border-surface-border bg-surface-border/10 p-2">
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted">
+          {t("settings.toolMode.title")}
         </div>
         <select
           value={toolCallMode}
           onChange={(event) => setToolCallMode(event.target.value as ToolCallMode)}
           className="w-full rounded border border-surface-border bg-surface-base px-2 py-1.5 text-xs text-surface-text outline-none focus:border-accent-blue"
         >
-          <option value="text_protocol">Text protocol</option>
-          <option value="native_tools">Provider-native tools</option>
+          <option value="native_tools">{t("settings.toolMode.native")}</option>
+          <option value="text_protocol">{t("settings.toolMode.text")}</option>
         </select>
         <div className="mt-2 text-[10px] leading-relaxed text-surface-muted">
-          Native tools advertises Agent changes and SDD drafts as provider tool schemas; text protocol remains the fallback path.
+          {t("settings.toolMode.help")}
         </div>
       </div>
 
@@ -617,156 +794,16 @@ export default function SettingsPanel() {
         disabled={saving}
         className="w-full py-1.5 rounded bg-accent-blue hover:bg-accent-blue/80 text-white text-xs font-medium disabled:opacity-50 transition-colors"
       >
-        {saving ? "Saving..." : "Save Profile"}
+        {saving ? t("settings.saving") : t("settings.save")}
       </button>
 
-      {/* ▸▸▸▸ Agent Permission Settings ▸▸▸▸ */}
-      <div className="mt-4 pt-3 border-t border-surface-border">
-        <div className="mb-2 text-[11px] font-semibold text-surface-muted tracking-wide">
-          Agent Permissions
-        </div>
-
-        {/* Permission Preset */}
-        <label className="block text-surface-muted mb-1 text-[11px]">Permission Preset</label>
-        <div className="mb-2 grid grid-cols-3 gap-1">
-          {(["ask", "suggest", "auto"] as AgentPermissionPreset[]).map((preset) => (
-            <button
-              key={preset}
-              onClick={() => setPermissionPreset(preset)}
-              className={`rounded border px-2 py-1.5 text-[11px] font-medium transition-colors ${
-                permissionPreset === preset
-                  ? "border-accent-blue bg-accent-blue/10 text-accent-blue"
-                  : "border-surface-border text-surface-muted hover:text-surface-text"
-              }`}
-            >
-              {preset === "ask" ? "\u{2753} Ask" : preset === "suggest" ? "\u{1F4DD} Suggest" : "\u{26A1} Auto"}
-            </button>
-          ))}
-        </div>
-        <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
-          {permissionPreset === "ask"
-            ? "Always confirm before any file or command operation; Auto mode never applies diffs unattended."
-            : permissionPreset === "suggest"
-            ? "Diffs wait for review; Auto mode never applies diffs unattended."
-            : "Auto mode may apply diffs unattended within the toggles, denied paths, and caps below."}
-        </p>
-
-        {/* Granular Toggles */}
-        <div className="mb-3 space-y-1.5 rounded border border-surface-border bg-surface-border/10 p-2">
-          <PermissionToggle
-            label="File Creation"
-            desc="Allow Agent to create new files"
-            checked={permissions.allowFileCreate}
-            onChange={() => togglePermission("allowFileCreate")}
-          />
-          <PermissionToggle
-            label="File Editing"
-            desc="Allow Agent to modify existing files"
-            checked={permissions.allowFileEdit}
-            onChange={() => togglePermission("allowFileEdit")}
-          />
-          <PermissionToggle
-            label="File Deletion"
-            desc="Allow Agent to delete files (destructive)"
-            checked={permissions.allowFileDelete}
-            onChange={() => togglePermission("allowFileDelete")}
-          />
-          <PermissionToggle
-            label="Command Execution"
-            desc="Allow Agent to run shell commands (destructive)"
-            checked={permissions.allowCommandRun}
-            onChange={() => togglePermission("allowCommandRun")}
-          />
-          <PermissionToggle
-            label="Git Actions"
-            desc="Allow Agent to perform git push/force operations"
-            checked={permissions.allowGitActions}
-            onChange={() => togglePermission("allowGitActions")}
-          />
-        </div>
-
-        {/* Deny paths / command patterns / per-run caps */}
-        <label className="block text-surface-muted mb-1 text-[11px]">Denied paths (one per line)</label>
-        <textarea
-          value={denyPathsText}
-          onChange={(event) => setDenyPathsText(event.target.value)}
-          onBlur={commitPermissionExtras}
-          rows={2}
-          placeholder={".env\nsecrets/"}
-          className="mb-2 w-full resize-y rounded border border-surface-border bg-surface-panel p-1.5 font-mono text-[10px] text-surface-text outline-none focus:border-accent-blue"
-        />
-        {permissions.allowCommandRun && (
-          <>
-            <label className="block text-surface-muted mb-1 text-[11px]">
-              Allowed command patterns (one per line, `*` wildcard)
-            </label>
-            <textarea
-              value={commandPatternsText}
-              onChange={(event) => setCommandPatternsText(event.target.value)}
-              onBlur={commitPermissionExtras}
-              rows={2}
-              placeholder={"npm test\ncargo *"}
-              className="mb-2 w-full resize-y rounded border border-surface-border bg-surface-panel p-1.5 font-mono text-[10px] text-surface-text outline-none focus:border-accent-blue"
-            />
-          </>
-        )}
-        <div className="mb-1 grid grid-cols-2 gap-2">
-          <label className="block text-[11px] text-surface-muted">
-            Max auto-applies / run
-            <input
-              type="number"
-              min={1}
-              value={maxAutoAppliesText}
-              onChange={(event) => setMaxAutoAppliesText(event.target.value)}
-              onBlur={commitPermissionExtras}
-              className="mt-0.5 w-full rounded border border-surface-border bg-surface-panel px-1.5 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
-            />
-          </label>
-          <label className="block text-[11px] text-surface-muted">
-            Max files / auto-apply
-            <input
-              type="number"
-              min={1}
-              value={maxFilesText}
-              onChange={(event) => setMaxFilesText(event.target.value)}
-              onBlur={commitPermissionExtras}
-              className="mt-0.5 w-full rounded border border-surface-border bg-surface-panel px-1.5 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
-            />
-          </label>
-        </div>
-      </div>
-
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={handleSetDefault}
-          disabled={!profileId || profileId === activeProfileId}
-          className="rounded border border-surface-border py-1.5 text-[11px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Set Default
-        </button>
-        <button
-          type="button"
-          onClick={handleDelete}
-          disabled={!profileId || llmProfiles.length <= 1}
-          className="rounded border border-diff-remove/40 py-1.5 text-[11px] text-diff-remove hover:bg-diff-remove/10 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Delete
-        </button>
-      </div>
-
-      {/* Test Connection */}
-      <button
-        onClick={handleTestConnection}
-        disabled={testing}
-        className="w-full mt-2 py-1.5 rounded border border-accent-purple/50 text-accent-purple text-xs font-medium hover:bg-accent-purple/10 disabled:opacity-50 transition-colors"
-      >
-        {testing ? "Testing..." : "⚡ Test Connection"}
-      </button>
-
-      {/* Message */}
+      {/* 反馈紧跟按钮。以前它渲染在 100 行 JSX 之后（Agent Permissions 和 Test
+          Connection 下面），在侧边栏里点完 Save 根本看不到，像是没有任何反应。 */}
       {message && (
         <div
+          ref={messageRef}
+          role="status"
+          aria-live="polite"
           className={`mt-2 px-2 py-1 rounded text-[11px] ${
             message.type === "ok"
               ? "bg-accent-green/10 border border-accent-green/30 text-accent-green"
@@ -777,63 +814,383 @@ export default function SettingsPanel() {
         </div>
       )}
 
+
+      {/* ▸▸▸▸ Agent Permission Settings ▸▸▸▸ */}
       <div className="mt-4 pt-3 border-t border-surface-border">
-        <div className="text-surface-muted text-[10px] leading-relaxed">
-          Tip: Set <code className="bg-surface-border/50 px-1 rounded">LLM_ENDPOINT</code>,{" "}
-          <code className="bg-surface-border/50 px-1 rounded">LLM_API_KEY</code>,{" "}
-          <code className="bg-surface-border/50 px-1 rounded">LLM_MODEL</code> env vars for default values.
+        <div className="mb-2 text-[11px] font-semibold text-surface-muted tracking-wide">
+          {t("settings.permissions.title")}
+        </div>
+
+        {/* Permission Preset */}
+        <label className="block text-surface-muted mb-1 text-[11px]">
+          {t("settings.permissions.preset")}
+        </label>
+        <div className="mb-2 grid grid-cols-3 gap-1">
+          {(["read-only", "create-files", "run-commands"] as AgentPermissionPreset[]).map((preset) => (
+            <button
+              key={preset}
+              onClick={() => setPermissionPreset(preset)}
+              className={`rounded border px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                permissionPreset === preset
+                  ? "border-accent-blue bg-accent-blue/10 text-accent-blue"
+                  : "border-surface-border text-surface-muted hover:text-surface-text"
+              }`}
+            >
+              {preset === "read-only"
+                ? `\u{1F441} ${t("settings.permissions.readOnly")}`
+                : preset === "create-files"
+                ? `\u{1F4DD} ${t("settings.permissions.createFiles")}`
+                : `\u{26A1} ${t("settings.permissions.runCommands")}`}
+            </button>
+          ))}
+        </div>
+        <p className="mb-3 text-[10px] leading-relaxed text-surface-muted">
+          {permissionPreset === "read-only"
+            ? t("settings.permissions.readOnly.desc")
+            : permissionPreset === "create-files"
+            ? t("settings.permissions.createFiles.desc")
+            : t("settings.permissions.runCommands.desc")}
+        </p>
+
+        {/* Granular Toggles */}
+        <div className="mb-3 space-y-1.5 rounded border border-surface-border bg-surface-border/10 p-2">
+          <PermissionToggle
+            label={t("settings.perm.fileCreate")}
+            desc={t("settings.perm.fileCreate.desc")}
+            checked={permissions.allowFileCreate}
+            onChange={() => togglePermission("allowFileCreate")}
+          />
+          <PermissionToggle
+            label={t("settings.perm.commandRun")}
+            desc={t("settings.perm.commandRun.desc")}
+            checked={permissions.allowCommandRun}
+            onChange={() => togglePermission("allowCommandRun")}
+          />
+          <PermissionToggle
+            label={t("settings.perm.browser")}
+            desc={t("settings.perm.browser.desc")}
+            checked={permissions.allowBrowserUse}
+            onChange={() => togglePermission("allowBrowserUse")}
+          />
+          {permissions.allowBrowserUse && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="browser-origins">
+                {t("settings.perm.browser.origins")}
+              </label>
+              <textarea
+                id="browser-origins"
+                rows={2}
+                spellCheck={false}
+                value={permissions.browserOrigins.join("\n")}
+                onChange={(event) =>
+                  setBrowserOrigins(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="http://127.0.0.1:1420"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 空清单时开关等于没开，这句话必须说出来，否则那个开关就是个假承诺 */}
+              {permissions.browserOrigins.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  {t("settings.perm.browser.empty")}
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label={t("settings.perm.pageRead")}
+            desc={t("settings.perm.pageRead.desc")}
+            checked={permissions.allowPageRead}
+            onChange={() => togglePermission("allowPageRead")}
+          />
+          {permissions.allowPageRead && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="page-read-origins">
+                {t("settings.perm.pageRead.origins")}
+              </label>
+              <textarea
+                id="page-read-origins"
+                rows={2}
+                spellCheck={false}
+                value={permissions.pageReadOrigins.join("\n")}
+                onChange={(event) =>
+                  setPageReadOrigins(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="http://127.0.0.1:1420"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 这份清单和上面那份是分开的：能打开一个页面 ≠ 能读它登录后才显示的正文 */}
+              {permissions.pageReadOrigins.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  {t("settings.perm.pageRead.empty")}
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label={t("settings.perm.desktop")}
+            desc={t("settings.perm.desktop.desc")}
+            checked={permissions.allowComputerUse}
+            onChange={() => togglePermission("allowComputerUse")}
+          />
+          {permissions.allowComputerUse && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="computer-apps">
+                {t("settings.perm.desktop.apps")}
+              </label>
+              <textarea
+                id="computer-apps"
+                rows={2}
+                spellCheck={false}
+                value={permissions.computerApps.join("\n")}
+                onChange={(event) =>
+                  setComputerApps(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="Code.exe"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 同浏览器：空清单时这个开关什么都不放行，必须说出来 */}
+              {permissions.computerApps.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  {t("settings.perm.desktop.empty")}
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label={t("settings.perm.capture")}
+            desc={t("settings.perm.capture.desc")}
+            checked={permissions.allowComputerCapture}
+            onChange={() => togglePermission("allowComputerCapture")}
+          />
+          {permissions.allowComputerCapture && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="capture-apps">
+                {t("settings.perm.capture.apps")}
+              </label>
+              <textarea
+                id="capture-apps"
+                rows={2}
+                spellCheck={false}
+                value={permissions.captureApps.join("\n")}
+                onChange={(event) =>
+                  setCaptureApps(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="Code.exe"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 这份清单和上面那份是分开的：能看见窗口存在 ≠ 能看见窗口里的东西 */}
+              {permissions.captureApps.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  {t("settings.perm.capture.empty")}
+                </p>
+              )}
+            </div>
+          )}
+          <PermissionToggle
+            label={t("settings.perm.input")}
+            desc={t("settings.perm.input.desc")}
+            checked={permissions.allowComputerInput}
+            onChange={() => togglePermission("allowComputerInput")}
+          />
+          {permissions.allowComputerInput && (
+            <div className="pt-1">
+              <label className="block text-[10px] text-surface-muted" htmlFor="input-apps">
+                {t("settings.perm.input.apps")}
+              </label>
+
+              <textarea
+                id="input-apps"
+                rows={2}
+                spellCheck={false}
+                value={permissions.inputApps.join("\n")}
+                onChange={(event) =>
+                  setInputApps(
+                    event.target.value
+                      .split("\n")
+                      .map((line) => line.trim())
+                      .filter(Boolean)
+                  )
+                }
+                placeholder="Code.exe"
+                className="mt-1 w-full rounded border border-surface-border bg-surface-bg px-2 py-1 font-mono text-[10px] text-surface-text"
+              />
+              {/* 又是一份单独的清单：能看窗口内容 ≠ 能往里面点，而后者撤不回 */}
+              {permissions.inputApps.length === 0 && (
+                <p className="mt-1 text-[10px] text-diff-modify">
+                  {t("settings.perm.input.empty")}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
+
+
+
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={handleSetDefault}
+          disabled={!profileId || profileId === activeProfileId}
+          className="rounded border border-surface-border py-1.5 text-[11px] text-surface-muted hover:text-surface-text disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {t("settings.setDefault")}
+        </button>
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={!profileId || llmProfiles.length <= 1}
+          className="rounded border border-diff-remove/40 py-1.5 text-[11px] text-diff-remove hover:bg-diff-remove/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {t("settings.delete")}
+        </button>
+      </div>
+
+      {/* Test Connection */}
+      <button
+        onClick={handleTestConnection}
+        disabled={testing}
+        className="w-full mt-2 py-1.5 rounded border border-accent-purple/50 text-accent-purple text-xs font-medium hover:bg-accent-purple/10 disabled:opacity-50 transition-colors"
+      >
+        {testing ? t("settings.testing") : `\u26A1 ${t("settings.test")}`}
+      </button>
+
+      {/* 反馈统一渲染在 Save Profile 按钮下方，见上。Test Connection 触发时靠
+          messageRef 滚回视野，避免同一个 live region 出现两份。 */}
+
+
+      <div className="mt-4 pt-3 border-t border-surface-border">
+        <div className="text-surface-muted text-[10px] leading-relaxed">
+          {t("settings.tip", {
+            endpoint: "LLM_ENDPOINT",
+            apiKey: "LLM_API_KEY",
+            model: "LLM_MODEL",
+          })}
+        </div>
+      </div>
+
+      {/*
+        项目记忆属于"这个工作区的 Agent 怎么干活"，而不是某一次对话的属性，所以它在设置里。
+        它的两种失效 —— 根本没有这份文件、超上限被静默截断 —— 在别处没有任何症状。
+      */}
+      <ProjectMemoryCard />
+
+      <McpPanel />
     </div>
   );
 }
 
+/**
+ * 预算类输入框。
+ *
+ * token 字段用**文本**框而不是 `type="number"`：数字框里打不出 `128k`，也打不出粘贴过来的
+ * `128,000` —— 浏览器直接拒收。而这个面板上唯一真正的失误是数零：128000 和 1280000 在 11px
+ * 的框里几乎一样，后者会让预算估算差一个数量级。所以允许简写，并且把解析结果回显在框下面 ——
+ * 用户要能确认"我打的这串被认成了什么"。
+ *
+ * 金额字段仍然是数字框：`$/M` 价格要小数步进，而美元没有 `k` 这种写法。
+ */
 function BudgetInput({
   label,
+  title,
   value,
   onChange,
   placeholder,
+  unit,
+  step,
 }: {
   label: string;
+  /** 这一格到底是什么意思。三列 10px 的标签放不下解释，但它必须能查到 */
+  title: string;
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
+  unit: "tokens" | "usd";
+  /** 金额字段要用小数步进，默认的 1 会让浏览器拒绝 "0.28" */
+  step?: string;
 }) {
+  const parsed = unit === "tokens" ? parseTokenInput(value) : undefined;
   return (
-    <label className="min-w-0">
+    <label className="min-w-0" title={title}>
       <span className="mb-1 block truncate text-[10px] text-surface-muted">{label}</span>
-      <input
-        type="number"
-        min={0}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
-      />
+      {unit === "tokens" ? (
+        <>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder={placeholder}
+            className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+          />
+          {/* 回显：空输入时不显示，否则每个框下面都挂着一句 "not set" 纯属噪音 */}
+          {value.trim() !== "" && (
+            <span
+              className={`mt-0.5 block truncate font-mono text-[9px] ${
+                parsed === undefined ? "text-diff-remove" : "text-surface-muted"
+              }`}
+            >
+              {formatTokenCount(parsed)}
+            </span>
+          )}
+        </>
+      ) : (
+        <input
+          type="number"
+          min={0}
+          step={step}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          className="w-full rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-surface-text outline-none focus:border-accent-blue"
+        />
+      )}
     </label>
   );
-}
-
-function inputToNumber(value: string) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }
 
 function numberToInput(value?: number) {
   return value ? String(value) : "";
 }
 
-function estimateInputTokens(maxContext: string, reservedOutput: string, maxOutput: string) {
-  const context = inputToNumber(maxContext);
-  if (!context) return undefined;
-  const reserved = inputToNumber(reservedOutput) ?? inputToNumber(maxOutput) ?? 4096;
-  return Math.max(0, context - reserved - 512);
+/**
+ * 换模型时这个框该不该跟着改。
+ *
+ * 只有两种情况算"可以改"：框是空的，或者里面**正好是上一个模型那一档**（说明它是上次自动填
+ * 的，不是人填的）。
+ *
+ * 关键在于"解析得出来"这一条：`parseTokenInput` 对 `abc`、`128kb`、`0` 都返回 `undefined`，
+ * 而上一个模型不认识时 `previous` 也是 `undefined` —— 两个 undefined 相等，于是用户手打的
+ * 那串文字会被一次换模型悄悄替换掉。
+ */
+function shouldAdoptModelLimit(current: string, previous: number | undefined): boolean {
+  if (current.trim() === "") return true;
+  const parsed = parseTokenInput(current);
+  return parsed !== undefined && parsed === previous;
 }
 
-function formatTokenBudget(value?: number) {
-  if (value === undefined) return "not set";
-  return value.toLocaleString();
-}
+
+
 
 function PermissionToggle({
   label,

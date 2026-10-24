@@ -10,17 +10,15 @@ Agent IDE is not intended to be a chat-only coding tool. The product direction i
 
 ## Current Status
 
-**v0.2.0 released** — first packaged, usable IDE build (Windows NSIS installer). Phase 7 is feature-complete; Phase 8 daily-IDE hardening and Phase 9.0 market-parity work are in progress.
+Phase 7 is feature-complete. Phase 8 is focused on daily IDE replacement hardening.
 
 Capability snapshot:
 
 - Desktop IDE shell: Monaco editor, Explorer, Git, Terminal, Problems, Logs, Commands, and Agent panels.
 - Agent loop: role pipeline, editable plan, context preview/budgeting, structured action logs, `agent-changes` protocol, and diff review/apply/regenerate.
-- Project memory: workspace-root `AGENTS.md` is loaded into Agent context (bounded, budget-aware, IDE + CLI) with a per-run toggle in the Chat context preview.
-- Provider-native tool calling (9.0.1): OpenAI-compatible `delta.tool_calls` streaming plus `agent-changes` fallback for local/small models.
+- Project memory: workspace-root `AGENTS.md` is loaded into Agent context (bounded, budget-aware, IDE + CLI).
 - Semantic/runtime loop: TypeScript/JavaScript and Go LSP first pass, diagnostics to Problems/editor markers, project command run history, and terminal failure context for Agent repair.
-- Automated testing: Vitest suite (53 tests), Rust suite (127 tests), CLI smoke coverage, and an automated visual smoke check (`npm run visual:test`) that screenshots the web-preview shell in headless Edge/Chrome.
-- Automation/release: headless `agent_cli` first pass and Windows packaging workflow with SHA256 manifest.
+- Automation/release: headless `agent_cli` first pass and Windows packaging workflow.
 
 The detailed implementation state, remaining gaps, and next tasks live in [ROADMAP.md](ROADMAP.md). Design and protocol docs: [docs/agent_ide_design.md](docs/agent_ide_design.md), [docs/agent_changes_schema.md](docs/agent_changes_schema.md), and [docs/smoke_test.md](docs/smoke_test.md).
 
@@ -39,6 +37,10 @@ npm run tauri -- dev
 ```
 
 Runs the real desktop IDE with the Rust backend and Tauri APIs.
+
+Once it is running, [docs/getting_started.md](docs/getting_started.md) walks through
+configuring a model, running a first task, reviewing and undoing changes, and the
+keyboard shortcuts. The rest of this file is build and architecture material.
 
 ## Setup
 
@@ -424,7 +426,6 @@ Run these checks before committing substantial changes:
 ```powershell
 npm run build
 npm test
-npm run visual:test
 cd src-tauri
 cargo check
 cargo test
@@ -432,7 +433,7 @@ cargo test
 
 Known build note: Vite currently warns about a large chunk because Monaco, Markdown, xterm, and syntax tooling are bundled together. This is not a correctness failure.
 
-`npm run visual:test` drives the Vite web preview in headless Edge/Chrome, verifies the IDE shell layout and panel interactions, and saves screenshots plus a summary to `test-results/visual/`. It covers web-preview scope only; for changes to LSP, Problems, Terminal, Git, or Agent diff application, also run the real Tauri runtime checklist in [docs/smoke_test.md](docs/smoke_test.md).
+For changes to LSP, Problems, Terminal, Git, or Agent diff application, also run the real Tauri runtime checklist in [docs/smoke_test.md](docs/smoke_test.md).
 
 ## Windows Packaging
 
@@ -455,12 +456,6 @@ To build one installer format:
 ```powershell
 npm run package:windows:nsis
 npm run package:windows:msi
-```
-
-Release builds on machines without LLVM/libclang (or before Phase 9.3 ships local inference) should skip the default `llama-cpp` Cargo feature; OpenAI-compatible providers remain available:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -BundleTargets nsis -NoDefaultFeatures
 ```
 
 The first Windows bundle may download NSIS, `nsis_tauri_utils.dll`, and/or WiX tooling through Tauri. If local bundling times out while downloading those tools, rerun the command after the tool cache is populated or run the `Windows Package` GitHub Actions workflow, which builds on `windows-latest` and uploads the generated artifacts.
@@ -626,7 +621,15 @@ cargo build --bin agent_cli --release
 target\release\agent_cli --help
 ```
 
-CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, `run`, and `smoke ide-backend`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `project-tasks.json`, `problems.json`, `repair-chain.json`, and `repair-summary.json` artifacts.
+CLI mode is first-pass complete for headless automation. It supports `doctor`, `context estimate`, `plan`, `run`, `smoke ide-backend`, and `smoke ide-surface`; text/JSON/NDJSON output; run artifacts; optional apply; project command checks; bounded repair iterations; command allow-listing; timeout/output/diff limits; and smoke-tested `project-tasks.json`, `problems.json`, `repair-chain.json`, and `repair-summary.json` artifacts.
+
+`smoke ide-surface` is the read-only probe for the panel backends the Agent flow does not touch — workspace resolution, project task discovery, verification candidates, Git status/diff, and context packing — using the same functions the desktop calls. It needs no LLM provider, so it can run in CI:
+
+```powershell
+target\release\agent_cli smoke ide-surface --output json
+```
+
+It reports each probe as `ok`, `unavailable` (nothing to show, e.g. not a Git repository), or `failed`, and writes `surface-probes.json` beside the other run artifacts. Only `failed` affects the exit code.
 
 It is intentionally not a full command-line IDE replacement. Visual Agent plan controls, Problems/Terminal/Git integration, LSP views, run history, and per-hunk review UI remain desktop IDE workflows.
 
@@ -641,3 +644,15 @@ git status --short
 ```
 
 Do not include unrelated demo/workspace changes in feature commits.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Third-party dependencies keep their own licenses:
+
+- Tauri and the Rust/npm dependency tree are permissively licensed (mostly MIT or Apache-2.0).
+- No native inference engine is linked. Local models are reached over HTTP through an OpenAI-compatible server (Ollama, LM Studio, vLLM), so nothing from llama.cpp ends up in the binary.
+
+Model weights and LLM provider endpoints are not part of this repository and are governed by whatever terms you obtain them under.
+

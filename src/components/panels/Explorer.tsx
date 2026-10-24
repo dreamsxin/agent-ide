@@ -1,9 +1,21 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Tree, type NodeRendererProps } from "react-arborist";
+import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
+import { Tree, type NodeRendererProps, type TreeApi } from "react-arborist";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { isTauriRuntime } from "../../utils/tauri";
+import { useT } from "../../i18n";
+import {
+  attachLoadedChildren,
+  copyNameCandidates,
+  explorerShortcut,
+  findNodeById,
+  loadedDirectoryPaths,
+  resolveMoveDestination,
+  validateEntryName,
+  withoutDraggedDescendants,
+  type ExplorerNode,
+} from "./explorerTree";
 
 // ====== 类型 ======
 interface FileEntry {
@@ -13,15 +25,8 @@ interface FileEntry {
   size: number;
 }
 
-interface TreeNodeData {
-  id: string;
-  name: string;
-  path: string;
-  isDir: boolean;
-  size: number;
-  childrenLoaded?: boolean;
-  children?: TreeNodeData[];
-}
+type TreeNodeData = ExplorerNode;
+
 
 interface ContextMenuState {
   x: number;
@@ -32,8 +37,10 @@ interface ContextMenuState {
 
 interface FileClipboardState {
   node: TreeNodeData;
-  operation: "copy";
+  /** `cut` 粘贴一次之后剪贴板就清空：源已经不在原处了 */
+  operation: "copy" | "cut";
 }
+
 
 interface NameDialogState {
   title: string;
@@ -92,16 +99,32 @@ function fileEntryToNode(entry: FileEntry): TreeNodeData {
   };
 }
 
-function workspaceRootNode(workspacePath: string): TreeNodeData {
+function workspaceRootNode(workspacePath: string, fallbackName: string): TreeNodeData {
   return {
     id: workspacePath,
-    name: basename(workspacePath) || "Workspace",
+    name: basename(workspacePath) || fallbackName,
     path: workspacePath,
     isDir: true,
     size: 0,
     childrenLoaded: true,
     children: [],
   };
+}
+
+/**
+ * 打开一个文件节点。
+ *
+ * 抽出来是为了给鼠标和键盘两条路径共用：以前只有行的 `onClick` 会打开文件，
+ * `onActivate`（方向键走到位置后按 Enter）只切换目录，于是纯键盘用户能在树里
+ * 走来走去，却打不开任何文件。
+ */
+function openTreeFile(data: TreeNodeData) {
+  useEditorStore.getState().openFile({
+    path: data.path,
+    name: data.name,
+    isDirty: false,
+    language: detectLanguage(data.path),
+  });
 }
 
 // ====== 树节点渲染 ======
@@ -122,13 +145,7 @@ function TreeNode({
       className="flex items-center gap-1 py-0.5 px-1 hover:bg-surface-border/30 cursor-pointer text-xs text-surface-text group"
       onClick={(e) => {
         if (!data.isDir) {
-          const lang = detectLanguage(data.path);
-          useEditorStore.getState().openFile({
-            path: data.path,
-            name: data.name,
-            isDirty: false,
-            language: lang,
-          });
+          openTreeFile(data);
         } else {
           e.stopPropagation();
           node.toggle();
@@ -162,7 +179,22 @@ function TreeNode({
 
 // ====== 主组件 ======
 export default function Explorer() {
+  const t = useT();
   const [rootData, setRootData] = useState<TreeNodeData[]>([]);
+  // `loadRoot` 需要读上一棵树来决定重新展开哪些目录，但它不能把 rootData 放进依赖：
+  // 那会让它每次树变化都换一个新函数，而挂载 effect 依赖它 —— 无限重载。
+  const rootDataRef = useRef<TreeNodeData[]>([]);
+  /**
+   * react-arborist 的 api，用来读"当前有焦点的是哪一行"。
+   *
+   * 不能自己用 `onFocus` 记进 ref：那个回调只在 `TreeApi.focus()` 走到时才触发，而
+   * 焦点从外面进入树时（点击空白、Tab 进来）走的是 `TreeApi.onFocus()`，它只 dispatch
+   * 不回调 —— 于是界面上有焦点环、我们手里却是 null。直接问 api 就没有第二份状态。
+   */
+  const treeRef = useRef<TreeApi<TreeNodeData> | null>(null);
+  useEffect(() => {
+    rootDataRef.current = rootData;
+  }, [rootData]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -172,6 +204,13 @@ export default function Explorer() {
   const [nameDialogError, setNameDialogError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  // react-arborist 要一个像素高度做虚拟滚动，它自己不量容器。以前这里传的是
+  // `window.innerHeight - 120`，和这个容器的真实高度没有关系：底部面板一开，左侧
+  // 面板比那个数矮几百像素，于是虚拟视口比可见区域高，树的最后几十行永远滚不到
+  // （外层 overflow-hidden 把它们裁掉了）。窗口 resize 也不会重算，因为那是渲染期
+  // 读的一个全局量，没有任何东西订阅它。改成量容器本身。
+  const treeViewportRef = useRef<HTMLDivElement>(null);
+  const [treeHeight, setTreeHeight] = useState(0);
 
   const explorerKey = useEditorStore((s) => s.explorerKey);
   const workspacePath = useEditorStore((s) => s.workspacePath);
@@ -185,7 +224,15 @@ export default function Explorer() {
 
   const toastTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  // 加载根目录
+  // 加载根目录。
+  //
+  // 重新列根之后必须把展开过的子树再列一遍：react-arborist 的展开状态存在它自己
+  // 内部（按 node id），我们这边一换 `rootData`，那些目录在它眼里还是开着的，
+  // 内容却空了 —— 用户每做一次新建 / 删除 / 重命名 / 粘贴都会看到"打开却是空的
+  // 文件夹"，要折叠再展开两次才能看回来。
+  //
+  // 是重新 list 而不是把旧子树缓存回去：这次操作本身就可能是在那个目录里新建了
+  // 文件，缓存旧内容会让新文件看不见 —— 那只是把一个可见的错换成一个隐蔽的错。
   const loadRoot = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -196,20 +243,45 @@ export default function Explorer() {
       }
       if (!isTauriRuntime()) {
         setRootData([]);
-        setError("File explorer is available in the Tauri app runtime.");
+        setError(t("explorer.noBackend"));
         return;
       }
+      // 从 ref 读上一棵树：放进 useCallback 的依赖会让 loadRoot 每次树变化都换一个
+      // 新函数，而挂载 effect 依赖它 —— 那就是一个无限重载循环。
+      const expandedDirs = loadedDirectoryPaths(rootDataRef.current);
       const entries: FileEntry[] = await invoke("list_directory", { path: workspacePath });
       const nodes = entries
         .filter((e) => !EXCLUDE_DIRS.has(e.name))
         .map(fileEntryToNode);
-      setRootData(nodes);
+
+      if (expandedDirs.length === 0) {
+        setRootData(nodes);
+        return;
+      }
+      const reloaded = await Promise.all(
+        expandedDirs.map(async (dirPath) => {
+          try {
+            const children: FileEntry[] = await invoke("list_directory", { path: dirPath });
+            return [
+              dirPath,
+              children.filter((e) => !EXCLUDE_DIRS.has(e.name)).map(fileEntryToNode),
+            ] as const;
+          } catch {
+            // 这个目录可能刚刚被删掉或改名，那就让它保持未展开，别让整次刷新失败
+            return null;
+          }
+        })
+      );
+      setRootData(
+        attachLoadedChildren(nodes, new Map(reloaded.filter((entry) => entry !== null)))
+      );
     } catch (e) {
-      setError(`Failed to load directory: ${e}`);
+      setError(t("explorer.loadFailed", { error: String(e) }));
     } finally {
       setLoading(false);
     }
   }, [workspacePath]);
+
 
   useEffect(() => {
     loadRoot();
@@ -240,7 +312,7 @@ export default function Explorer() {
         }
       }
       // 显示 toast
-      showToast("Files changed externally. Refreshing...");
+      showToast(t("explorer.externalChange"));
     })
       .then((fn) => {
         unlisten = fn;
@@ -251,6 +323,29 @@ export default function Explorer() {
       unlisten?.();
     };
   }, []);
+
+  // 量容器高度：ResizeObserver 覆盖窗口缩放、底部面板开合、剪贴板条出现等一切
+  // 原因，不用去枚举"高度可能因为什么变了"。这个 div 无条件渲染，effect 的 `[]`
+  // 依赖才成立；它还必须保持 `overflow-hidden`，否则子内容会反过来撑高容器，
+  // ResizeObserver 就成了自激回路。
+  useLayoutEffect(() => {
+    const element = treeViewportRef.current;
+    if (!element) return;
+    // 只接受正数。面板收起动画期间容器是 display:none，量出来是 0，而 0 不是
+    // "不知道"：react-arborist 的默认高度 500 只在 `undefined` 时生效，传 0 它就
+    // 老老实实渲染一个 0 行的列表 —— 整棵树空掉，还看不出为什么。Terminal 里的
+    // ResizeObserver 也是这么挡的。
+    const measure = () => {
+      const next = element.clientHeight;
+      if (next > 0) setTreeHeight(next);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
 
   function showToast(msg: string) {
     setToast(msg);
@@ -338,7 +433,7 @@ export default function Explorer() {
           closeContextMenu();
           return;
         }
-        node = workspaceRootNode(workspacePath);
+        node = workspaceRootNode(workspacePath, t("explorer.workspace"));
         scope = "blank";
         e.preventDefault();
       }
@@ -404,83 +499,188 @@ export default function Explorer() {
   const handleNewFile = useCallback(
     async (parentPath: string) => {
       openNameDialog({
-        title: "New File",
-        label: "File name",
+        title: t("explorer.newFile"),
+        label: t("explorer.fileName"),
         initialValue: "",
-        confirmText: "Create",
+        confirmText: t("explorer.create"),
         onConfirm: async (name) => {
           const path = joinPath(parentPath, name);
           await createFile(path);
-          showToast(`Created file: ${name}`);
+          showToast(t("explorer.created.file", { name }));
         },
       });
     },
-    [createFile, openNameDialog]
+    [createFile, openNameDialog, t]
   );
 
   // 新建文件夹
   const handleNewFolder = useCallback(
     async (parentPath: string) => {
       openNameDialog({
-        title: "New Folder",
-        label: "Folder name",
+        title: t("explorer.newFolder"),
+        label: t("explorer.folderName"),
         initialValue: "",
-        confirmText: "Create",
+        confirmText: t("explorer.create"),
         onConfirm: async (name) => {
           const path = joinPath(parentPath, name);
           await createDirectory(path);
-          showToast(`Created folder: ${name}`);
+          showToast(t("explorer.created.folder", { name }));
         },
       });
     },
-    [createDirectory, openNameDialog]
+    [createDirectory, openNameDialog, t]
   );
 
   // 重命名
   const handleRename = useCallback(
     async (node: TreeNodeData) => {
       openNameDialog({
-        title: "Rename",
-        label: "New name",
+        title: t("explorer.rename"),
+        label: t("explorer.newName"),
         initialValue: node.name,
-        confirmText: "Rename",
+        confirmText: t("explorer.rename"),
         onConfirm: async (newName) => {
           if (newName === node.name) return;
           const parts = node.path.split(/[/\\]/);
           parts[parts.length - 1] = newName;
           const newPath = parts.join("/");
           await renamePath(node.path, newPath);
-          showToast(`Renamed: ${newName}`);
+          showToast(t("explorer.renamed", { name: newName }));
         },
       });
     },
-    [openNameDialog, renamePath]
+    [openNameDialog, renamePath, t]
   );
 
   // 复制文件/文件夹到内部剪贴板
   const handleCopy = useCallback(
     (node: TreeNodeData) => {
       setFileClipboard({ node, operation: "copy" });
-      showToast(`Copied to Explorer clipboard: ${node.name}`);
+      showToast(t("explorer.copiedToClipboard", { name: node.name }));
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, t]
+  );
+
+  const handleCut = useCallback(
+    (node: TreeNodeData) => {
+      setFileClipboard({ node, operation: "cut" });
+      showToast(t("explorer.cutToClipboard", { name: node.name }));
+      closeContextMenu();
+    },
+    [closeContextMenu, t]
   );
 
   const handlePaste = useCallback(
     async (targetNode?: TreeNodeData | null) => {
       if (!fileClipboard) return;
-      const targetDirectory = targetNode?.isDir ? targetNode.path : workspacePath;
+      // 右击到文件上时用它所在的目录，而不是退回工作区根目录 —— 后者会把粘贴的东西
+      // 扔到一个用户没指的地方。菜单目前只在目录上给 Paste，所以这条是防患。
+      const targetDirectory = targetNode
+        ? targetNode.isDir
+          ? targetNode.path
+          : parentOf(targetNode.path)
+        : workspacePath;
       if (!targetDirectory) return;
+
+      if (fileClipboard.operation === "cut") {
+        const outcome = resolveMoveDestination(
+          fileClipboard.node.path,
+          fileClipboard.node.name,
+          targetDirectory
+        );
+        if ("error" in outcome) {
+          showToast(t(outcome.error.key, outcome.error.params));
+          closeContextMenu();
+          return;
+        }
+        try {
+          await renamePath(fileClipboard.node.path, outcome.destination);
+          showToast(t("explorer.moved", { name: fileClipboard.node.name }));
+          // 剪切只能粘一次：留着剪贴板会让第二次粘贴去找一个已经不存在的源
+          setFileClipboard(null);
+        } catch (e) {
+          showToast(t("explorer.moveFailed", { error: String(e) }));
+        }
+        closeContextMenu();
+        return;
+      }
+
       try {
         const destination = await copyWithUniqueName(fileClipboard.node.path, targetDirectory, fileClipboard.node.name, copyPath);
-        showToast(`Pasted: ${basename(destination)}`);
+        showToast(t("explorer.pasted", { name: basename(destination) }));
       } catch (e) {
-        showToast(`Failed to paste: ${e}`);
+        showToast(t("explorer.pasteFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu, copyPath, fileClipboard, workspacePath]
+    [closeContextMenu, copyPath, fileClipboard, renamePath, t, workspacePath]
+  );
+
+
+  /**
+   * 拖放移动。
+   *
+   * react-arborist 的行默认就是可拖的，但没有 `onMove` 时松手什么都不会发生 ——
+   * 一个假的可拖动手感，比不能拖更糟。落点判断和粘贴共用 `resolveMoveDestination`：
+   * 移动到自己身上、移进自己的子目录、移到它已经在的目录，这三种都要给出人能看懂的
+   * 拒绝理由，而不是让后端返回一句 EINVAL。
+   *
+   * 多选拖动时逐个搬（不是并发）：并发会让文件监听器的刷新和后续的搬移抢同一棵树，
+   * 而且失败一个也要能说清是哪一个。
+   */
+  const handleMove = useCallback(
+    async (args: { dragIds: string[]; parentId: string | null }) => {
+      // `parentId` 一定是目录或 null：arborist 的 `compute-drop` 只会把落点算到
+      // `isInternal` 的节点或根上（落在文件行上给的是它的父目录）。
+      const parent = args.parentId ? findNodeById(rootDataRef.current, args.parentId) : null;
+      const targetDirectory = parent ? parent.path : workspacePath;
+      if (!targetDirectory) return;
+
+      const dragged = args.dragIds
+        .map((id) => findNodeById(rootDataRef.current, id))
+        .filter((node): node is TreeNodeData => node != null);
+
+      const moved: string[] = [];
+      const failures: string[] = [];
+      for (const source of withoutDraggedDescendants(dragged)) {
+        const outcome = resolveMoveDestination(source.path, source.name, targetDirectory);
+        if ("error" in outcome) {
+          // 拖到它已经在的目录里：arborist 画的那条插入线让人以为能排序，而这里做不到
+          // 排序。这是一次无害的手势，不该报错，静默忽略就好。
+          if (outcome.reason !== "sameFolder") {
+            failures.push(t(outcome.error.key, outcome.error.params));
+          }
+          continue;
+        }
+        try {
+          await renamePath(source.path, outcome.destination);
+          moved.push(source.name);
+        } catch (e) {
+          failures.push(`${source.name}: ${e}`);
+        }
+      }
+
+      // 两边都要说：只报第一条失败会让"四个成功一个失败"看起来像整体失败
+      if (failures.length > 0) {
+        const failureSummary =
+          failures.length === 1
+            ? failures[0]
+            : t("explorer.moveMore", { first: failures[0], count: failures.length - 1 });
+        showToast(
+          moved.length > 0
+            ? t("explorer.movedSome", { count: moved.length, problem: failureSummary })
+            : failureSummary
+        );
+      } else if (moved.length > 0) {
+        showToast(
+          moved.length === 1
+            ? t("explorer.moved", { name: moved[0] })
+            : t("explorer.movedCount", { count: moved.length })
+        );
+      }
+    },
+    [renamePath, t, workspacePath]
   );
 
   // 复制绝对路径
@@ -488,13 +688,13 @@ export default function Explorer() {
     async (node: TreeNodeData) => {
       try {
         await navigator.clipboard.writeText(node.path);
-        showToast(`Copied file path: ${node.path}`);
+        showToast(t("explorer.copiedPath", { path: node.path }));
       } catch (e) {
-        alert(`Failed to copy file path: ${e}`);
+        alert(t("explorer.copyPathFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu, workspacePath]
+    [closeContextMenu, t]
   );
 
   // 复制相对工作区路径
@@ -503,13 +703,13 @@ export default function Explorer() {
       const relativePath = toWorkspaceRelativePath(workspacePath, node.path);
       try {
         await navigator.clipboard.writeText(relativePath);
-        showToast(`Copied relative path: ${relativePath}`);
+        showToast(t("explorer.copiedRelativePath", { path: relativePath }));
       } catch (e) {
-        alert(`Failed to copy relative path: ${e}`);
+        alert(t("explorer.copyRelativePathFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu, workspacePath]
+    [closeContextMenu, t, workspacePath]
   );
 
   // 在系统文件管理器中显示
@@ -517,29 +717,85 @@ export default function Explorer() {
     async (node: TreeNodeData) => {
       try {
         await invoke("reveal_in_file_explorer", { path: node.path });
-        showToast(`Revealed: ${node.name}`);
+        showToast(t("explorer.revealed", { name: node.name }));
       } catch (e) {
-        alert(`Failed to reveal in file explorer: ${e}`);
+        alert(t("explorer.revealFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [closeContextMenu]
+    [closeContextMenu, t]
   );
 
   // 删除
   const handleDelete = useCallback(
     async (node: TreeNodeData) => {
-      const type = node.isDir ? "folder" : "file";
-      if (!confirm(`Delete ${type} "${node.name}"?`)) return;
+      const question = node.isDir
+        ? t("explorer.delete.folder", { name: node.name })
+        : t("explorer.delete.file", { name: node.name });
+      if (!confirm(question)) return;
 
       try {
         await deletePath(node.path);
       } catch (e) {
-        alert(`Failed to delete: ${e}`);
+        alert(t("explorer.deleteFailed", { error: String(e) }));
       }
       closeContextMenu();
     },
-    [deletePath, closeContextMenu]
+    [deletePath, closeContextMenu, t]
+  );
+
+  /**
+   * 键盘操作：F2 改名、Delete / Backspace 删除、Ctrl/Cmd + C / X / V 复制剪切粘贴。
+   *
+   * 挂在**捕获阶段**，认领的键还要 `stopPropagation`。冒泡阶段不行：事件先到
+   * react-arborist 自己的容器，它对认不出来的键会走"首字母跳转"（`focusSearchTerm`
+   * 累加后 `tree.focus(...)`），于是 `Ctrl+X` 的 `x`、`Ctrl+V` 的 `v` 会先把焦点挪到
+   * 另一行 —— 我们再去读焦点，剪的就是另一个文件。
+   *
+   * 作用对象直接问 `TreeApi`，不另存一份"当前焦点"。
+   */
+  const handleTreeKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      // 名字对话框开着的时候键盘属于它：这里再抢一遍会一边打字一边触发删除
+      if (nameDialog) return;
+      const action = explorerShortcut(event);
+      if (!action) return;
+      const api = treeRef.current;
+      const focused = api?.focusedNode ?? null;
+      const node = focused?.data ?? null;
+      // 粘贴不需要选中任何东西：没有焦点时粘到工作区根目录，和空白处右键一致
+      if (!node && action !== "paste") return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      switch (action) {
+        case "rename":
+          if (node) void handleRename(node);
+          return;
+        case "delete": {
+          if (!node || !focused) return;
+          // 先把焦点挪到下一个兄弟或父目录，再删。删完那一行会卸载，焦点跟着丢，
+          // 之后所有按键都落到 body 上，键盘操作就整体失效了 —— arborist 自己的
+          // Backspace 分支也是先挪焦点再删。
+          const next = focused.nextSibling ?? focused.parent;
+          if (next && !next.isRoot) {
+            api?.focus(next, { scroll: false });
+          }
+          void handleDelete(node);
+          return;
+        }
+        case "copy":
+          if (node) handleCopy(node);
+          return;
+        case "cut":
+          if (node) handleCut(node);
+          return;
+        case "paste":
+          void handlePaste(node);
+          return;
+      }
+    },
+    [handleCopy, handleCut, handleDelete, handlePaste, handleRename, nameDialog]
   );
 
   return (
@@ -547,7 +803,7 @@ export default function Explorer() {
       {/* 标题栏 + 新建按钮 */}
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-surface-border/50 no-select">
         <span className="text-[11px] font-semibold text-surface-muted uppercase tracking-wider">
-          Explorer
+          {t("explorer.title")}
         </span>
         <div className="flex gap-0.5">
           <button
@@ -556,7 +812,7 @@ export default function Explorer() {
               handleNewFile(cwd);
             }}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
-            title="New File"
+            title={t("explorer.newFile")}
           >
             📄+
           </button>
@@ -566,14 +822,14 @@ export default function Explorer() {
               handleNewFolder(cwd);
             }}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
-            title="New Folder"
+            title={t("explorer.newFolder")}
           >
             📁+
           </button>
           <button
             onClick={loadRoot}
             className="text-surface-muted hover:text-surface-text p-1 rounded hover:bg-surface-border/30 text-xs"
-            title="Refresh"
+            title={t("explorer.refresh")}
           >
             ↻
           </button>
@@ -582,14 +838,16 @@ export default function Explorer() {
 
       {/* 树 */}
       <div
+        ref={treeViewportRef}
         className="flex-1 overflow-hidden"
         onContextMenu={(event) => {
           event.preventDefault();
           handleContextMenu(event, null);
         }}
+        onKeyDownCapture={handleTreeKeyDown}
       >
         {loading && (
-          <div className="p-2 text-xs text-surface-muted">Loading files...</div>
+          <div className="p-2 text-xs text-surface-muted">{t("explorer.loading")}</div>
         )}
         {error && (
           <div className="p-2 text-xs text-diff-remove">
@@ -598,26 +856,32 @@ export default function Explorer() {
               onClick={loadRoot}
               className="ml-2 underline hover:text-surface-text"
             >
-              Retry
+              {t("explorer.retry")}
             </button>
           </div>
         )}
         {!loading && !error && rootData.length > 0 && (
           <Tree<TreeNodeData>
+            ref={treeRef}
             data={rootData}
             idAccessor="id"
             childrenAccessor={(d) => d.children ?? null}
-            height={(window.innerHeight || 600) - 120}
+            // 还没量到的时候传 undefined，让库用它自己的默认高度；传 0 会渲染空树
+            height={treeHeight || undefined}
             width="100%"
             indent={14}
             rowHeight={26}
             overscanCount={20}
             openByDefault={false}
             onToggle={handleToggle}
+            onMove={handleMove}
             onActivate={(node) => {
-              // 只处理目录切换（键盘 Enter），文件打开由 TreeNode onClick 处理
+              // 方向键导航之后按 Enter 走到这里。目录切换，文件打开 ——
+              // 以前这里只处理目录，键盘用户因此打不开文件。
               if (node.data.isDir) {
                 node.toggle();
+              } else {
+                openTreeFile(node.data);
               }
             }}
             onContextMenu={(e) => {
@@ -631,18 +895,26 @@ export default function Explorer() {
           </Tree>
         )}
         {!loading && !error && rootData.length === 0 && (
-          <div className="p-2 text-xs text-surface-muted">No files found.</div>
+          // 空目录和"没打开工作区"不能共用一句话：后者的原因和解决办法完全不同。
+          // TopBar 在同一状态下说的是"还没打开文件夹"。
+          <div className="p-2 text-xs text-surface-muted">
+            {workspacePath ? t("explorer.empty") : t("explorer.noFolder")}
+          </div>
         )}
       </div>
 
       {fileClipboard && (
         <div className="border-t border-surface-border/50 px-2 py-1.5 text-[10px] text-surface-muted">
-          Copied: <span className="font-mono text-surface-text">{fileClipboard.node.name}</span>
+          {fileClipboard.operation === "cut"
+            ? t("explorer.clipboard.cut")
+            : t("explorer.clipboard.copied")}
+          :{" "}
+          <span className="font-mono text-surface-text">{fileClipboard.node.name}</span>
           <button
             onClick={() => handlePaste(null)}
             className="ml-2 rounded border border-surface-border px-1.5 py-0.5 text-surface-text hover:bg-surface-border/30"
           >
-            Paste
+            {t("explorer.paste")}
           </button>
         </div>
       )}
@@ -660,13 +932,13 @@ export default function Explorer() {
                 onClick={() => handleNewFile(contextMenu.node.path)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📄</span> New File
+                <span>📄</span> {t("explorer.newFile")}
               </button>
               <button
                 onClick={() => handleNewFolder(contextMenu.node.path)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📁</span> New Folder
+                <span>📁</span> {t("explorer.newFolder")}
               </button>
               <div className="border-t border-surface-border my-0.5" />
             </>
@@ -676,7 +948,7 @@ export default function Explorer() {
               onClick={() => handlePaste(contextMenu.node)}
               className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
             >
-              <span>📌</span> Paste
+              <span>📌</span> {t("explorer.paste")}
             </button>
           )}
           {contextMenu.scope === "node" && (
@@ -685,37 +957,43 @@ export default function Explorer() {
                 onClick={() => handleCopy(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📋</span> Copy File
+                <span>📋</span> {t("explorer.menu.copyFile")}
+              </button>
+              <button
+                onClick={() => handleCut(contextMenu.node)}
+                className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
+              >
+                <span>✂</span> {t("explorer.menu.cut")}
               </button>
               <button
                 onClick={() => handleCopyFilePath(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>⧉</span> Copy File Path
+                <span>⧉</span> {t("explorer.menu.copyPath")}
               </button>
               <button
                 onClick={() => handleCopyRelativePath(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>⧉</span> Copy Relative File Path
+                <span>⧉</span> {t("explorer.menu.copyRelativePath")}
               </button>
               <button
                 onClick={() => handleRevealInFileExplorer(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>📂</span> Reveal In File Explorer
+                <span>📂</span> {t("explorer.menu.reveal")}
               </button>
               <button
                 onClick={() => handleRename(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-surface-text hover:bg-surface-border/30 flex items-center gap-2"
               >
-                <span>✏️</span> Rename
+                <span>✏️</span> {t("explorer.rename")}
               </button>
               <button
                 onClick={() => handleDelete(contextMenu.node)}
                 className="w-full text-left px-3 py-1.5 text-xs text-diff-remove hover:bg-diff-remove/10 flex items-center gap-2"
               >
-                <span>🗑️</span> Delete
+                <span>🗑️</span> {t("explorer.menu.delete")}
               </button>
             </>
           )}
@@ -729,7 +1007,13 @@ export default function Explorer() {
             onSubmit={async (event) => {
               event.preventDefault();
               const value = nameDialogValue.trim();
-              if (!value) return;
+              // 形状不对就当场说清楚，别把它拼进路径：`a/b/c` 会静默建出一层嵌套，
+              // `../x` 会跑到父目录去 —— 用户以为自己在起名字，实际写了一段路径。
+              const problem = validateEntryName(value);
+              if (problem) {
+                setNameDialogError(t(problem.key, problem.params));
+                return;
+              }
               try {
                 await nameDialog.onConfirm(value);
                 closeNameDialog();
@@ -762,7 +1046,7 @@ export default function Explorer() {
                 onClick={closeNameDialog}
                 className="rounded border border-surface-border px-3 py-1 text-xs text-surface-muted hover:text-surface-text"
               >
-                Cancel
+                {t("explorer.cancel")}
               </button>
               <button
                 type="submit"
@@ -808,13 +1092,21 @@ function basename(path: string) {
   return normalizePath(path).split("/").pop() || path;
 }
 
+/** 一个路径所在的目录；没有分隔符时返回空串，调用方按"没有父目录"处理 */
+function parentOf(path: string) {
+  const normalized = normalizePath(path);
+  const separator = normalized.lastIndexOf("/");
+  return separator === -1 ? "" : normalized.slice(0, separator);
+}
+
+
 async function copyWithUniqueName(
   sourcePath: string,
   parent: string,
   sourceName: string,
   copyPath: (src: string, dest: string) => Promise<void>
 ) {
-  const candidates = copyNameCandidates(parent, sourceName);
+  const candidates = copyNameCandidates(sourceName).map((name) => joinPath(parent, name));
   let lastError: unknown = null;
   for (const destination of candidates) {
     try {
@@ -830,13 +1122,3 @@ async function copyWithUniqueName(
   throw lastError ?? new Error("No available copy name");
 }
 
-function copyNameCandidates(parent: string, sourceName: string) {
-  const dotIndex = sourceName.lastIndexOf(".");
-  const hasExtension = dotIndex > 0;
-  const stem = hasExtension ? sourceName.slice(0, dotIndex) : sourceName;
-  const ext = hasExtension ? sourceName.slice(dotIndex) : "";
-  return Array.from({ length: 50 }, (_, index) => {
-    const suffix = index === 0 ? " Copy" : ` Copy ${index + 1}`;
-    return joinPath(parent, `${stem}${suffix}${ext}`);
-  });
-}

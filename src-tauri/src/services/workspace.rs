@@ -7,6 +7,13 @@ pub fn config_dir() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
+    // 测试构建里绝不回落到真实 home。`env_test_guard()` 只是一把互斥锁，它不设
+    // 这个变量；而多个测试模块在 teardown 里 `remove_var`，`set_var` 又是进程
+    // 全局的。所以任何自己没设变量的测试都曾经会读写开发者真实的 ~/.agent-ide
+    // 和 OS 凭据库 —— 实际后果是保存好的 API key 被测试里的占位值覆盖。
+    if cfg!(test) {
+        return std::env::temp_dir().join("agent-ide-test-config-fallback");
+    }
     let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".agent-ide")
 }
@@ -34,6 +41,18 @@ pub fn load_workspace_path() -> Result<Option<String>, String> {
         .get("path")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string()))
+}
+
+/// 用来给落盘记录打"属于哪个工作区"标签的那个键。
+///
+/// 只有一个定义，因为读的键和写的键只要有一处不一样，记录就会写进去却读不回来 —— 那时界面
+/// 看起来和"根本没落盘"完全一样。`external_log` 和 `session_store` 共用它。
+pub fn current_workspace_key() -> Option<String> {
+    load_workspace_path()
+        .ok()
+        .flatten()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
 }
 
 pub fn workspace_root() -> Result<PathBuf, String> {
@@ -93,6 +112,117 @@ pub fn resolve_for_write(path: &str) -> Result<PathBuf, String> {
         ensure_within_workspace(&ancestor_resolved)?;
         Ok(shell_compatible_path(candidate))
     }
+}
+
+/// Agent 生成的写入：先过工作区边界，再过拒绝清单。
+///
+/// `resolve_for_write` 只保证"在工作区内"，但工作区内本身就有几类"写进去等于
+/// 拿到执行权或碰到密钥"的路径：
+/// - `.git/`：写 `.git/hooks/pre-commit` 等于在下一次 commit 时获得任意代码执行，
+///   写 `.git/config` 可以改 remote 或插入 `core.fsmonitor`。
+/// - 凭据文件（`.env*`、`*.pem`、`id_rsa` 等）：改写它们造成的泄漏或覆盖不可逆。
+/// - `.agent-ide/`、`node_modules/`：工具自身的状态和依赖树，不是源码。
+///
+/// 用户在文件浏览器里手动编辑这些文件仍然允许 —— 这条规则只约束 Agent 产出的
+/// diff，所以它是独立函数，而不是塞进 `resolve_for_write`。
+pub fn resolve_for_agent_write(path: &str) -> Result<PathBuf, String> {
+    let resolved = resolve_for_write(path)?;
+    // 只检查工作区内部的相对路径：工作区自己可能就放在
+    // `D:\work\node_modules\demo` 这种目录下，用绝对路径判断会把一切都拒掉
+    let root = workspace_root()?;
+    let relative = resolved.strip_prefix(&root).unwrap_or(&resolved);
+    if let Some(reason) = agent_write_denial(relative) {
+        return Err(reason);
+    }
+    Ok(resolved)
+}
+
+/// 把路径组件规范成 "Win32 实际会打开的那个名字"，再拿去比对清单。
+///
+/// `resolve_for_write` 对**还不存在**的文件不做 canonicalize（没有真实条目可查），
+/// 返回的是调用方的原始拼写。而 Win32 会忽略组件尾部的 `.` 和空格，并把
+/// `name::$DATA` 当作 `name` 的默认数据流。于是这些名字都不在清单里，落地却是被禁的目标：
+///
+/// - `.git./hooks/pre-commit` → 写进 `.git/hooks/pre-commit`，下次 commit 即任意代码执行
+/// - `.env `（尾部空格）、`certs/server.pem.` → 覆盖凭据
+/// - `.env::$DATA` → 同一份内容，名字不匹配
+///
+/// 归一化只会让判断更严，不会放宽：Windows 上本来就不存在真的叫 `foo.` 的文件，
+/// 而 Linux 上多拒一个字面量 `.git.` 的代价可以忽略。
+fn normalize_component_for_denial(component: &str) -> String {
+    let without_stream = component.split("::").next().unwrap_or(component);
+    without_stream.trim_end_matches(['.', ' ']).to_lowercase()
+}
+
+/// 命中拒绝清单时返回具体原因，否则返回 None
+fn agent_write_denial(path: &Path) -> Option<String> {
+    /// 目录名：出现在路径任意一层都拒绝（子模块的 `.git`、嵌套的 node_modules）
+    const DENIED_DIRS: [&str; 3] = [".git", ".agent-ide", "node_modules"];
+
+    // 大小写不敏感比较：Windows 上 `.GIT/hooks/pre-commit` 指向同一个文件。
+    // 同时抹掉 Win32 会忽略的尾部 `.`/空格和 ADS 后缀，见
+    // `normalize_component_for_denial`。
+    let components: Vec<String> = path
+        .components()
+        .map(|component| normalize_component_for_denial(&component.as_os_str().to_string_lossy()))
+        .collect();
+
+    let (file_name, dirs) = components.split_last()?;
+
+    if let Some(dir) = dirs.iter().find(|dir| DENIED_DIRS.contains(&dir.as_str())) {
+        return Some(format!(
+            "Agent writes into {}/ are not allowed: {}",
+            dir,
+            path.display()
+        ));
+    }
+    if DENIED_DIRS.contains(&file_name.as_str()) {
+        return Some(format!(
+            "Agent writes into {}/ are not allowed: {}",
+            file_name,
+            path.display()
+        ));
+    }
+
+    // `.env` 本身以及 `.env.local` / `.env.production` 这类变体
+    if is_credential_file_name(file_name) {
+        return Some(format!(
+            "Agent writes to credential file {} are not allowed",
+            file_name
+        ));
+    }
+
+    None
+}
+
+/// 凭据类文件名（传入的必须已小写）
+fn is_credential_file_name(file_name: &str) -> bool {
+    /// 文件名整体匹配
+    const DENIED_FILES: [&str; 5] = [".env", ".npmrc", ".netrc", "id_rsa", "id_ed25519"];
+    /// 扩展名匹配
+    const DENIED_EXTENSIONS: [&str; 4] = ["pem", "key", "p12", "pfx"];
+
+    if DENIED_FILES.contains(&file_name) || file_name.starts_with(".env.") {
+        return true;
+    }
+    file_name
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| DENIED_EXTENSIONS.contains(&extension))
+}
+
+/// 这个路径是否是凭据类文件，因而不该被送进发给模型的上下文。
+///
+/// 和写入拒绝清单共用同一份文件名规则，但刻意不含 `.git` / `node_modules`：
+/// 那两个是完整性和噪音问题，不是外泄问题。这里只接受路径字符串（可以是
+/// 相对路径或纯文件名），因为上下文里的条目不一定落在磁盘上。
+pub fn is_credential_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let file_name = normalized
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(&normalized)
+        .to_lowercase();
+    is_credential_file_name(&file_name)
 }
 
 pub fn ensure_within_workspace(path: &Path) -> Result<(), String> {
@@ -212,6 +342,9 @@ mod tests {
         assert!(resolved.ends_with(Path::new("src").join("main.ts")));
     }
 
+    // `\\?\` 是 Windows 独有的 verbatim 前缀。在 Unix 上它只是普通文件名字符，
+    // 拼出来的路径必然不存在，所以这两个断言只在 Windows 上成立。
+    #[cfg(target_os = "windows")]
     #[test]
     fn resolve_existing_allows_windows_verbatim_path_inside_workspace() {
         let _guard = env_test_guard();
@@ -225,6 +358,7 @@ mod tests {
         assert!(resolved.ends_with(Path::new("src").join("main.ts")));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn ensure_within_workspace_allows_windows_verbatim_workspace_root() {
         let _guard = env_test_guard();
@@ -266,6 +400,132 @@ mod tests {
         let err = resolve_for_write(outside.to_string_lossy().as_ref()).unwrap_err();
 
         assert!(err.contains("outside workspace"));
+    }
+
+    /// 写 `.git/hooks/pre-commit` 等于在下一次 commit 时拿到任意代码执行，
+    /// 而 `resolve_for_write` 只检查"在工作区内"，是允许的。
+    #[test]
+    fn agent_writes_into_dot_git_are_denied() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+        env.create_file(".git/hooks/pre-commit", "#!/bin/sh\n");
+
+        let err = resolve_for_agent_write(".git/hooks/pre-commit").unwrap_err();
+        assert!(err.contains(".git/"), "{}", err);
+
+        // 用户自己在文件浏览器里编辑仍然允许 —— 拒绝清单只约束 Agent
+        assert!(resolve_for_write(".git/hooks/pre-commit").is_ok());
+    }
+
+    #[test]
+    fn agent_writes_to_credential_files_are_denied() {
+        let _guard = env_test_guard();
+        let _env = TestEnv::new();
+
+        for path in [
+            ".env",
+            ".env.production",
+            "config/id_rsa",
+            "certs/server.pem",
+            "secrets/api.key",
+            "node_modules/pkg/index.js",
+            ".agent-ide/state.json",
+        ] {
+            let err = resolve_for_agent_write(path)
+                .expect_err(&format!("expected {} to be denied", path));
+            assert!(err.contains("not allowed"), "{}: {}", path, err);
+        }
+    }
+
+    /// 尾部 `.`／空格和 ADS 后缀会被 Win32 忽略，所以它们是清单的绕过口。
+    ///
+    /// 关键前提：`resolve_for_write` 只对**已存在**的文件 canonicalize，新建文件返回的是
+    /// 调用方的原始拼写。所以 `.git./hooks/pre-commit` 这种"目标还不存在"的路径过去能以
+    /// 不在清单里的名字通过检查，落地却是 `.git/hooks/pre-commit` —— 下次 commit 即任意
+    /// 代码执行。这里刻意都用不存在的路径，走的就是那条分支。
+    #[test]
+    fn agent_writes_cannot_evade_the_deny_list_with_windows_name_quirks() {
+        let _guard = env_test_guard();
+        let _env = TestEnv::new();
+
+        for path in [
+            ".git./hooks/pre-commit",
+            ".git ./hooks/pre-commit",
+            ".GIT./config",
+            ".env.",
+            ".env ",
+            ".env::$DATA",
+            "certs/server.pem.",
+            "secrets/api.key ",
+            "node_modules./pkg/index.js",
+            ".agent-ide./state.json",
+        ] {
+            let err = resolve_for_agent_write(path)
+                .expect_err(&format!("expected {:?} to be denied", path));
+            assert!(err.contains("not allowed"), "{:?}: {}", path, err);
+        }
+    }
+
+    /// 归一化不能反过来误伤正常文件名。
+    #[test]
+    fn normalizing_names_does_not_deny_ordinary_files() {
+        let _guard = env_test_guard();
+        let _env = TestEnv::new();
+
+        for path in [
+            "src/environment.ts",
+            "src/keyboard.ts",
+            "src/git/status.ts",
+            "docs/env.md",
+            "src/gitignore-parser.ts",
+        ] {
+            assert!(resolve_for_agent_write(path).is_ok(), "{} 不该被拒", path);
+        }
+    }
+
+    #[test]
+    fn agent_writes_to_ordinary_source_files_are_allowed() {
+        let _guard = env_test_guard();
+        let env = TestEnv::new();
+
+        let resolved = resolve_for_agent_write("src/env/loader.ts").unwrap();
+
+        assert!(resolved.starts_with(&env.root));
+        // 目录名叫 env、文件名含 key 都不该误伤
+        assert!(resolve_for_agent_write("src/keyboard.ts").is_ok());
+        assert!(resolve_for_agent_write("src/environment.ts").is_ok());
+    }
+
+    /// 出网方向复用同一份凭据文件规则，但不含 `.git` / `node_modules`：
+    /// 后两者是完整性和噪音问题，不是泄漏问题。
+    #[test]
+    fn credential_paths_are_recognized_for_context_exclusion() {
+        for path in [
+            ".env",
+            ".env.production",
+            "config/.ENV.local",
+            "keys/id_rsa",
+            "certs/server.pem",
+            "a\\b\\api.key",
+            ".npmrc",
+        ] {
+            assert!(is_credential_path(path), "{} should be credential", path);
+        }
+
+        for path in [
+            "src/env/loader.ts",
+            "src/keyboard.ts",
+            "src/environment.ts",
+            ".git/config",
+            "node_modules/pkg/index.js",
+            "README.md",
+        ] {
+            assert!(
+                !is_credential_path(path),
+                "{} should not be credential",
+                path
+            );
+        }
     }
 
     #[test]

@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+// PartialEq 是为了让 `resolve_context_compression` 的测试能直接断言模式。
+// 没有加 Copy：加了之后现有的 9 处 `.clone()` 全部变成 clippy 错误，
+// 为一个测试的便利去动那些无关代码不值得。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextCompressionMode {
     Full,
+    #[default]
     Focused,
     Compact,
     Budgeted,
@@ -85,6 +89,26 @@ pub struct ContextEstimateResponse {
     #[serde(rename = "inputBudgetTokens")]
     pub input_budget_tokens: Option<usize>,
     pub trimmed: bool,
+    /// 这个估算**没有**算进去的那几部分。
+    ///
+    /// 估算只覆盖上下文包（项目记忆、文件、diff、目录树、对话摘要），而真正发出去的请求还有
+    /// 系统提示、输出规则、工具 schema、待审 diff 摘要和用户这一句 prompt。以前界面上只有一个
+    /// 数字，用户拿它去调 Max context —— 而真实请求比它大出几千 token，于是"算得刚好"照样 400。
+    ///
+    /// 不去猜那几部分的大小：系统提示按路径不同（planner / executor / 各 role），工具 schema
+    /// 取决于这次运行的权限，prompt 还没打完。猜一个数会把一个诚实的缺口换成一个假的总数。
+    #[serde(rename = "notCounted")]
+    pub not_counted: Vec<String>,
+}
+
+/// 估算没覆盖的那几部分，措辞按"发出去时还会加上什么"来写。
+pub fn estimate_omissions() -> Vec<String> {
+    vec![
+        "the role's system prompt and output rules".to_string(),
+        "the tool schemas attached for this run".to_string(),
+        "the pending-diff summary".to_string(),
+        "your prompt itself".to_string(),
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -92,12 +116,6 @@ pub struct ContextSection {
     pub id: &'static str,
     pub label: &'static str,
     pub content: String,
-}
-
-impl Default for ContextCompressionMode {
-    fn default() -> Self {
-        Self::Focused
-    }
 }
 
 impl std::fmt::Display for ContextCompressionMode {
@@ -136,6 +154,28 @@ pub struct AgentContext {
     pub project_tree: Option<String>,
     #[serde(default)]
     pub project_memory: Option<String>,
+    /// 注入时项目记忆被切掉了尾部，以及原文有多大。
+    ///
+    /// 带着这件事一路传到命令层，是因为它只在这里（装配上下文的那一刻）知道，而唯一需要
+    /// 听到它的人在另一端：用户。不传的话，这个事实只能靠在注入文本里搜一句标记来还原 ——
+    /// 也就是只有模型看得见，而用户看到的是"我写的规则 Agent 不照做"。
+    #[serde(default)]
+    pub project_memory_truncated: Option<usize>,
+    /// 之前几轮的对话摘要。
+    ///
+    /// 每次运行原本都是冷启动：跟进一句"再处理下错误分支"没有任何上文，
+    /// 模型只能重新猜上一轮做了什么。这一段由 orchestrator 维护，并且作为
+    /// 普通上下文段落参与预算裁剪，而不是绕过预算直接塞进提示词。
+    #[serde(default)]
+    pub conversation: Option<String>,
+    /// IDE 当下的运行状况：问题面板、终端输出、失败的检查命令、warn/error 日志。
+    ///
+    /// 这一段以前由前端直接拼在提示词后面。后果是它对预算完全不可见：估算面板报的
+    /// "selected context N tokens" 不含它，裁剪也保护不到它，而它最大能有一万字符
+    /// 上下 —— 一个用户看不见、也管不到的大块。作为段落进来之后，它和别的段落一样被
+    /// 估算、排优先级、按配额裁。
+    #[serde(default)]
+    pub ide_runtime: Option<String>,
 }
 
 impl AgentContext {
@@ -149,6 +189,9 @@ impl AgentContext {
             git_diff: None,
             project_tree: None,
             project_memory: None,
+            project_memory_truncated: None,
+            conversation: None,
+            ide_runtime: None,
         }
     }
 
@@ -162,8 +205,15 @@ impl AgentContext {
 
     pub fn enrich_from_workspace_with_sources(&mut self, sources: &ContextSourceOptions) {
         if sources.include_project_memory && self.project_memory.is_none() {
-            self.project_memory =
-                crate::services::project_memory::load_project_memory().ok().flatten();
+            if let Some(loaded) = crate::services::project_memory::load_project_memory()
+                .ok()
+                .flatten()
+            {
+                // 被截断的字节数记在这里而不是只记一个 bool：命令层要把"原文多大"说给用户，
+                // 而那个数字只有这一刻知道 —— 装配之后就只剩下切好的那段文本了
+                self.project_memory_truncated = loaded.truncated.then_some(loaded.bytes);
+                self.project_memory = Some(loaded.text);
+            }
         }
         if sources.include_project_tree && self.project_tree.is_none() {
             self.project_tree = build_project_tree_summary(160, 4).ok();
@@ -215,9 +265,19 @@ impl AgentContext {
                 sections.push(ContextSection {
                     id: "project_memory",
                     label: "Project memory (AGENTS.md)",
+                    content: format!("Project memory (AGENTS.md):\n```\n{}\n```\n", memory),
+                });
+            }
+        }
+
+        if let Some(ref conversation) = self.conversation {
+            if !conversation.trim().is_empty() {
+                sections.push(ContextSection {
+                    id: "conversation",
+                    label: "Earlier turns",
                     content: format!(
-                        "Project memory (AGENTS.md):\n```\n{}\n```\n",
-                        memory
+                        "Earlier turns in this session (most recent last):\n{}\n",
+                        conversation
                     ),
                 });
             }
@@ -230,37 +290,67 @@ impl AgentContext {
                 content: format!("Active file: {}\n", file),
             });
         }
-        if let Some(ref selection) = self.selection {
+        // 打开的是凭据文件时，正文和选区都不能进上下文。写入侧的拒绝清单只管
+        // 落盘，没有对应的出网约束 —— 而把 .env 全文发给供应商是不可撤销的泄漏。
+        // 只挡这两段：目录树、打开文件列表、git diff 仍然照常提供。
+        let active_file_is_credential = self
+            .active_file
+            .as_deref()
+            .is_some_and(crate::services::workspace::is_credential_path);
+        if !active_file_is_credential {
+            if let Some(ref selection) = self.selection {
+                sections.push(ContextSection {
+                    id: "selection",
+                    label: "Selection",
+                    content: format!("Selected code:\n```\n{}\n```\n", selection),
+                });
+            }
+        }
+        // 问题面板 / 终端 / 失败的检查 / 日志。以前前端把这段直接拼在提示词后面，于是
+        // 估算和裁剪都看不见它 —— 一个上万字符的块可以把预算悄悄挤爆。
+        //
+        // 空串要当成"没有"：`buildIdeRuntimeContext` 在无事可报或开关全关时返回 ""，
+        // 照样建段的话，面板上会出现一行绿点的 "IDE runtime"，而模型收到的只是一个空
+        // 标题 —— "关掉了"和"开着但没内容"变得无法区分。
+        if let Some(runtime) = self
+            .ide_runtime
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
             sections.push(ContextSection {
-                id: "selection",
-                label: "Selection",
-                content: format!("Selected code:\n```\n{}\n```\n", selection),
+                id: "ide_runtime",
+                label: "IDE runtime",
+                content: format!("=== IDE Runtime Context ===\n{}\n", runtime.trim_end()),
             });
         }
         if let Some(ref content) = self.active_file_content {
-            let section_content = match mode {
-                ContextCompressionMode::Full => {
-                    format!("Current file content:\n```\n{}\n```\n", content)
-                }
-                ContextCompressionMode::Budgeted => {
-                    format!(
-                        "Current file budgeted content:\n```\n{}\n```\n",
-                        excerpt_text(content, 24_000)
-                    )
-                }
-                ContextCompressionMode::Focused => {
-                    format!(
-                        "Current file excerpt:\n```\n{}\n```\n",
-                        excerpt_text(content, 16_000)
-                    )
-                }
-                ContextCompressionMode::Compact => {
-                    format!(
-                        "Current file summary: {} bytes, {} lines.\nCurrent file outline:\n```\n{}\n```\n",
-                        content.len(),
-                        content.lines().count(),
-                        outline_text(content, 80)
-                    )
+            let section_content = if active_file_is_credential {
+                "Current file content withheld: the active file looks like a credential file, so its contents are not sent to the model.\n".to_string()
+            } else {
+                match mode {
+                    ContextCompressionMode::Full => {
+                        format!("Current file content:\n```\n{}\n```\n", content)
+                    }
+                    ContextCompressionMode::Budgeted => {
+                        format!(
+                            "Current file budgeted content:\n```\n{}\n```\n",
+                            excerpt_text(content, 24_000)
+                        )
+                    }
+                    ContextCompressionMode::Focused => {
+                        format!(
+                            "Current file excerpt:\n```\n{}\n```\n",
+                            excerpt_text(content, 16_000)
+                        )
+                    }
+                    ContextCompressionMode::Compact => {
+                        format!(
+                            "Current file summary: {} bytes, {} lines.\nCurrent file outline:\n```\n{}\n```\n",
+                            content.len(),
+                            content.lines().count(),
+                            outline_text(content, 80)
+                        )
+                    }
                 }
             };
             sections.push(ContextSection {
@@ -319,10 +409,97 @@ impl AgentContext {
     }
 }
 
+/// 没填"预留输出"时按多少算。
+///
+/// 这个默认一直在代码里（两处 `unwrap_or(4096)`），但界面上从来没说过，于是那个空框看起来像
+/// "必须填"。给它一个名字：两处公式不会各自漂移，界面也能照着显示"正在生效的就是这个值"。
+pub const DEFAULT_RESERVED_OUTPUT_TOKENS: u32 = 4_096;
+
+/// 装配开销的余量。上下文块之外还有系统提示词、工具 schema 等等，它们不在估算里（见
+/// ROADMAP 119/124），所以从窗口里先扣掉一截，别把预算算得比实际宽。
+pub const CONTEXT_ASSEMBLY_HEADROOM_TOKENS: u32 = 512;
+
+/// 上下文装配能用的输入预算。
+///
+/// 窗口没设时返回 `None`：这个数字会变成装配器的字符上限，按一个猜出来的窗口去裁用户的
+/// 上下文，比不裁更糟。界面上那行估算在窗口未知时退回按**模型**查表（前端
+/// `utils/modelLimits.ts`），查不到就显示 unknown —— 不猜。
 pub fn estimated_input_tokens_from_budget(budget: &ContextBudget) -> Option<usize> {
     let max_context = budget.max_context_tokens?;
-    let reserved = budget.reserved_output_tokens.unwrap_or(4096);
-    Some(max_context.saturating_sub(reserved).saturating_sub(512))
+    let reserved = budget
+        .reserved_output_tokens
+        .unwrap_or(DEFAULT_RESERVED_OUTPUT_TOKENS as usize);
+    Some(
+        max_context
+            .saturating_sub(reserved)
+            .saturating_sub(CONTEXT_ASSEMBLY_HEADROOM_TOKENS as usize),
+    )
+}
+
+/// 段落的预算优先级与配额权重。
+///
+/// 之前的装配是顺序贪心：按段落顺序消耗预算，第一个装不下的段落被截断后
+/// `remaining` 直接归零，其后所有段落一律标记 "budget exhausted"。后果是
+/// 一个大文件或一个大 diff 就能把 git diff、目录树整段饿死 —— 而这跟段落
+/// 本身的重要程度无关，只跟它在列表里的位置有关。
+///
+/// 现在每个段落有独立配额：先按优先级发放各自的配额上限，再把剩余额度回补
+/// 给被截断的段落。大段落最多吃掉自己那份，不会连带饿死后面的。
+///
+/// 返回 `(优先级, 配额权重)`。优先级小的先分配；权重是该段落能占用的输入
+/// 预算比例，权重之和故意大于 1 —— 配额是软上限，没人用的额度会在第二轮
+/// 回补出去。
+fn section_budget_rule(id: &str) -> (u8, f32) {
+    match id {
+        // 项目头和活动文件路径都是几十字节，但没有它们模型不知道自己在改什么
+        "project" => (0, 0.05),
+        "active_file_path" => (1, 0.03),
+        // 项目约定和用户选区是最强的意图信号，排在正文之前
+        "project_memory" => (2, 0.15),
+        "selection" => (3, 0.15),
+        // 用户刚点了"让 Agent 修"，问题面板和失败输出就是这次请求的理由；排在正文
+        // 之前，配额比正文小 —— 它是线索，正文才是要改的东西
+        "ide_runtime" => (4, 0.15),
+        "conversation" => (5, 0.10),
+        "active_file_content" => (6, 0.30),
+        "git_diff" => (7, 0.20),
+        "project_tree" => (8, 0.10),
+        "open_files" => (9, 0.05),
+        _ => (10, 0.05),
+    }
+}
+
+/// 配额小于这个字节数时不再截断，直接排除该段落。
+///
+/// 截断标记本身要占几十字节，配额太小的话装进去的全是 "context truncated"
+/// 而没有实际内容，纯属浪费预算。
+const MIN_USEFUL_SECTION_CHARS: usize = 240;
+
+pub fn estimate_tokens_for_text(text: &str) -> usize {
+    // ASCII 大致 4 字符 1 token；CJK 等非 ASCII 字符按 1 token 计。
+    // 原来统一用 `字节数 / 4`，对中文是系统性低估：一个汉字 3 字节算 0.75
+    // token，实际接近 1 token。中文提示词因此会在预算边缘被整段截断。
+    let mut ascii = 0usize;
+    let mut wide = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            wide += 1;
+        }
+    }
+    ascii.saturating_add(3) / 4 + wide
+}
+
+/// 按实际文本构成推算"每 token 多少字节"，用于把 token 预算换成字节预算。
+///
+/// 纯 ASCII 约 4，纯中文约 3。固定用 4 会让中文内容超出真实预算。
+fn bytes_per_token(text: &str) -> usize {
+    let tokens = estimate_tokens_for_text(text);
+    if tokens == 0 {
+        return 4;
+    }
+    (text.len() / tokens).clamp(2, 4)
 }
 
 fn build_context_with_estimate(
@@ -334,30 +511,61 @@ fn build_context_with_estimate(
         .budget
         .as_ref()
         .and_then(estimated_input_tokens_from_budget);
-    let max_chars = input_budget_tokens.map(|tokens| tokens.saturating_mul(4));
-    let mut remaining = max_chars.unwrap_or(usize::MAX);
+    let max_chars = input_budget_tokens.map(|tokens| {
+        let combined: String = sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect();
+        tokens.saturating_mul(bytes_per_token(&combined))
+    });
+
+    let allotted = match max_chars {
+        Some(max_chars) => {
+            let lengths: Vec<(usize, usize)> = sections
+                .iter()
+                .map(|section| {
+                    (
+                        section_budget_rule(section.id).0 as usize,
+                        section.content.len(),
+                    )
+                })
+                .collect();
+            let weights: Vec<f32> = sections
+                .iter()
+                .map(|section| section_budget_rule(section.id).1)
+                .collect();
+            Some(allocate_with_quotas(&lengths, &weights, max_chars))
+        }
+        None => None,
+    };
+
     let mut output = String::new();
     let mut estimates = Vec::new();
 
-    for section in sections {
+    for (index, section) in sections.into_iter().enumerate() {
         let raw_section_chars = section.content.len();
+        let raw_section_tokens = estimate_tokens_for_text(&section.content);
         let mut included = true;
         let mut trimmed = false;
         let mut excluded_reason = None;
         let mut content = section.content;
 
-        if max_chars.is_some() {
-            if remaining == 0 {
-                included = false;
-                content.clear();
-                excluded_reason = Some("excluded because budget was exhausted".to_string());
-            } else if content.len() > remaining {
-                trimmed = true;
-                content = excerpt_text(&content, remaining);
-                remaining = 0;
-                excluded_reason = Some("trimmed to fit input budget".to_string());
-            } else {
-                remaining = remaining.saturating_sub(content.len());
+        if let Some(ref allotted) = allotted {
+            let grant = allotted[index];
+            if grant < content.len() {
+                if grant < MIN_USEFUL_SECTION_CHARS {
+                    included = false;
+                    content.clear();
+                    excluded_reason = Some(
+                        "excluded because higher-priority sections used the input budget"
+                            .to_string(),
+                    );
+                } else {
+                    trimmed = true;
+                    content = excerpt_text(&content, grant);
+                    excluded_reason =
+                        Some("trimmed to fit its share of the input budget".to_string());
+                }
             }
         }
 
@@ -372,7 +580,7 @@ fn build_context_with_estimate(
             id: section.id.to_string(),
             label: section.label.to_string(),
             chars: raw_section_chars,
-            estimated_tokens: estimate_tokens(raw_section_chars),
+            estimated_tokens: raw_section_tokens,
             included,
             trimmed,
             excluded_reason,
@@ -384,16 +592,51 @@ fn build_context_with_estimate(
         sections: estimates,
         raw_chars,
         final_chars,
-        estimated_tokens: estimate_tokens(final_chars),
+        estimated_tokens: estimate_tokens_for_text(&output),
         input_budget_tokens,
         trimmed: final_chars < raw_chars,
+        not_counted: estimate_omissions(),
     };
 
     (output, response)
 }
 
-pub fn estimate_tokens(chars: usize) -> usize {
-    chars.saturating_add(3) / 4
+/// 按优先级发配额，再回补剩余额度。
+///
+/// `lengths[i] = (优先级, 段落字节数)`，`weights[i]` 是该段落的配额比例。
+fn allocate_with_quotas(
+    lengths: &[(usize, usize)],
+    weights: &[f32],
+    max_chars: usize,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&index| lengths[index].0);
+
+    let mut allotted = vec![0usize; lengths.len()];
+    let mut remaining = max_chars;
+
+    for &index in &order {
+        let length = lengths[index].1;
+        let cap = ((max_chars as f32) * weights[index]).round() as usize;
+        let grant = length.min(cap).min(remaining);
+        allotted[index] = grant;
+        remaining -= grant;
+    }
+
+    for &index in &order {
+        if remaining == 0 {
+            break;
+        }
+        let need = lengths[index].1.saturating_sub(allotted[index]);
+        if need == 0 {
+            continue;
+        }
+        let grant = need.min(remaining);
+        allotted[index] += grant;
+        remaining -= grant;
+    }
+
+    allotted
 }
 
 pub fn build_project_tree_summary(max_entries: usize, max_depth: usize) -> Result<String, String> {
@@ -413,13 +656,32 @@ pub fn build_git_diff_summary(max_chars: usize) -> Result<String, String> {
     let head = repo.head().map_err(|e| format!("HEAD: {}", e))?;
     let tree = head.peel_to_tree().map_err(|e| format!("Tree: {}", e))?;
     let diff = repo
-        .diff_tree_to_workdir_with_index(Some(&tree), None)
+        .diff_tree_to_workdir_with_index(
+            Some(&tree),
+            Some(&mut diff_options_scoped_to(&repo, &root)),
+        )
         .map_err(|e| format!("Diff: {}", e))?;
 
     let mut output = String::new();
-    diff.print(git2::DiffFormat::Patch, |_, _, line| {
+    let mut withheld: Vec<String> = Vec::new();
+    diff.print(git2::DiffFormat::Patch, |delta, _, line| {
         if output.len() >= max_chars {
             return false;
+        }
+        // 改动过的 .env / 私钥，其内容会整段出现在 patch 里。写入侧挡住了 Agent
+        // 改这些文件，但 diff 是出网方向，必须单独挡一次。
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .map(|path| path.to_string_lossy().to_string());
+        if let Some(path) = path {
+            if crate::services::workspace::is_credential_path(&path) {
+                if !withheld.contains(&path) {
+                    withheld.push(path);
+                }
+                return true;
+            }
         }
         let origin = match line.origin() {
             '+' => '+',
@@ -436,7 +698,35 @@ pub fn build_git_diff_summary(max_chars: usize) -> Result<String, String> {
     if output.len() >= max_chars {
         output.push_str("\n/* ... git diff truncated ... */\n");
     }
+    if !withheld.is_empty() {
+        output.push_str(&format!(
+            "\n/* diff withheld for credential files: {} */\n",
+            withheld.join(", ")
+        ));
+    }
     Ok(output)
+}
+
+/// 把 diff 限定在工作区目录内。
+///
+/// `Repository::discover` 是向上找仓库根的：工作区只是大仓库的一个子目录时，
+/// 不加 pathspec 会把兄弟目录的改动也塞进发给模型的上下文 —— 那些文件根本
+/// 不在用户打开的工作区里。算不出相对路径时保持原样（不限定），以免误伤。
+fn diff_options_scoped_to(repo: &git2::Repository, root: &Path) -> git2::DiffOptions {
+    let mut options = git2::DiffOptions::new();
+    let Some(workdir) = repo.workdir() else {
+        return options;
+    };
+    let workdir = workdir
+        .canonicalize()
+        .map(crate::services::workspace::shell_compatible_path)
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    if let Ok(relative) = root.strip_prefix(&workdir) {
+        if !relative.as_os_str().is_empty() {
+            options.pathspec(relative);
+        }
+    }
+    options
 }
 
 fn collect_tree_entries(
@@ -586,7 +876,155 @@ mod tests {
             git_diff: None,
             project_tree: None,
             project_memory: None,
+            project_memory_truncated: None,
+            conversation: None,
+            ide_runtime: None,
         }
+    }
+
+    /// IDE 运行状况必须是一个**段落**，而不是前端拼在提示词后面的一块。
+    ///
+    /// 拼在提示词里的话，估算面板报的 token 数不含它、预算裁剪也保护不到它 —— 而这块
+    /// 最大能有上万字符，等于用户看不见也管不到的一大截。
+    /// 估算必须自己说清它没算什么。
+    ///
+    /// 这个数字是用户拿去调 Max context 的那个。只报"选中的上下文有多大"、不报"发出去时还会
+    /// 加上什么"，就会出现"看着离预算还很远，却因为超长被截断"的运行 —— 正是这个产品最该避免
+    /// 的那种虚假信心。名单由这一侧出，因为漏了什么只有装配请求的这一侧知道。
+    #[test]
+    fn the_estimate_says_what_it_did_not_count() {
+        let omissions = estimate_omissions();
+        let joined = omissions.join(" | ");
+
+        // 四个真正的缺口都要点名，不能只含糊说一句"还有别的"
+        assert!(joined.contains("system prompt"), "{}", joined);
+        assert!(joined.contains("tool schemas"), "{}", joined);
+        assert!(joined.contains("pending-diff"), "{}", joined);
+        assert!(joined.contains("your prompt"), "{}", joined);
+
+        // 估算返回值里也要带着它：只放在悬浮提示里的话，不悬浮的人看不到
+        let ctx = sample_context("const a = 1;");
+        let estimate = ctx.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            None,
+        ));
+        assert_eq!(estimate.not_counted, omissions);
+    }
+
+    #[test]
+    fn ide_runtime_is_an_estimated_and_budgeted_section() {
+        let mut context = sample_context("const a = 1;\n");
+        let runtime = format!("problem list\n{}", "x".repeat(4_000));
+        context.ide_runtime = Some(runtime);
+
+        let estimate = context.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            None,
+        ));
+        let section = estimate
+            .sections
+            .iter()
+            .find(|section| section.id == "ide_runtime")
+            .expect("ide_runtime section");
+        assert!(section.chars > 4_000, "{}", section.chars);
+        assert!(section.estimated_tokens > 0);
+
+        // 预算紧到只够高优先级段落时，它按规则被裁或被排除，而不是绕过预算照发
+        let squeezed = context.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            Some(ContextBudget {
+                max_context_tokens: Some(1_200),
+                reserved_output_tokens: Some(400),
+            }),
+        ));
+        let squeezed_section = squeezed
+            .sections
+            .iter()
+            .find(|section| section.id == "ide_runtime")
+            .expect("ide_runtime section");
+        assert!(
+            squeezed_section.trimmed || !squeezed_section.included,
+            "{:?}",
+            squeezed_section
+        );
+    }
+
+    /// 空的运行状况不建段。
+    ///
+    /// `buildIdeRuntimeContext` 在无事可报、或者四个开关全关时返回 ""。照样建段的话，
+    /// 面板上会多出一行绿点的 "IDE runtime"，模型收到一个只有标题的空块，而"关掉了"和
+    /// "开着但没内容"变得无法区分 —— 这个面板存在的意义就是说清发了什么。
+    #[test]
+    fn an_empty_ide_runtime_is_not_a_section() {
+        let mut context = sample_context("const a = 1;\n");
+        context.ide_runtime = Some("   \n".to_string());
+
+        let estimate = context.estimate_prompt_context(&ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            None,
+        ));
+
+        assert!(
+            !estimate
+                .sections
+                .iter()
+                .any(|section| section.id == "ide_runtime"),
+            "{:?}",
+            estimate
+                .sections
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// 写入侧的拒绝清单只管落盘，没有出网方向的对应约束：打开 `.env` 时
+    /// 它的全文会被送给供应商，而这种泄漏是不可撤销的。
+    #[test]
+    fn credential_files_are_withheld_from_the_prompt() {
+        let ctx = AgentContext {
+            active_file: Some(".env.production".to_string()),
+            active_file_content: Some("STRIPE_SECRET_KEY=sk_live_deadbeef".to_string()),
+            selection: Some("sk_live_deadbeef".to_string()),
+            ..sample_context("unused")
+        };
+
+        let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+
+        assert!(!prompt.contains("sk_live_deadbeef"), "{}", prompt);
+        assert!(prompt.contains("withheld"));
+        // 路径本身仍然告知模型，只是内容不发
+        assert!(prompt.contains(".env.production"));
+
+        // 普通源码文件不受影响
+        let normal = sample_context("const a = 1;");
+        let prompt = normal.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+        assert!(prompt.contains("const a = 1;"));
+        assert!(prompt.contains("const selected = true;"));
+    }
+
+    /// 历史作为普通上下文段落参与预算裁剪，而不是绕过预算直接拼进提示词
+    #[test]
+    fn conversation_history_becomes_a_trimmable_prompt_section() {
+        let ctx = AgentContext {
+            conversation: Some(
+                "1. asked: rename the value\n   result: awaiting review: src/app.ts".to_string(),
+            ),
+            ..sample_context("const a = 1;")
+        };
+
+        let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
+        assert!(prompt.contains("Earlier turns"), "{}", prompt);
+        assert!(prompt.contains("rename the value"));
+
+        let sections = ctx.build_prompt_sections(&ContextCompressionMode::Full);
+        assert!(sections.iter().any(|section| section.id == "conversation"));
+
+        // 没有历史时不该多出一个空段落
+        let fresh = sample_context("const a = 1;");
+        assert!(!fresh
+            .to_prompt_context_with_mode(&ContextCompressionMode::Full)
+            .contains("Earlier turns"));
     }
 
     #[test]
@@ -685,7 +1123,9 @@ mod tests {
 
         let prompt = ctx.to_prompt_context_with_mode(&ContextCompressionMode::Full);
 
-        let memory_index = prompt.find("Project memory (AGENTS.md)").expect("memory section");
+        let memory_index = prompt
+            .find("Project memory (AGENTS.md)")
+            .expect("memory section");
         let active_index = prompt.find("Active file:").expect("active file section");
         assert!(memory_index < active_index);
     }
@@ -780,5 +1220,67 @@ mod tests {
         assert!(prompt.len() <= 10_000 + 120);
         assert!(estimate.trimmed);
         assert!(estimate.input_budget_tokens.is_some());
+    }
+
+    /// 顺序贪心的老装配里，一个超大 active file 会把它后面的 git diff、目录树
+    /// 全部饿死（`remaining` 归零后一律 "budget exhausted"）。配额分配下，每个
+    /// 段落只能吃掉自己那份。
+    #[test]
+    fn budget_quotas_keep_lower_priority_sections_alive() {
+        let mut ctx = sample_context(&"x".repeat(200_000));
+        ctx.project_memory = Some("Always run cargo test.".to_string());
+        ctx.git_diff = Some(format!(
+            "diff --git a/a.ts b/a.ts\n{}\n",
+            "+line\n".repeat(5_000)
+        ));
+        ctx.project_tree = Some("src/\n  src/app.ts\n  src/main.ts".repeat(200));
+
+        let options = ContextBuildOptions::new(
+            ContextCompressionMode::Full,
+            Some(ContextBudget {
+                max_context_tokens: Some(8_000),
+                reserved_output_tokens: Some(1_000),
+            }),
+        );
+        let estimate = ctx.estimate_prompt_context(&options);
+        let prompt = ctx.to_prompt_context_with_options(&options);
+
+        let included = |id: &str| {
+            estimate
+                .sections
+                .iter()
+                .find(|section| section.id == id)
+                .map(|section| section.included)
+                .unwrap_or(false)
+        };
+
+        assert!(included("active_file_content"));
+        assert!(included("git_diff"), "{:?}", estimate.sections);
+        assert!(included("project_tree"), "{:?}", estimate.sections);
+        // 高优先级的小段落必须完整保留
+        assert!(prompt.contains("Always run cargo test."));
+        assert!(prompt.contains("const selected = true;"));
+        assert!(!estimate
+            .sections
+            .iter()
+            .any(|section| section.excluded_reason.as_deref()
+                == Some("excluded because budget was exhausted")));
+    }
+
+    /// 统一按 `字节数 / 4` 估算对中文是系统性低估：一个汉字 3 字节会被算成
+    /// 0.75 token，实际接近 1 token，中文提示词因此在预算边缘被整段截断。
+    #[test]
+    fn token_estimate_counts_cjk_characters_individually() {
+        assert_eq!(estimate_tokens_for_text("abcd"), 1);
+        assert_eq!(estimate_tokens_for_text("你好世界"), 4);
+
+        let chinese = "把错误分支也处理一下".repeat(100);
+        let byte_based = chinese.len() / 4;
+        assert!(
+            estimate_tokens_for_text(&chinese) > byte_based,
+            "CJK estimate {} should exceed the byte-based {}",
+            estimate_tokens_for_text(&chinese),
+            byte_based
+        );
     }
 }
