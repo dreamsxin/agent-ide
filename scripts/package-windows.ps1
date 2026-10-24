@@ -3,7 +3,12 @@ param(
     [string]$Configuration = "release",
     [switch]$SkipChecks,
     [switch]$CleanOutput,
-    [switch]$SkipDependencyNote
+    [switch]$SkipDependencyNote,
+    # Skip the default `llama-cpp` Cargo feature (needs LLVM/libclang plus a
+    # native llama.cpp build). OpenAI-compatible providers remain available,
+    # which matches the Phase 9.3 re-scope, so this is the recommended
+    # release configuration until local inference engines ship.
+    [switch]$NoDefaultFeatures
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,6 +75,15 @@ if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
     }
 }
 
+$cargoFeatureArgs = @()
+$tauriFeatureArgs = @()
+if ($NoDefaultFeatures) {
+    $cargoFeatureArgs = @("--no-default-features")
+    # tauri-cli forwards everything after `--` to the cargo runner.
+    $tauriFeatureArgs = @("--", "--no-default-features")
+    Write-Host "Cargo features: --no-default-features (llama-cpp local inference disabled)"
+}
+
 if (-not $SkipChecks) {
     Invoke-Step "Frontend build" {
         npm run build
@@ -80,7 +94,7 @@ if (-not $SkipChecks) {
     Invoke-Step "Rust check" {
         Push-Location (Join-Path $RepoRoot "src-tauri")
         try {
-            cargo check
+            cargo check @cargoFeatureArgs
         } finally {
             Pop-Location
         }
@@ -88,7 +102,7 @@ if (-not $SkipChecks) {
     Invoke-Step "Rust tests" {
         Push-Location (Join-Path $RepoRoot "src-tauri")
         try {
-            cargo test
+            cargo test @cargoFeatureArgs
         } finally {
             Pop-Location
         }
@@ -102,7 +116,7 @@ if ($CleanOutput -and (Test-Path $outputDir)) {
 }
 
 Invoke-Step "Tauri Windows build" {
-    npm run tauri -- build --bundles $BundleTargets
+    npm run tauri -- build --bundles $BundleTargets @tauriFeatureArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri bundling failed with exit code $LASTEXITCODE. Check installer toolchain downloads for NSIS/WiX."
     }
@@ -149,6 +163,7 @@ $manifest = [pscustomobject]@{
     platform = "windows"
     bundleTargets = $BundleTargets
     configuration = $Configuration
+    noDefaultFeatures = [bool]$NoDefaultFeatures
     generatedAt = (Get-Date).ToUniversalTime().ToString("o")
     artifacts = $manifestArtifacts | Sort-Object file
 }

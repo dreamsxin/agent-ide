@@ -10,15 +10,17 @@ Agent IDE is not intended to be a chat-only coding tool. The product direction i
 
 ## Current Status
 
-Phase 7 is feature-complete. Phase 8 is focused on daily IDE replacement hardening.
+**v0.2.0 released** — first packaged, usable IDE build (Windows NSIS installer). Phase 7 is feature-complete; Phase 8 daily-IDE hardening and Phase 9.0 market-parity work are in progress.
 
 Capability snapshot:
 
 - Desktop IDE shell: Monaco editor, Explorer, Git, Terminal, Problems, Logs, Commands, and Agent panels.
 - Agent loop: role pipeline, editable plan, context preview/budgeting, structured action logs, `agent-changes` protocol, and diff review/apply/regenerate.
-- Project memory: workspace-root `AGENTS.md` is loaded into Agent context (bounded, budget-aware, IDE + CLI).
+- Project memory: workspace-root `AGENTS.md` is loaded into Agent context (bounded, budget-aware, IDE + CLI) with a per-run toggle in the Chat context preview.
+- Provider-native tool calling (9.0.1): OpenAI-compatible `delta.tool_calls` streaming plus `agent-changes` fallback for local/small models.
 - Semantic/runtime loop: TypeScript/JavaScript and Go LSP first pass, diagnostics to Problems/editor markers, project command run history, and terminal failure context for Agent repair.
-- Automation/release: headless `agent_cli` first pass and Windows packaging workflow.
+- Automated testing: Vitest suite (53 tests), Rust suite (127 tests), CLI smoke coverage, and an automated visual smoke check (`npm run visual:test`) that screenshots the web-preview shell in headless Edge/Chrome.
+- Automation/release: headless `agent_cli` first pass and Windows packaging workflow with SHA256 manifest.
 
 The detailed implementation state, remaining gaps, and next tasks live in [ROADMAP.md](ROADMAP.md). Design and protocol docs: [docs/agent_ide_design.md](docs/agent_ide_design.md), [docs/agent_changes_schema.md](docs/agent_changes_schema.md), and [docs/smoke_test.md](docs/smoke_test.md).
 
@@ -422,6 +424,7 @@ Run these checks before committing substantial changes:
 ```powershell
 npm run build
 npm test
+npm run visual:test
 cd src-tauri
 cargo check
 cargo test
@@ -429,7 +432,7 @@ cargo test
 
 Known build note: Vite currently warns about a large chunk because Monaco, Markdown, xterm, and syntax tooling are bundled together. This is not a correctness failure.
 
-For changes to LSP, Problems, Terminal, Git, or Agent diff application, also run the real Tauri runtime checklist in [docs/smoke_test.md](docs/smoke_test.md).
+`npm run visual:test` drives the Vite web preview in headless Edge/Chrome, verifies the IDE shell layout and panel interactions, and saves screenshots plus a summary to `test-results/visual/`. It covers web-preview scope only; for changes to LSP, Problems, Terminal, Git, or Agent diff application, also run the real Tauri runtime checklist in [docs/smoke_test.md](docs/smoke_test.md).
 
 ## Windows Packaging
 
@@ -452,6 +455,12 @@ To build one installer format:
 ```powershell
 npm run package:windows:nsis
 npm run package:windows:msi
+```
+
+Release builds on machines without LLVM/libclang (or before Phase 9.3 ships local inference) should skip the default `llama-cpp` Cargo feature; OpenAI-compatible providers remain available:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -BundleTargets nsis -NoDefaultFeatures
 ```
 
 The first Windows bundle may download NSIS, `nsis_tauri_utils.dll`, and/or WiX tooling through Tauri. If local bundling times out while downloading those tools, rerun the command after the tool cache is populated or run the `Windows Package` GitHub Actions workflow, which builds on `windows-latest` and uploads the generated artifacts.

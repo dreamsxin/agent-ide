@@ -97,7 +97,7 @@ See `docs/smoke_test.md` sections 2–10 for the full manual checklist that thes
 3. Verifies required layout elements (`app-root`, `topbar`, `left-panel`, `bottom-panel`, bottom tabs), switches all four bottom-panel tabs, opens the command palette with `Ctrl+Shift+P`, and fails on any uncaught page error.
 4. Saves per-state screenshots and a `summary.json` to `test-results/visual/` (gitignored) for human visual review, and exits non-zero when any check fails.
 
-The manual visual review step is to open the generated screenshots and confirm layout, degraded-state messaging (for example `TS unavailable`, `Terminal is available in the Tauri app runtime.`), and theme rendering look correct. Recorded 2026-10-24: 12/12 checks passed, screenshots reviewed — default layout, bottom tabs, and command palette all render as designed.
+The manual visual review step is to open the generated screenshots and confirm layout, degraded-state messaging (for example `TS unavailable`, `Terminal is available in the Tauri app runtime.`), and theme rendering look correct. Recorded 2026-10-24: 13/13 checks passed, screenshots reviewed — default layout, bottom tabs, and command palette all render as designed.
 
 ```bash
 npm run visual:test

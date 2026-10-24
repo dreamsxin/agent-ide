@@ -44,7 +44,7 @@ cargo test
 
 ## Current State
 
-Status as of 2026-09-04: **Phase 8 daily IDE replacement hardening in progress; Phase 9.0 market-parity foundation started (AGENTS.md project memory landed)**.
+Status as of 2026-10-24: **v0.2.0 released — first packaged, usable IDE build (Windows NSIS, `-NoDefaultFeatures`). Phase 8 hardening and Phase 9.0 market-parity work continue.**
 
 Updated strategic direction (2026-09-03):
 
@@ -173,6 +173,7 @@ The app is no longer just a static UI prototype. It has a working Tauri/Rust bac
 - Fixed the broken frontend build (2026-10-24): six TypeScript errors in the half-landed Phase 9.2 intelligent-completion hook (`useIntelligentCompletion.ts`) and Phase 9.1 editor integration (`EditorContainer.tsx`); `maxSuggestions`/`onSuggestionGenerated` options are now actually wired through the Monaco completion provider, and suggestion statistics update from generated suggestions.
 - Added Vitest coverage for the Phase 9.1/9.2 editor utilities (`incrementalRenderer`, `intelligentCompletion`), the task run lifecycle/terminal queueing store (`useTaskStore`), and log persistence behavior (`useLogStore`), raising the frontend suite from 14 to 53 tests.
 - Added automated visual smoke verification (`npm run visual:test`, `scripts/visual-check.mjs`): Playwright-core drives the Vite web preview in headless Edge/Chrome, asserts required layout elements and tab/palette interactions, captures per-state screenshots plus `summary.json` under `test-results/visual/`, and fails on uncaught page errors; screenshots are reviewed manually as the 视觉校对 step.
+- Released **v0.2.0** (2026-10-24): version bumped across `package.json`/`tauri.conf.json`/`Cargo.toml`, `CHANGELOG.md` added, README/README.zh-CN refreshed, Tauri bundle config fixed (removed missing `icons/icon.icns`), and the Windows NSIS installer packaged with the new `-NoDefaultFeatures` flag and SHA256 manifest.
 
 Important distinction:
 
@@ -188,12 +189,14 @@ Last verified locally:
 ```powershell
 npm run build     # passes; Vite still warns about a large Monaco/Markdown chunk
 npm test          # passes; 53 tests across 10 files (14 -> 53 on 2026-10-24)
-npm run visual:test # passes; 12/12 automated visual smoke checks with screenshots
+npm run visual:test # passes; 13/13 automated visual smoke checks with screenshots
 cargo check       # passes (no-default-features)
 cargo test        # passes; 127 tests (no-default-features)
 ```
 
 2026-10-24 verification note: the previously broken `npm run build` was fixed (six TypeScript errors in the half-landed Phase 9.1/9.2 files `useIntelligentCompletion.ts` and `EditorContainer.tsx`). The Phase 9.1/9.2 utility modules are now covered by Vitest. `npm run visual:test` was added and its screenshots were visually reviewed: default layout, bottom tabs, and command palette render correctly in web preview mode with accurate degraded-state messaging.
+
+2026-10-24 release note: **v0.2.0** packaged via `scripts/package-windows.ps1 -BundleTargets nsis -NoDefaultFeatures` into `release/windows/0.2.0/` with `SHA256SUMS.txt` and `manifest.json`. The release build skips the default `llama-cpp` feature (no LLVM/libclang on the build machine; local inference stays pending Phase 9.3) — OpenAI-compatible providers, the full IDE shell, and the Agent loop are unaffected. The Chat context preview gained the per-run AGENTS.md toggle (Next task 4).
 
 2026-09-05 verification note: `cargo check --no-default-features` and `cargo test --no-default-features` pass on Windows (127 tests, 0 failed), including the AGENTS.md project-memory tests and the new tool-call accumulator / synthesis tests. The default `llama-cpp` feature additionally requires LLVM/libclang plus a full llama.cpp native build, which is pending the re-scoped Phase 9.3 (OpenAI-compatible local runtimes first).
 
@@ -865,7 +868,7 @@ target\release\agent_cli --help
 1. ~~Implement Phase 9.0.1 provider-native tool calling in `services/llm_client.rs` + `agent/executor.rs` with `agent-changes` kept as fallback~~ **Done (2026-09-05)**: `stream_chat_with_tools` parses OpenAI-compatible `delta.tool_calls` streams and non-streaming `tool_calls`, and `merge_tool_call_output` synthesizes `agent-changes` blocks so the parse pipeline is transport-agnostic. Live provider round-trip still pending a real API key.
 2. Implement Phase 9.0.3 MCP client (RMCP stdio transport, tool discovery/invocation) behind the Phase 9.0.1 tool surface.
 3. Implement Phase 9.0.4 desktop permission model V2 by reusing CLI `--allow-run` patterns in `commands/agent.rs`, with Ask/Suggest/Auto presets, path deny rules, and a per-run cost cap.
-4. Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.
+4. ~~Surface the AGENTS.md project-memory toggle in the ChatView context-source chips and keep the context preview in sync with the new `project_memory` estimate section.~~ **Done (2026-10-24)**: Chat context preview has an "AGENTS.md" toggle; `includeProjectMemory` flows through estimates and runs.
 5. Run the real Tauri smoke loop for Terminal / Commands / Problems / LSP / Git / Agent repair and record the commit/workspace results in `docs/smoke_test.md` release notes.
 6. Runtime-verify TypeScript and Go LSP indexing in `npm run tauri -- dev`, including install/config UX, large workspace behavior, diagnostics refresh, and Quick Fix application.
 7. ~~Add frontend and Tauri smoke tests for daily workflows: open workspace, edit/save, LSP diagnostics, run test, Problems jump, Agent Fix, review/apply hunk, Git commit/push.~~ **First pass landed (2026-10-24)**: `npm run visual:test` automates the web-preview shell smoke (layout, bottom tabs, command palette, page-error capture, screenshots). Tauri-runtime interactions (edit/save, LSP, Agent fix, Git) still need the desktop E2E layer from `npm run e2e:workflow` extended to those flows.

@@ -160,7 +160,26 @@ async function main() {
     await page.keyboard.press("Escape");
     await sleep(200);
 
-    // 5. No uncaught page errors during the run.
+    // 5. Chat context preview exposes the per-run context toggles, including
+    // the AGENTS.md project-memory toggle added in v0.2.0.
+    const contextEdit = page.locator(
+      'button[title="Preview and choose what the Agent receives as context"]'
+    );
+    if (await contextEdit.isVisible().catch(() => false)) {
+      await contextEdit.click();
+      await sleep(300);
+      const agentsToggle = await page
+        .locator('label:has-text("AGENTS.md"), div:has-text("AGENTS.md")')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      check("Chat context preview shows AGENTS.md toggle", agentsToggle);
+      await page.screenshot({ path: resolve(SHOT_DIR, "04-context-preview.png") });
+    } else {
+      check("Chat context preview shows AGENTS.md toggle", false, "context preview button not found");
+    }
+
+    // 6. No uncaught page errors during the run.
     check(
       "No uncaught page errors",
       pageErrors.length === 0,
